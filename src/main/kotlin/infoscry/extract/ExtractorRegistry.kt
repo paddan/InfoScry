@@ -61,8 +61,14 @@ class ExtractorRegistry(
          *
          * Each extractor claims its own media types, so a document goes to the reader that understands
          * its structure, and [TextualFallbackExtractor] takes only the text containers no format
-         * extractor owns. The Office, PDF, OCR, and e-book extractors are added by the tasks that own
-         * them and register their own types here.
+         * extractor owns. The OCR and e-book extractors are added by the tasks that own them and register
+         * their own types here.
+         *
+         * The PDF reader is wired to [refusingOcr] because the tool that reads a rendered page is the
+         * Tesseract task's; the PDF reader itself, including its page decisions and its rendering, is
+         * complete. A page that has its own text is extracted and cited as usual, and a page that needs
+         * OCR reports [PdfExtractor.OCR_UNAVAILABLE_CODE] against the document instead of being dropped
+         * silently.
          */
         fun production(): ExtractorRegistry = ExtractorRegistry(
             listOf(
@@ -76,8 +82,24 @@ class ExtractorRegistry(
                 SpreadsheetExtractor(OfficeFormat.LEGACY),
                 PresentationExtractor(OfficeFormat.OOXML),
                 PresentationExtractor(OfficeFormat.LEGACY),
+                PdfExtractor(refusingOcr),
             ),
             TextualFallbackExtractor(),
         )
+
+        /**
+         * The OCR seam the production registry uses until the Tesseract implementation replaces it.
+         *
+         * It refuses the whole document rather than each page, because a build with no OCR tool fails
+         * every page of a scan the same way, and one actionable code beats a document full of identical
+         * page failures. Nothing is substituted for the missing reading: a scanned page is reported as
+         * unread, never indexed as though it were empty.
+         */
+        private val refusingOcr: suspend (RenderedPage) -> OcrResult = { _ ->
+            throw OcrUnavailableException(
+                PdfExtractor.OCR_UNAVAILABLE_CODE,
+                "this build has no OCR implementation, so a page without its own text cannot be read",
+            )
+        }
     }
 }

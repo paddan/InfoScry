@@ -42,6 +42,28 @@ internal const val DOCUMENT_TOO_LARGE_CODE: String = "DOCUMENT_TOO_LARGE"
 internal const val DOCUMENT_TOO_LARGE_KEY: String = "document-too-large"
 
 /**
+ * The code a document protected by a password or DRM fails under.
+ *
+ * One spelling on purpose: the PDF reader, the Office readers, and the e-book reader all refuse protected
+ * material rather than decrypting it, and a reader who sees this code has to find the same word in the
+ * item outcome, the queue, and the CLI.
+ *
+ * Nothing is decrypted and nothing is guessed: a document that needs a password is a document this
+ * pipeline cannot cite, which is what the person importing it needs to be told.
+ */
+internal const val ENCRYPTED_DOCUMENT_CODE: String = "ENCRYPTED_DOCUMENT"
+
+/**
+ * The key a document refused before its first unit fails under.
+ *
+ * A key names a unit, and a document refused before it has one, so such a refusal names the document
+ * instead. The *code* carries the reason (`ENCRYPTED_DOCUMENT`, `DOCUMENT_UNREADABLE`, `NEEDS_TESSERACT`)
+ * and this key is what makes any of them survive a resume: the next attempt recognises the refusal and
+ * does not report it a second time.
+ */
+internal const val DOCUMENT_REFUSED_KEY: String = "document"
+
+/**
  * One citable unit an extractor produced, before the store gives it an identifier.
  *
  * Both text forms are carried: [extractedText] is what the tool produced, [searchText] is the form the

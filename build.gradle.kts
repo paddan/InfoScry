@@ -40,6 +40,9 @@ dependencies {
     // from poi-ooxml, and the legacy binary formats (HWPF/HSSF/HSLF) from poi-scratchpad.
     implementation(libs.poi.ooxml)
     implementation(libs.poi.scratchpad)
+    // The PDF extractor: PDFBox reads one page's text layer at a time and renders only the pages that
+    // OCR has to read.
+    implementation(libs.pdfbox)
     // The local API: the embedded server, its Netty engine, and the loopback client the CLI and the
     // tests use to talk to a running server.
     implementation(libs.ktor.server.core)
@@ -108,4 +111,13 @@ val officeFixtures = tasks.register<JavaExec>("officeFixtures") {
     description = "Regenerate the committed Office fixtures under src/test/resources/fixtures"
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("infoscry.fixtures.OfficeFixtureGenerator")
+}
+
+// The PDF fixtures are written by PDFBox itself and are byte-stable, so a maintainer can regenerate them
+// and see exactly which bytes changed.
+val pdfFixtures = tasks.register<JavaExec>("pdfFixtures") {
+    group = "build"
+    description = "Regenerate the committed PDF fixtures under src/test/resources/fixtures"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("infoscry.fixtures.PdfFixtureGenerator")
 }
