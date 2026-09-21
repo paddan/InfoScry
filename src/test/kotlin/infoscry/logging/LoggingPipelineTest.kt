@@ -9,6 +9,8 @@ import ch.qos.logback.core.Appender
 import ch.qos.logback.core.rolling.RollingFileAppender
 import ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy
 import ch.qos.logback.core.util.FileSize
+import infoscry.config.BearerToken
+import infoscry.config.RuntimeInfo
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -137,6 +139,26 @@ class LoggingPipelineTest {
         assertContains(content, "api_key")
         assertContains(content, "question")
         assertContains(content, "authorization")
+    }
+
+    @Test
+    fun `a bearer token cannot reach the log through stringification`() {
+        val token = BearerToken.new()
+        val info = RuntimeInfo(pid = ProcessHandle.current().pid(), port = 8765, bearerToken = token)
+
+        val file = logToFile { logger ->
+            logger.info("server listening: $info")
+            logger.atInfo().addKeyValue("runtime_info", info).log("runtime ready")
+        }
+
+        val content = Files.readString(file)
+
+        assertFalse(
+            content.contains(token.value),
+            "the bearer token is a credential and must never reach the log: $content",
+        )
+        assertContains(content, "bearerToken", message = "the field name still shows what was withheld")
+        assertContains(content, BearerToken.REDACTED, message = "the value is replaced, not dropped")
     }
 
     @Test
