@@ -16,48 +16,55 @@ Planning documents:
 | Tasks | State |
 |---|---|
 | 1–17 | **Complete, each independently reviewed, pushed.** Phase 1 and Phase 2 gates passed. |
-| 18 | **Partial commit** `3363e76` — gates never run, review pending, test code does not compile. |
+| 18 | **Recovery in progress under `docs/superpowers/plans/2026-09-21-infoscry-task-18-recovery.md`.** Stages 1–2 of 6 done (`5122893`, `0d11bcc`); Stages 3–6 remain. The recovery plan's Stage 6 owns the gate run and the task review, so Task 18 is **not yet reviewed**. |
 | 19–28 | Not started. |
 
-Verified at the pause (checked against git and the compiler, not against agent reports):
+### Task 18 recovery progress
 
-- `main` compiles (`./gradlew compileKotlin` clean).
-- `./gradlew compileTestKotlin` **fails**; every error is in
-  `src/test/kotlin/infoscry/search/ReindexRecoveryTest.kt` (~lines 85–111), written against a misremembered API:
-  ambiguous `SeededArchive` destructuring, a **private** `LuceneIndex.use`, unresolved `index`, and wrong
-  argument types (`AppContext` expected; `String`→`Double`; `Int`→`Double`; `Any`→`CollectionId`).
-- Four implementer attempts on Task 18 died on provider errors mid-run; their accumulated WIP is what
-  `3363e76` contains. None of it has been reviewed or gated.
+| Stage | State |
+|---|---|
+| 1. Make the test source compile | **Done** `5122893` — test-only change; the 61 compiler errors reduced to three real ones (manual `componentN` members on a data-class fixture, a missing `AppPaths` import, a `suspend` fixture), the rest were cascades. Product code untouched, and the product was right in both test/product disagreements it surfaced. |
+| 2. Make the generation content exact | **Done** `0d11bcc` — a rebuilt generation now publishes only the live document set: the copy-based path prunes documents that are no longer in SQLite, `validate` checks every collection's live-ID set rather than row counts, and new stale-row tests fail through **production validation** when the pruning is disabled. |
+| 3. Prove the marker and crash protocol | Not started. The kill tests already pass from the WIP (real child-process death at `GENERATION_BUILT`, `BEFORE_MARKER_SWAP`, `AFTER_MARKER_SWAP` behaves correctly), but Stages 3's fuller sweep/lease assertions are not written. |
+| 4. Prove exclusive maintenance and job restart | Not started. **Seeded diagnostic:** the two maintenance tests time out after 60 s because a fully-copied document never reaches the embedder; Stage 4 must seed a document with an **outdated chunking marker** (a different `tokenizerId`) so `needsChunking` is true and the blocking embedder is reached. Stage 2 also made `validate` check every collection, so the seeded document needs agreed rows for a narrowed rebuild. |
+| 5. HTTP and CLI boundary tests | Not started — no `SearchRoutesTest`, `SearchCommandTest` or `ReindexCommandTest` exists. |
+| 6. Gate, review, commit | Not started. `ReindexResult` gained `staleDocuments: Int = 0` (the `--json` shape is unchanged; Stage 5 may surface it). The test class takes ~2 m 4 s dominated by the two 60 s timeouts, so it should drop well under a minute once Stage 4's seed is fixed. |
 
-### Task 18 WIP contents (unverified)
+### Task 18 WIP contents
 
-Present and plausibly complete: `search/ReindexService`, `jobs/ReindexJobHandler`, `server/SearchRoutes`,
-`cli/SearchCommand`, `cli/ReindexCommand`, `cli/JobWaiting`, migration
+Present in the WIP and partially exercised: `search/ReindexService`, `jobs/ReindexJobHandler`,
+`server/SearchRoutes`, `cli/SearchCommand`, `cli/ReindexCommand`, `cli/JobWaiting`, migration
 `db/migration/003_job_types.sql` (a second job type — the migration Task 3's review predicted), plus edits in
 `search/LuceneIndex`, `search/SearchService`, `AppContext`, `server/Routes`, `jobs/ImportJobHandler`,
-`jobs/JobHandler`, `storage/SchemaMigrator`, `domain/Models` and three test files.
+`jobs/JobHandler`, `storage/SchemaMigrator`, `domain/Models` and three test files. No part of it is reviewed
+or gated yet.
 
-The design direction the last attempt died on: Lucene 10.4 cannot read vectors back, so instead of an API that
-reuses vectors between index generations, decide **per document** whether the carried-forward content is
-already authoritative (marker + row counts) and otherwise delete and rebuild that document's entries. The plan
-permits "carry forward **or reconstruct**", but the choice must satisfy six protocol points recorded in the
-ledger ruling "Task 18: Ruling (WIP handover, partner choice 1A)": per-document idempotency; stable content-unit
-IDs; the one-index rule (never a collection-only index); the `index/current` marker protocol; the exclusive
-maintenance protocol; and no live writer publishing during a rebuild.
+The design direction the WIP chose: Lucene 10.4 cannot read vectors back, so instead of an API that reuses
+vectors between index generations, decide **per document** whether the carried-forward content is already
+authoritative (marker + row counts) and otherwise delete and rebuild that document's entries. The plan permits
+"carry forward **or reconstruct**".
 
 ## Resume checklist, in order
 
-1. **Make the test code compile.** Fix `ReindexRecoveryTest.kt` against the real `AppContext`/`LuceneIndex`/
-   `ContentStore` API. Confirm with `./gradlew compileTestKotlin`.
-2. **Review the whole WIP against the brief** — nothing in `3363e76` is trusted. Generate the brief with the SDD
-   script (`bash <superpowers>/skills/subagent-driven-development/scripts/task-brief docs/superpowers/plans/2026-09-20-infoscry-implementation.md 18`).
-3. **Write the missing Review Focus tests**: child-process kills before and after the marker swap; competing
-   import and deletion during a rebuild; the all-collections assertion; and the route contract tests
-   (collection mandatory at the route/CLI boundary; 4xx for `QUERY_TOO_LONG`, `FILTER_TOO_BROAD` and the
-   wildcard/fuzzy rewrite residual; a caller can tell which hybrid branch failed).
-4. **Run the Phase 3 gate**: `./gradlew check` and
-   `./gradlew run --args='search --collection Default --json test'` (must return valid JSON even with zero hits).
-5. **Task-review Task 18** (`review-package` from `534fad3` to `HEAD`), then continue with Task 19.
+1. **Stage 3** — prove the marker and crash protocol: stop the child at each `ReindexStep`, restart, and assert
+   `index/current` selects exactly the named generation; unpublised `lucene-next-*`, old generations and the
+   temporary marker are swept at startup while the marked generation is never removed; and a reader holding a
+   lease on the old generation can finish before it is closed.
+2. **Stage 4** — prove exclusive maintenance and job restart: with a blocking fake embedder (seeded as above),
+   an import and a collection deletion during the build must be refused (423 / `MaintenanceInProgressException`)
+   and accepted afterwards; then prove the `REINDEX` migration from an older schema version, claim, process
+   death, `resetInterrupted`, resume with the payload's collection ID, and that a stale publisher refuses to
+   replace a newer current generation.
+3. **Stage 5** — add the HTTP and CLI boundary tests: GET/POST search, reindex and content-unit; mandatory
+   collection; cross-collection 404; no full documents in a search response; stable empty JSON; **4xx for
+   caller-fixable input and 503 for model/GPU/index environment failures**, with no sensitive text in logs or
+   errors; and CLI behaviour in both server and foreground mode, including `--wait --json` reporting a terminal
+   job result while holding process ownership.
+4. **Stage 6** — run the gate (`compileTestKotlin`, the focused reindex and jobs tests, `./gradlew check`, the
+   CLI smoke `search --collection Default --json test`, `git diff --check`), verify the diff against Task 18's
+   six protocol points, task-review Task 18 over `534fad3..HEAD`, update this file with the real gate status,
+   and only then continue to Task 19.
+
 
 Review depth from here, per the partner's split: **full per-task review for Tasks 19–22** (the LLM chain:
 profiles, streaming clients, Ask's budget and citation validation, Investigate's bounded tool loop) and
