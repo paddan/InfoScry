@@ -25,6 +25,13 @@ class Database(val path: Path) : AutoCloseable {
 
     private val lock = ReentrantLock()
 
+    /**
+     * How deep the current thread is inside [transaction]. The single connection is only reachable
+     * while holding [lock], so only the thread that owns the lock can be inside a transaction scope,
+     * which makes a thread-local depth the exact nesting state.
+     */
+    private val transactionDepth = ThreadLocal.withInitial { 0 }
+
     internal val connection: Connection =
         DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}")
 
@@ -44,14 +51,26 @@ class Database(val path: Path) : AutoCloseable {
      * Runs [block] in a transaction: commits when it returns, rolls back when it throws. The caller
      * sees its own failure; a failure while rolling back is attached to it as suppressed rather than
      * replacing it.
+     *
+     * Nesting composes rather than committing early: an inner [transaction] opens a SAVEPOINT inside
+     * the outermost transaction, so the whole composition commits or rolls back as one unit. Product
+     * steps that compose store methods which each open their own transaction depend on this -- for
+     * example collection deletion ("marks the collection `DELETING`, cancels its jobs, and inserts
+     * `PREPARED`") and per-unit import commits.
      */
     fun <T> transaction(block: (Connection) -> T): T = lock.withLock {
+        val depth = transactionDepth.get()
+        if (depth == 0) outermostTransaction(block) else savepointTransaction(depth, block)
+    }
+
+    private fun <T> outermostTransaction(block: (Connection) -> T): T {
         val previousAutoCommit = connection.autoCommit
         connection.autoCommit = false
+        transactionDepth.set(1)
         try {
             val result = block(connection)
             connection.commit()
-            result
+            return result
         } catch (failure: Throwable) {
             try {
                 connection.rollback()
@@ -60,8 +79,34 @@ class Database(val path: Path) : AutoCloseable {
             }
             throw failure
         } finally {
+            transactionDepth.set(0)
             connection.autoCommit = previousAutoCommit
         }
+    }
+
+    private fun <T> savepointTransaction(depth: Int, block: (Connection) -> T): T {
+        val savepoint = "infoscry_savepoint_$depth"
+        execute("SAVEPOINT $savepoint")
+        transactionDepth.set(depth + 1)
+        try {
+            val result = block(connection)
+            execute("RELEASE SAVEPOINT $savepoint")
+            return result
+        } catch (failure: Throwable) {
+            try {
+                execute("ROLLBACK TO SAVEPOINT $savepoint")
+                execute("RELEASE SAVEPOINT $savepoint")
+            } catch (rollbackFailure: Exception) {
+                failure.addSuppressed(rollbackFailure)
+            }
+            throw failure
+        } finally {
+            transactionDepth.set(depth)
+        }
+    }
+
+    private fun execute(sql: String) {
+        connection.createStatement().use { it.execute(sql) }
     }
 
     /** The schema version SQLite records in the database header. */
