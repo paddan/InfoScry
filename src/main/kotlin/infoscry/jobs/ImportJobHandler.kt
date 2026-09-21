@@ -96,11 +96,9 @@ class ImportJobHandler(
         val item = stage.run(STAGE_QUEUE) { items.queue(job.id, source.key, source.path.toString()) }
         if (isAlreadyImported(item)) return
 
-        if (!source.exists) {
-            recordFailure(job, source, stage, document = null, code = SOURCE_MISSING, message = GONE_MESSAGE)
-            return
-        }
-
+        // The item's stored document is consulted before the source path is: an earlier attempt may have put
+        // the bytes in the managed library before the user moved or deleted the file, and that stored copy
+        // is what the resume has to read.
         val attached = attachDocument(job, collection, source, item, stage) ?: return
         val document = attached.document
         val fingerprint = ExtractionFingerprint.of(document.sha256, settings)
@@ -196,16 +194,33 @@ class ImportJobHandler(
             stage.run(STAGE_COPY) { documents.delete(owned.id) }
         }
 
+        // Nothing usable is stored for this item, so the source file is the only way in -- and it may be
+        // gone. That is the item's result rather than a reason to skip it: a file the user selected and that
+        // no longer exists is something the user has to see. A stored document that is still there never
+        // reaches this point, which is what lets a moved or deleted source be finished from the copy.
+        if (!source.exists) {
+            recordFailure(job, source, stage, document = null, code = SOURCE_MISSING, message = GONE_MESSAGE)
+            return null
+        }
+
         val imported = try {
             stage.run(STAGE_COPY) { library.importFile(collection.id, source.path) }
-        } catch (failure: IOException) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (notActive: CollectionNotActiveException) {
+            throw notActive
+        } catch (failure: Exception) {
+            // One file's failure is one file's failure, whichever way the copy failed: a file that cannot be
+            // read and a managed library that cannot lay the bytes down are both this item's result, not the
+            // job's. Leaving only `IOException` isolated would make an unforeseen copy failure abandon every
+            // file after it, which is the opposite of what an archive of a thousand files needs.
             recordFailure(
                 job = job,
                 source = source,
                 stage = stage,
                 document = null,
-                code = SOURCE_UNREADABLE,
-                message = failure.message ?: "the file could not be read",
+                code = if (failure is IOException) SOURCE_UNREADABLE else COPY_FAILED,
+                message = failure.message ?: "the file could not be copied",
             )
             return null
         }
@@ -335,9 +350,15 @@ class ImportJobHandler(
         return found.sortedBy { it.toString() }
     }
 
+    /**
+     * How an extractor failure is reported to the user.
+     *
+     * Only the failure the extractor itself classifies is inferred here. Everything else stays a failure
+     * with its own message, so a defect inside an extractor cannot be dressed up as a problem with the
+     * user's request; a code for a result the pipeline expected is declared by whatever produces it.
+     */
     private fun codeFor(failure: Exception): String = when (failure) {
         is UnsupportedMediaTypeException -> failure.code
-        is IllegalArgumentException -> "INVALID_REQUEST"
         else -> EXTRACTION_FAILED
     }
 
@@ -349,6 +370,7 @@ class ImportJobHandler(
         private const val STAGE_RECORD = "record"
         private const val SOURCE_MISSING = "SOURCE_MISSING"
         private const val SOURCE_UNREADABLE = "SOURCE_UNREADABLE"
+        private const val COPY_FAILED = "COPY_FAILED"
         private const val EXTRACTION_FAILED = "EXTRACTION_FAILED"
         private const val GONE_MESSAGE = "the file was gone before the import reached it"
 

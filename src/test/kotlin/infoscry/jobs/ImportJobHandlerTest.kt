@@ -25,16 +25,17 @@ import infoscry.storage.ImportItemOutcome
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
-import java.security.MessageDigest
-import java.util.HexFormat
+import java.nio.file.attribute.PosixFilePermissions
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 /**
  * What an import does with a directory of real files.
@@ -214,6 +215,85 @@ class ImportJobHandlerTest {
         }
     }
 
+    @Test
+    fun `a restarted import finishes from the managed copy once the source file is gone`() {
+        withHarness { harness ->
+            val source = harness.writeText("moved.txt", "Ordinary text\n")
+            val canonical = source.toRealPath()
+            val sink = FileExtractionSink(harness.directory.resolve("units"))
+            val parked = CompletableDeferred<Unit>()
+
+            // The first attempt stores the bytes, commits its first unit, and dies while the next one is
+            // still being worked on: the state a machine that loses power leaves behind.
+            val jobId = harness.interrupt(listOf(canonical), harness.pipeline(ParkedUnits(parked), sink), parked)
+
+            val interrupted = AppContext.open(harness.dataDir).use { it.importItems.listForJob(jobId) }
+            val stored = interrupted.single().documentId
+            assertEquals(ImportItemOutcome.PENDING, interrupted.single().outcome)
+            assertTrue(stored != null, "the managed document is recorded before extraction starts")
+
+            // The user then moves the file away, so the managed copy is the only place these bytes exist.
+            // The interrupted job already points at that document, which is what makes finishing it possible
+            // instead of reporting a source that is simply missing.
+            Files.delete(canonical)
+
+            val resumed = RecordingUnits(units = 3)
+            val run = harness.resume(jobId, harness.pipeline(resumed, sink))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(ImportItemOutcome.DUPLICATE, run.items.single().outcome)
+            assertEquals(stored, run.items.single().documentId)
+            assertNotEquals("SOURCE_MISSING", run.items.single().errorCode)
+            assertEquals(listOf("unit-1", "unit-2"), resumed.produced)
+            assertEquals(listOf("unit-0"), resumed.skipped)
+            assertEquals(setOf("unit-0", "unit-1", "unit-2"), sink.committedKeys())
+        }
+    }
+
+    @Test
+    fun `an import with no durable unit store leaves the document extracting rather than complete`() {
+        withHarness { harness ->
+            val source = harness.writeText("pending.txt", "text\n")
+            val extractor = RecordingUnits(units = 2)
+
+            val run = harness.import(listOf(source), harness.pipeline(extractor))
+
+            // This is the state production produces today: the bytes are stored and the item reads as
+            // imported, while the document is deliberately not called complete. A script that sees exit 0
+            // has to be able to tell that from a searchable document, which is what this pins. The extractor
+            // is not run either, because a store that cannot keep its output would only spend OCR time.
+            val item = run.items.single()
+            assertEquals(ImportItemOutcome.IMPORTED, item.outcome)
+            assertEquals(DocumentStatus.EXTRACTING, run.documents.getValue(item.documentId!!).status)
+            assertTrue(extractor.produced.isEmpty(), "extraction ran with nowhere to store its units")
+        }
+    }
+
+    @Test
+    fun `a file that cannot be copied fails its own item without stopping the import`() {
+        withHarness { harness ->
+            assertTrue(
+                java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+                "this test makes a file unreadable with a POSIX mode",
+            )
+            val readable = harness.writeText("readable.txt", "text\n")
+            val unreadable = harness.writeText("unreadable.txt", "private\n")
+            Files.setPosixFilePermissions(unreadable, PosixFilePermissions.fromString("---------"))
+
+            val run = harness.import(listOf(readable, unreadable), harness.pipeline(RecordingUnits(units = 1)))
+
+            // A copy failure is that file's result, not the job's: the import reaches its end and the file
+            // that could not be read is reported with a code and a message the user can act on.
+            assertEquals(JobState.COMPLETE, run.job.state)
+            val byName = run.items.associateBy { Path.of(it.sourcePath).fileName.toString() }
+            assertEquals(ImportItemOutcome.IMPORTED, byName.getValue("readable.txt").outcome)
+            val failed = byName.getValue("unreadable.txt")
+            assertEquals(ImportItemOutcome.FAILED, failed.outcome)
+            assertEquals("SOURCE_UNREADABLE", failed.errorCode)
+            assertTrue(!failed.errorMessage.isNullOrBlank(), "a failed item carries a message for the user")
+        }
+    }
+
     private fun withHarness(block: (Harness) -> Unit) {
         val directory = Files.createTempDirectory("infoscry-import")
         try {
@@ -241,7 +321,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
     /** The files a test imports. Separate from [dataDir], so importing a directory cannot sweep the archive. */
     val sourcesDir: Path = Files.createDirectories(directory.resolve("sources"))
 
-    private val dataDir = Files.createDirectories(directory.resolve("data"))
+    val dataDir = Files.createDirectories(directory.resolve("data"))
 
     fun writeText(name: String, content: String): Path {
         val file = sourcesDir.resolve(name)
@@ -280,12 +360,53 @@ internal class Harness(val directory: Path) : AutoCloseable {
         settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
         collectionId: CollectionId = CollectionId("default"),
     ): ImportRun = AppContext.open(dataDir).use { context ->
+        val job = enqueue(context, sources, settings, collectionId)
+        ImportJobHandler.attachTo(context, pipeline)
+        finish(context, job.id, collectionId)
+    }
+
+    /**
+     * Starts an import and lets it die in the middle of extraction, the way a killed process does.
+     *
+     * The attempt is parked inside [extractionParked] when this returns, and closing the context is the
+     * kill: the runner hands the unfinished job back to the queue, which is the durable state a restart
+     * has to pick up. Nothing else about the attempt is simulated.
+     */
+    fun interrupt(
+        sources: List<Path>,
+        pipeline: ImportPipeline,
+        extractionParked: CompletableDeferred<Unit>,
+        settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
+        collectionId: CollectionId = CollectionId("default"),
+    ): JobId = AppContext.open(dataDir).use { context ->
+        val job = enqueue(context, sources, settings, collectionId)
+        ImportJobHandler.attachTo(context, pipeline)
+        runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { extractionParked.await() } }
+        job.id
+    }
+
+    /** Runs an already queued job to its end in a fresh process, as the next start would after a kill. */
+    fun resume(
+        jobId: JobId,
+        pipeline: ImportPipeline,
+        collectionId: CollectionId = CollectionId("default"),
+    ): ImportRun = AppContext.open(dataDir).use { context ->
+        ImportJobHandler.attachTo(context, pipeline)
+        finish(context, jobId, collectionId)
+    }
+
+    private fun enqueue(
+        context: AppContext,
+        sources: List<Path>,
+        settings: ExtractionSettings,
+        collectionId: CollectionId,
+    ): Job {
         val payload = ImportJobPayload(
             collectionId = collectionId.value,
             sources = sources.map { it.toAbsolutePath().normalize().toString() },
             settings = settings,
         )
-        val job = context.jobs.enqueue(
+        return context.jobs.enqueue(
             type = JobType.IMPORT,
             // A collection the database does not hold would be refused by the foreign key, so the job is
             // enqueued without one and the payload is what names it — which is the case under test.
@@ -293,11 +414,13 @@ internal class Harness(val directory: Path) : AutoCloseable {
             payload = payload.encode(),
             total = 0,
         )
-        ImportJobHandler.attachTo(context, pipeline)
-        val finished = runBlocking { awaitTerminal(context, job.id) }
-        ImportRun(
+    }
+
+    private fun finish(context: AppContext, jobId: JobId, collectionId: CollectionId): ImportRun {
+        val finished = runBlocking { awaitTerminal(context, jobId) }
+        return ImportRun(
             job = finished,
-            items = context.importItems.listForJob(job.id),
+            items = context.importItems.listForJob(jobId),
             documents = context.documents.listByCollection(collectionId, limit = 100).associateBy { it.id },
         )
     }
@@ -351,6 +474,44 @@ internal class RecordingUnits(
         input.boundary.unit {
             emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = units))
         }
+    }
+}
+
+/**
+ * An extractor that parks itself in the middle of its work, so a test can kill the process there.
+ *
+ * It commits its first unit, reports that it has reached the park, and then waits for a release that never
+ * arrives: from the durable state's point of view the attempt is alive and unfinished, which is the state a
+ * power loss leaves behind.
+ */
+internal class ParkedUnits(
+    private val parked: CompletableDeferred<Unit>,
+    private val units: Int = 3,
+) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        val first = "unit-0"
+        if (!input.isCommitted(first)) {
+            input.boundary.unit {
+                emit(
+                    ExtractionEvent.UnitReady(
+                        key = first,
+                        ordinal = 0,
+                        unit = ContentUnitDraft(
+                            locator = SourceLocation.TextLines(start = 1, end = 1),
+                            extractedText = "unit 0",
+                            searchText = "unit 0",
+                        ),
+                    ),
+                )
+            }
+        }
+        parked.complete(Unit)
+        // Where the process dies: a real child tool would be working here for minutes.
+        CompletableDeferred<Unit>().await()
+        input.boundary.unit { emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = units)) }
     }
 }
 
@@ -415,7 +576,5 @@ internal suspend fun awaitTerminal(context: AppContext, id: JobId): Job {
 private const val TERMINAL_TIMEOUT_NANOS = 60_000_000_000L
 private const val POLL_MILLIS = 20L
 
-internal fun sha256Of(path: Path): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    return HexFormat.of().formatHex(digest.digest(Files.readAllBytes(path)))
-}
+/** How long a test waits for an attempt to reach its park before calling the test a failure. */
+private const val PARK_TIMEOUT_MILLIS = 30_000L

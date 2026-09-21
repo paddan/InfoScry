@@ -63,11 +63,11 @@ class ServeCommand(
 
         val (context, server) = runBlocking {
             val opened = AppContext.open(options.dataDir)
-            val started = startLoopbackServer(opened, port)
             // The worker is attached before anything is served, so an enqueued import is always owned by a
             // live process: a request that was accepted while no runner existed would be a job nobody runs.
+            // Attaching first makes that an ordering invariant rather than a comment about one.
             ImportJobHandler.attachTo(opened, pipeline(opened.paths))
-            opened to started
+            opened to startLoopbackServer(opened, port)
         }
         Runtime.getRuntime().addShutdownHook(
             Thread {

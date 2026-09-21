@@ -89,10 +89,6 @@ class ImportItemStore(private val database: Database) {
         }
     }
 
-    /** How many items ended in each outcome, which is what a caller reports to the user. */
-    fun countByOutcome(jobId: JobId): Map<ImportItemOutcome, Int> =
-        listForJob(jobId).groupingBy { it.outcome }.eachCount()
-
     /**
      * Records the managed document a file became, before the rest of its work has run.
      *
