@@ -214,7 +214,13 @@ class EpubExtractor(
                 }
             }
 
-            if (sections.isNotEmpty()) continue
+            if (sections.isNotEmpty()) {
+                // A chapter the reader reads as text is never handed to a tool, so its plates have not been
+                // read as pictures either. Leaving them out of the total made "images: 12,
+                // pictures_not_read: 0" read as though twelve pictures had been read.
+                picturesNotRead += images.size
+                continue
+            }
 
             // A chapter with no text of its own: the pages of a scan, a facsimile, a comic page. Its
             // content exists only as a picture, so a tool has to read it — and the unit is still the
@@ -417,7 +423,13 @@ class EpubExtractor(
         /** How many footnotes the book carries. */
         const val FOOTNOTES_METADATA: String = "footnotes"
 
-        /** How many pictures the per-chapter bound left unread. */
+        /**
+         * How many pictures no reading looked at.
+         *
+         * That is the plates of a chapter that was read as text, plus the pictures past the per-chapter
+         * bound in a chapter that had to be handed to a tool: the number that says [IMAGES_METADATA] is a
+         * count of references, not of readings.
+         */
         const val PICTURES_NOT_READ_METADATA: String = "pictures_not_read"
 
         /** The attribute that declares what an element is in an EPUB. */
@@ -969,6 +981,13 @@ private object Fb2Sections {
  * is therefore the answer to this attempt too, and re-running it would only spend a child process on a
  * question that has been answered.
  *
+ * Only a *finished* conversion is ever placed there. The converter is handed a path inside this attempt's
+ * private directory and its output is moved into the artifact root afterwards, so a run that is stopped on
+ * timeout, cancelled, or that dies mid-write leaves nothing the next attempt could mistake for an answer —
+ * the same reason the conversion log is written through a `.part` file. A partial book at the target path
+ * would be worse than a missing one: the reuse check would accept it as the answer, the reader would refuse
+ * it, and the document would stay unimportable after whatever caused the truncation was fixed.
+ *
  * The original is the input and is never touched: the converted file is a derived artifact, and the citation
  * still points at the book the person imported.
  */
@@ -993,14 +1012,18 @@ class CalibreConverter(
      */
     suspend fun convert(input: ExtractionInput): Path {
         val target = input.artifactRoot.resolve(relativeArtifactPath(input.fingerprint))
-        if (Files.isRegularFile(target) && Files.size(target) > 0) return target
+        if (isReusable(target)) return target
 
-        Files.createDirectories(target.parent)
         val workDirectory = Files.createTempDirectory(WORK_DIRECTORY_PREFIX)
         try {
+            // The converter writes into this attempt's own directory rather than into the artifact root. The
+            // target path is what a later attempt looks at for an answer, so a process that is stopped on
+            // timeout or dies mid-write must not be able to leave a truncated book there; only a conversion
+            // that succeeded and produced bytes is moved in.
+            val converted = workDirectory.resolve(ARTIFACT_NAME)
             val outcome = try {
                 ExternalProcess.run(
-                    command = listOf(executable, input.managedPath.toString(), target.toString()),
+                    command = listOf(executable, input.managedPath.toString(), converted.toString()),
                     timeout = timeout,
                     cwd = workDirectory,
                     maxCapturedStdoutBytes = maxCapturedOutputBytes,
@@ -1016,7 +1039,7 @@ class CalibreConverter(
             writeLog(input, target, outcome.stdout, outcome.stderr)
 
             if (!outcome.succeeded) throw failure(outcome)
-            if (!Files.isRegularFile(target) || Files.size(target) == 0L) {
+            if (!isReusable(converted)) {
                 // A tool that reports success and writes nothing has not converted anything, and handing the
                 // missing file to the EPUB reader would report the failure as an unreadable book.
                 throw ConversionRefusedException(
@@ -1024,9 +1047,32 @@ class CalibreConverter(
                     "the converter reported success without writing a book",
                 )
             }
+            moveIntoPlace(converted, target)
             return target
         } finally {
             workDirectory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * Whether [path] holds a book this attempt can use as the answer.
+     *
+     * A path that cannot be examined is not an answer either: the file can be removed between the check and
+     * the read, and reporting that as "no conversion yet" leaves the attempt free to convert again.
+     */
+    private fun isReusable(path: Path): Boolean = try {
+        Files.isRegularFile(path) && Files.size(path) > 0
+    } catch (unreadable: IOException) {
+        false
+    }
+
+    /** Moves a finished conversion into the artifact root, creating the directory it belongs to. */
+    private fun moveIntoPlace(converted: Path, target: Path) {
+        Files.createDirectories(target.parent)
+        try {
+            Files.move(converted, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } catch (unsupported: java.nio.file.AtomicMoveNotSupportedException) {
+            Files.move(converted, target, StandardCopyOption.REPLACE_EXISTING)
         }
     }
 
@@ -1066,6 +1112,9 @@ class CalibreConverter(
             .toString(Charsets.UTF_8)
         val partial = log.resolveSibling("${log.fileName}.part")
         try {
+            // The log belongs beside the converted book, so its directory is created here — a conversion
+            // that got as far as a tool call has something to say and keeps saying it even when it failed.
+            Files.createDirectories(log.parent)
             Files.write(partial, bounded.toByteArray(Charsets.UTF_8))
             try {
                 Files.move(partial, log, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)

@@ -3,10 +3,12 @@ package infoscry.extract
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
 import infoscry.fixtures.EbookFixtureGenerator
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
+import java.time.Duration
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -175,6 +177,36 @@ class EbookExtractorsTest {
             spy.pages.single().page,
             "the picture is numbered by its place in the book, not by how many readings this attempt made",
         )
+        assertEquals(
+            "1",
+            (events.last() as ExtractionEvent.Finished).metadata[EpubExtractor.PICTURES_NOT_READ_METADATA],
+            "the plate inside a chapter read as text was never handed to a tool, and the count has to say so",
+        )
+    }
+
+    @Test
+    fun `a chapter with more pictures than the bound reads the bound and reports the rest`() = runBlocking {
+        val spy = EbookOcrSpy(text = "Plansch")
+        val probe = probe()
+        val book = managedEpub(
+            replacing = "OEBPS/chapter3.xhtml" to ninePicturesChapter(),
+            adding = { zip -> (1..9).forEach { number -> zip.storedPicture("OEBPS/images/plate-$number.png") } },
+        )
+
+        val events = collect(EpubExtractor(spy.seam), inputFor(book, probe), probe)
+
+        assertEquals(
+            MAX_OCR_IMAGES_PER_CHAPTER,
+            spy.readings.size,
+            "one chapter handed every picture to the tool instead of stopping at the bound",
+        )
+        val metadata = (events.last() as ExtractionEvent.Finished).metadata
+        assertEquals("10", metadata[EpubExtractor.IMAGES_METADATA])
+        assertEquals(
+            "2",
+            metadata[EpubExtractor.PICTURES_NOT_READ_METADATA],
+            "the plate of the text chapter and the picture past the bound are both unread",
+        )
     }
 
     // ---- A chapter that is only a picture ----------------------------------------------------------
@@ -216,6 +248,36 @@ class EbookExtractorsTest {
         val metadata = (events.last() as ExtractionEvent.Finished).metadata
         assertEquals("1", metadata[ImageExtractor.OCR_PAGES_METADATA])
         assertContains(metadata.getValue(ImageExtractor.OCR_MEAN_CONFIDENCE_METADATA), "0.88")
+    }
+
+    @Test
+    fun `a tool that fails on a picture fails that chapter rather than the book`() = runBlocking {
+        val spy = EbookOcrSpy(failsWith = IOException("the tool died"))
+        val probe = probe()
+
+        val events = collect(EpubExtractor(spy.seam), inputFor(managedEpub(), probe), probe)
+
+        val failed = failures(events).single()
+        assertEquals(OCR_FAILED_CODE, failed.code)
+        assertEquals("ebook:s002:image", failed.key, "the failing chapter is the one that has no text")
+        assertEquals(3, units(events).size, "the chapters that were read are still delivered")
+    }
+
+    @Test
+    fun `a tool that reads every picture and returns nothing fails that chapter`() = runBlocking {
+        val spy = EbookOcrSpy(text = "")
+        val probe = probe()
+
+        val events = collect(EpubExtractor(spy.seam), inputFor(managedEpub(), probe), probe)
+
+        val failed = failures(events).single()
+        assertEquals(
+            OCR_FAILED_CODE,
+            failed.code,
+            "a chapter that reaches a reader as empty when its scan was never read is not a silent section",
+        )
+        assertEquals(3, units(events).size)
+        assertTrue(spy.readings.isNotEmpty(), "the tool was never asked to read the chapter's picture")
     }
 
     @Test
@@ -264,6 +326,32 @@ class EbookExtractorsTest {
     }
 
     // ---- Hostile books -----------------------------------------------------------------------------
+
+    @Test
+    fun `a package document that declares an entity cannot read the file it names`() = runBlocking {
+        val secret = directory.resolve("secret.txt")
+        Files.writeString(secret, "TOP-SECRET-VALUE")
+        val probe = probe()
+        val book = managedEpub(replacing = "OEBPS/content.opf" to packageWithExternalEntity(secret))
+
+        val events = collect(EpubExtractor(EbookOcrSpy().seam), inputFor(book, probe), probe)
+
+        val produced = events.joinToString("\n") { event ->
+            when (event) {
+                is ExtractionEvent.UnitReady -> event.unit.extractedText
+                is ExtractionEvent.Finished -> event.metadata.toString()
+                is ExtractionEvent.UnitFailed -> event.code
+            }
+        }
+        assertFalse(
+            produced.contains("TOP-SECRET-VALUE"),
+            "an external entity pulled a local file into the extraction: $produced",
+        )
+        assertTrue(
+            events.none { it is ExtractionEvent.Finished },
+            "a package document carrying a doctype was read rather than refused",
+        )
+    }
 
     @Test
     fun `a book that declares itself encrypted is refused as encrypted`() = runBlocking {
@@ -458,7 +546,18 @@ class EbookExtractorsTest {
 
         val passed = Files.readAllLines(args)
         assertEquals(book.toString(), passed[0], "the managed original is what the converter is given")
-        assertEquals(expectedConvertedBook().toString(), passed[1])
+        assertFalse(
+            passed[1].startsWith(artifactRoot.toString()),
+            "the converter was handed a path in the artifact root, where a stopped run would leave a book: ${passed[1]}",
+        )
+        assertFalse(
+            Files.exists(Path.of(passed[1])),
+            "the converter's own output path outlived the attempt, so a partial book could have stayed at it: ${passed[1]}",
+        )
+        assertTrue(
+            Files.isRegularFile(expectedConvertedBook()),
+            "the finished conversion was not published under the fingerprint",
+        )
         assertEquals(
             SourceLocation.EbookSection(
                 EbookFixtureGenerator.FIRST_CHAPTER,
@@ -562,8 +661,67 @@ class EbookExtractorsTest {
         val refusal = failures(events).single()
         assertEquals(CalibreConverter.NEEDS_CALIBRE_CODE, refusal.code)
         assertTrue(
-            Files.walk(artifactRoot).use { paths -> paths.noneMatch { Files.isRegularFile(it) } },
-            "a refused conversion wrote something into the artifact root",
+            Files.list(artifactRoot).use { entries -> entries.findAny().isEmpty },
+            "a refused conversion left something in the artifact root, a file or a directory",
+        )
+    }
+
+    @Test
+    fun `a conversion that fails after writing leaves nothing the next attempt would reuse`() = runBlocking {
+        val probe = probe()
+        val truncating = writeFakeExecutable(
+            directory,
+            "ebook-convert-truncating",
+            "cp \"\$1\" \"\$2\"\nexit 3",
+        )
+        val events = collect(
+            CalibreBackedEbookExtractor(
+                CalibreConverter(executable = truncating.toString()),
+                EpubExtractor(EbookOcrSpy().seam),
+            ),
+            inputFor(managedEpub(name = "kindle.azw3"), probe),
+            probe,
+        )
+
+        assertEquals(DOCUMENT_UNREADABLE_CODE, failures(events).single().code)
+        assertFalse(
+            Files.exists(expectedConvertedBook()),
+            "a failed conversion published a book where the reuse check looks for an answer",
+        )
+
+        val working = CalibreConverter(
+            executable = fakeConverter(directory.resolve("args.txt")).toString(),
+        )
+        val second = collect(
+            CalibreBackedEbookExtractor(working, EpubExtractor(EbookOcrSpy().seam)),
+            inputFor(managedEpub(name = "kindle.azw3"), probe),
+            probe,
+        )
+
+        assertTrue(
+            units(second).isNotEmpty(),
+            "the fingerprint kept the failed attempt's book, so the book could not be imported",
+        )
+        assertTrue(Files.isRegularFile(expectedConvertedBook()))
+    }
+
+    @Test
+    fun `a conversion stopped on timeout leaves nothing the next attempt would reuse`() = runBlocking {
+        val probe = probe()
+        val slow = writeFakeExecutable(directory, "ebook-convert-slow", "cp \"\$1\" \"\$2\"\nsleep 30")
+        val events = collect(
+            CalibreBackedEbookExtractor(
+                CalibreConverter(executable = slow.toString(), timeout = Duration.ofMillis(500)),
+                EpubExtractor(EbookOcrSpy().seam),
+            ),
+            inputFor(managedEpub(name = "kindle.azw3"), probe),
+            probe,
+        )
+
+        assertTrue(failures(events).isNotEmpty(), "a conversion that was stopped was not refused")
+        assertFalse(
+            Files.exists(expectedConvertedBook()),
+            "a stopped conversion published the book it had written so far",
         )
     }
 
@@ -708,6 +866,48 @@ class EbookExtractorsTest {
         closeEntry()
     }
 
+    /** The picture-only chapter's markup, rewritten to reference nine pictures instead of one. */
+    private fun ninePicturesChapter(): String = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml">
+          <head><title>${EbookFixtureGenerator.THIRD_CHAPTER}</title></head>
+          <body>
+        ${(1..9).joinToString("\n") { number -> "    <img src=\"images/plate-$number.png\" alt=\"Plansch\"/>" }}
+          </body>
+        </html>
+    """.trimIndent()
+
+    /** Writes one more picture into the book being built. */
+    private fun ZipOutputStream.storedPicture(path: String) {
+        putNextEntry(ZipEntry(path))
+        write(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+        closeEntry()
+    }
+
+    /**
+     * A package document whose title is an entity naming a local file.
+     *
+     * The rest of the document is a complete book — a manifest, a spine, a real chapter — so a reader that
+     * resolved the entity would finish the extraction and publish the file's contents as the title, rather
+     * than failing for a reason that has nothing to do with the entity.
+     */
+    private fun packageWithExternalEntity(secret: Path): String = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE package [ <!ENTITY xxe SYSTEM "file://$secret"> ]>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:title>&xxe;</dc:title>
+            <dc:language>${EbookFixtureGenerator.LANGUAGE}</dc:language>
+            <dc:identifier id="bookid">${EbookFixtureGenerator.IDENTIFIER}</dc:identifier>
+          </metadata>
+          <manifest>
+            <item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+          </manifest>
+          <spine><itemref idref="c1"/></spine>
+        </package>
+    """.trimIndent()
+
     /** Copies the committed FB2 fixture into the managed area. */
     private fun managedFb2(): Path {
         val target = directory.resolve("managed").resolve(EbookFixtureGenerator.FB2_NAME)
@@ -811,6 +1011,7 @@ class EbookExtractorsTest {
         private val confidence: Double? = 0.9,
         private val artifact: Boolean = false,
         private val unavailable: String? = null,
+        private val failsWith: Exception? = null,
         private val insidePermit: PermitProbeBoundary? = null,
     ) {
 
@@ -830,6 +1031,7 @@ class EbookExtractorsTest {
             // the tool could read a file at the moment it was called.
             readings += Reading(page = page, pictureExisted = java.nio.file.Files.isRegularFile(page.imagePath))
             unavailable?.let { code -> throw OcrUnavailableException(code, "no OCR tool in this build") }
+            failsWith?.let { failure -> throw failure }
             OcrResult(
                 text = text,
                 meanConfidence = confidence,

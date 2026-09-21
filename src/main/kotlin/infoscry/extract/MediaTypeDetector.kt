@@ -184,9 +184,13 @@ class MediaTypeDetector(private val detector: DefaultDetector = DefaultDetector(
 /**
  * The extension of a Kindle or legacy e-book container.
  *
- * These are the formats the design lists as readable through an external converter, restricted here to the
- * ones whose bytes carry no signature of their own: a `.mobi` or `.azw3` is detected from its magic, so it
- * needs no help from the name, and the rest arrive as an unnameable binary without one.
+ * These are the formats the design lists as readable through an external converter. The name is a fallback
+ * that is consulted only after the bytes have been read: a file whose content says no more than "some
+ * binary" is routed to the converter when, and only when, it was published under one of these extensions.
+ * A `.mobi`, `.azw` or `.azw4` carries a Mobipocket signature, so its bytes normally settle the type on
+ * their own and this list merely agrees with them; the rest have no signature this build can name, and the
+ * extension is the only thing that says a converter is what reads them. The list is closed: an extension
+ * outside it never routes a file to Calibre.
  */
 private val CALIBRE_BOOK_EXTENSIONS: Set<String> = setOf(
     "mobi",
