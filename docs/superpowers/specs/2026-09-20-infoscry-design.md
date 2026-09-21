@@ -2,6 +2,7 @@
 
 **Date:** 2026-09-20  
 **Status:** Revised after design/plan review; seven findings addressed, with GPU requirement approved
+**Amendment 2026-09-21 (v1 scope reduction):** the first release targets macOS arm64 with an Apple GPU only. The Linux x86_64/NVIDIA CUDA target is deferred because no NVIDIA hardware is currently available to validate it, and untested GPU code is worse than absent GPU code: v1 therefore implements no CUDA path at all. Linux remains an unvalidated portability target for the non-GPU test suites and is not a supported runtime. Everything below that says "both platforms", "CUDA", or "macOS/Linux" is superseded by this amendment.
 **Product language:** English
 
 ## 1. Purpose
@@ -24,7 +25,7 @@ The first release must:
 - keep originals, extracted text, embeddings, and indexes on the local machine;
 - send only the question, selected source excerpts, and their citation metadata to
   the configured LLM;
-- run on macOS arm64 with an Apple GPU and Linux x86_64 with an NVIDIA CUDA GPU;
+- run on macOS arm64 with an Apple GPU;
 - expose both an English-language web interface and a CLI.
 
 The design target is a local archive of up to roughly 10,000 documents or one
@@ -78,11 +79,11 @@ introduce Tailwind, a design-system framework, or a large component library.
 - Apache Lucene stores the rebuildable full-text and vector search index.
 - Managed original files and generated artifacts live under the InfoScry data
   directory.
-- ONNX Runtime runs the local embedding model with required GPU acceleration.
-  Linux uses CUDA; macOS uses CoreML with GPU enabled. Diagnostics, source
-  viewing, and existing keyword search remain usable without a ready GPU, but
-  embedding-dependent operations report an actionable error instead of silently
-  falling back to CPU-only inference.
+- ONNX Runtime runs the local embedding model with required GPU acceleration
+  through the macOS CoreML execution provider with GPU-enabled compute units.
+  Diagnostics, source viewing, and existing keyword search remain usable
+  without a ready GPU, but embedding-dependent operations report an actionable
+  error instead of silently falling back to CPU-only inference.
 
 Lucene is preferred over LanceDB because it embeds directly in the JVM, has
 mature lexical and OCR-tolerant search features, and supports HNSW/KNN vectors
@@ -101,7 +102,7 @@ The implementation uses these responsibilities:
 - Apache Commons CSV: CSV parsing;
 - Tesseract CLI: OCR for images and rendered PDF pages;
 - Calibre `ebook-convert`: optional conversion of Kindle and legacy e-books;
-- ONNX Runtime with platform-specific CUDA/CoreML native libraries: local document and query embeddings.
+- ONNX Runtime with the macOS CoreML native library: local document and query embeddings.
 
 Tesseract is a mandatory runtime dependency. Calibre is optional; formats that
 require it receive `NEEDS_TOOL` status when it is unavailable.
@@ -384,20 +385,20 @@ document structure:
 The default local embedding model is `intfloat/multilingual-e5-base` at revision
 `d128750597153bb5987e10b1c3493a34e5a4502a`, producing 768-dimensional vectors:
 
-- Linux x86_64/NVIDIA: `onnx/model_O4.onnx` with ONNX Runtime CUDA;
 - macOS arm64/Apple GPU: `onnx/model.onnx` with ONNX Runtime CoreML and GPU
-  enabled; the CUDA-optimized O4 export is not used on Mac.
+  enabled. There is one platform entry because there is one validated platform;
+  the CUDA-optimized O4 export is not used and no CUDA dependency is declared.
 
 The release manifest pins artifact checksums, matching tokenizer files,
 provider/native-runtime build, and provider options. GPU presence alone is not
 sufficient: the real model must load and execute accelerated transformer
-compute on each supported platform. CPU support for shape/control operators is
+compute on the supported platform. CPU support for shape/control operators is
 allowed; CPU-only embedding inference is not. CoreML provider registration
 alone is not proof of GPU execution. The hardware release gate records device
 traces, tested OS/driver/runtime versions, latency, and memory in
 `docs/gpu-validation.md`; exact compatibility is established by those tests,
-not asserted by this design. Intel Macs and non-CUDA Linux GPUs are outside the
-initial runtime matrix.
+not asserted by this design. Intel Macs, Linux x86_64, and non-Apple GPUs are
+outside the v1 runtime matrix.
 
 Query and document prefixes follow the model specification. The index records
 model revision, export checksum, tokenizer/pooling/prefix version, and vector
@@ -855,8 +856,9 @@ Test layers:
    standalone and server-owned CLI process-lifetime/exit-code tests;
 5. provider-adapter tests against local mock HTTP servers, never paid APIs;
 6. one Playwright flow covering import, search, and opening a citation;
-7. CI on macOS and Linux with fakes, plus mandatory real-GPU tests on both
-   supported hardware targets before release. Real-model tests include 512-token
+7. CI on macOS with fakes, plus a mandatory real-GPU test on that hardware
+   target before release, and a non-GPU Linux job as a portability check that
+   cannot authorize a release. Real-model tests include 512-token
    boundary coverage and must fail, not skip, when required hardware is absent;
 8. complete-request budget tests with long histories, small contexts, Unicode,
    tool schemas/results, whole-group eviction, and stable citation mappings.
@@ -870,24 +872,23 @@ A release archive contains:
 
 - InfoScry and a minimal Java 25 LTS runtime;
 - compiled SvelteKit assets;
-- the platform-specific pinned ONNX model, tokenizer files, and matching native GPU execution provider;
+- the pinned ONNX model, tokenizer files, and the matching CoreML native GPU execution provider;
 - the `infoscry` launcher.
 
 Tesseract is installed separately and is mandatory. Calibre is installed
 separately and is optional. `infoscry doctor` provides platform-appropriate
 installation guidance when either is absent.
 
-The initial release format is signed tar/zip archives for macOS arm64 and Linux
-x86_64 with the required GPU hardware. GPU driver/runtime prerequisites and
-validated versions are documented per archive. Unpack and test each archive
-using its bundled Java/native runtime and model on the corresponding GPU;
-hosted fake-only CI does not satisfy this release gate. A native installer,
-Homebrew formula, system package, Docker image, and automatic updater are
-outside the first release.
+The initial release format is a signed tar/zip archive for macOS arm64 with an
+Apple GPU. GPU/runtime prerequisites and validated versions are documented for
+that archive. Unpack and test the archive using its bundled Java/native runtime
+and model on that GPU; hosted fake-only CI does not satisfy this release gate. A
+native installer, Homebrew formula, system package, Docker image, Linux archive,
+and automatic updater are outside the first release.
 
 ## 19. Acceptance criteria
 
-The first release is complete when a user on each supported macOS/Linux GPU target can:
+The first release is complete when a user on the supported macOS arm64 GPU target can:
 
 1. start InfoScry and open the local English web UI;
 2. create or use a collection;

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the first local macOS/Linux release of InfoScry: managed document ingestion, structured extraction and OCR, hybrid Lucene search, cited Ask/Investigate LLM workflows, an English SvelteKit UI, and a scriptable CLI.
+**Goal:** Build the first local macOS release of InfoScry: managed document ingestion, structured extraction and OCR, hybrid Lucene search, cited Ask/Investigate LLM workflows, an English SvelteKit UI, and a scriptable CLI.
 
 **Architecture:** One Kotlin/JVM 25 process owns SQLite, Lucene, the managed library, persistent jobs, Ktor APIs, and compiled Svelte assets. Tesseract and optional Calibre run as bounded child processes. The TypeScript frontend and CLI call the same Kotlin application services; SQLite is authoritative and Lucene is rebuildable.
 
@@ -14,7 +14,7 @@
 
 - Product name and all user-facing copy are **InfoScry** and English.
 - Kotlin targets JVM 25 and releases bundle a minimal Java 25 LTS runtime.
-- Runtime platforms are macOS arm64 with an Apple GPU and Linux x86_64 with an NVIDIA CUDA GPU. GPU acceleration is required for embeddings; do not add Windows-specific work or silently fall back to CPU-only inference. Diagnostics, source viewing, and existing keyword search remain available when GPU readiness fails.
+- Runtime platform is macOS arm64 with an Apple GPU (CoreML), the only validated target for v1 — the Linux x86_64/NVIDIA CUDA target is deferred because no NVIDIA hardware is available to validate it, so no CUDA path is implemented at all. GPU acceleration is required for embeddings; do not add Windows-specific work or silently fall back to CPU-only inference. Diagnostics, source viewing, and existing keyword search remain available when GPU readiness fails. Linux remains supported only as an unvalidated portability target for the non-GPU test suites.
 - Application code is Kotlin and TypeScript. Prefer maintained JVM libraries; external Python-backed tools are allowed only as child processes when JVM support is materially worse.
 - Ktor binds only to `127.0.0.1`; no public bind option in v1.
 - Original source files are never modified or deleted.
@@ -39,7 +39,7 @@ kotlinx-coroutines 1.10.2           kotlinx-serialization 1.9.0
 SQLite JDBC 3.49.1.0                Lucene 10.4.0
 Apache Tika 3.3.2                   PDFBox 3.0.7
 Apache POI 5.5.1                    jsoup 1.21.1
-Commons CSV 1.14.1                  ONNX Runtime 1.22.0 (platform-specific EP build)
+Commons CSV 1.14.1                  ONNX Runtime 1.22.0 (macOS CoreML build)
 DJL tokenizers 0.33.0               Logback 1.5.18
 Svelte 5.57.1                       SvelteKit 2.70.3
 adapter-static 3.0.10               Vite 8.3.0
@@ -53,6 +53,8 @@ declares peer `typescript@^5.3.3 || ^6.0.0` and `svelte-check@4.7.6` declares `^
 `npm install` fails with `ERESOLVE`. 6.0.3 is the highest published version satisfying both ranges.
 This is the documented-incompatibility path permitted above; no other baseline entry changed.
 
+Baseline amendment (2026-09-21, v1 scope reduction): the second platform entry and the two-platform GPU gate are removed. macOS arm64 with an Apple GPU is the only validated runtime target in v1; the Linux x86_64/NVIDIA CUDA target is deferred because no NVIDIA hardware is available to validate it, and v1 therefore implements **no** CUDA path, declares no `onnxruntime_gpu` dependency, and ships no CUDA-optimized export. Linux remains a non-GPU portability job in CI that cannot authorize a release. Cost if wrong: adding the Linux/CUDA target later means a new model export, a second native runtime, a CUDA registration path in `GpuRuntime`, a second packaging variant, and its own hardware validation — all of which are additive and none of which invalidates the macOS design.
+
 ## Review Focus
 
 These conditions are easy to miss and must be pinned by the named task tests:
@@ -62,7 +64,7 @@ These conditions are easy to miss and must be pinned by the named task tests:
 3. **Hostile containers:** Task 13 must reject EPUB/ZIP bombs, path traversal entries, encrypted/DRM material, and missing Calibre without writing outside the document artifact directory.
 4. **Untrusted document prompts and citations:** Tasks 21 and 22 must prove document instructions are passed as evidence, unknown source IDs never become links, and tools cannot accept paths or switch collections.
 5. **Secret/error leakage:** Tasks 5, 19, and 20 must prove logs/API responses redact API keys, document excerpts, questions, and provider authorization headers while still returning actionable errors.
-6. **GPU execution:** Tasks 15 and 28 must load the real platform model with CUDA/CoreML, prove accelerated transformer execution, and fail a CPU-only or unavailable-provider case. Mock tests cannot satisfy this gate.
+6. **GPU execution:** Tasks 15 and 28 must load the real model with CoreML on macOS arm64, prove accelerated transformer execution, and fail a CPU-only or unavailable-provider case. Mock tests cannot satisfy this gate.
 7. **No embedding truncation:** Tasks 14-15 must prove each complete passage, including repeated headers, prefix, and special tokens, fits 512 tokens and reaches inference unchanged.
 8. **CLI ownership:** Task 8 must launch real CLI processes with and without a server and prove successful import never leaves a job without a live owner.
 9. **Deletion recovery:** Tasks 6, 16, and 27 must kill the process between deletion phases, recover before serving requests, and exclude concurrent import into a deleting collection.
@@ -108,7 +110,7 @@ src/main/kotlin/infoscry/
   extract/EbookExtractors.kt             EPUB/FB2 and Calibre adapter
   extract/TextNormalizer.kt              extracted/search text separation
   chunk/Chunker.kt                       structure-bounded model-token chunks
-  embedding/ModelManager.kt              platform model files/checksum
+  embedding/ModelManager.kt              model files/checksum
   embedding/GpuRuntime.kt                 required execution provider and readiness probe
   embedding/E5Embedder.kt                tokenizer, ONNX, pooling, normalization
   search/LuceneIndex.kt                  schema, idempotent writes, deletes
@@ -140,7 +142,7 @@ web/src/routes/*                          page components
 web/tests/*                               Vitest tests
 web/e2e/*                                 Playwright smoke flow
 models/embedding-model.json               pinned source revision and file manifest
-.github/workflows/ci.yml                  macOS/Linux build and tests
+.github/workflows/ci.yml                  macOS build/tests plus a non-GPU Linux portability job
 ```
 
 ## Spec Coverage Map
@@ -898,18 +900,17 @@ git commit -m "feat: persist structured chunks"
 
 - [ ] **Step 1: Pin the model revision and required files**
 
-Manifest must reference `intfloat/multilingual-e5-base` commit `d128750597153bb5987e10b1c3493a34e5a4502a` with two platform entries:
+Manifest must reference `intfloat/multilingual-e5-base` commit `d128750597153bb5987e10b1c3493a34e5a4502a` with one platform entry:
 
 | Platform | Model artifact | Required execution provider |
 |---|---|---|
-| Linux x86_64, NVIDIA GPU | `onnx/model_O4.onnx` | CUDA; use the matching `com.microsoft.onnxruntime:onnxruntime_gpu` native build |
 | macOS arm64, Apple GPU | `onnx/model.onnx` (standard export; validate its CoreML graph in Step 4) | CoreML with GPU enabled; use a Java/JNI native build containing CoreML |
 
-Both entries include `onnx/tokenizer.json`, `onnx/tokenizer_config.json`, `onnx/special_tokens_map.json`, and `onnx/sentencepiece.bpe.model`. Commit expected SHA-256 values from the pinned artifacts before downloader tests; never treat a checksum first calculated from an arbitrary downloaded file as the expected value. Record native build identity and provider options. Do not load the CUDA-optimized O4 export on CoreML or install both conflicting ONNX Java runtime artifacts in one distribution. A model fingerprint includes export checksum, tokenizer, pooling/prefix version, and dimension; switching exports requires rebuilding vectors.
+The entry includes `onnx/tokenizer.json`, `onnx/tokenizer_config.json`, `onnx/special_tokens_map.json`, and `onnx/sentencepiece.bpe.model`. Commit expected SHA-256 values from the pinned artifacts before downloader tests; never treat a checksum first calculated from an arbitrary downloaded file as the expected value. Record native build identity and provider options. Declare no CUDA dependency and ship no CUDA-optimized export: the deferred Linux/NVIDIA target has no hardware to validate it, and untested GPU code is worse than absent GPU code. A model fingerprint includes export checksum, tokenizer, pooling/prefix version, and dimension; switching exports requires rebuilding vectors.
 
-Use the pinned Java API and native libraries together. If the pinned macOS artifact lacks CoreML or necessary GPU options, build a reproducible matching JNI library with CoreML enabled or make the separately reviewed runtime-version adjustment permitted by the baseline. Verify provider availability and a real model run; package naming alone is not evidence of GPU support. Record tested OS, GPU, driver, CUDA/cuDNN or CoreML requirements in `docs/gpu-validation.md` before this task passes. Intel Macs and non-CUDA Linux GPUs are outside the initial runtime matrix.
+Use the pinned Java API and native libraries together. If the pinned macOS artifact lacks CoreML or necessary GPU options, build a reproducible matching JNI library with CoreML enabled or make the separately reviewed runtime-version adjustment permitted by the baseline. Verify provider availability and a real model run; package naming alone is not evidence of GPU support. Record tested OS, GPU, and runtime/dispatch requirements in `docs/gpu-validation.md` before this task passes. Intel Macs, Linux x86_64, and non-Apple GPUs are outside the v1 runtime matrix.
 
-References: [O4 optimization constraints](https://huggingface.co/docs/optimum-onnx/onnxruntime/usage_guides/optimization), [CoreML provider/build options](https://onnxruntime.ai/docs/execution-providers/CoreML-ExecutionProvider.html), [Java packaging](https://onnxruntime.ai/docs/get-started/with-java.html), and [CUDA compatibility](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html). These define the verification work; platform compatibility is not assumed proven by this plan.
+References: [CoreML provider/build options](https://onnxruntime.ai/docs/execution-providers/CoreML-ExecutionProvider.html) and [Java packaging](https://onnxruntime.ai/docs/get-started/with-java.html). These define the verification work; platform compatibility is not assumed proven by this plan.
 
 - [ ] **Step 2: Write model download/checksum tests with a local HTTP server**
 
@@ -919,18 +920,18 @@ Assert atomic download, resume rejection on wrong content, checksum mismatch del
 
 Use DJL tokenizer files; prepend `query: ` and `passage: `; encode special tokens with truncation disabled. Reject any passage above 512 encoded tokens with `EMBEDDING_INPUT_TOO_LONG`; Task 14 must prevent this in normal ingestion. Reject oversized queries with an actionable validation error instead of truncating them. Run ONNX; attention-mask average-pool `last_hidden_state`; L2-normalize to 768 floats. Limit inference batches by token count and the validated device-memory budget; on OOM halve the batch down to one, then return an actionable GPU error.
 
-Explicitly register CUDA on Linux or CoreML with GPU-enabled compute units on macOS before creating the session. Missing provider/device, incompatible native libraries, failed warm-up, or a graph running entirely on CPU produces `GPU_UNAVAILABLE`; embedding-dependent work must not report success. CPU support for shape/control operators is allowed. Keep diagnostics, original/source access, and existing keyword search usable. Runtime warm-up uses synthetic public text and confirms graph assignment to the required EP; Task 15 hardware validation separately proves actual GPU execution because CoreML registration alone is not proof of GPU use.
+Explicitly register CoreML with GPU-enabled compute units before creating the session. Missing provider/device, incompatible native libraries, failed warm-up, or a graph running entirely on CPU produces `GPU_UNAVAILABLE`; embedding-dependent work must not report success. CPU support for shape/control operators is allowed. Keep diagnostics, original/source access, and existing keyword search usable. Runtime warm-up uses synthetic public text and confirms graph assignment to the required EP; Task 15 hardware validation separately proves actual GPU execution because CoreML registration alone is not proof of GPU use.
 
 - [ ] **Step 4: Add deterministic unit tests and required GPU integration validation**
 
 Unit-test pooling with synthetic tensors, missing-provider behavior, CPU-only graph rejection, OOM batch reduction, and no truncation. Define `./gradlew gpuIntegrationTest` as a separate JUnit task including `model`/`gpu` tags; normal tests exclude those tags and use fakes. GPU tests use preinstalled verified model files and fail, never skip, when the required hardware/provider is unavailable.
 
-Run `gpuIntegrationTest` on both target GPU platforms before the Task 15 gate and again from each packaged runtime before release. Assert 768 dimensions, finite unit-norm vectors, Swedish/English retrieval expectations, and batch sizes/sequence lengths up to 512. Verify tokenizer coverage for long final tails and headers with truncation disabled. Capture ONNX profiling plus CUDA GPU activity on Linux, and CoreML/Metal device traces on macOS, demonstrating transformer compute on GPU rather than merely provider registration. Record actual versions, device, latency, peak device memory, and evidence paths in `docs/gpu-validation.md`; a CPU-only trace or absent platform evidence fails the gate. Hosted fake-only CI may pass independently but cannot authorize a release.
+Run `gpuIntegrationTest` on the macOS arm64 target before the Task 15 gate and again from the packaged runtime before release. Assert 768 dimensions, finite unit-norm vectors, Swedish/English retrieval expectations, and batch sizes/sequence lengths up to 512. Verify tokenizer coverage for long final tails and headers with truncation disabled. Capture CoreML/Metal device traces demonstrating transformer compute on GPU rather than merely provider registration. Record actual versions, device, latency, peak device memory, and evidence paths in `docs/gpu-validation.md`; a CPU-only trace or absent platform evidence fails the gate. Hosted fake-only CI may pass independently but cannot authorize a release.
 
 - [ ] **Step 5: Verify and commit**
 
 Run: `./gradlew test --tests 'infoscry.embedding.*'`
-Expected: unit tests PASS without network or model files. Additionally run `./gradlew gpuIntegrationTest` on each target GPU platform; both must PASS with recorded evidence before Task 16 begins.
+Expected: unit tests PASS without network or model files. Additionally run `./gradlew gpuIntegrationTest` on the macOS arm64 target; it must PASS with recorded evidence before Task 16 begins.
 
 ```bash
 git add models docs/gpu-validation.md build.gradle.kts src/main/kotlin/infoscry/embedding src/test/kotlin/infoscry/embedding
@@ -1476,20 +1477,20 @@ git commit -m "test: cover recovery and security end to end"
 - Modify: `.gitignore`
 
 **Interfaces:**
-- Produces: macOS/Linux CI, `dist/infoscry-<version>-<platform>.tar.gz`, installation/run documentation.
+- Produces: macOS CI plus a non-GPU Linux portability job, `dist/infoscry-<version>-macos-arm64.tar.gz`, installation/run documentation.
 - Consumes: complete tested app and model manifest.
 
 - [ ] **Step 1: Add CI with zero paid/network-dependent tests**
 
-Matrix macOS/Linux with JDK 25 and Node. Run Gradle checks, Vitest, Svelte check/build, and Playwright using fakes. Cache Gradle/npm; do not inject provider secrets. Run real external-tool tests and `gpuIntegrationTest` in separate hardware jobs. GPU jobs are mandatory for each release target, run on suitable trusted runners (macOS arm64 Apple GPU and Linux x86_64 NVIDIA GPU), and fail rather than skip when hardware is absent. Fake-only CI cannot satisfy the release gate.
+Matrix macOS (JDK 25 and Node) plus a non-GPU Linux job that runs the same checks as a portability signal. Run Gradle checks, Vitest, Svelte check/build, and Playwright using fakes. Cache Gradle/npm; do not inject provider secrets. Run real external-tool tests and `gpuIntegrationTest` in a separate macOS arm64 hardware job. The GPU job is mandatory for the release target, runs on a suitable trusted macOS arm64 runner with an Apple GPU, and fails rather than skips when hardware is absent. A green Linux job cannot authorize a release.
 
 - [ ] **Step 2: Add minimal-runtime packaging**
 
-Use `jlink`/`jpackage` application image rather than native installer. Include app JARs, static frontend, prompt resources, launcher, and only the matching platform model/native ONNX provider build and manifest. Package names include OS and architecture; document external GPU driver/runtime prerequisites from the validated matrix. Package script verifies Java 25, frontend build, model checksums, tests, archive contents, and SHA-256 output. The release workflow signs each archive and checksum with `cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY`, uploads `.sig` and `.pem` verification material, and fails rather than publishing an unsigned release.
+Use `jlink`/`jpackage` application image rather than native installer. Include app JARs, static frontend, prompt resources, launcher, and the matching CoreML native ONNX provider build and model manifest. The package name includes OS and architecture (macOS arm64 only); document external GPU/runtime prerequisites from the validated matrix. Package script verifies Java 25, frontend build, model checksums, tests, archive contents, and SHA-256 output. The release workflow signs each archive and checksum with `cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY`, uploads `.sig` and `.pem` verification material, and fails rather than publishing an unsigned release.
 
 - [ ] **Step 3: Write exact setup and privacy documentation**
 
-Document the tested GPU/device/driver/runtime matrix, GPU-required operations and diagnostic failures, macOS/Linux Tesseract installation, optional Calibre, OCR language packs, platform model download size, env-var API keys, `serve`, browser URL, CLI foreground versus server enqueue behavior, `logs --follow`, backup of `~/.infoscry`, resumable OCR, deletion recovery, rebuild write pause, conversation context eviction, and exactly what may leave the machine.
+Document the tested GPU/device/runtime matrix, GPU-required operations and diagnostic failures, macOS Tesseract installation, optional Calibre, OCR language packs, model download size, env-var API keys, `serve`, browser URL, CLI foreground versus server enqueue behavior, `logs --follow`, backup of `~/.infoscry`, resumable OCR, deletion recovery, rebuild write pause, conversation context eviction, the DOCTYPE limitation for EPUB 2 books, the long Calibre permit hold, and exactly what may leave the machine. State plainly that Linux is not a supported v1 runtime and that embeddings require an Apple GPU.
 
 - [ ] **Step 4: Run acceptance commands**
 
@@ -1500,7 +1501,7 @@ cd web && npm ci && npm test -- --run && npm run check && npm run build && cd ..
 ./build/install/infoscry/bin/infoscry doctor --json
 ```
 
-Expected: all commands succeed on each supported GPU target; doctor may only WARN for optional Calibre or absent API keys and must report the required GPU ready. Unpack each release archive into a clean path and rerun the GPU inference validation using its bundled Java/native runtime and model, then import/search the fixture through that launcher. Record evidence in `docs/gpu-validation.md` and `docs/release-verification.md`. The archive contains Java 25 runtime and no API keys/test logs. A missing GPU run or CPU-only execution blocks release even if all mock tests pass.
+Expected: all commands succeed on the supported macOS arm64 GPU target; doctor may only WARN for optional Calibre or absent API keys and must report the required GPU ready. Unpack the release archive into a clean path and rerun the GPU inference validation using its bundled Java/native runtime and model, then import/search the fixture through that launcher. Record evidence in `docs/gpu-validation.md` and `docs/release-verification.md`. The archive contains Java 25 runtime and no API keys/test logs. A missing GPU run or CPU-only execution blocks release even if all mock tests pass.
 
 - [ ] **Step 5: Check every spec acceptance criterion manually**
 
@@ -1519,10 +1520,10 @@ Do not begin the next phase until the current gate passes:
 
 1. **Core gate (Task 6):** secure local server, recoverable collection deletion, mutation admission, CLI, logging, and frontend shell pass on a temporary data directory.
 2. **Ingestion gate (Task 14):** every committed format fixture yields stable content units and bounded chunks; errors remain per-document; forced restart reuses committed OCR checkpoints and standalone import retains process ownership.
-3. **Search gate (Tasks 15-18):** real GPU/tokenizer validation passes on both targets before Task 16; imported fixture corpus is keyword/semantic/hybrid searchable, checkpoints avoid repeated OCR, and rebuild survives interruption and competing writes.
+3. **Search gate (Tasks 15-18):** real GPU/tokenizer validation passes on macOS arm64 before Task 16; imported fixture corpus is keyword/semantic/hybrid searchable, checkpoints avoid repeated OCR, and rebuild survives interruption and competing writes.
 4. **LLM gate (Task 22):** mock OpenAI/Anthropic Ask and Investigate produce validated citations with hard tool/context limits, structurally valid pruned histories, stable evidence IDs, and no secret leakage.
 5. **UI gate (Task 25):** all core workflows work through the English static Svelte UI.
-6. **Release gate (Task 28):** macOS/Linux CI, packaged-runtime GPU validation on both hardware targets, E2E security/recovery/concurrent-maintenance/CLI-ownership tests, package, doctor, docs, and all 15 acceptance criteria pass.
+6. **Release gate (Task 28):** macOS CI plus non-GPU Linux portability, packaged-runtime GPU validation on the macOS arm64 target, E2E security/recovery/concurrent-maintenance/CLI-ownership tests, package, doctor, docs, and all 15 acceptance criteria pass.
 
 ## Execution Rules for Smaller Models
 
