@@ -4,6 +4,8 @@ import infoscry.AppContext
 import infoscry.collection.DeletionRecoveryBlockedException
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
+import infoscry.domain.Job
+import infoscry.domain.JobId
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
 import infoscry.storage.MaintenanceInProgressException
@@ -60,6 +62,12 @@ data class DeleteCollectionRequest(val confirmName: String)
 
 @Serializable
 data class DeleteCollectionResponse(val collectionId: String, val phase: String)
+
+@Serializable
+data class JobsResponse(val jobs: List<Job>)
+
+@Serializable
+data class JobResponse(val job: Job)
 
 /**
  * The wire format, in one place.
@@ -133,6 +141,25 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
             }
         }
 
+        route("/api/jobs") {
+            get {
+                call.handle {
+                    val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: DEFAULT_JOB_PAGE
+                    val offset = call.request.queryParameters["offset"]?.toIntOrNull() ?: 0
+                    call.respondJson(HttpStatusCode.OK, JobsResponse(context.jobs.list(limit, offset)))
+                }
+            }
+
+            // The cancellation request is persisted before anything is signalled, so a caller that sees
+            // this answer knows the request outlives this process.
+            post("/{id}/cancel") {
+                call.handle {
+                    val jobId = call.jobId()
+                    call.respondJson(HttpStatusCode.OK, JobResponse(context.cancelJob(jobId)))
+                }
+            }
+        }
+
         // The compiled SvelteKit application. Its client-side routes all fall back to this file.
         staticResources("/", STATIC_RESOURCES, index = "index.html")
 
@@ -153,6 +180,9 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
 }
 
 private const val STATIC_RESOURCES = "static"
+
+/** How many jobs one page of `GET /api/jobs` returns when the caller does not ask for a size. */
+private const val DEFAULT_JOB_PAGE = 100
 
 private const val API_PREFIX = "/api/"
 
@@ -191,6 +221,12 @@ suspend inline fun <reified T> ApplicationCall.receiveJson(): T {
     } catch (failure: SerializationException) {
         throw BadRequestException("the request body is not valid ${T::class.simpleName} JSON: ${failure.message}")
     }
+}
+
+fun ApplicationCall.jobId(): JobId {
+    val raw = parameters["id"]?.takeIf { it.isNotBlank() }
+        ?: throw BadRequestException("a job id is required in the path")
+    return JobId(raw)
 }
 
 fun ApplicationCall.collectionId(): CollectionId {

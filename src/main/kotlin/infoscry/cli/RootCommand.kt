@@ -61,7 +61,7 @@ class RootCommand : CliktCommand(name = "infoscry") {
     }
 
     init {
-        subcommands(LogsCommand(), ServeCommand(), CollectionCommand())
+        subcommands(LogsCommand(), ServeCommand(), CollectionCommand(), JobsCommand())
     }
 
     override fun run() {

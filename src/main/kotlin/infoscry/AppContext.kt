@@ -5,16 +5,21 @@ import infoscry.collection.CollectionService
 import infoscry.collection.DeletionRecoveryReport
 import infoscry.config.AppPaths
 import infoscry.config.ProcessLock
+import infoscry.domain.Job
+import infoscry.domain.JobId
+import infoscry.jobs.JobRunner
 import infoscry.library.ManagedLibrary
 import infoscry.logging.LoggingBootstrap
 import infoscry.storage.CollectionStore
 import infoscry.storage.Database
 import infoscry.storage.DeletionStore
 import infoscry.storage.DocumentStore
+import infoscry.storage.JobStore
 import infoscry.storage.MutationCoordinator
 import infoscry.storage.SchemaMigrator
 import java.nio.file.Path
 import kotlinx.coroutines.runBlocking
+import org.slf4j.LoggerFactory
 
 /**
  * One open InfoScry data directory: every service the process needs, wired by hand and closed together.
@@ -38,8 +43,32 @@ class AppContext private constructor(
     val library: ManagedLibrary,
     val mutations: MutationCoordinator,
     val collectionService: CollectionService,
+    val jobs: JobStore,
     private val lock: ProcessLock,
 ) : AutoCloseable {
+
+    /**
+     * The worker that owns this data directory's job queue, once a composition root has wired its
+     * handlers. `serve` and a foreground `import` attach one; a short-lived CLI does not, because it
+     * cannot run jobs and must not pretend it could.
+     */
+    @Volatile
+    private var jobRunner: JobRunner? = null
+
+    /** Wires the process's worker. There is one per process, because there is one writer. */
+    fun attachJobRunner(runner: JobRunner) {
+        check(jobRunner == null) { "a job runner is already attached to this data directory" }
+        jobRunner = runner
+    }
+
+    /**
+     * Records a cancellation request for one job and interrupts the attempt that is running it.
+     *
+     * With a runner attached the attempt is stopped promptly; without one the durable request is the
+     * whole action and nothing is lost, because only the process holding the data-directory lock can be
+     * running work for it — and that process is this one.
+     */
+    suspend fun cancelJob(id: JobId): Job = jobRunner?.cancel(id) ?: jobs.cancel(id)
 
     /**
      * What the startup roll-forward found. Non-empty [DeletionRecoveryReport.blocked] means the
@@ -51,6 +80,10 @@ class AppContext private constructor(
         private set
 
     override fun close() {
+        // The worker stops first: it writes, so it must not still be running when the database closes.
+        // Its close hands unfinished attempts back to the queue, which is what makes a clean shutdown
+        // resumable.
+        runCatching { jobRunner?.close() }
         // The lock is released last: while the database is closing, this process still owns the data
         // directory, so no second process may open it in between.
         runCatching { database.close() }
@@ -81,6 +114,7 @@ class AppContext private constructor(
                     val collections = CollectionStore(database)
                     val documents = DocumentStore(database)
                     val deletions = DeletionStore(database)
+                    val jobs = JobStore(database)
                     val mutations = MutationCoordinator()
                     val service = CollectionService(
                         database = database,
@@ -99,9 +133,18 @@ class AppContext private constructor(
                         library = ManagedLibrary(paths, documents),
                         mutations = mutations,
                         collectionService = service,
+                        jobs = jobs,
                         lock = lock,
                     )
                     context.deletionRecovery = runBlocking { service.recoverDeletions() }
+                    // After deletions are finished, because finishing one cascades its jobs away: an
+                    // attempt that a previous process was inside is queued again, and a cancellation
+                    // request that previous process recorded is honoured rather than re-run.
+                    val resumed = jobs.resetInterrupted()
+                    if (resumed > 0) {
+                        LOGGER.atInfo().addKeyValue(RESUMED_JOBS_FIELD, resumed)
+                            .log("queued interrupted job attempts again")
+                    }
                     return context
                 } catch (failure: Throwable) {
                     runCatching { database.close() }
@@ -112,5 +155,9 @@ class AppContext private constructor(
                 throw failure
             }
         }
+
+        private const val RESUMED_JOBS_FIELD = "resumed_jobs"
     }
 }
+
+private val LOGGER = LoggerFactory.getLogger("infoscry.startup")

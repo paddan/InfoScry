@@ -2,11 +2,15 @@ package infoscry.cli
 
 import infoscry.config.RuntimeInfo
 import infoscry.domain.Collection
+import infoscry.domain.Job
+import infoscry.domain.JobId
 import infoscry.server.ApiErrorResponse
 import infoscry.server.ApiJson
 import infoscry.server.CollectionResponse
 import infoscry.server.CollectionsResponse
 import infoscry.server.CreateCollectionRequest
+import infoscry.server.JobResponse
+import infoscry.server.JobsResponse
 import infoscry.server.LOOPBACK_HOST
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -58,6 +62,18 @@ class LoopbackApi(
             setBody(ApiJson.encodeToString(request))
         }
         return ApiJson.decodeFromString<CollectionResponse>(expect(response)).collection
+    }
+
+    suspend fun listJobs(limit: Int): List<Job> =
+        ApiJson.decodeFromString<JobsResponse>(
+            expect(client.get("$base/api/jobs?limit=$limit")),
+        ).jobs
+
+    suspend fun cancelJob(id: JobId): Job {
+        val response = client.post("$base/api/jobs/${id.value}/cancel") {
+            header()
+        }
+        return ApiJson.decodeFromString<JobResponse>(expect(response)).job
     }
 
     override fun close() {

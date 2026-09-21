@@ -4,6 +4,8 @@ import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.config.RuntimeInfo
 import infoscry.domain.Collection
+import infoscry.domain.Job
+import infoscry.domain.JobId
 
 /**
  * Where a CLI command does its work: in this process, or through the server that already owns the data
@@ -26,6 +28,11 @@ sealed interface CliSession : AutoCloseable {
         description: String? = null,
     ): Collection
 
+    suspend fun listJobs(limit: Int): List<Job>
+
+    /** Persists the cancellation request and, when this process owns the attempt, interrupts it. */
+    suspend fun cancelJob(id: JobId): Job
+
     /** Works directly on the data directory, holding the process lock for the duration. */
     class Local(val context: AppContext) : CliSession {
 
@@ -35,6 +42,12 @@ sealed interface CliSession : AutoCloseable {
 
         override suspend fun createCollection(name: String, description: String?): Collection =
             context.collectionService.create(name = name, description = description)
+
+        override suspend fun listJobs(limit: Int): List<Job> = context.jobs.list(limit = limit)
+
+        // A short-lived CLI has no worker, so the durable request is the whole action: no other process
+        // can be running this data directory's jobs, because this process holds its lock.
+        override suspend fun cancelJob(id: JobId): Job = context.cancelJob(id)
 
         override fun close() {
             context.close()
@@ -50,6 +63,10 @@ sealed interface CliSession : AutoCloseable {
 
         override suspend fun createCollection(name: String, description: String?): Collection =
             api.createCollection(name = name, description = description)
+
+        override suspend fun listJobs(limit: Int): List<Job> = api.listJobs(limit)
+
+        override suspend fun cancelJob(id: JobId): Job = api.cancelJob(id)
 
         override fun close() {
             api.close()

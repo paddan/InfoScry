@@ -154,6 +154,14 @@ data class Chunk(
 /**
  * A durable unit of background work. [stage] is the human-readable stage inside a running job;
  * [completed] and [total] count its items. Errors are stored as a code plus an actionable message.
+ *
+ * [collectionId] and [payload] are what a worker needs to resume the job — the collection it belongs to
+ * and the request it was enqueued with — and they mirror the `jobs` table's columns so a record round-
+ * trips without a second row type.
+ *
+ * [cancelRequested] is the durable cancellation request, which is deliberately separate from the state:
+ * a stage may still be inside a platform call when the request arrives, so the state stays `RUNNING`
+ * until the worker can honestly say the job stopped.
  */
 @Serializable
 data class Job(
@@ -162,11 +170,14 @@ data class Job(
     val state: JobState,
     val createdAt: String,
     val updatedAt: String,
+    val collectionId: CollectionId? = null,
     val stage: String? = null,
     val completed: Int = 0,
     val total: Int = 0,
+    val payload: String? = null,
     val errorCode: String? = null,
     val errorMessage: String? = null,
+    val cancelRequested: Boolean = false,
 ) {
     init {
         require(completed >= 0) { "Job.completed must not be negative, was $completed" }
