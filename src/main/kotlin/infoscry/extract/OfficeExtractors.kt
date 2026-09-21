@@ -9,7 +9,9 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.HexFormat
 import java.util.Locale
+import java.util.zip.ZipFile
 import javax.imageio.ImageIO
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
@@ -63,13 +65,50 @@ internal const val PPT_MEDIA_TYPE: String = "application/vnd.ms-powerpoint"
 /**
  * The largest Office container an extractor will hand to POI.
  *
+ * This is the bound on what a document costs the way in — the bytes on the disk. What the process will
+ * hold is a different number, because a parsed model is larger than its file: [MAX_OFFICE_EXPANDED_BYTES]
+ * bounds that for the one family whose bytes are a container of other bytes, and a compound file has no
+ * such gap because it stores its streams uncompressed.
+ *
  * Every reader here holds the parsed document in memory — POI has no streaming mode for page-level or
- * slide-level work — so the file's size is the closest predictor of what the process will need. A
- * refusal is worse than reading a document and better than an out-of-memory kill that takes every other
- * job in the process with it, and the same bound covers a `.docx` whose zip expands far beyond its
- * size.
+ * slide-level work — so a refusal is worse than reading a document and better than an out-of-memory kill
+ * that takes every other job in the process with it.
  */
 internal const val MAX_OFFICE_DOCUMENT_BYTES: Long = 64L * 1024 * 1024
+
+/**
+ * The largest expansion an OOXML container may declare before an extractor refuses it.
+ *
+ * A `.docx` is a zip, and a zip's size on disk says nothing about what it holds: a few kilobytes can
+ * expand to gigabytes, and the expansion is what the readers materialise. The total uncompressed size is
+ * therefore measured from the container's own central directory before anything is decompressed. A
+ * directory that understates its entries is not a hole — POI's readers stop at the sizes they are given,
+ * and the container still has to fit [MAX_OFFICE_DOCUMENT_BYTES] on the way in — but it is why this is a
+ * gate rather than a guarantee.
+ */
+internal const val MAX_OFFICE_EXPANDED_BYTES: Long = 256L * 1024 * 1024
+
+/**
+ * The most columns a spreadsheet row may reach before its unit is refused instead of widened.
+ *
+ * A row is read across every column the file says it has, so one stray cell in a far column turns a row
+ * into thousands of strings and a unit into a range no reader can use. Excel's own limit is 16 384
+ * columns; well before that a row has stopped being a table a citation can name. A row past this bound is
+ * refused rather than quietly cut short, because dropping a cell is dropping evidence.
+ */
+internal const val MAX_SPREADSHEET_COLUMNS: Int = 1024
+
+/** The code a spreadsheet unit fails under when one of its rows reaches past [MAX_SPREADSHEET_COLUMNS]. */
+internal const val SHEET_RANGE_TOO_WIDE_CODE: String = "SHEET_RANGE_TOO_WIDE"
+
+/**
+ * The most pixels a slide preview may hold.
+ *
+ * A preview is a `BufferedImage` of the slide's page size, so a page size is an allocation request: only
+ * a corrupt or hostile file asks for a canvas past this bound. A slide whose page size is too large gets
+ * a rendering warning and still delivers its text.
+ */
+internal const val MAX_PREVIEW_PIXELS: Long = 16_777_216L
 
 /** Which container family a document is read from. The registry knows it; the bytes cannot say. */
 enum class OfficeFormat {
@@ -98,6 +137,12 @@ enum class OfficeFormat {
  * a heading style name. A document whose styles were flattened — which is what some converters do — has
  * no headings left at all, and then the whole document is one section with an empty heading path, which
  * is a truthful citation rather than a guess.
+ *
+ * Every block of a document is read before the first unit is emitted, so the sections of a long report are
+ * held at once. That is a deliberate exception to the pipeline's one-unit-at-a-time discipline and it is
+ * what the format allows: POI has already parsed the whole document into memory by then, and grouping its
+ * paragraphs is a walk over text that is already extracted. What bounds it is [MAX_OFFICE_DOCUMENT_BYTES]
+ * together with [MAX_OFFICE_EXPANDED_BYTES].
  */
 class WordExtractor(private val format: OfficeFormat) : DocumentExtractor {
 
@@ -105,7 +150,7 @@ class WordExtractor(private val format: OfficeFormat) : DocumentExtractor {
         if (format == OfficeFormat.OOXML) setOf(DOCX_MEDIA_TYPE) else setOf(DOC_MEDIA_TYPE)
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
-        if (refuseOversized(input, Files.size(input.managedPath))) return@flow
+        if (refuseOversized(input, format)) return@flow
         val units = when (format) {
             OfficeFormat.OOXML -> Files.newInputStream(input.managedPath).use { stream ->
                 XWPFDocument(stream).use { document -> wordUnits(ooxmlBlocks(document)) }
@@ -130,6 +175,11 @@ class WordExtractor(private val format: OfficeFormat) : DocumentExtractor {
  * A formula cell is read through its **stored result**, never by evaluating anything — evaluating would
  * run the workbook's formulas (and, for the legacy format, its macros) on material nobody has vouched
  * for, and a cached value is what the document itself claims the answer is.
+ *
+ * Where the work happens matters as much as what it produces. Which rows exist, how wide the file made
+ * them, and the A1 bounds they cite are all read from the container's own row index, which is cheap; the
+ * expensive part, formatting every cell a reader would see, runs inside the unit boundary. An attempt that
+ * resumes therefore walks a whole workbook without formatting the cells of any unit it is going to skip.
  */
 class SpreadsheetExtractor(
     private val format: OfficeFormat,
@@ -144,84 +194,141 @@ class SpreadsheetExtractor(
         if (format == OfficeFormat.OOXML) setOf(XLSX_MEDIA_TYPE) else setOf(XLS_MEDIA_TYPE)
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
-        if (refuseOversized(input, Files.size(input.managedPath))) return@flow
-        val sheets = mutableListOf<OfficeUnit>()
+        if (refuseOversized(input, format)) return@flow
         var sheetCount = 0
-        val open: (Workbook) -> Unit = { workbook ->
-            workbook.forEach { sheet ->
+        var ordinalBase = 0
+        val batches = mutableListOf<SpreadsheetBatch>()
+        // The workbook stays open while the units are emitted, because producing a batch reads its cells.
+        // Nothing is formatted here: [sheetBatches] reads the file's own row index, and the collector is
+        // the only thing that runs inside the boundary.
+        val open: suspend (Workbook) -> Unit = { workbook ->
+            val sheets = workbook.iterator()
+            while (sheets.hasNext()) {
+                val sheet = sheets.next()
                 sheetCount++
-                sheets.addAll(sheetUnits(sheet))
+                val sheetBatch = sheetBatches(sheet, ordinalBase)
+                ordinalBase += sheetBatch.size
+                batches.addAll(sheetBatch)
+            }
+            emitOfficeUnits(input, batches.asSequence().map { batch -> batch.unit() }) {
+                mapOf(
+                    EXTRACTOR_METADATA to SPREADSHEET_METADATA,
+                    FORMAT_METADATA to format.metadataName(),
+                    SHEETS_METADATA to sheetCount.toString(),
+                )
             }
         }
         when (format) {
             OfficeFormat.OOXML -> Files.newInputStream(input.managedPath)
-                .use { stream -> XSSFWorkbook(stream).use(open) }
+                .use { stream -> XSSFWorkbook(stream).use { workbook -> open(workbook) } }
 
             OfficeFormat.LEGACY -> Files.newInputStream(input.managedPath)
-                .use { stream -> HSSFWorkbook(stream).use(open) }
-        }
-        emitOfficeUnits(input, sheets.asSequence()) {
-            mapOf(
-                EXTRACTOR_METADATA to SPREADSHEET_METADATA,
-                FORMAT_METADATA to format.metadataName(),
-                SHEETS_METADATA to sheetCount.toString(),
-            )
+                .use { stream -> HSSFWorkbook(stream).use { workbook -> open(workbook) } }
         }
     }
 
     /**
-     * One sheet's units, in reading order.
+     * One sheet's units, in reading order, with only what is cheap to know about them.
      *
      * The header is the first row with a non-blank cell: a sheet whose first rows are empty still has a
      * header, and calling an empty row one would repeat nothing above every unit. A sheet with no data
      * rows below its header has no units — the same reason a CSV with only a header has none.
+     *
+     * Nothing here formats a cell, and nothing here is where the work happens. A row that reaches past
+     * [MAX_SPREADSHEET_COLUMNS] marks its batch as unproducible instead of widening it, so the refusal is
+     * decided before any cell is read.
      */
-    private fun sheetUnits(sheet: Sheet): List<OfficeUnit> {
-        val formatter = DataFormatter(Locale.ROOT)
-        val rows = sheet.map { row -> SpreadsheetRow(row.rowNum, rowCells(row, formatter)) }
-        val headerIndex = rows.indexOfFirst { row -> row.cells.any { it.isNotBlank() } }
+    private fun sheetBatches(sheet: Sheet, ordinalBase: Int): List<SpreadsheetBatch> {
+        val rows = sheet.map { row -> SpreadsheetRow(row) }
+        val headerIndex = rows.indexOfFirst { row -> row.hasContent }
         if (headerIndex < 0) return emptyList()
-        val header = rows[headerIndex].cells
-        val units = mutableListOf<OfficeUnit>()
+        val header = rows[headerIndex]
+        val batches = mutableListOf<SpreadsheetBatch>()
         var batch = mutableListOf<SpreadsheetRow>()
 
         fun closeBatch() {
             if (batch.isEmpty()) return
             val first = batch.first().number + 1
             val last = batch.last().number + 1
-            val columns = maxOf(header.size, batch.maxOf { it.cells.size }, 1)
-            val locator = SourceLocation.SpreadsheetRange(
-                sheet = sheet.sheetName,
-                startCell = "A$first",
-                endCell = "${columnLetter(columns)}$last",
-            )
-            val key = "rows:${sheet.sheetName}:$first-$last"
-            val ordinal = units.size
-            val extracted = csvText(batch.map { it.cells })
-            val search = tableSearchText(header, batch.map { it.cells })
-            units.add(
-                OfficeUnit(key = key, ordinal = ordinal, locator = locator) {
-                    ContentUnitDraft(
-                        locator = locator,
-                        extractedText = TextNormalizer.normalize(extracted).extracted,
-                        searchText = TextNormalizer.normalize(search).search,
-                    )
-                },
+            val columns = maxOf(header.columns, batch.maxOf { it.columns }, 1)
+            batches.add(
+                SpreadsheetBatch(
+                    sheet = sheet,
+                    key = "rows:${sheet.sheetName}:$first-$last",
+                    ordinal = ordinalBase + batches.size,
+                    locator = SourceLocation.SpreadsheetRange(
+                        sheet = sheet.sheetName,
+                        startCell = "A$first",
+                        endCell = "${columnLetter(columns)}$last",
+                    ),
+                    headerRow = header.number,
+                    rowNumbers = batch.map { it.number },
+                    tooWide = columns > MAX_SPREADSHEET_COLUMNS,
+                ),
             )
             batch = mutableListOf()
         }
 
         rows.drop(headerIndex + 1).forEach { row ->
-            if (row.cells.all { it.isBlank() }) return@forEach
+            if (!row.hasContent) return@forEach
             batch.add(row)
             if (batch.size >= rowsPerUnit) closeBatch()
         }
         closeBatch()
-        return units
+        return batches
     }
 
-    /** One row of a sheet, with the row number a reader counts it at. */
-    private data class SpreadsheetRow(val number: Int, val cells: List<String>)
+    /**
+     * One row of a sheet, with the row number a reader counts it at and how wide the file made it.
+     *
+     * Whether a row holds anything is judged from the cells the file has rather than from their formatted
+     * values, because formatting is the work this type exists to postpone. A formula whose stored result
+     * is the empty string is therefore a cell that is there, which is also what the file says it is.
+     */
+    private class SpreadsheetRow(private val row: Row) {
+
+        val number: Int = row.rowNum
+
+        val columns: Int = row.lastCellNum.toInt()
+
+        val hasContent: Boolean get() = row.any { cell -> cell.cellType != CellType.BLANK }
+    }
+
+    /**
+     * One citable range of a sheet: the bounds a reader sees, and the rows it covers.
+     *
+     * The sheet is held open for the batch's lifetime — [unit] reads cells when the unit is produced,
+     * which happens inside the boundary — and the formatting happens there rather than here. That is what
+     * lets a resumed attempt skip a committed batch without formatting any of its cells.
+     */
+    private class SpreadsheetBatch(
+        private val sheet: Sheet,
+        val key: String,
+        val ordinal: Int,
+        val locator: SourceLocation,
+        private val headerRow: Int,
+        private val rowNumbers: List<Int>,
+        private val tooWide: Boolean,
+    ) {
+
+        fun unit(): OfficeUnit = OfficeUnit(
+            key = key,
+            ordinal = ordinal,
+            locator = locator,
+            failureCode = if (tooWide) SHEET_RANGE_TOO_WIDE_CODE else null,
+        ) {
+            val formatter = DataFormatter(Locale.ROOT)
+            val header = rowValues(sheet, headerRow, formatter)
+            val rows = rowNumbers.map { number -> rowValues(sheet, number, formatter) }
+            val normalisedExtracted = TextNormalizer.normalize(csvText(rows))
+            val normalisedSearch = TextNormalizer.normalize(tableSearchText(header, rows))
+            ContentUnitDraft(
+                locator = locator,
+                extractedText = normalisedExtracted.extracted,
+                searchText = normalisedSearch.search,
+            )
+        }
+    }
 
     companion object {
 
@@ -236,7 +343,8 @@ class SpreadsheetExtractor(
  * The row is walked by index rather than by its own iterator so that a value keeps its column: a formula
  * in column C printed as the first cell of its row would line up with the wrong header.
  */
-private fun rowCells(row: Row, formatter: DataFormatter): List<String> {
+private fun rowValues(sheet: Sheet, number: Int, formatter: DataFormatter): List<String> {
+    val row = sheet.getRow(number) ?: return emptyList()
     val columns = row.lastCellNum.toInt()
     if (columns <= 0) return emptyList()
     return (0 until columns).map { index ->
@@ -255,7 +363,13 @@ private fun rowCells(row: Row, formatter: DataFormatter): List<String> {
  * Each slide also gets a rendered preview artifact, which is what a source viewer needs to show the slide
  * as it looks rather than as its text reads. Rendering needs fonts and a graphics stack that a headless
  * machine may not have, so a failed render is recorded as a warning while the slide's text is still
- * delivered: the alternative would lose indexable evidence because of a missing font.
+ * delivered: the alternative would lose indexable evidence because of a missing font. A preview is also
+ * refused outright when its page size asks for more pixels than [MAX_PREVIEW_PIXELS]: a corrupt page size
+ * is not a reason to allocate an image the machine cannot hold.
+ *
+ * A show's slides are walked before the first unit is emitted, and each slide's expensive work — its
+ * preview render — still happens inside that slide's permit. What bounds the walk is
+ * [MAX_OFFICE_DOCUMENT_BYTES] together with [MAX_OFFICE_EXPANDED_BYTES].
  */
 class PresentationExtractor(private val format: OfficeFormat) : DocumentExtractor {
 
@@ -263,7 +377,7 @@ class PresentationExtractor(private val format: OfficeFormat) : DocumentExtracto
         if (format == OfficeFormat.OOXML) setOf(PPTX_MEDIA_TYPE) else setOf(PPT_MEDIA_TYPE)
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
-        if (refuseOversized(input, Files.size(input.managedPath))) return@flow
+        if (refuseOversized(input, format)) return@flow
         val units = mutableListOf<OfficeUnit>()
         val warnings = mutableListOf<String>()
         var slideCount = 0
@@ -358,34 +472,41 @@ class PresentationExtractor(private val format: OfficeFormat) : DocumentExtracto
     ): Preview? = try {
         val width = pageSize.width.coerceAtLeast(1)
         val height = pageSize.height.coerceAtLeast(1)
-        val image = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
-        val graphics = image.createGraphics()
-        try {
-            draw(graphics)
-        } finally {
-            graphics.dispose()
-        }
-        Files.createDirectories(where)
-        val name = String.format(Locale.ROOT, "slide-%06d.png", number)
-        val target = where.resolve(name)
-        // A half-written preview would be referenced by a unit that claims it is complete, so the file is
-        // written under a temporary name and moved into place before the unit is delivered.
-        val temporary = Files.createTempFile(where, "$name.", ".part")
-        try {
-            if (!ImageIO.write(image, "png", temporary.toFile())) {
-                throw IllegalStateException("no PNG writer is available")
+        if (width.toLong() * height.toLong() > MAX_PREVIEW_PIXELS) {
+            warnings.add("slide $number: a $width x $height preview is past the pixel bound")
+            null
+        } else {
+            val image = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+            val graphics = image.createGraphics()
+            try {
+                draw(graphics)
+            } finally {
+                graphics.dispose()
             }
-            Files.move(temporary, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-        } finally {
-            Files.deleteIfExists(temporary)
+            Files.createDirectories(where)
+            val name = String.format(Locale.ROOT, "slide-%06d.png", number)
+            val target = where.resolve(name)
+            // A half-written preview would be referenced by a unit that claims it is complete, so the file
+            // is written under a temporary name and moved into place before the unit is delivered.
+            val temporary = Files.createTempFile(where, "$name.", ".part")
+            try {
+                if (!ImageIO.write(image, "png", temporary.toFile())) {
+                    throw IllegalStateException("no PNG writer is available")
+                }
+                Files.move(temporary, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            } finally {
+                Files.deleteIfExists(temporary)
+            }
+            Preview(
+                relativePath = "$PREVIEW_DIRECTORY/$name",
+                sha256 = sha256Of(target),
+            )
         }
-        Preview(
-            relativePath = "$PREVIEW_DIRECTORY/$name",
-            sha256 = sha256Of(target),
-        )
-    } catch (failure: Throwable) {
-        // A missing font or a headless graphics stack is not a reason to lose the slide's text.
-        if (failure is InterruptedException) throw failure
+    } catch (failure: Exception) {
+        // A missing font or a headless graphics stack is not a reason to lose the slide's text. An
+        // interrupt or a cancellation is: both say this attempt must stop rather than keep rendering, and
+        // an Error is not a rendering problem at all, so neither is caught here.
+        if (failure is InterruptedException || failure is CancellationException) throw failure
         warnings.add("slide $number: ${failure::class.simpleName}")
         null
     }
@@ -436,11 +557,16 @@ private fun wordMetadata(format: OfficeFormat): Map<String, String> = mapOf(
  * inside the unit boundary, so the artifact it writes and the checkpoint that describes it commit
  * together. [key] and [ordinal] are already known at that point, which is what lets a resumed attempt
  * skip committed units without doing their work.
+ *
+ * A unit this attempt cannot produce at all — a spreadsheet row that reaches past
+ * [MAX_SPREADSHEET_COLUMNS] — says so with [failureCode]: the pipeline records a unit that failed rather
+ * than a unit whose evidence was quietly cut short.
  */
 internal class OfficeUnit(
     val key: String,
     val ordinal: Int,
     val locator: SourceLocation,
+    val failureCode: String? = null,
     val produce: () -> ContentUnitDraft,
 )
 
@@ -461,14 +587,29 @@ internal suspend fun FlowCollector<ExtractionEvent>.emitOfficeUnits(
         input.boundary.unit {
             total++
             if (input.isCommitted(unit.key)) return@unit
-            emit(ExtractionEvent.UnitReady(key = unit.key, ordinal = unit.ordinal, unit = unit.produce()))
+            val code = unit.failureCode
+            if (code == null) {
+                emit(
+                    ExtractionEvent.UnitReady(
+                        key = unit.key,
+                        ordinal = unit.ordinal,
+                        unit = unit.produce(),
+                    ),
+                )
+            } else {
+                emit(ExtractionEvent.UnitFailed(key = unit.key, ordinal = unit.ordinal, code = code))
+            }
         }
     }
     input.boundary.unit { emit(ExtractionEvent.Finished(metadata = metadata(), totalUnits = total)) }
 }
 
 /**
- * Refuses an Office document that is larger than the extractors will parse, and says whether it did.
+ * Refuses an Office document whose bytes, or whose declared expansion, are past the bounds — and says so.
+ *
+ * The container is measured first because that is the cheap check and it is the one that bounds a compound
+ * file, whose streams are stored uncompressed. The expansion is measured only for an OOXML container that
+ * already fits, because opening a zip that is not there is wasted work.
  *
  * A document refused before its first unit has no unit to fail, so the failure names the document
  * instead. The key is the same one the HTML extractor uses, because the meaning is the same: this
@@ -476,9 +617,17 @@ internal suspend fun FlowCollector<ExtractionEvent>.emitOfficeUnits(
  */
 private suspend fun FlowCollector<ExtractionEvent>.refuseOversized(
     input: ExtractionInput,
-    size: Long,
+    format: OfficeFormat,
 ): Boolean {
-    if (size <= MAX_OFFICE_DOCUMENT_BYTES) return false
+    val containerBytes = Files.size(input.managedPath)
+    val expansion = if (format == OfficeFormat.OOXML && containerBytes <= MAX_OFFICE_DOCUMENT_BYTES) {
+        declaredExpansion(input.managedPath)
+    } else {
+        null
+    }
+    val tooLarge = containerBytes > MAX_OFFICE_DOCUMENT_BYTES ||
+        (expansion != null && expansion > MAX_OFFICE_EXPANDED_BYTES)
+    if (!tooLarge) return false
     if (!input.isCommitted(DOCUMENT_TOO_LARGE_KEY)) {
         input.boundary.unit {
             emit(
@@ -491,6 +640,22 @@ private suspend fun FlowCollector<ExtractionEvent>.refuseOversized(
         }
     }
     return true
+}
+
+/**
+ * What an OOXML container declares it expands to, or `null` when the bytes are not a container at all.
+ *
+ * The zip's central directory records each entry's uncompressed size, so the total is known without
+ * decompressing anything. An entry whose size is not recorded counts as nothing rather than as unlimited:
+ * POI's readers use the same directory, and the container-size bound still applies on the way in.
+ */
+private fun declaredExpansion(path: Path): Long? = try {
+    ZipFile(path.toFile()).use { zip ->
+        zip.entries().asSequence().sumOf { entry -> entry.size.coerceAtLeast(0) }
+    }
+} catch (failure: Exception) {
+    if (failure is InterruptedException) throw failure
+    null
 }
 
 /** One block of a Word document: a paragraph or a table row, and the paragraphs it covers. */
@@ -783,14 +948,29 @@ private fun isLayoutPlaceholder(shape: Shape<*, *>): Boolean {
  * The speaker notes of a legacy slide.
  *
  * HSLF exposes a paragraph's text through a static method rather than on the paragraph, and a slide
- * without notes has no notes object at all, so both cases are handled here.
+ * without notes has no notes object at all, so both cases are handled here. What the notes then *mean* is
+ * [notesText]'s job, which is where that judgement lives because it is the part that can be tested without
+ * a document that has notes: POI 5.5.1 has no public way to give a slide one.
  */
 private fun hslfNotesText(notes: Notes<*, *>?): String? {
-    if (notes == null) return null
-    val groups = @Suppress("UNCHECKED_CAST")
-    (notes as? org.apache.poi.hslf.usermodel.HSLFNotes)?.textParagraphs ?: return null
-    val masterTexts = hslfMasterTexts(notes)
-    val texts = groups.map { paragraphs -> HSLFTextParagraph.getText(paragraphs).trim() }
+    val hslf = notes as? org.apache.poi.hslf.usermodel.HSLFNotes ?: return null
+    return notesText(
+        paragraphTexts = hslf.textParagraphs.map { paragraphs -> HSLFTextParagraph.getText(paragraphs).trim() },
+        masterTexts = hslfMasterTexts(notes),
+    )
+}
+
+/**
+ * What a slide's notes say about the document, given one text per group of notes paragraphs.
+ *
+ * [paragraphTexts] is what the notes shape holds, one entry per group, and [masterTexts] is what the notes
+ * master contributes: its prompts, dates, footers, and slide numbers. Both filters exist for the same
+ * reason — a reader opening the notes should see what a person wrote about this document and not the
+ * layout that would be there anyway — and a notes shape that says nothing is not notes, so it yields
+ * `null` rather than an empty unit.
+ */
+internal fun notesText(paragraphTexts: List<String>, masterTexts: Set<String>): String? {
+    val texts = paragraphTexts
         .filterNot { text -> masterTexts.contains(text) }
         .filter { it.isNotBlank() }
         .joinToString("\n")

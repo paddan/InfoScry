@@ -36,6 +36,35 @@ class MediaTypeDetectorTest {
     }
 
     @Test
+    fun `a binary workbook is not claimed as a spreadsheet it is not`() {
+        val file = directory.resolve("register.xlsb")
+        writeBinaryWorkbook(file)
+
+        val detected = detector.detect(file).value
+
+        assertEquals(
+            "application/x-tika-ooxml",
+            detected,
+            "a binary workbook is a container this build cannot read, so it is left to the generic type",
+        )
+        assertFalse(
+            detected == XLSX_MEDIA_TYPE,
+            "an .xlsb would be handed to XSSFWorkbook, which throws at the user instead of refusing it",
+        )
+    }
+
+    private fun writeBinaryWorkbook(target: Path) {
+        ZipOutputStream(Files.newOutputStream(target)).use { zip ->
+            zip.putNextEntry(ZipEntry("[Content_Types].xml"))
+            zip.write("<Types/>".toByteArray())
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("xl/workbook.bin"))
+            zip.write(byteArrayOf(1, 2, 3))
+            zip.closeEntry()
+        }
+    }
+
+    @Test
     fun `a png named like a pdf is detected as a png`() {
         val file = directory.resolve("report.pdf")
         writePng(file)

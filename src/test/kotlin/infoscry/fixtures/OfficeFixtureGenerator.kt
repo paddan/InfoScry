@@ -63,12 +63,18 @@ object OfficeFixtureGenerator {
     private const val NOTES_TEXT = "Kom ihåg att citera källan."
 
     /**
-     * Writes all six fixtures into [target] and returns what it wrote.
+     * Writes the fixtures into [target] and returns what it wrote.
+     *
+     * [withConvertedLegacyWord] is off for an automated run. `sample.doc` is produced by whichever system
+     * converter happens to be installed, so a machine with LibreOffice writes different bytes than the
+     * committed file, and a check that regenerated it would fail for having better tools rather than for a
+     * change in the document. Five of the six fixtures are written by POI itself and are therefore
+     * byte-stable; the committed `sample.doc` is the fixture of record and is simply read.
      *
      * Files that already exist are overwritten, except `sample.doc` when no converter is available, which
-     * is left in place with a printed note: the committed file is still the fixture the tests read.
+     * is left in place with a printed note.
      */
-    fun writeAll(target: Path): List<Path> {
+    fun writeAll(target: Path, withConvertedLegacyWord: Boolean = true): List<Path> {
         Files.createDirectories(target)
         val written = mutableListOf<Path>()
         written.add(writeWordOoxml(target.resolve(WORD_OOXML_NAME)))
@@ -76,7 +82,9 @@ object OfficeFixtureGenerator {
         written.add(writeSlidesOoxml(target.resolve(SLIDES_OOXML_NAME)))
         written.add(writeWorkbookLegacy(target.resolve(WORKBOOK_LEGACY_NAME)))
         written.add(writeSlidesLegacy(target.resolve(SLIDES_LEGACY_NAME)))
-        writeWordLegacy(target.resolve(WORD_LEGACY_NAME), target.resolve(WORD_OOXML_NAME))?.let(written::add)
+        if (withConvertedLegacyWord) {
+            writeWordLegacy(target.resolve(WORD_LEGACY_NAME), target.resolve(WORD_OOXML_NAME))?.let(written::add)
+        }
         return written
     }
 
@@ -222,7 +230,10 @@ object OfficeFixtureGenerator {
      * `sample.doc`, converted from the generated `sample.docx`.
      *
      * Returns `null` when neither converter is installed, leaving the committed file in place — that is
-     * the expected case on a machine that only runs the tests.
+     * the expected case on a machine that only runs the tests. Regenerating it on a machine with
+     * LibreOffice produces a document that keeps its heading styles, which is a better fixture than the
+     * flattened one but not the same bytes: the legacy extractor tests would then see sections instead of
+     * one flat section, so the committed file is what they are written against.
      */
     fun writeWordLegacy(target: Path, source: Path): Path? {
         if (!Files.exists(source)) {

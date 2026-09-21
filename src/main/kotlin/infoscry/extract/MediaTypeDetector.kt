@@ -62,8 +62,7 @@ class MediaTypeDetector(private val detector: DefaultDetector = DefaultDetector(
         ZipFile(path.toFile()).use { zip ->
             when {
                 zip.getEntry(WORD_DOCUMENT_ENTRY) != null -> DOCX_MEDIA_TYPE
-                zip.getEntry(WORKBOOK_ENTRY) != null || zip.getEntry(WORKBOOK_BINARY_ENTRY) != null ->
-                    XLSX_MEDIA_TYPE
+                zip.getEntry(WORKBOOK_ENTRY) != null -> XLSX_MEDIA_TYPE
 
                 zip.getEntry(PRESENTATION_ENTRY) != null -> PPTX_MEDIA_TYPE
                 else -> null
@@ -123,8 +122,16 @@ private const val MSOFFICE_CONTAINER = "application/x-tika-msoffice"
 
 /** The zip entries that tell one OOXML document family from another. */
 private const val WORD_DOCUMENT_ENTRY = "word/document.xml"
+
+/**
+ * The zip entry that marks an OOXML workbook.
+ *
+ * `xl/workbook.bin` is deliberately absent. That entry marks a *binary* workbook (`.xlsb`), which is a
+ * different format: `XSSFWorkbook` cannot read it, so naming it here would hand such a file to a reader
+ * that throws a parse error at the user instead of refusing the type.
+ */
 private const val WORKBOOK_ENTRY = "xl/workbook.xml"
-private const val WORKBOOK_BINARY_ENTRY = "xl/workbook.bin"
+
 private const val PRESENTATION_ENTRY = "ppt/presentation.xml"
 
 /** The streams that tell one compound-file format from another. */

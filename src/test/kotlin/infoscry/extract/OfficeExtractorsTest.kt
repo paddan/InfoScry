@@ -2,6 +2,7 @@ package infoscry.extract
 
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
+import java.awt.Dimension
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -17,6 +18,8 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import org.apache.poi.xslf.usermodel.XMLSlideShow
+import org.apache.poi.xssf.usermodel.XSSFWorkbook
 
 /**
  * The Word, spreadsheet, and presentation extractors, on both container families.
@@ -30,7 +33,8 @@ import kotlinx.coroutines.runBlocking
  * the generator writes them; the committed `.doc` was produced by a converter that flattens every
  * paragraph to `Normal`, so it is asserted as what it is: one section whose heading path is empty. The
  * heading *rule* is tested directly against the style names Word writes, which is the part a styled
- * legacy document would exercise.
+ * legacy document would exercise. The legacy notes path is treated the same way: POI 5.5.1 cannot give a
+ * slide a notes slide, so [notesText] is tested directly and the committed `.ppt` carries no notes.
  */
 class OfficeExtractorsTest {
 
@@ -200,6 +204,50 @@ class OfficeExtractorsTest {
     }
 
     @Test
+    fun `units are numbered across the whole workbook and not once per sheet`() {
+        val probe = PermitProbeBoundary()
+
+        val units = units(
+            collect(
+                SpreadsheetExtractor(OfficeFormat.OOXML, rowsPerUnit = 1),
+                inputFor("sample.xlsx", probe),
+                probe,
+            ),
+        )
+
+        // Three batches in `Transfers` and one in `Sammanfattning`. An ordinal says where a unit sits in
+        // the document, so a second sheet does not restart at zero and collide with the first.
+        assertEquals(listOf(0, 1, 2, 3), units.map { it.ordinal })
+    }
+
+    @Test
+    fun `a row that reaches past the column bound is refused instead of widened`() {
+        val probe = PermitProbeBoundary()
+        val source = directory.resolve("wide.xlsx")
+        XSSFWorkbook().use { workbook ->
+            val sheet = workbook.createSheet("Bred")
+            sheet.createRow(0).createCell(0).setCellValue("Kolumn")
+            sheet.createRow(1).apply {
+                createCell(0).setCellValue("första")
+                // One stray far-right cell is all it takes: the row is read across every column the file
+                // says it has, so this would become a range of more than a thousand columns.
+                createCell(MAX_SPREADSHEET_COLUMNS).setCellValue("långt bort")
+            }
+            Files.newOutputStream(source).use { workbook.write(it) }
+        }
+
+        val events = collect(SpreadsheetExtractor(OfficeFormat.OOXML), inputFor(source, probe), probe)
+
+        val failure = events.filterIsInstance<ExtractionEvent.UnitFailed>().single()
+        assertEquals(SHEET_RANGE_TOO_WIDE_CODE, failure.code)
+        assertEquals("rows:Bred:2-2", failure.key)
+        assertTrue(
+            units(events).isEmpty(),
+            "an over-wide row must be refused, not cut down to a citable range that dropped cells",
+        )
+    }
+
+    @Test
     fun `xls cites the same sheets and reads the same stored results`() {
         val probe = PermitProbeBoundary()
 
@@ -270,6 +318,18 @@ class OfficeExtractorsTest {
     }
 
     @Test
+    fun `notes keep what a person wrote and drop the notes master's own layout`() {
+        assertEquals("Kom ihåg att citera källan.", notesText(listOf("Kom ihåg att citera källan."), emptySet()))
+        assertEquals("Första\nAndra", notesText(listOf("Första", "Andra"), emptySet()))
+        assertNull(
+            notesText(listOf("Click to edit Master text styles"), setOf("Click to edit Master text styles")),
+            "the notes master's prompt is layout, not something anyone wrote about this document",
+        )
+        assertNull(notesText(listOf("   ", ""), emptySet()), "a notes shape that says nothing is not notes")
+        assertNull(notesText(emptyList(), emptySet()))
+    }
+
+    @Test
     fun `a slide whose preview cannot be rendered still delivers its text`() {
         val probe = PermitProbeBoundary()
         val input = inputFor("sample.pptx", probe)
@@ -289,6 +349,26 @@ class OfficeExtractorsTest {
     }
 
     @Test
+    fun `a slide whose page size would not fit a preview keeps its text and records a warning`() {
+        val probe = PermitProbeBoundary()
+        val source = directory.resolve("huge-slides.pptx")
+        XMLSlideShow().use { show ->
+            show.pageSize = Dimension(20_000, 20_000)
+            show.createSlide().createTextBox().setText("Översikt")
+            Files.newOutputStream(source).use { show.write(it) }
+        }
+        val input = inputFor(source, probe)
+
+        val events = collect(PresentationExtractor(OfficeFormat.OOXML), input, probe)
+
+        val unit = units(events).single()
+        assertContains(unit.unit.extractedText, "Översikt")
+        assertNull(unit.unit.artifactRelativePath, "a page size past the pixel bound is not rendered")
+        assertEquals("1", (events.last() as ExtractionEvent.Finished).metadata["rendering_warnings"])
+        assertFalse(Files.exists(input.artifactRoot.resolve("preview/slide-000001.png")))
+    }
+
+    @Test
     fun `a document above the office bound is refused without claiming completion`() {
         val probe = PermitProbeBoundary()
         val oversized = directory.resolve("oversized.docx")
@@ -301,6 +381,53 @@ class OfficeExtractorsTest {
         val failure = events.single() as ExtractionEvent.UnitFailed
         assertEquals(DOCUMENT_TOO_LARGE_CODE, failure.code)
         assertEquals(DOCUMENT_TOO_LARGE_KEY, failure.key)
+    }
+
+    @Test
+    fun `a container that expands past its own size is refused before any unit is produced`() {
+        val probe = PermitProbeBoundary()
+        val expanding = directory.resolve("expanding.xlsx")
+        writeExpandingContainer(expanding, MAX_OFFICE_EXPANDED_BYTES + 1)
+        assertTrue(
+            Files.size(expanding) < MAX_OFFICE_DOCUMENT_BYTES,
+            "the fixture has to fit on the way in, or it would be refused for its size instead",
+        )
+
+        val events = collect(SpreadsheetExtractor(OfficeFormat.OOXML), inputFor(expanding, probe), probe)
+
+        assertEquals(1, events.size)
+        val failure = events.single() as ExtractionEvent.UnitFailed
+        assertEquals(DOCUMENT_TOO_LARGE_CODE, failure.code)
+        assertEquals(DOCUMENT_TOO_LARGE_KEY, failure.key)
+    }
+
+    @Test
+    fun `a compressed document that expands within the bound is still read`() {
+        val probe = PermitProbeBoundary()
+
+        val units = units(collect(SpreadsheetExtractor(OfficeFormat.OOXML), inputFor("sample.xlsx", probe), probe))
+
+        assertEquals(2, units.size, "a committed workbook must not be refused by the expansion bound")
+    }
+
+    /**
+     * A container that stays small on disk while declaring more uncompressed bytes than [expandedBytes].
+     *
+     * Nothing in it is a real workbook: what is under test is the measurement, and a few hundred kilobytes
+     * of zeros deflate to almost nothing, which is exactly the shape the expansion bound exists for.
+     */
+    private fun writeExpandingContainer(target: Path, expandedBytes: Long) {
+        val zeros = ByteArray(1 shl 20)
+        java.util.zip.ZipOutputStream(Files.newOutputStream(target)).use { zip ->
+            zip.putNextEntry(java.util.zip.ZipEntry("xl/workbook.xml"))
+            var written = 0L
+            while (written < expandedBytes) {
+                val chunk = minOf(zeros.size.toLong(), expandedBytes - written).toInt()
+                zip.write(zeros, 0, chunk)
+                written += chunk
+            }
+            zip.closeEntry()
+        }
     }
 
     @Test
@@ -400,10 +527,15 @@ class OfficeExtractorsTest {
 
     @Test
     fun `the generator reproduces the committed fixtures byte for byte`() {
+        // The legacy `.doc` is the one fixture a system converter writes, so it is deliberately not
+        // regenerated here: LibreOffice would produce different bytes than the committed file, and a check
+        // that failed for having better tools would say nothing about the extractors.
         val regenerated = infoscry.fixtures.OfficeFixtureGenerator.writeAll(
             Files.createTempDirectory("infoscry-office-regenerated"),
+            withConvertedLegacyWord = false,
         )
 
+        assertEquals(5, regenerated.size, "every fixture POI writes itself is regenerated")
         regenerated.forEach { path ->
             val committed = fixtureDirectory().resolve(path.fileName.toString())
             assertTrue(Files.exists(committed), "${path.fileName} is not committed")
@@ -413,9 +545,8 @@ class OfficeExtractorsTest {
             )
         }
         assertTrue(
-            regenerated.any { it.fileName.toString() == "sample.doc" } ||
-                Files.exists(fixtureDirectory().resolve("sample.doc")),
-            "the legacy .doc is neither regenerated nor committed",
+            Files.exists(fixtureDirectory().resolve("sample.doc")),
+            "the legacy .doc is committed, because no test run can produce it",
         )
     }
 
