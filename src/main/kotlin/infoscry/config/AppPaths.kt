@@ -39,6 +39,11 @@ internal object PrivatePermissions {
     fun hardenDirectory(directory: Path) {
         if (posixSupported) Files.setPosixFilePermissions(directory, directoryMode)
     }
+
+    /** Re-applies the private mode to an existing file, for the same reason as [hardenDirectory]. */
+    fun hardenFile(file: Path) {
+        if (posixSupported) Files.setPosixFilePermissions(file, fileMode)
+    }
 }
 
 /**
@@ -65,10 +70,10 @@ class AppPaths private constructor(val root: Path) {
     val databaseFile: Path = root.resolve("infoscry.db")
     val lockFile: Path = root.resolve("infoscry.lock")
     val runtimeFile: Path = root.resolve("runtime.json")
-    val libraryDir: Path = root.resolve("library")
+    val libraryDir: Path = root.resolve(LIBRARY_DIRECTORY)
     val indexDir: Path = root.resolve("index")
     val modelsDir: Path = root.resolve("models")
-    val logsDir: Path = root.resolve("logs")
+    val logsDir: Path = root.resolve(LOGS_DIRECTORY)
     val tempDir: Path = root.resolve("tmp")
 
     fun collectionDir(collectionId: CollectionId): Path = libraryDir.resolve(collectionId.value)
@@ -112,6 +117,16 @@ class AppPaths private constructor(val root: Path) {
 
     companion object {
         const val ARTIFACTS_DIRECTORY = "artifacts"
+        const val LIBRARY_DIRECTORY = "library"
+        const val LOGS_DIRECTORY = "logs"
+
+        /**
+         * The layout of a data directory, naming paths without creating or touching anything.
+         *
+         * Reading logs or running diagnostics must not change the state an operator asked about, so
+         * these callers need the layout without the setup [from] performs.
+         */
+        fun of(dataDir: Path): AppPaths = AppPaths(dataDir.toAbsolutePath().normalize())
 
         /** The data directory of a running InfoScry, created if it does not exist yet. */
         fun from(dataDir: Path): AppPaths =

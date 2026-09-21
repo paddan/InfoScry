@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  InfoScry's logging policy.
+
+  Two sinks with one policy in front of them: the console is for a human watching the process, the
+  rolling file is the structured record `infoscry logs`, the web log panel, and `doctor` read back.
+  Records are redacted by field name before either sink sees them, so an API key or a document excerpt
+  cannot reach a file by accident.
+
+  The rolling limits are the product's promise: 10 MiB per file, ten periods kept, and a hard 100 MiB
+  cap on the logs directory. The directory is addressable as the `infoscry.logs.dir` property so a
+  test, or a user with a data directory elsewhere, can point it somewhere else.
+-->
+<configuration>
+
+  <property name="LOG_DIR" value="${infoscry.logs.dir:-${user.home}/.infoscry/logs}"/>
+
+  <turboFilter class="infoscry.logging.SensitiveDataTurboFilter"/>
+
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} %X{component} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${LOG_DIR}/infoscry.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>${LOG_DIR}/infoscry.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+      <maxFileSize>10MB</maxFileSize>
+      <maxHistory>10</maxHistory>
+      <totalSizeCap>100MB</totalSizeCap>
+    </rollingPolicy>
+    <encoder class="infoscry.logging.JsonLogEncoder"/>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="FILE"/>
+  </root>
+
+</configuration>

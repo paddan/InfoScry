@@ -28,6 +28,9 @@ dependencies {
     implementation(libs.clikt)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.sqlite.jdbc)
+    // Logging: the console encoder, the rolling JSON file sink, and the redaction filter the
+    // configuration in logback.xml names.
+    implementation(libs.logback.classic)
 
     testImplementation(kotlin("test"))
     testImplementation(kotlin("test-junit5"))
