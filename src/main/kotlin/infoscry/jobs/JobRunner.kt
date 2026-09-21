@@ -20,7 +20,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 
@@ -142,8 +141,19 @@ class JobRunner(
 
     private suspend fun dispatch() {
         while (currentCoroutineContext().isActive) {
-            val claimed = store.claimNextQueued()
+            // The permit is reserved *before* the claim, so a claim always has a worker behind it. The row
+            // says RUNNING and `infoscry jobs` and the web queue read that row: claiming first and waiting
+            // for a permit afterwards would mark work running that no stage is executing.
+            permits.acquire()
+            val claimed = try {
+                store.claimNextQueued()
+            } catch (failure: Throwable) {
+                // Also covers a cancellation while suspended above, so the reserved permit is never lost.
+                permits.release()
+                throw failure
+            }
             if (claimed == null) {
+                permits.release()
                 delay(pollIntervalMillis)
                 continue
             }
@@ -154,10 +164,17 @@ class JobRunner(
     /**
      * Registers the attempt before it can run, so a cancellation that arrives a microsecond after the
      * claim still finds the coroutine to interrupt.
+     *
+     * The attempt owns the permit [dispatch] already reserved for it and releases it when the attempt
+     * ends, which is what keeps the number of `RUNNING` rows equal to the number of executing attempts.
      */
     private fun launchAttempt(claimed: Job) {
         val attempt = scope.launch(start = CoroutineStart.LAZY) {
-            permits.withPermit { runAttempt(claimed) }
+            try {
+                runAttempt(claimed)
+            } finally {
+                permits.release()
+            }
         }
         attempts[claimed.id] = attempt
         attempt.invokeOnCompletion { attempts.remove(claimed.id) }

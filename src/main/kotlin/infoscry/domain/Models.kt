@@ -2,6 +2,7 @@ package infoscry.domain
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 // Every `createdAt`/`updatedAt` field in this file is an ISO-8601 instant string (for example
 // `2026-09-21T07:45:12.345Z`). The persistence boundary parses and formats them, so the domain stays
@@ -157,7 +158,8 @@ data class Chunk(
  *
  * [collectionId] and [payload] are what a worker needs to resume the job — the collection it belongs to
  * and the request it was enqueued with — and they mirror the `jobs` table's columns so a record round-
- * trips without a second row type.
+ * trips without a second row type. The payload is worker-internal: it will hold the paths the user
+ * selected for an import, and it never leaves the process, so it is excluded from every wire format.
  *
  * [cancelRequested] is the durable cancellation request, which is deliberately separate from the state:
  * a stage may still be inside a platform call when the request arrives, so the state stays `RUNNING`
@@ -174,7 +176,7 @@ data class Job(
     val stage: String? = null,
     val completed: Int = 0,
     val total: Int = 0,
-    val payload: String? = null,
+    @Transient val payload: String? = null,
     val errorCode: String? = null,
     val errorMessage: String? = null,
     val cancelRequested: Boolean = false,

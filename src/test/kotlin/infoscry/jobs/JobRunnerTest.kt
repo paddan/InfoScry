@@ -119,6 +119,16 @@ class JobRunnerTest {
 
             withTimeout(TIMEOUT_MILLIS) { twoInside.await() }
             assertEquals(2, peak.get(), "the third attempt has to wait for a permit")
+            assertEquals(
+                2,
+                jobs.list(limit = 10).count { it.state == JobState.RUNNING },
+                "a claim has to have a worker behind it, so no row may say RUNNING without an attempt",
+            )
+            assertEquals(
+                1,
+                jobs.list(limit = 10).count { it.state == JobState.QUEUED },
+                "the third job stays queued until a permit is free instead of looking running",
+            )
             release.complete(Unit)
 
             queued.forEach { awaitState(it.id, JobState.COMPLETE) }

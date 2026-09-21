@@ -84,6 +84,14 @@ class AppContext private constructor(
         // Its close hands unfinished attempts back to the queue, which is what makes a clean shutdown
         // resumable.
         runCatching { jobRunner?.close() }
+            .onFailure { failure ->
+                // Worth a line: a worker that could not hand its attempts back leaves the next process to
+                // repair the queue, and without this nothing records why it did not happen here.
+                LOGGER.atWarn()
+                    .addKeyValue(COMPONENT_FIELD, JOBS_COMPONENT)
+                    .setCause(failure)
+                    .log("the job runner did not finish handing its attempts back to the queue")
+            }
         // The lock is released last: while the database is closing, this process still owns the data
         // directory, so no second process may open it in between.
         runCatching { database.close() }
@@ -157,6 +165,8 @@ class AppContext private constructor(
         }
 
         private const val RESUMED_JOBS_FIELD = "resumed_jobs"
+        private const val COMPONENT_FIELD = "component"
+        private const val JOBS_COMPONENT = "jobs"
     }
 }
 

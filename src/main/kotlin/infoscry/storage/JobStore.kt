@@ -8,7 +8,6 @@ import infoscry.domain.JobType
 import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.ResultSet
-import java.sql.SQLException
 
 /** Nothing was ever enqueued under this job id. */
 class NoSuchJobException(val jobId: JobId) : NoSuchElementException("no job with id ${jobId.value}")
@@ -55,13 +54,16 @@ class JobStore(private val database: Database) {
             updatedAt = now,
         )
         database.transaction { connection ->
+            // Checked inside the transaction rather than read beforehand, so a collection deleted in
+            // between cannot turn this refusal into a foreign-key error, and checked by query instead of
+            // by matching the driver's message text, which a driver upgrade would reword into an
+            // internal error the caller cannot act on.
+            if (collectionId != null && !collectionExists(connection, collectionId)) {
+                throw NoSuchElementException("no collection with id ${collectionId.value}")
+            }
             connection.prepareStatement(INSERT_JOB).use { statement ->
                 bind(statement, job)
-                try {
-                    statement.executeUpdate()
-                } catch (failure: SQLException) {
-                    failure.rethrowAsMissingCollection(collectionId)
-                }
+                statement.executeUpdate()
             }
         }
         return job
@@ -365,12 +367,11 @@ class JobStore(private val database: Database) {
         updatedAt = getString("updated_at"),
     )
 
-    private fun SQLException.rethrowAsMissingCollection(collectionId: CollectionId?) {
-        if (collectionId == null) throw this
-        val message = message.orEmpty()
-        if (!message.contains("FOREIGN KEY", ignoreCase = true)) throw this
-        throw NoSuchElementException("no collection with id ${collectionId.value}")
-    }
+    private fun collectionExists(connection: Connection, id: CollectionId): Boolean =
+        connection.prepareStatement("SELECT 1 FROM collections WHERE id = ?").use { statement ->
+            statement.setString(1, id.value)
+            statement.executeQuery().use { rows -> rows.next() }
+        }
 
     companion object {
 

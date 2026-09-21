@@ -9,6 +9,7 @@ import infoscry.server.ApiTestServer
 import infoscry.server.JobResponse
 import infoscry.server.JobsResponse
 import infoscry.storage.JobStore
+import io.ktor.client.statement.bodyAsText
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -16,8 +17,10 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 
 /**
  * `infoscry jobs` as a real process.
@@ -80,6 +83,26 @@ class JobsCommandTest {
             assertContains(text.stdout, "RUNNING")
             assertContains(text.stdout, "ocr")
             assertContains(text.stdout, "2/5")
+        }
+    }
+
+    @Test
+    fun `a job payload never leaves the server`() {
+        val marker = "PRIVATE-SOURCE-PATH-MARKER"
+        ApiTestServer(dataDir).use { server ->
+            server.context.jobs.enqueue(JobType.IMPORT, payload = marker, total = 1)
+
+            val body = runBlocking { server.get("/api/jobs").bodyAsText() }
+
+            assertContains(body, "\"jobs\"", message = "the queue is still the answer: $body")
+            assertFalse(
+                body.contains(marker),
+                "the payload holds the paths the user selected and is worker-internal: $body",
+            )
+
+            val listed = CliProcess.run(*args("jobs", "--json"))
+            assertEquals(0, listed.exitCode, listed.stderr)
+            assertFalse(listed.stdout.contains(marker), "the CLI's shape follows the wire: ${listed.stdout}")
         }
     }
 
