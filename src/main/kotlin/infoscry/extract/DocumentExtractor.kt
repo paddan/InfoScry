@@ -33,6 +33,15 @@ internal const val MAX_TEXT_DOCUMENT_BYTES: Long = 32L * 1024 * 1024
 internal const val DOCUMENT_TOO_LARGE_CODE: String = "DOCUMENT_TOO_LARGE"
 
 /**
+ * The key a document refused before its first unit fails under.
+ *
+ * A key names a unit, and a document refused before its first unit has none, so such a failure names the
+ * document instead. Every extractor that can refuse a document uses this one spelling, because the key is
+ * what makes the refusal survive a resume: the next attempt recognises it and does not re-report it.
+ */
+internal const val DOCUMENT_TOO_LARGE_KEY: String = "document-too-large"
+
+/**
  * One citable unit an extractor produced, before the store gives it an identifier.
  *
  * Both text forms are carried: [extractedText] is what the tool produced, [searchText] is the form the

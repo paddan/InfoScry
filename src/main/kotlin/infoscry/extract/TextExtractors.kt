@@ -400,10 +400,11 @@ class HtmlExtractor(
          * The key a refused document fails under.
          *
          * A key names a unit, and a document refused before its first section has none, so the failure
-         * names the document instead. Nothing cites it: it exists so the reason survives a resume rather
-         * than being re-derived from an oversized file on every attempt.
+         * names the document instead: [DOCUMENT_TOO_LARGE_KEY], the one spelling every extractor that can
+         * refuse a document uses. Nothing cites it; it exists so the reason survives a resume rather than
+         * being re-derived from an oversized file on every attempt.
          */
-        const val OVERSIZED_KEY = "document-too-large"
+        const val OVERSIZED_KEY: String = DOCUMENT_TOO_LARGE_KEY
     }
 }
 
@@ -591,22 +592,11 @@ class CsvExtractor(private val rowsPerUnit: Int = DEFAULT_ROWS_PER_UNIT) : Docum
         maxOf(header.size, batch.maxOf { it.cells.size }, 1)
 
     /** The rows as CSV, which is what the parser read back out of the file. */
-    private fun printRows(batch: List<Row>): String {
-        val printed = StringBuilder()
-        CSVPrinter(printed, CSVFormat.DEFAULT.builder().setRecordSeparator("\n").get()).use { printer ->
-            batch.forEach { printer.printRecord(it.cells) }
-        }
-        return printed.toString()
-    }
+    private fun printRows(batch: List<Row>): String = csvText(batch.map { it.cells })
 
     /** The header labels and the rows as one searchable text; a value's own newline is not a row break. */
-    private fun searchableRows(header: List<String>, batch: List<Row>): String = buildString {
-        append(searchableLine(header)).append('\n')
-        batch.forEach { append(searchableLine(it.cells)).append('\n') }
-    }
-
-    private fun searchableLine(cells: List<String>): String =
-        cells.joinToString("\t") { it.replace(CELL_BREAK, " ") }
+    private fun searchableRows(header: List<String>, batch: List<Row>): String =
+        tableSearchText(header, batch.map { it.cells })
 
     private fun tableName(path: Path): String {
         val filename = path.fileName?.toString().orEmpty()
@@ -633,9 +623,6 @@ class CsvExtractor(private val rowsPerUnit: Int = DEFAULT_ROWS_PER_UNIT) : Docum
 
         /** The name a table gets when the file's own name yields none. */
         const val DEFAULT_TABLE_NAME: String = "table"
-
-        /** A line break inside a value, which must not read as the end of a record. */
-        private val CELL_BREAK = Regex("[\\r\\n]+")
     }
 }
 
@@ -702,6 +689,37 @@ internal class CsvTable(reader: Reader, delimiter: Char) {
 
     private fun CSVRecord.cells(): List<String> = iterator().asSequence().toList()
 }
+
+/**
+ * A table's rows as CSV, which is the evidence form for both a CSV file and a spreadsheet range.
+ *
+ * CSV is what the source actually held and what a reader can check the citation against, so both table
+ * formats print their rows the same way rather than each inventing a layout.
+ */
+internal fun csvText(rows: List<List<String>>): String {
+    val printed = StringBuilder()
+    CSVPrinter(printed, CSVFormat.DEFAULT.builder().setRecordSeparator("\n").get()).use { printer ->
+        rows.forEach { printer.printRecord(it) }
+    }
+    return printed.toString()
+}
+
+/**
+ * A table's searchable form: the column labels above every batch of rows.
+ *
+ * A value with no column name above it is unsearchable, so the header travels with each batch, and a line
+ * break inside a value is flattened because it would otherwise read as the start of a new record.
+ */
+internal fun tableSearchText(header: List<String>, rows: List<List<String>>): String = buildString {
+    append(searchableLine(header)).append('\n')
+    rows.forEach { append(searchableLine(it)).append('\n') }
+}
+
+private fun searchableLine(cells: List<String>): String =
+    cells.joinToString("\t") { it.replace(CELL_BREAK, " ") }
+
+/** A line break inside a value, which must not read as the end of a record. */
+private val CELL_BREAK = Regex("[\\r\\n]+")
 
 /** `A`, `Z`, `AA`, `AB`: the column labels a spreadsheet range is written with. */
 internal fun columnLetter(column: Int): String {

@@ -70,6 +70,12 @@ class ExtractorRegistry(
                 MarkdownExtractor(),
                 HtmlExtractor(),
                 CsvExtractor(),
+                WordExtractor(OfficeFormat.OOXML),
+                WordExtractor(OfficeFormat.LEGACY),
+                SpreadsheetExtractor(OfficeFormat.OOXML),
+                SpreadsheetExtractor(OfficeFormat.LEGACY),
+                PresentationExtractor(OfficeFormat.OOXML),
+                PresentationExtractor(OfficeFormat.LEGACY),
             ),
             TextualFallbackExtractor(),
         )

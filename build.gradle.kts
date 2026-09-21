@@ -36,6 +36,10 @@ dependencies {
     // records whose fields may contain the delimiter or a newline.
     implementation(libs.jsoup)
     implementation(libs.commons.csv)
+    // The Word, spreadsheet, and presentation extractors. POI reads the OOXML family (XWPF/XSSF/XSLF)
+    // from poi-ooxml, and the legacy binary formats (HWPF/HSSF/HSLF) from poi-scratchpad.
+    implementation(libs.poi.ooxml)
+    implementation(libs.poi.scratchpad)
     // The local API: the embedded server, its Netty engine, and the loopback client the CLI and the
     // tests use to talk to a running server.
     implementation(libs.ktor.server.core)
@@ -94,4 +98,14 @@ tasks.processResources {
     from(webDir.dir("build")) {
         into("static")
     }
+}
+
+// The committed Office fixtures are evidence a reader can inspect, not build output: this task exists so
+// a maintainer can regenerate them and see exactly which bytes changed. It needs no converter for five of
+// the six files; the legacy .doc needs LibreOffice or macOS textutil, and is left untouched without one.
+val officeFixtures = tasks.register<JavaExec>("officeFixtures") {
+    group = "build"
+    description = "Regenerate the committed Office fixtures under src/test/resources/fixtures"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("infoscry.fixtures.OfficeFixtureGenerator")
 }
