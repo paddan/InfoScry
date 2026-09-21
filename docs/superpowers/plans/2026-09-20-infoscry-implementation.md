@@ -860,6 +860,8 @@ Create `content_units`, `chunks`, and `extraction_checkpoints` with locator JSON
 
 `TokenCounter.encodePassage(text)` exposes the exact token IDs and offsets including `passage: ` and special tokens. `Chunker` prefers paragraph/line boundaries, then shrinks the body until the full encoded passage (including any repeated header) is at most 512 tokens. Never infer the budget by subtracting a hardcoded prefix length. Retain original-text offsets; normalization must not lose the mapping. Tests use a fake with explicit prefix/special-token overhead; Task 15 repeats boundary tests with the real tokenizer. Reject an oversized passage at the embedder boundary rather than truncating it.
 
+**Offset space (ruled 2026-09-21).** Chunk character offsets address the **search text** only, and that is the single space: `content_units` stores both forms but every offset, every span, and every rendered citation refer to `search_text`, which `readUnit` already returns. No `extracted`↔`search` mapping is stored. The invariant that makes this safe is asserted in `ContentStoreTest`: slicing `searchText` with a chunk's `startOffset`/`endOffset` yields exactly that chunk's `text`. `extractedText` remains byte-faithful evidence; the authoritative original is the managed file, which viewers open directly. Task 24 must therefore highlight a matched span by locating it inside the unit's stored `searchText` — never by carrying an offset into `extractedText`.
+
 - [ ] **Step 4: Persist extraction atomically**
 
 Import handler collects extraction events with backpressure. For every `UnitReady`, verify durable artifacts and transactionally upsert text/location plus the successful checkpoint under the existing Task 8 unit-boundary mutation permit. Release that permit only after commit; then admit the next unit. A queued exclusive operation therefore waits for at most the currently bounded unit/tool operation, not an entire PDF. `UnitFailed` persists a failure checkpoint and warning; only explicit retry clears failed keys. `Finished` commits metadata, unit count, and extraction-complete marker. On cancellation/process death, retain all committed units; on restart validate fingerprint/artifact checksums and skip valid committed keys. Changed extraction settings create a new extraction fingerprint explicitly; ordinary restart and reindex never do so. A missing/corrupt committed artifact invalidates only its affected unit and reports the repair.
@@ -1332,7 +1334,7 @@ Assert query modes/filters, result badges, keyboard selection, citation locator 
 
 - [ ] **Step 3: Implement split search page and viewers**
 
-Use PDF.js at one-based page, SVG/HTML OCR boxes, accessible tables with highlighted range, sanitized section HTML, and slide preview/text. Every viewer includes **Open original** through an ID-only endpoint.
+Use PDF.js at one-based page, SVG/HTML OCR boxes, accessible tables with highlighted range, sanitized section HTML, and slide preview/text. Every viewer includes **Open original** through an ID-only endpoint. A highlighted span is located inside the unit's stored `searchText` (the ruled offset space) — do not carry offsets into `extractedText`.
 
 - [ ] **Step 4: Verify and commit**
 
