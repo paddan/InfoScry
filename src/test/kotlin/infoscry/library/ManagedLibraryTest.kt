@@ -64,8 +64,8 @@ class ManagedLibraryTest {
         assertEquals(ManagedImportOutcome.CREATED, first.outcome)
         assertEquals(ManagedImportOutcome.DUPLICATE, second.outcome)
         assertEquals(first.document.id, second.document.id)
-        assertEquals(first.originalPath, second.originalPath)
-        assertContentEquals(Files.readAllBytes(source), Files.readAllBytes(second.originalPath))
+        assertEquals(first.managedPath, second.managedPath)
+        assertContentEquals(Files.readAllBytes(source), Files.readAllBytes(second.managedPath))
         assertEquals(1, documents.countByCollection(nightfall))
         assertEquals(listOf(first.document.id), managedDocumentIds(nightfall))
         assertEquals(emptyList(), tempFiles())
@@ -80,8 +80,8 @@ class ManagedLibraryTest {
 
         assertEquals(ManagedImportOutcome.CREATED, inAcme.outcome)
         assertNotEquals(inNightfall.document.id, inAcme.document.id)
-        assertNotEquals(inNightfall.originalPath, inAcme.originalPath)
-        assertContentEquals(Files.readAllBytes(source), Files.readAllBytes(inAcme.originalPath))
+        assertNotEquals(inNightfall.managedPath, inAcme.managedPath)
+        assertContentEquals(Files.readAllBytes(source), Files.readAllBytes(inAcme.managedPath))
         assertEquals(1, documents.countByCollection(nightfall))
         assertEquals(1, documents.countByCollection(acme))
     }
@@ -116,7 +116,7 @@ class ManagedLibraryTest {
         val imported = library.importFile(nightfall, source)
         Files.delete(source)
 
-        assertContentEquals(payload, Files.readAllBytes(imported.originalPath))
+        assertContentEquals(payload, Files.readAllBytes(imported.managedPath))
     }
 
     @Test
@@ -128,8 +128,8 @@ class ManagedLibraryTest {
         val moved = Files.move(source, sourceDir.resolve("renamed.pdf"))
 
         assertTrue(Files.exists(moved))
-        assertContentEquals(payload, Files.readAllBytes(imported.originalPath))
-        assertEquals(source.toAbsolutePath().toString(), imported.document.originalPath)
+        assertContentEquals(payload, Files.readAllBytes(imported.managedPath))
+        assertEquals(source.toAbsolutePath().toString(), imported.document.sourcePath)
     }
 
     @Test
@@ -164,7 +164,7 @@ class ManagedLibraryTest {
         val imported = library.importFile(nightfall, source)
 
         assertEquals(ManagedImportOutcome.CREATED, imported.outcome)
-        assertContentEquals(Files.readAllBytes(source), Files.readAllBytes(imported.originalPath))
+        assertContentEquals(Files.readAllBytes(source), Files.readAllBytes(imported.managedPath))
     }
 
     @Test
@@ -201,17 +201,17 @@ class ManagedLibraryTest {
 
         assertEquals(nightfall, document.collectionId)
         assertEquals("Quarterly Report.PDF", document.originalFilename)
-        assertEquals(source.toAbsolutePath().toString(), document.originalPath)
+        assertEquals(source.toAbsolutePath().toString(), document.sourcePath)
         assertEquals(Files.size(source), document.sizeBytes)
         assertEquals(sha256Of(source), document.sha256)
         assertTrue(document.mediaType.isNotBlank())
         assertEquals(DocumentStatus.COPYING, document.status)
         assertEquals(
             paths.artifactsDir(nightfall, document.id),
-            imported.originalPath.parent.resolve("artifacts"),
+            imported.managedPath.parent.resolve("artifacts"),
         )
         assertTrue(Files.isDirectory(paths.artifactsDir(nightfall, document.id)))
-        assertEquals("original.pdf", imported.originalPath.fileName.toString())
+        assertEquals("original.pdf", imported.managedPath.fileName.toString())
     }
 
     private fun sourceFile(name: String, content: String): Path =

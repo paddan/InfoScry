@@ -30,7 +30,7 @@ class DocumentStore(private val database: Database) {
                 statement.setString(3, document.sha256)
                 statement.setString(4, document.mediaType)
                 statement.setString(5, document.originalFilename)
-                statement.setString(6, document.originalPath)
+                statement.setString(6, document.sourcePath)
                 statement.setLong(7, document.sizeBytes)
                 statement.setString(8, document.status.name)
                 statement.setString(9, document.title)
@@ -66,7 +66,7 @@ class DocumentStore(private val database: Database) {
         }
 
     /** Documents of one collection, newest first, ordered by id so a tie is still deterministic. */
-    fun listByCollection(collectionId: CollectionId, limit: Int = 100, offset: Int = 0): List<Document> {
+    fun listByCollection(collectionId: CollectionId, limit: Int, offset: Int = 0): List<Document> {
         require(limit > 0) { "limit must be positive, was $limit" }
         require(offset >= 0) { "offset must not be negative, was $offset" }
         return database.read { connection ->
@@ -150,7 +150,7 @@ class DocumentStore(private val database: Database) {
         sha256 = getString("sha256"),
         mediaType = getString("media_type"),
         originalFilename = getString("original_filename"),
-        originalPath = getString("original_path"),
+        sourcePath = getString("original_path"),
         sizeBytes = getLong("size_bytes"),
         status = DocumentStatus.valueOf(getString("status")),
         title = getString("title"),

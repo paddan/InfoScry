@@ -27,14 +27,14 @@ enum class ManagedImportOutcome {
 /**
  * The result of managing one source file.
  *
- * [originalPath] is the managed copy inside the data directory, not the user's source file; the
- * source path is kept as metadata on [Document.originalPath]. Callers that display a citation open
+ * [managedPath] is the managed copy inside the data directory, not the user's source file; the
+ * source path is kept as metadata on [Document.sourcePath]. Callers that display a citation open
  * the managed copy, which is why it survives the source being moved or deleted.
  */
 data class ManagedImport(
     val outcome: ManagedImportOutcome,
     val document: Document,
-    val originalPath: Path,
+    val managedPath: Path,
 )
 
 /**
@@ -64,9 +64,12 @@ class ManagedLibrary(
     /**
      * Copies [source] into the managed library for [collectionId].
      *
-     * @throws NoSuchFileException when the source does not exist.
-     * @throws IllegalArgumentException when the source is not a regular file.
-     * @throws NoSuchElementException when the collection does not exist.
+     * **Crash vs. failure invariant:** the caller may assume that a `QUEUED` or `COPYING` document
+     * whose managed original is absent on disk represents a partially completed import that the
+     * import job (Task 8) should resume by re-copying the file. That case arises from a process
+     * crash between committing the database row and moving the file into place, and is durable state
+     * this class cannot fix. An ordinary exception, by contrast, never leaves such a ghost: the
+     * compensating actions below ensure the database row and the on-disk file are always removed.
      */
     fun importFile(collectionId: CollectionId, source: Path): ManagedImport {
         val canonicalSource = source.toAbsolutePath().normalize()
@@ -103,7 +106,7 @@ class ManagedLibrary(
 
         val documentId = DocumentId.new()
         val extension = extensionOf(source.fileName.toString())
-        val originalPath = paths.originalFile(collectionId, documentId, extension)
+        val managedPath = paths.originalFile(collectionId, documentId, extension)
         val now = Instants.now()
         val document = Document(
             id = documentId,
@@ -111,7 +114,7 @@ class ManagedLibrary(
             sha256 = copied.sha256,
             mediaType = Files.probeContentType(source) ?: DEFAULT_MEDIA_TYPE,
             originalFilename = source.fileName.toString(),
-            originalPath = source.toString(),
+            sourcePath = source.toString(),
             sizeBytes = copied.sizeBytes,
             status = DocumentStatus.COPYING,
             createdAt = now,
@@ -120,17 +123,21 @@ class ManagedLibrary(
 
         paths.createDocumentDirectories(collectionId, documentId)
         try {
-            moveInto(temporary, originalPath)
+            moveInto(temporary, managedPath)
             documents.insert(document)
         } catch (duplicate: DuplicateDocumentException) {
             discardDocumentDirectory(collectionId, documentId)
             val existing = documents.findBySha256(collectionId, copied.sha256) ?: throw duplicate
             return ManagedImport(ManagedImportOutcome.DUPLICATE, existing, managedPathOf(existing))
         } catch (failure: Throwable) {
+            // Compensating action: the move may have succeeded but the row insert failed (or the
+            // move itself failed). Remove the document row if it was created and discard the
+            // managed directory so a failed import leaves neither a row nor a file.
+            documents.delete(documentId)
             discardDocumentDirectory(collectionId, documentId)
             throw failure
         }
-        return ManagedImport(ManagedImportOutcome.CREATED, document, originalPath)
+        return ManagedImport(ManagedImportOutcome.CREATED, document, managedPath)
     }
 
     /** The managed copy a stored document has, derived from the identifiers and stored filename. */
@@ -164,11 +171,11 @@ class ManagedLibrary(
      * atomically still get a move rather than a copy, because the scratch directory and the library
      * are both inside the data directory.
      */
-    private fun moveInto(temporary: Path, originalPath: Path) {
+    private fun moveInto(temporary: Path, managedPath: Path) {
         try {
-            Files.move(temporary, originalPath, StandardCopyOption.ATOMIC_MOVE)
+            Files.move(temporary, managedPath, StandardCopyOption.ATOMIC_MOVE)
         } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(temporary, originalPath)
+            Files.move(temporary, managedPath)
         }
     }
 

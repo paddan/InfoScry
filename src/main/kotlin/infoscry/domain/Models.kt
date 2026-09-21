@@ -1,5 +1,6 @@
 package infoscry.domain
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 // Every `createdAt`/`updatedAt` field in this file is an ISO-8601 instant string (for example
@@ -83,7 +84,8 @@ data class Document(
     val sha256: String,
     val mediaType: String,
     val originalFilename: String,
-    val originalPath: String,
+    @SerialName("original_path")
+    val sourcePath: String,
     val sizeBytes: Long,
     val status: DocumentStatus,
     val createdAt: String,
@@ -98,7 +100,7 @@ data class Document(
         require(sha256.isNotBlank()) { "Document.sha256 must not be blank" }
         require(mediaType.isNotBlank()) { "Document.mediaType must not be blank" }
         require(originalFilename.isNotBlank()) { "Document.originalFilename must not be blank" }
-        require(originalPath.isNotBlank()) { "Document.originalPath must not be blank" }
+        require(sourcePath.isNotBlank()) { "Document.sourcePath must not be blank" }
         require(sizeBytes >= 0) { "Document.sizeBytes must not be negative, was $sizeBytes" }
     }
 }
