@@ -192,6 +192,80 @@ class TextExtractorsTest {
     }
 
     @Test
+    fun `html keeps the prose a form and a table wrap`() {
+        val source = source(
+            "wrapped.html",
+            """
+            <html><body>
+              <h1>Anmalan</h1>
+              <form action="/spara"><p>Ansokan galler bilaga 4.</p>
+                <input type="text" value="hemligt">
+                <textarea>Fritext: overklagandet avslogs.</textarea>
+                <button>Skicka</button>
+              </form>
+              <table><tr><th>Namn</th><th>Belopp</th></tr><tr><td>Anna</td><td>1200</td></tr></table>
+            </body></html>
+            """.trimIndent(),
+        )
+        val probe = PermitProbeBoundary()
+
+        val text = units(collect(HtmlExtractor(), inputFor(source, probe), probe))
+            .joinToString("\n") { it.unit.extractedText }
+
+        assertContains(text, "Ansokan galler bilaga 4.", message = "a form wrapped real prose")
+        assertContains(text, "overklagandet avslogs.", message = "a textarea holds text a person wrote")
+        assertContains(text, "Anna", message = "a table wrapped real content")
+        assertContains(text, "1200")
+    }
+
+    @Test
+    fun `html keeps the text of a noscript fallback and of a vector figure`() {
+        val source = source(
+            "fallback.html",
+            "<html><body><noscript>JavaScript ar avstangt; visa den har texten.</noscript>" +
+                "<svg><text>Figur 1: karta</text></svg><p>Brotext.</p></body></html>",
+        )
+        val probe = PermitProbeBoundary()
+
+        val text = units(collect(HtmlExtractor(), inputFor(source, probe), probe))
+            .joinToString("\n") { it.unit.extractedText }
+
+        assertContains(text, "JavaScript ar avstangt", message = "a noscript fallback is text the author wrote")
+        assertContains(text, "Figur 1: karta", message = "a vector figure's label is text")
+        assertContains(text, "Brotext.")
+    }
+
+    @Test
+    fun `html refuses a document above the memory bound instead of reading it`() {
+        val source = source("huge.html", "<html><body><p>${ "a".repeat(2000) }</p></body></html>")
+        val probe = PermitProbeBoundary()
+
+        val events = collect(HtmlExtractor(maxDocumentBytes = 1024), inputFor(source, probe), probe)
+
+        val failure = events.single() as ExtractionEvent.UnitFailed
+        assertEquals(DOCUMENT_TOO_LARGE_CODE, failure.code)
+        assertTrue(units(events).isEmpty(), "a refused document has no unit to cite")
+        assertTrue(
+            events.none { it is ExtractionEvent.Finished },
+            "a refused document must not be reported as finished",
+        )
+    }
+
+    @Test
+    fun `html does not report a refusal that is already committed`() {
+        val source = source("huge.html", "<html><body><p>${ "a".repeat(2000) }</p></body></html>")
+        val probe = PermitProbeBoundary()
+
+        val events = collect(
+            HtmlExtractor(maxDocumentBytes = 1024),
+            inputFor(source, probe, committed = setOf(HtmlExtractor.OVERSIZED_KEY)),
+            probe,
+        )
+
+        assertTrue(events.isEmpty(), "an oversized document was parsed and reported again: $events")
+    }
+
+    @Test
     fun `html never lets a script, a style block, or an event handler into a unit`() {
         val probe = PermitProbeBoundary()
 
@@ -388,6 +462,52 @@ class TextExtractorsTest {
     }
 
     @Test
+    fun `a csv file reaches the csv extractor through detection`() {
+        val path = fixture("sample.csv")
+        val probe = PermitProbeBoundary()
+
+        val events = collect(
+            ExtractorRegistry.production().select(MediaTypeDetector().detect(path).value),
+            inputFor(path, probe),
+            probe,
+        )
+
+        assertEquals(
+            SourceLocation.SpreadsheetRange(sheet = "sample", startCell = "A2", endCell = "D5"),
+            units(events).single().unit.locator,
+            "a csv read by a text reader would be cited by line range instead of by spreadsheet range",
+        )
+    }
+
+    @Test
+    fun `a markdown file reaches the markdown extractor through detection`() {
+        val path = fixture("sample.md")
+        val probe = PermitProbeBoundary()
+
+        val events = collect(
+            ExtractorRegistry.production().select(MediaTypeDetector().detect(path).value),
+            inputFor(path, probe),
+            probe,
+        )
+
+        assertEquals(listOf(SourceLocation.TextLines(1, 3), SourceLocation.TextLines(4, 6)), units(events).map { it.unit.locator }.take(2))
+    }
+
+    @Test
+    fun `a tsv file is read as a table with its tab separator`() {
+        val source = source("register.tsv", "id\tnamn\tbelopp\r\n1\tAnna\t1200\r\n")
+        val probe = PermitProbeBoundary()
+
+        val unit = units(collect(CsvExtractor(), inputFor(source, probe), probe)).single().unit
+
+        assertEquals(
+            SourceLocation.SpreadsheetRange(sheet = "register", startCell = "A2", endCell = "C2"),
+            unit.locator,
+            "a tab-separated row read as comma-separated collapses into one column",
+        )
+    }
+
+    @Test
     fun `the production registry routes each text format to its own extractor`() {
         val registry = ExtractorRegistry.production()
 
@@ -409,6 +529,9 @@ class TextExtractorsTest {
         "sample.md" to MarkdownExtractor(),
         "sample.html" to HtmlExtractor(),
         "sample.csv" to CsvExtractor(),
+        // The fixture's own type is irrelevant to the whole-document fallback: what these shared tests
+        // check is its boundary discipline, which is the same obligation as every other extractor's.
+        "sample.txt" to TextualFallbackExtractor(),
     )
 
     private fun collect(

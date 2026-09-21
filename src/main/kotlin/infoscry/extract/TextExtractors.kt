@@ -4,6 +4,7 @@ import infoscry.domain.SourceLocation
 import java.io.Reader
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Locale
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import org.apache.commons.csv.CSVFormat
@@ -212,16 +213,15 @@ class MarkdownExtractor : DocumentExtractor {
 /**
  * Splits a Markdown file into sections, one heading at a time.
  *
- * The heading stack is what turns `### Bilagor` under `## Handlingar` under `# Utredningen` into the path a
- * reader would trace by hand; a heading at a level truncates the stack to that level, so a sibling section
- * never inherits a deeper path from the section before it.
+ * A heading opens a section and the section holds every line up to the next heading of any level. Split
+ * that way, each line belongs to exactly one section, so a nested heading does not repeat its parent's
+ * text and a search hit names one place rather than two.
  */
 private class MarkdownSections(private val lines: SourceLines) {
 
     /** [hasNext] says whether the file has a section after this one, so no permit is taken to find out. */
     data class Section(val startLine: Int, val endLine: Int, val text: String, val hasNext: Boolean)
 
-    private val stack = ArrayDeque<Pair<Int, String>>()
     private val buffer = StringBuilder()
     private var startLine = 0
     private var endLine = 0
@@ -232,15 +232,13 @@ private class MarkdownSections(private val lines: SourceLines) {
         while (true) {
             val line = lines.next() ?: return close(hasNext = false)
             lineNumber++
-            val heading = HEADING.matchEntire(line.text.trim())
-            if (heading == null) {
+            if (!HEADING.matches(line.text.trim())) {
                 append(line)
                 continue
             }
-            // A heading closes the section before it and opens a new one, so the section being returned
-            // already knows that another one follows.
+            // A heading closes the section before it and opens the next one, so the section being
+            // returned already knows that another one follows.
             val closed = close(hasNext = true)
-            open(level = heading.groupValues[1].length, title = heading.groupValues[2].trim())
             append(line)
             if (closed != null) return closed
         }
@@ -250,11 +248,6 @@ private class MarkdownSections(private val lines: SourceLines) {
         if (buffer.isEmpty()) startLine = lineNumber
         endLine = lineNumber
         buffer.append(line.text).append(line.terminator)
-    }
-
-    private fun open(level: Int, title: String) {
-        while (stack.isNotEmpty() && stack.last().first >= level) stack.removeLast()
-        stack.addLast(level to title)
     }
 
     private fun close(hasNext: Boolean): Section? {
@@ -271,7 +264,8 @@ private class MarkdownSections(private val lines: SourceLines) {
 
     companion object {
 
-        private val HEADING = Regex("^(#{1,6})\\s+(.*)$")
+        /** An ATX heading: one to six `#` followed by the title. Setext underlines are body text. */
+        private val HEADING = Regex("^#{1,6}\\s+.*$")
     }
 }
 
@@ -283,15 +277,27 @@ private class MarkdownSections(private val lines: SourceLines) {
  * handler or a `javascript:` target would be the same hole with a smaller payload. Everything active is
  * removed before a unit exists, so there is no later stage that has to remember to be careful.
  *
+ * Removing markup is not the same as removing text. What is deleted whole is only the markup whose
+ * content is not document text at all — code, styling, embedded objects, document metadata — because a
+ * page that wrapped a paragraph in a `<form>` or a table in a layout element is ordinary, and dropping
+ * that subtree would delete evidence the archive exists to keep. Everything else loses its *tags*: the
+ * safelist strips the element and its attributes while the text a person wrote stays where it is.
+ *
  * The safelist is spelled out rather than taken whole from jsoup: the extractor walks headings and
  * block elements to build its sections, so the structure it depends on has to survive cleaning.
  */
 object HtmlSanitizer {
 
-    /** Elements that carry executable or non-content material. Their content goes with them. */
-    private const val ACTIVE_CONTENT =
-        "script, style, noscript, iframe, object, embed, template, svg, math, link, meta, base, " +
-            "applet, frame, frameset, form, input, button, select, textarea"
+    /**
+     * Elements whose content is executable, styling, embedded, or metadata: removed with their subtree.
+     *
+     * The list is deliberately shorter than it looks like it should be. `<form>`, `<input>`,
+     * `<textarea>`, `<button>`, `<select>`, `<noscript>`, `<svg>` and `<math>` all carry markup that
+     * must not survive — but they also wrap or contain text somebody wrote, so they are left to the
+     * safelist, which strips their tags and their attributes and keeps their text.
+     */
+    private const val NON_TEXT_CONTENT =
+        "script, style, iframe, object, embed, applet, frame, frameset, link, meta, base, template"
 
     /** Structure the section walk depends on, plus the inline vocabulary worth keeping as text. */
     private val KEPT_TAGS = arrayOf(
@@ -307,10 +313,10 @@ object HtmlSanitizer {
     /** The inert document [html] describes. */
     fun sanitize(html: String): Document = sanitize(Jsoup.parse(html))
 
-    /** The inert form of an already parsed document: active elements and attributes removed. */
+    /** The inert form of an already parsed document: non-text elements and active attributes removed. */
     fun sanitize(document: Document): Document {
         val source = document.clone()
-        source.select(ACTIVE_CONTENT).remove()
+        source.select(NON_TEXT_CONTENT).remove()
         return Jsoup.parse(Jsoup.clean(source.body().html(), SAFELIST))
     }
 }
@@ -325,13 +331,32 @@ object HtmlSanitizer {
  *
  * jsoup has to parse the whole document to give a DOM, so the container is read once before the first
  * unit. That read writes nothing and produces no unit; every unit and its event still happen inside the
- * boundary.
+ * boundary. Because nothing about the document is understood until the DOM exists, a container above
+ * [MAX_TEXT_DOCUMENT_BYTES] is refused instead of being read: an out-of-memory kill would take every other
+ * job in the process with it, and a refusal is at least a reason a reader can act on.
  */
-class HtmlExtractor : DocumentExtractor {
+class HtmlExtractor(
+    private val maxDocumentBytes: Long = MAX_TEXT_DOCUMENT_BYTES,
+) : DocumentExtractor {
+
+    init {
+        require(maxDocumentBytes >= 1) { "an HTML memory bound must allow at least one byte, was $maxDocumentBytes" }
+    }
 
     override val supportedMediaTypes: Set<String> = setOf(TEXT_HTML, APPLICATION_XHTML)
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        if (Files.size(input.managedPath) > maxDocumentBytes) {
+            // A DOM has to exist before a heading section can be named, so there is no unit to fail here:
+            // the document is refused, and a refusal is not a completion. The file is never parsed, and a
+            // refusal that is already durable is not reported a second time.
+            if (!input.isCommitted(OVERSIZED_KEY)) {
+                input.boundary.unit {
+                    emit(ExtractionEvent.UnitFailed(key = OVERSIZED_KEY, ordinal = 0, code = DOCUMENT_TOO_LARGE_CODE))
+                }
+            }
+            return@flow
+        }
         val document = Jsoup.parse(Files.readString(input.managedPath, Charsets.UTF_8))
         val metadata = documentMetadata(document)
         val sections = HtmlSections.sectionsOf(HtmlSanitizer.sanitize(document))
@@ -367,6 +392,18 @@ class HtmlExtractor : DocumentExtractor {
         if (title.isNotEmpty()) put("title", title)
         val language = document.selectFirst("html")?.attr("lang")?.trim().orEmpty()
         if (language.isNotEmpty()) put("lang", language)
+    }
+
+    companion object {
+
+        /**
+         * The key a refused document fails under.
+         *
+         * A key names a unit, and a document refused before its first section has none, so the failure
+         * names the document instead. Nothing cites it: it exists so the reason survives a resume rather
+         * than being re-derived from an oversized file on every attempt.
+         */
+        const val OVERSIZED_KEY = "document-too-large"
     }
 }
 
@@ -503,7 +540,7 @@ class CsvExtractor(private val rowsPerUnit: Int = DEFAULT_ROWS_PER_UNIT) : Docum
         var position = 0
         var total = 0
         Files.newBufferedReader(input.managedPath, Charsets.UTF_8).use { reader ->
-            val table = CsvTable(reader)
+            val table = CsvTable(reader, delimiterFor(input.managedPath))
             val header = table.header
             val name = tableName(input.managedPath)
             while (table.hasMore()) {
@@ -577,6 +614,18 @@ class CsvExtractor(private val rowsPerUnit: Int = DEFAULT_ROWS_PER_UNIT) : Docum
         return stem.ifBlank { filename.ifBlank { DEFAULT_TABLE_NAME } }
     }
 
+    /**
+     * The separator between the columns of the table.
+     *
+     * TSV is the same table with tabs between the columns, and within the text family the name is the
+     * only signal for which one a file is: two files that differ only in their separator have the same
+     * bytes as far as any detector can tell. Reading a TSV as comma-separated would put a whole row in
+     * one cell and cite a range one column wide, so the name is consulted for the separator and for
+     * nothing else — the file's content is what decided that it is a table at all.
+     */
+    private fun delimiterFor(path: Path): Char =
+        if (path.fileName?.toString()?.lowercase(Locale.ROOT)?.endsWith(".tsv") == true) '\t' else ','
+
     companion object {
 
         /** How many records one CSV unit holds unless a caller asks for another batch size. */
@@ -601,9 +650,10 @@ internal data class Row(val number: Int, val cells: List<String>)
  * dropping it needs to know that no record follows, and reading the whole table into a list to find out
  * would undo the streaming.
  */
-internal class CsvTable(reader: Reader) {
+internal class CsvTable(reader: Reader, delimiter: Char) {
 
     private val records: Iterator<CSVRecord> = CSVFormat.DEFAULT.builder()
+        .setDelimiter(delimiter)
         .setIgnoreEmptyLines(false)
         .get()
         .parse(reader)

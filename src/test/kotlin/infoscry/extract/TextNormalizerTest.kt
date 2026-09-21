@@ -1,5 +1,6 @@
 package infoscry.extract
 
+import java.text.Normalizer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -105,14 +106,25 @@ class TextNormalizerTest {
 
         val normalised = TextNormalizer.normalize(raw)
 
+        // A count alone would pass if normalisation swapped one word for another of the same length, so
+        // the two lists are compared as words. Composition and the control character are folded out
+        // first: those are exactly what the normalizer is allowed to change, and nothing else.
         val words = { text: String -> text.split(Regex("\\s+")).filter { it.isNotBlank() } }
+        val folded = { text: String -> words(text).map(::withoutMarksOrControls) }
         assertEquals(
-            words(raw).size,
-            words(normalised.search).size,
-            "normalisation dropped or merged a word: ${normalised.search}",
+            folded(raw),
+            folded(normalised.search),
+            "normalisation changed the words: ${normalised.search}",
         )
         assertTrue(normalised.search.contains("Beslut:"))
         assertTrue(normalised.search.contains("Anmalan"))
         assertTrue(normalised.search.endsWith("registrerades.\n"))
     }
+
+    /** A word with its accents decomposed, and with the control characters the normalizer strips gone. */
+    private fun withoutMarksOrControls(word: String): String =
+        Normalizer.normalize(word, Normalizer.Form.NFD).filter { character ->
+            Character.getType(character) != Character.NON_SPACING_MARK.toInt() &&
+                Character.getType(character) != Character.CONTROL.toInt()
+        }
 }

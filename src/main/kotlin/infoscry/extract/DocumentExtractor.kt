@@ -16,6 +16,23 @@ import kotlinx.serialization.Serializable
 const val EXTRACTOR_SCHEMA_VERSION = "1"
 
 /**
+ * The largest text container an extractor will hold in memory in one piece.
+ *
+ * An extractor that reads a whole document before it can name a citable unit — a DOM, a whole-file
+ * string — has no way to split work it does not understand, so above this size it refuses the document
+ * instead of risking an out-of-memory kill that would take every other job in the process with it.
+ */
+internal const val MAX_TEXT_DOCUMENT_BYTES: Long = 32L * 1024 * 1024
+
+/**
+ * The code a text container above [MAX_TEXT_DOCUMENT_BYTES] fails under.
+ *
+ * One spelling on purpose: the code travels into the item outcome, the CLI and the queue, so a reader
+ * who sees it has to find the same word everywhere.
+ */
+internal const val DOCUMENT_TOO_LARGE_CODE: String = "DOCUMENT_TOO_LARGE"
+
+/**
  * One citable unit an extractor produced, before the store gives it an identifier.
  *
  * Both text forms are carried: [extractedText] is what the tool produced, [searchText] is the form the

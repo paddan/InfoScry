@@ -52,6 +52,31 @@ class MediaTypeDetectorTest {
     }
 
     @Test
+    fun `a text container is narrowed by the name it was published under`() {
+        val spreadsheet = directory.resolve("register.csv")
+        Files.writeString(spreadsheet, "id,name\n1,Anna\n")
+        val markdown = directory.resolve("anteckningar.md")
+        Files.writeString(markdown, "# Rubrik\nText.\n")
+        val prose = directory.resolve("protokoll.txt")
+        Files.writeString(prose, "Bara text.\n")
+
+        assertEquals("text/csv", detector.detect(spreadsheet).value)
+        assertEquals("text/markdown", detector.detect(markdown).value)
+        assertEquals("text/plain", detector.detect(prose).value)
+    }
+
+    @Test
+    fun `a zip archive named like a csv is still a zip container`() {
+        val file = directory.resolve("register.csv")
+        writeZip(file, "entry.txt", "inside")
+
+        assertTrue(
+            detector.detect(file).value.contains("zip"),
+            "the name overruled the bytes: ${detector.detect(file).value}",
+        )
+    }
+
+    @Test
     fun `a zip archive named like a text file is detected as a zip container`() {
         val file = directory.resolve("notes.txt")
         writeZip(file, "entries/one.txt", "inside")

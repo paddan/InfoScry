@@ -2,6 +2,7 @@ package infoscry.extract
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Locale
 import org.apache.tika.detect.DefaultDetector
 import org.apache.tika.io.TikaInputStream
 import org.apache.tika.metadata.Metadata
@@ -31,7 +32,31 @@ class MediaTypeDetector(private val detector: DefaultDetector = DefaultDetector(
             "media type detection needs a regular file, but $path is not one"
         }
         TikaInputStream.get(path).use { stream ->
-            return DetectedMediaType(detector.detect(stream, Metadata()).toString())
+            val detected = detector.detect(stream, Metadata()).toString()
+            return DetectedMediaType(narrowTextContainer(detected, path.fileName?.toString().orEmpty()))
+        }
+    }
+
+    /**
+     * The media type of a text container, narrowed by the name the file was published under.
+     *
+     * Every text container without a signature of its own — CSV, TSV, Markdown — is reported as
+     * `text/plain`, which is true and useless: it says the file is text but not which reader understands
+     * its structure, so a `.csv` would be read as prose and cited by line range instead of by spreadsheet
+     * range, and the viewer for its rows would never be reached. Content cannot settle that question —
+     * bytes that differ only in their separator are the same bytes — so the name is consulted, and only
+     * here: after the bytes have already said the file is text, and only to choose between readers that
+     * all read text.
+     *
+     * The rule stays subordinate to the bytes. A container named `.csv` whose content is a zip is still a
+     * zip, and content that is not text is never claimed to be.
+     */
+    private fun narrowTextContainer(detected: String, filename: String): String {
+        if (detected.substringBefore(';').trim() != TEXT_PLAIN) return detected
+        return when (filename.substringAfterLast('.', "").lowercase(Locale.ROOT)) {
+            "csv", "tsv" -> TEXT_CSV
+            "md", "markdown" -> TEXT_MARKDOWN
+            else -> detected
         }
     }
 }

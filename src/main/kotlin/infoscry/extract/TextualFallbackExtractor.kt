@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.flow
  *
  * The whole document becomes one unit with a line-range locator: there is no structure to cite more
  * precisely, and inventing one would put a wrong citation in front of a reader. Because the unit is the
- * whole document, the file is refused above [MAX_DOCUMENT_BYTES] instead of being read into memory: a
+ * whole document, the file is refused above [MAX_TEXT_DOCUMENT_BYTES] instead of being read into memory: a
  * container this large cannot be split into citable units by a reader that does not understand it, and
  * pretending otherwise would trade an honest failure for an out-of-memory kill.
  */
@@ -25,8 +25,10 @@ class TextualFallbackExtractor : DocumentExtractor {
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
         val key = WHOLE_DOCUMENT_KEY
-        if (!input.isCommitted(key) && Files.size(input.managedPath) > MAX_DOCUMENT_BYTES) {
-            input.boundary.unit { emit(ExtractionEvent.UnitFailed(key = key, ordinal = 0, code = TOO_LARGE)) }
+        if (!input.isCommitted(key) && Files.size(input.managedPath) > MAX_TEXT_DOCUMENT_BYTES) {
+            input.boundary.unit {
+                emit(ExtractionEvent.UnitFailed(key = key, ordinal = 0, code = DOCUMENT_TOO_LARGE_CODE))
+            }
             return@flow
         }
         if (!input.isCommitted(key)) {
@@ -60,12 +62,6 @@ class TextualFallbackExtractor : DocumentExtractor {
 
         /** The one unit a whole-document reader produces, and the key a resume matches on. */
         const val WHOLE_DOCUMENT_KEY = "document"
-
-        /** The code a container above the size cap fails with, so the reason is nameable. */
-        const val TOO_LARGE = "DOCUMENT_TOO_LARGE"
-
-        /** The largest container this reader will hold in memory as a single unit. */
-        const val MAX_DOCUMENT_BYTES: Long = 32L * 1024 * 1024
 
         /** The types a text reader can honestly claim: the containers no format extractor owns. */
         val TEXTUAL_MEDIA_TYPES: Set<String> = setOf(
