@@ -13,6 +13,7 @@ import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
 import infoscry.storage.MaintenanceInProgressException
 import io.ktor.http.ContentType
+import infoscry.search.SearchUnavailableException
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
@@ -231,6 +232,8 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
             }
         }
 
+        configureSearchRoutes(context, context.mutations)
+
         // The compiled SvelteKit application. Its client-side routes all fall back to this file.
         staticResources("/", STATIC_RESOURCES, index = "index.html")
 
@@ -319,6 +322,14 @@ class BadRequestException(message: String) : IllegalArgumentException(message)
 suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
     try {
         block()
+    } catch (refused: SearchUnavailableException) {
+        // A search can be refused for a reason the caller can fix (an over-long query, an over-broad
+        // filter) or one the environment has to fix (no model, no usable GPU, an index that needs a
+        // rebuild). The code and the remedy travel either way, and the status names which kind it is.
+        respondJson(
+            searchFailureStatus(refused.code),
+            ApiErrorResponse(ApiError(code = refused.code, message = refused.remedy)),
+        )
     } catch (maintenance: MaintenanceInProgressException) {
         respondJson(
             HttpStatusCode.Locked,

@@ -87,6 +87,8 @@ class RootCommand(
             CollectionCommand(),
             JobsCommand(),
             ImportCommand(pipeline, importEmbedder),
+            SearchCommand(),
+            ReindexCommand(),
         )
     }
 

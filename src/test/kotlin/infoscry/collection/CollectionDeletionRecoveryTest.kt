@@ -145,7 +145,7 @@ class CollectionDeletionRecoveryTest {
             // Index one chunk the way an import would, through the real index with a deterministic vector.
             val documentId = DocumentId.new()
             runBlocking {
-                context.index.replaceDocument(
+                context.index().replaceDocument(
                     listOf(
                         DocumentRow(
                             collectionId = collection.id,
@@ -169,8 +169,8 @@ class CollectionDeletionRecoveryTest {
                     ),
                 )
             }
-            assertEquals(1, context.index.chunkCount(collection.id, documentId))
-            assertTrue(context.index.searchKeyword(collection.id, "classified", limit = 10).isNotEmpty())
+            assertEquals(1, context.index().chunkCount(collection.id, documentId))
+            assertTrue(context.index().searchKeyword(collection.id, "classified", limit = 10).isNotEmpty())
             collection.id to documentId
         }
 
@@ -181,8 +181,8 @@ class CollectionDeletionRecoveryTest {
         AppContext.open(dataDir).use { reopened ->
             assertTrue(reopened.deletionRecovery.blocked.isEmpty())
             assertNull(reopened.collectionService.get(collectionId))
-            assertEquals(0, reopened.index.chunkCount(collectionId, documentId), "no deleted collection is searchable")
-            assertTrue(reopened.index.searchKeyword(collectionId, "classified", limit = 10).isEmpty())
+            assertEquals(0, reopened.index().chunkCount(collectionId, documentId), "no deleted collection is searchable")
+            assertTrue(reopened.index().searchKeyword(collectionId, "classified", limit = 10).isEmpty())
         }
     }
 

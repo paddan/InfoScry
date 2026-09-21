@@ -3,6 +3,7 @@ package infoscry.jobs
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.domain.JobType
 import infoscry.domain.JobState
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
@@ -31,6 +32,22 @@ import kotlinx.coroutines.CancellationException
 fun interface JobHandler {
 
     suspend fun handle(job: Job, stage: JobStage)
+}
+
+/**
+ * Hands each job to the handler its type names.
+ *
+ * The runner claims one job at a time and takes one handler, so a second job type reaches the product
+ * through this dispatch rather than through a second runner: two runners would be two claim loops over
+ * the same queue, and the queue's ordering is what keeps a runner's permits sane.
+ */
+class DispatchingJobHandler(private val byType: Map<JobType, JobHandler>) : JobHandler {
+
+    override suspend fun handle(job: Job, stage: JobStage) {
+        val handler = byType[job.type]
+            ?: throw IllegalArgumentException("no handler for job type ${job.type}")
+        handler.handle(job, stage)
+    }
 }
 
 /**
@@ -72,7 +89,7 @@ class JobStage internal constructor(
     }
 
     /**
-     * Records how far the attempt has come. The counters are the checkpoint a reopened job resumes from,
+     * Reports how far the attempt has come. The counters are the checkpoint a reopened job resumes from,
      * so a handler reports them after the work they describe is durable.
      */
     suspend fun reportProgress(completed: Int, total: Int) {
@@ -80,6 +97,19 @@ class JobStage internal constructor(
             assertAttemptMayContinue()
             store.progress(jobId, completed = completed, total = total)
         }
+    }
+
+    /**
+     * Reports progress from inside exclusive maintenance, and rechecks the attempt while there.
+     *
+     * The maintenance owner — the reindex job — cannot use [reportProgress], because waiting for
+     * admission would mean waiting for itself. It is allowed to write its own progress without
+     * admission, because it already holds the only permit, and this is also where it notices that
+     * the job was cancelled: every document it reports is one more document it may stop after.
+     */
+    suspend fun reportWhileMaintaining(stage: String, completed: Int, total: Int) {
+        assertAttemptMayContinue()
+        store.progress(jobId, stage = stage, completed = completed, total = total)
     }
 
     private fun assertAttemptMayContinue() {

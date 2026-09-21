@@ -10,12 +10,14 @@ import infoscry.embedding.GpuUnavailableException
 import infoscry.embedding.ModelManager
 import infoscry.search.DocumentRow
 import infoscry.search.LuceneIndex
+import infoscry.search.ReindexService
 import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Document
 import infoscry.domain.DocumentStatus
+import infoscry.domain.JobType
 import infoscry.domain.Job
 import infoscry.extract.CalibreConverter
 import infoscry.extract.DOCUMENT_TOO_LARGE_CODE
@@ -74,7 +76,7 @@ class ImportJobHandler(
     private val pipeline: ImportPipeline,
     private val content: ContentStore,
     private val chunker: Chunker,
-    private val index: LuceneIndex,
+    private val index: () -> LuceneIndex,
     private val documentEmbedder: () -> DocumentEmbedder?,
     private val maxChunksPerDocument: Int,
 ) : JobHandler {
@@ -312,7 +314,7 @@ class ImportJobHandler(
                 if (live.lifecycle != CollectionLifecycle.ACTIVE) {
                     throw CollectionNotActiveException(collection.id)
                 }
-                index.replaceDocument(rows)
+                index().replaceDocument(rows)
             }
             stage.run(STAGE_RECORD) {
                 val failedUnits = content.extractionMarker(document.id)?.failedUnits ?: 0
@@ -709,6 +711,7 @@ class ImportJobHandler(
             ),
             // A document may hold at most this many chunks in a single index transaction's in-memory rows.
             maxChunksPerDocument: Int = MAX_CHUNKS_PER_DOCUMENT,
+            reindexService: (AppContext) -> ReindexService = ::productionReindexService,
         ): JobRunner {
             val handler = ImportJobHandler(
                 paths = context.paths,
@@ -719,7 +722,7 @@ class ImportJobHandler(
                 pipeline = pipeline,
                 content = context.content,
                 chunker = chunker,
-                index = context.index,
+                index = { context.index() },
                 documentEmbedder = documentEmbedder,
                 maxChunksPerDocument = maxChunksPerDocument,
             )
@@ -727,12 +730,43 @@ class ImportJobHandler(
                 store = context.jobs,
                 collections = context.collections,
                 mutations = context.mutations,
-                handler = handler,
+                handler = DispatchingJobHandler(
+                    mapOf(
+                        JobType.IMPORT to handler,
+                        JobType.REINDEX to ReindexJobHandler(reindexService(context)),
+                    ),
+                ),
             )
             context.attachJobRunner(runner)
             runner.start()
             return runner
         }
+
+        /**
+         * The rebuild the process runs with: the pinned model's identity, the tokenizer the import
+         * stage measures with, and the index accessor and publication hook that make the swap land in
+         * this process.
+         */
+        private fun productionReindexService(context: AppContext): ReindexService = ReindexService(
+            mutations = context.mutations,
+            collections = context.collections,
+            documents = context.documents,
+            content = context.content,
+            chunker = Chunker(
+                E5Embedder.productionCounter(
+                    modelsDir = context.paths.modelsDir,
+                    profileDirectory = context.paths.embeddingProfileDir,
+                ),
+            ),
+            paths = context.paths,
+            identity = AppContext.identityForCurrentModel(),
+            documentEmbedder = E5Embedder.productionDocumentEmbedder(
+                modelsDir = context.paths.modelsDir,
+                profileDirectory = context.paths.embeddingProfileDir,
+            ),
+            current = { context.index() },
+            publish = { next, previous -> context.publishGeneration(next, previous) },
+        )
     }
 }
 

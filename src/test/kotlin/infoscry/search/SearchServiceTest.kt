@@ -195,7 +195,7 @@ class SearchServiceTest {
             val service = SearchService(
                 collections = collections,
                 documents = documents,
-                index = staleIndex,
+                index = { staleIndex },
                 queryEmbedder = { FixedQueryEmbedder() },
             )
 
@@ -563,7 +563,7 @@ class SearchServiceTest {
         val service = SearchService(
             collections = collections,
             documents = documents,
-            index = index,
+            index = { index },
             queryEmbedder = embedder,
             maxScopeTerms = maxScopeTerms,
         )

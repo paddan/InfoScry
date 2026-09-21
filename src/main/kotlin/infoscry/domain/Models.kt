@@ -39,6 +39,9 @@ enum class CollectionLifecycle {
 @Serializable
 enum class JobType {
     IMPORT,
+
+    /** Rebuilds the search index from the persisted text, so citations and vectors agree again. */
+    REINDEX,
 }
 
 /**

@@ -27,6 +27,8 @@ import infoscry.storage.MutationCoordinator
 import infoscry.storage.SchemaMigrator
 import java.nio.file.Path
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.slf4j.LoggerFactory
 
 /**
@@ -52,11 +54,67 @@ class AppContext private constructor(
     val importItems: ImportItemStore,
     val library: ManagedLibrary,
     val mutations: MutationCoordinator,
-    val collectionService: CollectionService,
     val jobs: JobStore,
-    val index: LuceneIndex,
+    private val injectedIndexRemover: CollectionIndexRemover,
+    initialIndex: LuceneIndex,
     private val lock: ProcessLock,
 ) : AutoCloseable {
+
+    /**
+     * The generation this data directory currently serves.
+     *
+     * A rebuild builds a successor and publishes it while this process keeps running, so readers take
+     * the current generation *by reference here* rather than holding the one they were opened with: a
+     * search that starts after the swap reads the new generation, and one that started before it
+     * finishes on the generation it already leased.
+     */
+    @Volatile
+    private var currentGeneration: LuceneIndex = initialIndex
+
+    /** Serializes publishing a successor, so two rebuilds cannot swap out of order. */
+    private val indexAdmission = Mutex()
+
+    /**
+     * The index phase of a deletion removes the collection's rows from the generation the process
+     * serves *right now*, which is why the remover reads through the accessor rather than holding the
+     * generation it was opened with: a deletion that finishes after a rebuild must clean the successor,
+     * not the one it replaced.
+     */
+    private val indexRemover: CollectionIndexRemover =
+        if (injectedIndexRemover === CollectionIndexRemover.NONE) {
+            CollectionIndexRemover { collectionId -> index().deleteCollection(collectionId) }
+        } else {
+            injectedIndexRemover
+        }
+
+    val collectionService: CollectionService = CollectionService(
+        database = database,
+        paths = paths,
+        collections = collections,
+        deletions = deletions,
+        coordinator = mutations,
+        index = indexRemover,
+    )
+
+    /** The generation the process currently serves. Reading it is a single atomic reference read. */
+    fun index(): LuceneIndex = currentGeneration
+
+    /**
+     * Publishes [next] as the generation this process serves and hands [previous] back to retirement.
+     *
+     * The swap is ordered after the marker by the caller, so anything that reads the new generation
+     * here can rely on it being the durable one. The check is what stops two rebuilds from interleaving
+     * their swaps: the second one sees that the generation it built against is no longer served and
+     * refuses rather than publishing over it.
+     */
+    internal suspend fun publishGeneration(next: LuceneIndex, previous: LuceneIndex) {
+        indexAdmission.withLock {
+            check(currentGeneration === previous) {
+                "another rebuild published ${currentGeneration.name} while this one was building"
+            }
+            currentGeneration = next
+        }
+    }
 
     /**
      * Retrieval over this context's index, resolved lazily so a command that never searches does not
@@ -66,7 +124,7 @@ class AppContext private constructor(
         SearchService(
             collections = collections,
             documents = documents,
-            index = index,
+            index = { index() },
             queryEmbedder = E5Embedder.productionQueryEmbedder(paths.modelsDir, paths.embeddingProfileDir),
         )
     }
@@ -118,8 +176,9 @@ class AppContext private constructor(
             }
         // The index closes before the database: both are derived from it, and an index writer that held
         // the directory open while the database closed would be the one thing this process owns that
-        // outlived its archive.
-        runCatching { index.close() }
+        // outlived its archive. The generation served right now is the one to close; a retired one was
+        // closed by the rebuild that retired it.
+        runCatching { currentGeneration.close() }
         // The lock is released last: while the database is closing, this process still owns the data
         // directory, so no second process may open it in between.
         runCatching { database.close() }
@@ -166,22 +225,6 @@ class AppContext private constructor(
                     // records the pinned model's identity so stale vectors are detected rather than searched.
                     val searchIndex = LuceneIndex.open(paths.indexDir, identityForCurrentModel())
                     try {
-                        // The removal seam stays injectable for tests that must observe an index failure;
-                        // production passes the real index and lets it fill the deletion machine's
-                        // INDEX_DELETED phase itself.
-                        val remover = if (index === CollectionIndexRemover.NONE) {
-                            CollectionIndexRemover { collectionId -> searchIndex.deleteCollection(collectionId) }
-                        } else {
-                            index
-                        }
-                        val service = CollectionService(
-                            database = database,
-                            paths = paths,
-                            collections = collections,
-                            deletions = deletions,
-                            coordinator = mutations,
-                            index = remover,
-                        )
                         val context = AppContext(
                             paths = paths,
                             database = database,
@@ -192,12 +235,21 @@ class AppContext private constructor(
                             importItems = importItems,
                             library = ManagedLibrary(paths, documents),
                             mutations = mutations,
-                            collectionService = service,
                             jobs = jobs,
-                            index = searchIndex,
+                            injectedIndexRemover = index,
+                            initialIndex = searchIndex,
                             lock = lock,
                         )
-                        context.deletionRecovery = runBlocking { service.recoverDeletions() }
+                        context.deletionRecovery = runBlocking { context.collectionService.recoverDeletions() }
+                        // The sweep runs after the marker is resolved and before any writer is admitted,
+                        // so the set it removes is exactly the unreferenced one: a half-built successor
+                        // and a generation a previous process could not retire.
+                        val swept = LuceneIndex.sweepUnreferenced(paths.indexDir, searchIndex.name)
+                        if (swept.isNotEmpty()) {
+                            LOGGER.atInfo()
+                                .addKeyValue(SWEPT_GENERATIONS_FIELD, swept.joinToString(", "))
+                                .log("removed unreferenced search index generations")
+                        }
                         // After deletions are finished, because finishing one cascades its jobs away: an
                         // attempt that a previous process was inside is queued again, and a cancellation
                         // request that previous process recorded is honoured rather than re-run.
@@ -235,6 +287,7 @@ class AppContext private constructor(
         }
 
         private const val RESUMED_JOBS_FIELD = "resumed_jobs"
+        private const val SWEPT_GENERATIONS_FIELD = "swept_generations"
         private const val COMPONENT_FIELD = "component"
         private const val JOBS_COMPONENT = "jobs"
     }

@@ -10,6 +10,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
@@ -254,6 +256,36 @@ class LuceneIndex private constructor(
     }
 
     /**
+     * How many rows one document has in this generation, for the rebuild that decides which copied
+     * documents already agree with the database.
+     */
+    fun rowCount(documentId: DocumentId): Int = readSearcher { searcher ->
+        searcher.count(TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, documentId.value)))
+    }
+
+    /** How many rows one collection has, for a rebuild's validation that every row is accounted for. */
+    fun rowCount(collectionId: CollectionId): Int = readSearcher { searcher ->
+        searcher.count(TermQuery(Term(LuceneSchema.FIELD_COLLECTION_ID, collectionId.value)))
+    }
+
+    /**
+     * Waits, bounded, for every search that is still reading this generation to finish.
+     *
+     * A rebuild publishes a successor and then retires the generation it replaced: readers that
+     * acquired a searcher before the swap must be allowed to finish on it, which is the lease the
+     * rebuild waits to drain. `false` means the wait ran out with readers still inside, and the caller
+     * must leave the generation alone rather than closing it under them.
+     */
+    suspend fun drainLeases(timeoutMillis: Long): Boolean {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (openLeases.get() > 0) {
+            if (System.nanoTime() >= deadline) return false
+            delay(LEASE_POLL_MILLIS)
+        }
+        return true
+    }
+
+    /**
      * Keyword search over the analyzed text field.
      *
      * [collectionId] and [documentIds] narrow the match exactly in the query itself. A query the classic
@@ -433,11 +465,16 @@ class LuceneIndex private constructor(
         )
     }
 
+    /** How many searches are reading this generation right now, so retirement can wait for them. */
+    private val openLeases = AtomicInteger(0)
+
     private fun <T> readSearcher(block: (IndexSearcher) -> T): T {
         val searcher = handle.manager.acquire()
+        openLeases.incrementAndGet()
         try {
             return block(searcher)
         } finally {
+            openLeases.decrementAndGet()
             handle.manager.release(searcher)
         }
     }
@@ -481,6 +518,9 @@ class LuceneIndex private constructor(
         private const val MARKER_FILE: String = "current"
         private const val GENERATION_PREFIX: String = "lucene-"
 
+        /** How often retirement checks whether the readers it is waiting for have finished. */
+        private const val LEASE_POLL_MILLIS: Long = 20L
+
         private val LOCATOR_JSON = Json { ignoreUnknownKeys = true }
 
         /**
@@ -496,6 +536,73 @@ class LuceneIndex private constructor(
             Files.createDirectories(indexDir)
             val generation = resolve(indexDir, identity)
             return LuceneIndex(indexDir, generation)
+        }
+
+        /**
+         * Opens a *named* generation without consulting the marker.
+         *
+         * The rebuild builds a successor into `lucene-next-<uuid>` while the current generation keeps
+         * serving, so it opens that directory directly: the marker still names the generation it will
+         * name until the rebuild publishes, and a directory that exists without being named is exactly
+         * what this is for. The caller commits and closes the writer it gets before any marker is
+         * touched.
+         */
+        internal fun openGeneration(indexDir: Path, name: String, identity: IndexIdentity): LuceneIndex {
+            check(name.startsWith(GENERATION_PREFIX)) { "a generation is named $GENERATION_PREFIX<uuid>, was $name" }
+            return LuceneIndex(indexDir, GenerationInfo(name, indexDir, identity))
+        }
+
+        /** The generation the marker names, or `null` when no marker has been published yet. */
+        internal fun currentGenerationName(indexDir: Path): String? {
+            val marker = indexDir.resolve(MARKER_FILE)
+            if (!Files.exists(marker)) return null
+            val name = Files.readString(marker).trim()
+            check(name.isNotBlank()) {
+                "the search index marker ($marker) is empty; refusing to guess which generation is active"
+            }
+            return name
+        }
+
+        /** Publishes [name] as the active generation with the same atomic rename every open resolves. */
+        internal fun publishMarker(indexDir: Path, name: String) {
+            writeMarkerAtomically(indexDir.resolve(MARKER_FILE), name)
+        }
+
+        /**
+         * Removes the generations the marker no longer names.
+         *
+         * Startup runs this once the marker has been resolved, so the set it removes is exactly the
+         * unreferenced one: a half-built successor whose writer died, and a retired generation left
+         * open by a process that could not drain its readers. The current target is never a candidate,
+         * whatever its name looks like — a successor keeps the `next` spelling after it is published,
+         * and deleting the named generation would be deleting the index the caller just chose.
+         */
+        internal fun sweepUnreferenced(indexDir: Path, keep: String): List<String> {
+            val removed = mutableListOf<String>()
+            Files.list(indexDir).use { entries ->
+                entries
+                    .filter { entry ->
+                        val name = entry.fileName.toString()
+                        (name.startsWith(GENERATION_PREFIX) || name == "$MARKER_FILE.tmp") && name != keep
+                    }
+                    .sorted()
+                    .forEach { entry ->
+                        val name = entry.fileName.toString()
+                        if (Files.isDirectory(entry)) {
+                            deleteRecursively(entry)
+                        } else {
+                            Files.deleteIfExists(entry)
+                        }
+                        removed += name
+                    }
+            }
+            return removed
+        }
+
+        private fun deleteRecursively(directory: Path) {
+            Files.walk(directory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach { path -> Files.deleteIfExists(path) }
+            }
         }
 
         private fun resolve(indexDir: Path, identity: IndexIdentity): GenerationInfo {
@@ -582,7 +689,11 @@ private class GenerationInfo internal constructor(
         val directory = FSDirectory.open(directoryPath)
         val analyzer = LuceneIndex.newAnalyzer()
         try {
-            val writer = IndexWriter(directory, IndexWriterConfig(analyzer))
+            // The identity is written with the first commit, so a generation that is opened and
+            // committed without ever being searched still records what its vectors were built with.
+            val writer = IndexWriter(directory, IndexWriterConfig(analyzer)).apply {
+                setLiveCommitData(identity.toUserData().entries.toList())
+            }
             return try {
                 val manager = SearcherManager(writer, SearcherFactory())
                 GenerationHandle(name, directory, writer, manager, analyzer, identity)

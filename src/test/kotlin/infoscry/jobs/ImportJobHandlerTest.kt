@@ -141,7 +141,7 @@ class ImportJobHandlerTest {
             assertEquals(documentId, second.items.single().documentId)
             AppContext.open(harness.dataDir).use { context ->
                 assertEquals(DocumentStatus.COMPLETE, context.documents.get(documentId)!!.status)
-                assertEquals(3, context.index.chunkCount(CollectionId("default"), documentId))
+                assertEquals(3, context.index().chunkCount(CollectionId("default"), documentId))
             }
         }
     }
@@ -282,7 +282,7 @@ class ImportJobHandlerTest {
             AppContext.open(harness.dataDir).use { context ->
                 val document = context.documents.get(stored)!!
                 assertEquals(DocumentStatus.COMPLETE, document.status)
-                assertEquals(3, context.index.chunkCount(CollectionId("default"), stored))
+                assertEquals(3, context.index().chunkCount(CollectionId("default"), stored))
                 assertEquals(
                     setOf("unit-0", "unit-1", "unit-2"),
                     context.content
@@ -361,8 +361,8 @@ class ImportJobHandlerTest {
                 assertEquals(listOf(0, 1, 2), units.map { it.ordinal })
                 assertEquals("unit 0", units.first().extractedText)
                 assertTrue(context.content.chunkCount(documentId) >= 3, "every unit produced chunks")
-                assertEquals(3, context.index.chunkCount(collectionId, documentId), "every chunk is searchable")
-                val hits = context.index.searchKeyword(collectionId, "unit", limit = 10)
+                assertEquals(3, context.index().chunkCount(collectionId, documentId), "every chunk is searchable")
+                val hits = context.index().searchKeyword(collectionId, "unit", limit = 10)
                 assertEquals(3, hits.size)
                 assertEquals(documentId.value, hits.first().documentId)
                 assertEquals(
@@ -399,7 +399,7 @@ class ImportJobHandlerTest {
                 // is searchable with a warning rather than failed or silently complete.
                 assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, document.status)
                 assertEquals(1, context.content.extractionMarker(documentId)?.failedUnits)
-                assertEquals(2, context.index.chunkCount(CollectionId("default"), documentId))
+                assertEquals(2, context.index().chunkCount(CollectionId("default"), documentId))
             }
         }
     }
@@ -469,7 +469,7 @@ class ImportJobHandlerTest {
             val documentId = item.documentId!!
             assertEquals(DocumentStatus.FAILED, run.documents.getValue(documentId).status)
             AppContext.open(harness.dataDir).use { context ->
-                assertEquals(0, context.index.chunkCount(CollectionId("default"), documentId))
+                assertEquals(0, context.index().chunkCount(CollectionId("default"), documentId))
             }
         }
     }
@@ -494,7 +494,7 @@ class ImportJobHandlerTest {
             assertEquals(DocumentStatus.FAILED, run1.documents.getValue(documentId).status)
             assertEquals(4, run1Extractor.produced.size, "run 1 must extract all four units for the resume to have them")
             AppContext.open(harness.dataDir).use { context ->
-                assertEquals(0, context.index.chunkCount(CollectionId("default"), documentId))
+                assertEquals(0, context.index().chunkCount(CollectionId("default"), documentId))
             }
 
             // Run 2: the same file against the same durable state ("a new process over the same data
@@ -524,7 +524,7 @@ class ImportJobHandlerTest {
             assertEquals(4, run2Extractor.skipped.size, "every committed unit must be reused from its checkpoint")
             assertEquals(4, embedCallsRun2, "the re-run embeds each unit's persisted chunk exactly once (one call per unit)")
             AppContext.open(harness.dataDir).use { context ->
-                assertEquals(4, context.index.chunkCount(CollectionId("default"), documentId))
+                assertEquals(4, context.index().chunkCount(CollectionId("default"), documentId))
             }
         }
     }
@@ -546,7 +546,7 @@ class ImportJobHandlerTest {
             val documentId = item.documentId!!
             assertEquals(DocumentStatus.COMPLETE, run.documents.getValue(documentId).status)
             AppContext.open(harness.dataDir).use { context ->
-                assertEquals(3, context.index.chunkCount(CollectionId("default"), documentId))
+                assertEquals(3, context.index().chunkCount(CollectionId("default"), documentId))
             }
         }
     }
@@ -627,7 +627,7 @@ class ImportJobHandlerTest {
                 assertTrue(context.content.chunkCount(document.id) >= 3, "the resumed pass chunks every unit")
                 // The resume ends the same way a first pass does: complete, and once in the index.
                 assertEquals(DocumentStatus.COMPLETE, document.status)
-                assertEquals(3, context.index.chunkCount(CollectionId("default"), document.id))
+                assertEquals(3, context.index().chunkCount(CollectionId("default"), document.id))
             }
         }
     }
@@ -661,7 +661,7 @@ class ImportJobHandlerTest {
             AppContext.open(harness.dataDir).use { context ->
                 val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
                 assertEquals(DocumentStatus.COMPLETE, document.status)
-                assertEquals(2, context.index.chunkCount(CollectionId("default"), document.id))
+                assertEquals(2, context.index().chunkCount(CollectionId("default"), document.id))
             }
         }
     }

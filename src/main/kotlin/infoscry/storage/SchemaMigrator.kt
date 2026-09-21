@@ -32,6 +32,40 @@ class SchemaMigrator(private val database: Database) {
     }
 
     private fun apply(migration: Migration) {
+        if (migration.foreignKeysOff) {
+            applyWithForeignKeysOff(migration)
+        } else {
+            applyWithForeignKeysOn(migration)
+        }
+    }
+
+    /**
+     * Runs a migration that must not be checked against foreign keys.
+     *
+     * Rebuilding a referenced table — the only way SQLite can widen a CHECK constraint — needs the
+     * pragma off while the rows are copied, and a `PRAGMA foreign_keys` assignment is a no-op inside
+     * a transaction, so the pragma is set on the connection before the migration's own transaction
+     * opens and restored after it closes. The copy runs in one transaction of its own, so a crash
+     * still leaves either the previous version or the new one.
+     */
+    private fun applyWithForeignKeysOff(migration: Migration) {
+        database.read { connection ->
+            connection.createStatement().use { statement -> statement.execute(PRAGMA_FOREIGN_KEYS_OFF) }
+        }
+        try {
+            applyStatements(migration)
+        } finally {
+            database.read { connection ->
+                connection.createStatement().use { statement -> statement.execute(PRAGMA_FOREIGN_KEYS_ON) }
+            }
+        }
+    }
+
+    private fun applyWithForeignKeysOn(migration: Migration) {
+        applyStatements(migration)
+    }
+
+    private fun applyStatements(migration: Migration) {
         val statements = splitSqlStatements(readResourceText(migration.resource))
         database.transaction { connection ->
             connection.createStatement().use { statement ->
@@ -54,15 +88,20 @@ class SchemaMigrator(private val database: Database) {
         javaClass.classLoader.getResourceAsStream(resource)?.use { it.readBytes().decodeToString() }
             ?: error("migration resource $resource is missing from the classpath")
 
-    private data class Migration(val version: Int, val resource: String)
+    private data class Migration(val version: Int, val resource: String, val foreignKeysOff: Boolean = false)
 
     companion object {
         /** The schema version this build writes and understands. */
-        const val SUPPORTED_VERSION = 2
+        const val SUPPORTED_VERSION = 3
+
+        private const val PRAGMA_FOREIGN_KEYS_OFF = "PRAGMA foreign_keys = OFF"
+
+        private const val PRAGMA_FOREIGN_KEYS_ON = "PRAGMA foreign_keys = ON"
 
         private val MIGRATIONS = listOf(
             Migration(version = 1, resource = "db/migration/001_core.sql"),
             Migration(version = 2, resource = "db/migration/002_content.sql"),
+            Migration(version = 3, resource = "db/migration/003_job_types.sql", foreignKeysOff = true),
         )
     }
 }

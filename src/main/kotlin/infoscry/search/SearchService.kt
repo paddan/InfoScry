@@ -16,6 +16,7 @@ import infoscry.storage.DocumentCriterion
 import infoscry.storage.DocumentStore
 import java.util.Locale
 import kotlinx.serialization.json.Json
+import org.apache.lucene.search.IndexSearcher
 import org.slf4j.LoggerFactory
 
 /**
@@ -36,7 +37,7 @@ import org.slf4j.LoggerFactory
 class SearchService(
     private val collections: CollectionStore,
     private val documents: DocumentStore,
-    private val index: LuceneIndex,
+    private val index: () -> LuceneIndex,
     private val queryEmbedder: () -> QueryEmbedder?,
     private val maxScopeTerms: Int = DEFAULT_MAX_SCOPE_TERMS,
 ) {
@@ -74,7 +75,9 @@ class SearchService(
 
         val keywordHits = when (mode) {
             SearchMode.KEYWORD, SearchMode.HYBRID ->
-                index.searchKeyword(filters.collectionId, queryText, documentIds, TOP_PER_BRANCH)
+                searchRefusingOverbroad {
+                    index().searchKeyword(filters.collectionId, queryText, documentIds, TOP_PER_BRANCH)
+                }
 
             SearchMode.SEMANTIC -> emptyList()
         }
@@ -93,12 +96,30 @@ class SearchService(
         return publish(fused, queryText)
     }
 
+    /**
+     * Wraps a Lucene branch so a pathological index cannot surface as a server error.
+     *
+     * The pre-parse guard bounds how many tokens a query may analyze into, but a short query with a
+     * broad wildcard expands at *rewrite* time, inside the searcher, and a rewrite can still run past
+     * Lucene's clause ceiling on an index large enough to feed it. That is the caller's query doing
+     * it, not a corrupt index, so it is answered with the same shape every other caller mistake uses.
+     */
+    private inline fun <T> searchRefusingOverbroad(block: () -> T): T = try {
+        block()
+    } catch (tooMany: IndexSearcher.TooManyClauses) {
+        throw SearchUnavailableException(
+            QUERY_TOO_BROAD_CODE,
+            "the query expands to more clauses than the index can hold; narrow the wildcards or " +
+                "shorten it and search again",
+        )
+    }
+
     private fun semanticSearch(
         queryText: String,
         filters: SearchFilters,
         documentIds: Set<String>?,
     ): List<IndexHit> {
-        val status = index.schemaStatus
+        val status = index().schemaStatus
         if (status !is SchemaStatus.Ready) {
             throw SearchUnavailableException(
                 REBUILD_REQUIRED_CODE,
@@ -117,7 +138,9 @@ class SearchService(
         } catch (failure: EmbeddingException) {
             throw SearchUnavailableException(failure.code, failure.message ?: "the query could not be embedded")
         }
-        return index.searchVector(filters.collectionId, vector, documentIds, TOP_PER_BRANCH)
+        return searchRefusingOverbroad {
+            index().searchVector(filters.collectionId, vector, documentIds, TOP_PER_BRANCH)
+        }
     }
 
     private fun publish(fused: List<FusedSearchHit>, queryText: String): SearchOutcome {
@@ -231,6 +254,9 @@ class SearchService(
         const val FUSION_TOP: Int = 30
         const val REBUILD_REQUIRED_CODE: String = "INDEX_REBUILD_REQUIRED"
         const val FILTER_TOO_BROAD_CODE: String = "FILTER_TOO_BROAD"
+
+        /** The code a query carries when Lucene's clause ceiling stops it during a rewrite. */
+        const val QUERY_TOO_BROAD_CODE: String = "QUERY_TOO_BROAD"
 
         /**
          * How many candidate documents a document-level filter may select before a search is refused.

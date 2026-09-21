@@ -152,10 +152,13 @@ class ImportCommand(
             ImportJobHandler.attachTo(open, pipeline(open), documentEmbedder = importEmbedder(open))
             echo("Importing ${requested.size} path(s) as job ${job.id.value}.")
             val finished = runBlocking {
-                awaitTerminal {
-                    open.jobs.get(job.id)
-                        ?: throw NoSuchElementException("no job with id ${job.id.value}")
-                }
+                awaitTerminalJob(
+                    lookup = {
+                        open.jobs.get(job.id)
+                            ?: throw NoSuchElementException("no job with id ${job.id.value}")
+                    },
+                    what = "import",
+                )
             }
             report(finished, open.importItems.listForJob(job.id), options, executedHere = true)
         }
@@ -169,7 +172,7 @@ class ImportCommand(
                 reportAccepted(accepted.job.id, accepted.job.state, options, executedHere = false)
                 return
             }
-            val finished = runBlocking { awaitTerminal { api.getJob(accepted.job.id) } }
+            val finished = runBlocking { awaitTerminalJob(lookup = { api.getJob(accepted.job.id) }, what = "import") }
             val items = runBlocking { api.importItems(accepted.job.id) }
             report(finished, items, options, executedHere = false)
         }
@@ -277,32 +280,6 @@ class ImportCommand(
         }
     }
 
-    /**
-     * Waits until the job ends, on either side of the wire.
-     *
-     * The local read is a database lookup and the remote one is a request, so the two are passed as one
-     * lookup rather than duplicated: what has to be identical is that both wait for a terminal state and
-     * neither gives up early.
-     */
-    private suspend fun awaitTerminal(lookup: suspend () -> Job): Job {
-        val deadline = System.nanoTime() + WAIT_TIMEOUT_NANOS
-        while (System.nanoTime() < deadline) {
-            val job = try {
-                lookup()
-            } catch (missing: NoSuchElementException) {
-                // The job row can disappear when its collection is deleted. That is a terminal outcome for
-                // this command, and saying so beats waiting for a row that will never come back.
-                throw CliFailure("the import job no longer exists: ${missing.message.orEmpty()}")
-            }
-            if (job.state !in ACTIVE_STATES) return job
-            delay(POLL_MILLIS)
-        }
-        throw CliFailure("the import did not reach a final state within a day")
-    }
 
-    private companion object {
-        const val POLL_MILLIS = 100L
-        const val WAIT_TIMEOUT_NANOS = 24L * 60 * 60 * 1_000_000_000L
-        val ACTIVE_STATES = setOf(JobState.QUEUED, JobState.RUNNING)
-    }
+
 }

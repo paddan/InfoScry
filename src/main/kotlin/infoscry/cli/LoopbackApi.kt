@@ -15,6 +15,8 @@ import infoscry.server.ImportRequest
 import infoscry.server.JobResponse
 import infoscry.server.JobsResponse
 import infoscry.server.LOOPBACK_HOST
+import infoscry.server.ReindexAcceptedResponse
+import infoscry.server.SearchResponse
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.get
@@ -26,6 +28,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
+import io.ktor.client.request.url
 
 /**
  * A failure the server reported, in the words it used.
@@ -81,6 +84,66 @@ class LoopbackApi(
             setBody(ApiJson.encodeToString(request))
         }
         return ApiJson.decodeFromString<ImportAcceptedResponse>(expect(response))
+    }
+
+    /**
+     * Searches the collection the server serves.
+     *
+     * This is a read, so a CLI asks the server rather than contending for the data directory's lock;
+     * the filters travel as query parameters because that is what `GET /api/search` takes, and the
+     * server resolves the collection the same way the collection commands do, by name or id.
+     */
+    suspend fun search(
+        collection: String,
+        query: String,
+        mode: String?,
+        filters: infoscry.search.SearchFilters,
+        limit: Int,
+    ): infoscry.search.SearchOutcome {
+        val response = client.get("$base/api/search") {
+            header()
+            url {
+                parameters.append("collection", collection)
+                parameters.append("q", query)
+                mode?.let { parameters.append("mode", it) }
+                filters.mediaTypes.forEach { parameters.append("mediaType", it) }
+                filters.filenameOrPathContains?.let { parameters.append("path", it) }
+                filters.titleAuthorOrLanguageContains?.let { parameters.append("text", it) }
+                filters.importedFrom?.let { parameters.append("from", it) }
+                filters.importedUntil?.let { parameters.append("until", it) }
+                filters.statuses.forEach { parameters.append("status", it.name) }
+                if (filters.ocrOnly) parameters.append("ocrOnly", "true")
+                parameters.append("limit", limit.toString())
+            }
+        }
+        val body = ApiJson.decodeFromString<SearchResponse>(expect(response))
+        return infoscry.search.SearchOutcome(
+            hits = body.hits.map { hit ->
+                infoscry.search.SearchHit(
+                    collectionId = infoscry.domain.CollectionId(hit.collectionId),
+                    documentId = infoscry.domain.DocumentId(hit.documentId),
+                    unitId = infoscry.domain.ContentUnitId(hit.unitId),
+                    chunkOrdinal = hit.chunkOrdinal,
+                    text = hit.text,
+                    highlighted = hit.highlighted,
+                    locator = hit.locator,
+                    locatorLabel = hit.locatorLabel,
+                    matchedBy = hit.matchedBy.map { infoscry.search.SearchMode.valueOf(it) }.toSet(),
+                )
+            },
+            staleFiltered = body.staleFiltered,
+        )
+    }
+
+    /** Hands a rebuild to the server that owns the data directory. */
+    suspend fun enqueueReindex(collection: String?): ReindexAcceptedResponse {
+        val request = infoscry.server.ReindexApiRequest(collection = collection)
+        val response = client.post("$base/api/reindex") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(request))
+        }
+        return ApiJson.decodeFromString<ReindexAcceptedResponse>(expect(response))
     }
 
     /** One job's current state, which is what `import --wait` polls. */
