@@ -96,7 +96,9 @@ class JobRunner(
 
     private var dispatcher: kotlinx.coroutines.Job? = null
 
-    /** Begins claiming queued jobs. Calling it twice is a mistake, not a second worker. */
+    /**
+     * Begins claiming queued jobs. Calling it twice is a mistake, not a second worker.
+     */
     fun start() {
         synchronized(lifecycle) {
             check(!closing) { "the job runner is closed" }
@@ -140,6 +142,7 @@ class JobRunner(
     }
 
     private suspend fun dispatch() {
+        var consecutiveFailures = 0
         while (currentCoroutineContext().isActive) {
             // The permit is reserved *before* the claim, so a claim always has a worker behind it. The row
             // says RUNNING and `infoscry jobs` and the web queue read that row: claiming first and waiting
@@ -147,11 +150,25 @@ class JobRunner(
             permits.acquire()
             val claimed = try {
                 store.claimNextQueued()
-            } catch (failure: Throwable) {
+            } catch (cancelled: CancellationException) {
                 // Also covers a cancellation while suspended above, so the reserved permit is never lost.
                 permits.release()
-                throw failure
+                throw cancelled
+            } catch (failure: Throwable) {
+                // A claim that fails is not a reason to stop claiming. Leaving the loop here used to end
+                // the worker silently: the process stayed up, the queue stayed full, and nothing said why.
+                // The permit is released first, and the loop backs off so a database that is genuinely down
+                // is retried calmly instead of in a hot spin.
+                permits.release()
+                consecutiveFailures++
+                LOGGER.atError()
+                    .addKeyValue(CONSECUTIVE_FAILURES_FIELD, consecutiveFailures)
+                    .setCause(failure)
+                    .log("claiming the next job failed; the worker keeps trying")
+                delay(backoffMillis(consecutiveFailures))
+                continue
             }
+            consecutiveFailures = 0
             if (claimed == null) {
                 permits.release()
                 delay(pollIntervalMillis)
@@ -159,6 +176,12 @@ class JobRunner(
             }
             launchAttempt(claimed)
         }
+    }
+
+    /** How long to wait after [failures] consecutive claim failures: short, then capped. */
+    private fun backoffMillis(failures: Int): Long {
+        val capped = minOf(failures, MAX_BACKOFF_STEPS)
+        return pollIntervalMillis shl (capped - 1)
     }
 
     /**
@@ -245,6 +268,8 @@ class JobRunner(
         const val DEFAULT_POLL_MILLIS = 50L
         const val JOB_ID_FIELD = "job_id"
         const val ERROR_CODE_FIELD = "error_code"
+        const val CONSECUTIVE_FAILURES_FIELD = "consecutive_claim_failures"
+        const val MAX_BACKOFF_STEPS = 5
     }
 }
 

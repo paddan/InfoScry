@@ -10,6 +10,8 @@ import com.github.ajalt.clikt.parameters.types.path
 import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.config.ProcessLockUnavailable
+import infoscry.jobs.ImportJobHandler
+import infoscry.jobs.ImportPipeline
 import infoscry.logging.LoggingBootstrap
 import infoscry.server.ApiJson
 import infoscry.server.DEFAULT_PORT
@@ -30,7 +32,9 @@ data class ServeResponse(val url: String, val port: Int, val pid: Long)
  * is the thing that ends it. Interrupting it stops the server and removes `runtime.json`, which is what
  * tells a later CLI that nobody is listening.
  */
-class ServeCommand : CliktCommand(name = "serve") {
+class ServeCommand(
+    private val pipeline: (AppPaths) -> ImportPipeline = { ImportPipeline.production() },
+) : CliktCommand(name = "serve") {
 
     private val port by option(
         "--port",
@@ -60,6 +64,9 @@ class ServeCommand : CliktCommand(name = "serve") {
         val (context, server) = runBlocking {
             val opened = AppContext.open(options.dataDir)
             val started = startLoopbackServer(opened, port)
+            // The worker is attached before anything is served, so an enqueued import is always owned by a
+            // live process: a request that was accepted while no runner existed would be a job nobody runs.
+            ImportJobHandler.attachTo(opened, pipeline(opened.paths))
             opened to started
         }
         Runtime.getRuntime().addShutdownHook(

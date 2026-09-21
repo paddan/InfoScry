@@ -32,8 +32,10 @@ class JobStateException(val jobId: JobId, val state: JobState, val requirement: 
  *
  * The read methods are not a safety mechanism. A caller that needs to decide and then write has to do
  * both in the store, because anything read outside a transaction can be stale by the time it is used.
+ *
+ * The class is open only so [claimNextQueued] can be overridden by a test that needs one claim to fail.
  */
-class JobStore(private val database: Database) {
+open class JobStore(private val database: Database) {
 
     fun enqueue(
         type: JobType,
@@ -103,8 +105,12 @@ class JobStore(private val database: Database) {
      *
      * Oldest first keeps the queue fair: an archive of thousands of documents is imported in the order
      * it was handed over, not in whatever order a poll happens to see.
+     *
+     * Open so a test can make one claim fail and prove the dispatcher keeps claiming afterwards — a
+     * failure here used to end the claim loop silently, which left a live runner with a full queue and no
+     * worker.
      */
-    fun claimNextQueued(): Job? = database.transaction { connection ->
+    open fun claimNextQueued(): Job? = database.transaction { connection ->
         val next = connection.prepareStatement(
             "$SELECT_JOBS WHERE state = ? ORDER BY created_at, rowid LIMIT 1",
         ).use { statement ->

@@ -44,7 +44,10 @@ internal fun resolveOptions(parent: CliOptions?, json: Boolean, dataDir: Path?):
  * It owns the two options that apply everywhere, and creates the subcommands. The options are also
  * accepted after a subcommand name; see [resolveOptions].
  */
-class RootCommand : CliktCommand(name = "infoscry") {
+class RootCommand(
+    private val pipeline: (infoscry.config.AppPaths) -> infoscry.jobs.ImportPipeline =
+        { infoscry.jobs.ImportPipeline.production() },
+) : CliktCommand(name = "infoscry") {
 
     private val json by option("--json", help = JSON_HELP).flag()
 
@@ -61,7 +64,13 @@ class RootCommand : CliktCommand(name = "infoscry") {
     }
 
     init {
-        subcommands(LogsCommand(), ServeCommand(), CollectionCommand(), JobsCommand())
+        subcommands(
+            LogsCommand(),
+            ServeCommand(pipeline),
+            CollectionCommand(),
+            JobsCommand(),
+            ImportCommand(pipeline),
+        )
     }
 
     override fun run() {

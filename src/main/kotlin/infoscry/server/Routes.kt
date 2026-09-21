@@ -6,6 +6,9 @@ import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.domain.JobType
+import infoscry.extract.ExtractionSettings
+import infoscry.jobs.ImportJobPayload
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
 import infoscry.storage.MaintenanceInProgressException
@@ -68,6 +71,23 @@ data class JobsResponse(val jobs: List<Job>)
 
 @Serializable
 data class JobResponse(val job: Job)
+
+/** What a caller asks for: the collection by name or id, and the files or directories it selected. */
+@Serializable
+data class ImportRequest(val collection: String, val paths: List<String>)
+
+/**
+ * The answer to an import request.
+ *
+ * `accepted` is the honest word for it: the job is durable and a worker will run it, which is not the
+ * same as the import being finished. A caller that needs the outcome asks for the job, or passes `--wait`.
+ */
+@Serializable
+data class ImportAcceptedResponse(val accepted: Boolean, val job: Job)
+
+/** One file's result, so a caller can report which documents failed and why. */
+@Serializable
+data class ImportItemsResponse(val items: List<infoscry.storage.ImportItem>)
 
 /**
  * The wire format, in one place.
@@ -141,12 +161,60 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
             }
         }
 
+        route("/api/imports") {
+            post {
+                call.handle {
+                    val request = call.receiveJson<ImportRequest>()
+                    val collection = context.collectionService.requireActiveByNameOrId(request.collection)
+                    val payload = ImportJobPayload.of(
+                        collectionId = collection.id,
+                        sources = request.paths,
+                        settings = ExtractionSettings(ocrLanguages = collection.ocrLanguages),
+                    )
+                    val job = context.jobs.enqueue(
+                        type = JobType.IMPORT,
+                        collectionId = collection.id,
+                        payload = payload.encode(),
+                        total = 0,
+                    )
+                    call.respondJson(
+                        HttpStatusCode.Accepted,
+                        ImportAcceptedResponse(accepted = true, job = job),
+                    )
+                }
+            }
+        }
+
         route("/api/jobs") {
             get {
                 call.handle {
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: DEFAULT_JOB_PAGE
                     val offset = call.request.queryParameters["offset"]?.toIntOrNull() ?: 0
                     call.respondJson(HttpStatusCode.OK, JobsResponse(context.jobs.list(limit, offset)))
+                }
+            }
+
+            get("/{id}") {
+                call.handle {
+                    val jobId = call.jobId()
+                    val job = context.jobs.get(jobId)
+                        ?: throw NoSuchElementException("no job with id ${jobId.value}")
+                    call.respondJson(HttpStatusCode.OK, JobResponse(job))
+                }
+            }
+
+            get("/{id}/items") {
+                call.handle {
+                    val jobId = call.jobId()
+                    // An unknown job is a 404 rather than an empty list: "no results" and "no such job" are
+                    // different answers, and a caller that polls has to be able to tell them apart.
+                    if (context.jobs.get(jobId) == null) {
+                        throw NoSuchElementException("no job with id ${jobId.value}")
+                    }
+                    call.respondJson(
+                        HttpStatusCode.OK,
+                        ImportItemsResponse(context.importItems.listForJob(jobId)),
+                    )
                 }
             }
 

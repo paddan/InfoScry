@@ -308,6 +308,42 @@ class JobRunnerTest {
         assertFailsWith<IllegalArgumentException> { JobConcurrency(jobs = 0, ocr = 1, embeddings = 1) }
     }
 
+    @Test
+    fun `a claim that fails does not end the worker`() = runBlocking {
+        // A claim can fail on a real machine -- a busy database, a transient permission problem. What must
+        // not happen is the worker quietly giving up: it stays alive with a full queue and no attempts, and
+        // nothing in the queue says why nothing is moving.
+        val flaky = FlakyClaimStore(database, failures = 3)
+        val queued = flaky.enqueue(JobType.IMPORT, collectionId, total = 1)
+        val runner = JobRunner(
+            store = flaky,
+            collections = collections,
+            mutations = mutations,
+            handler = testHandler { _, stage -> stage.run("unit") { } },
+            concurrency = JobConcurrency(jobs = 1, ocr = 1, embeddings = 1),
+            pollIntervalMillis = POLL_INTERVAL_MILLIS,
+        )
+        runner.start()
+        try {
+            assertEquals(JobState.COMPLETE, awaitState(queued.id, JobState.COMPLETE).state)
+            assertTrue(flaky.claims.get() > 3, "the worker stopped claiming after a failure: ${flaky.claims.get()}")
+        } finally {
+            runner.close()
+        }
+    }
+
+    /** A queue whose first [failures] claims fail, so the worker has to survive them. */
+    private class FlakyClaimStore(database: Database, private val failures: Int) : JobStore(database) {
+
+        val claims = AtomicInteger()
+
+        override fun claimNextQueued(): Job? {
+            val attempt = claims.incrementAndGet()
+            if (attempt <= failures) throw IllegalStateException("the queue could not be read (attempt $attempt)")
+            return super.claimNextQueued()
+        }
+    }
+
     private fun testHandler(block: suspend (Job, JobStage) -> Unit): JobHandler = JobHandler(block)
 
     private fun runner(

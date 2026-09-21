@@ -9,6 +9,9 @@ import infoscry.server.ApiJson
 import infoscry.server.CollectionResponse
 import infoscry.server.CollectionsResponse
 import infoscry.server.CreateCollectionRequest
+import infoscry.server.ImportAcceptedResponse
+import infoscry.server.ImportItemsResponse
+import infoscry.server.ImportRequest
 import infoscry.server.JobResponse
 import infoscry.server.JobsResponse
 import infoscry.server.LOOPBACK_HOST
@@ -68,6 +71,27 @@ class LoopbackApi(
         ApiJson.decodeFromString<JobsResponse>(
             expect(client.get("$base/api/jobs?limit=$limit")),
         ).jobs
+
+    /** Hands one import to the server that owns the data directory. */
+    suspend fun enqueueImport(collection: String, paths: List<String>): ImportAcceptedResponse {
+        val request = ImportRequest(collection = collection, paths = paths)
+        val response = client.post("$base/api/imports") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(request))
+        }
+        return ApiJson.decodeFromString<ImportAcceptedResponse>(expect(response))
+    }
+
+    /** One job's current state, which is what `import --wait` polls. */
+    suspend fun getJob(id: JobId): Job =
+        ApiJson.decodeFromString<JobResponse>(expect(client.get("$base/api/jobs/${id.value}"))).job
+
+    /** One job's per-document results. */
+    suspend fun importItems(id: JobId): List<infoscry.storage.ImportItem> =
+        ApiJson.decodeFromString<ImportItemsResponse>(
+            expect(client.get("$base/api/jobs/${id.value}/items")),
+        ).items
 
     suspend fun cancelJob(id: JobId): Job {
         val response = client.post("$base/api/jobs/${id.value}/cancel") {

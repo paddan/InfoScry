@@ -15,6 +15,7 @@ import infoscry.storage.Database
 import infoscry.storage.DeletionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.JobStore
+import infoscry.storage.ImportItemStore
 import infoscry.storage.MutationCoordinator
 import infoscry.storage.SchemaMigrator
 import java.nio.file.Path
@@ -40,6 +41,7 @@ class AppContext private constructor(
     val collections: CollectionStore,
     val documents: DocumentStore,
     val deletions: DeletionStore,
+    val importItems: ImportItemStore,
     val library: ManagedLibrary,
     val mutations: MutationCoordinator,
     val collectionService: CollectionService,
@@ -110,6 +112,12 @@ class AppContext private constructor(
             paths: AppPaths,
             index: CollectionIndexRemover = CollectionIndexRemover.NONE,
         ): AppContext {
+            // The whole layout first, before anything can write into it. Opening a data directory creates its
+            // database, so this is not a read-only operation and must not pretend to be one: the import path
+            // copies through the scratch directory, and a layout that is missing `tmp` would make the first
+            // import of a fresh archive fail on a directory nobody had created yet.
+            paths.ensureDirectories()
+
             // Before anything logs: the log sink is the data directory's, and that is only true if
             // Logback learns about it before it configures itself.
             LoggingBootstrap.useLogsDirectory(paths)
@@ -123,6 +131,7 @@ class AppContext private constructor(
                     val documents = DocumentStore(database)
                     val deletions = DeletionStore(database)
                     val jobs = JobStore(database)
+                    val importItems = ImportItemStore(database)
                     val mutations = MutationCoordinator()
                     val service = CollectionService(
                         database = database,
@@ -138,6 +147,7 @@ class AppContext private constructor(
                         collections = collections,
                         documents = documents,
                         deletions = deletions,
+                        importItems = importItems,
                         library = ManagedLibrary(paths, documents),
                         mutations = mutations,
                         collectionService = service,

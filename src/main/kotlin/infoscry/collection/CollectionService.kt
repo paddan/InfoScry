@@ -121,6 +121,25 @@ class CollectionService(
             "no usable collection with id ${id.value}; it does not exist or its deletion is in progress",
         )
 
+    /**
+     * The collection a person meant, named either by its identifier or by its name.
+     *
+     * Both spellings exist because both are natural: a script has the identifier, and a person typing a
+     * command has the name. Names are matched case-insensitively, the way the store rejects duplicates,
+     * so "nightfall" and "Nightfall" are not two different answers.
+     */
+    fun requireActiveByNameOrId(reference: String): Collection {
+        require(reference.isNotBlank()) { "a collection reference must not be blank" }
+        val byId = get(CollectionId(reference))
+        if (byId != null) return requireActive(byId.id)
+        val byName = list().firstOrNull { it.name.equals(reference, ignoreCase = true) }
+        return requireActive(
+            byName?.id ?: throw NoSuchElementException(
+                "no usable collection named or identified by '$reference'",
+            ),
+        )
+    }
+
     // ---- Ordinary mutations ----
 
     suspend fun create(

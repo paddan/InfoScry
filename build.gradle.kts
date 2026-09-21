@@ -29,6 +29,9 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.sqlite.jdbc)
+    // Content-based media type detection. Only Tika's core is wired here: the format *parsers* arrive
+    // with the tasks that own those formats, which use PDFBox, POI, jsoup, and Commons CSV directly.
+    implementation(libs.tika.core)
     // The local API: the embedded server, its Netty engine, and the loopback client the CLI and the
     // tests use to talk to a running server.
     implementation(libs.ktor.server.core)

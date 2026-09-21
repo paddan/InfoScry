@@ -140,8 +140,13 @@ class ManagedLibrary(
         return ManagedImport(ManagedImportOutcome.CREATED, document, managedPath)
     }
 
-    /** The managed copy a stored document has, derived from the identifiers and stored filename. */
-    private fun managedPathOf(document: Document): Path = paths.originalFile(
+    /**
+     * The managed copy a stored document has, derived from the identifiers and its stored filename.
+     *
+     * Public because a reader needs it as much as an importer does: the source viewer opens the managed
+     * copy at a citation, and the import path uses it to find the bytes of a document it is resuming.
+     */
+    fun managedPathOf(document: Document): Path = paths.originalFile(
         document.collectionId,
         document.id,
         extensionOf(document.originalFilename),

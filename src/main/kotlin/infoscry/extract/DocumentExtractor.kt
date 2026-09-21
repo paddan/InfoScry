@@ -1,0 +1,230 @@
+package infoscry.extract
+
+import infoscry.domain.DocumentId
+import infoscry.domain.SourceLocation
+import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.HexFormat
+import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.Serializable
+
+/**
+ * The version of the extraction contract itself: how units are shaped, what a fingerprint means, and
+ * what an extractor is allowed to skip. It is part of every fingerprint, so a change that makes old
+ * output incomparable invalidates reuse instead of silently mixing two shapes in one index.
+ */
+const val EXTRACTOR_SCHEMA_VERSION = "1"
+
+/**
+ * One citable unit an extractor produced, before the store gives it an identifier.
+ *
+ * Both text forms are carried: [extractedText] is what the tool produced, [searchText] is the form the
+ * index will hold. [artifactRelativePath] and [artifactSha256] name a file the extractor wrote under the
+ * document's artifact root — the OCR word boxes, a rendered page — so the unit and its artifact commit
+ * together and a reader can later verify the artifact still matches the unit it belongs to.
+ */
+data class ContentUnitDraft(
+    val locator: SourceLocation,
+    val extractedText: String,
+    val searchText: String,
+    val artifactRelativePath: String? = null,
+    val artifactSha256: String? = null,
+)
+
+/**
+ * The extraction settings one import ran with.
+ *
+ * They are captured when the job is enqueued and travel in its payload, because a paused job must be
+ * resumable: a collection whose OCR languages change afterwards does not silently rewrite the meaning of
+ * the checkpoints an earlier attempt committed. [ocrTool] and [renderDpi] are filled in by the tasks that
+ * own those tools; until then they are absent, and "absent" is itself part of the fingerprint.
+ */
+@Serializable
+data class ExtractionSettings(
+    val ocrLanguages: String,
+    val extractorSchemaVersion: String = EXTRACTOR_SCHEMA_VERSION,
+    val ocrTool: String? = null,
+    val renderDpi: Int? = null,
+)
+
+/**
+ * What a unit's checkpoints are keyed by: the same bytes, extracted the same way.
+ *
+ * The fingerprint is what makes a resumed or repeated import cheap without making it wrong. It covers
+ * the document's own content hash and every setting that can change what the extractor produces, so
+ * output committed under one fingerprint is reused only when it would be produced identically again. A
+ * tool upgrade therefore does not quietly invalidate a paused job: reuse stops, and the operator decides
+ * whether to restart extraction.
+ */
+@JvmInline
+value class ExtractionFingerprint(val value: String) {
+
+    override fun toString(): String = value
+
+    companion object {
+
+        /** The fingerprint of one document under one set of extraction settings. */
+        fun of(sha256: String, settings: ExtractionSettings): ExtractionFingerprint {
+            require(sha256.isNotBlank()) { "a fingerprint needs the document's content hash" }
+            require(settings.ocrLanguages.isNotBlank()) {
+                "a fingerprint needs the OCR languages the extraction ran with"
+            }
+            require(settings.extractorSchemaVersion.isNotBlank()) {
+                "a fingerprint needs the extractor schema version"
+            }
+            // A canonical, ordered, line-delimited form: the same inputs always hash the same, and two
+            // settings lists cannot collide by concatenating into the same string.
+            val canonical = listOf(
+                "sha256=$sha256",
+                "schema=${settings.extractorSchemaVersion}",
+                "ocr_languages=${settings.ocrLanguages}",
+                "ocr_tool=${settings.ocrTool ?: NONE}",
+                "render_dpi=${settings.renderDpi ?: NONE}",
+            ).joinToString("\n")
+            val digest = MessageDigest.getInstance("SHA-256")
+                .digest(canonical.toByteArray(Charsets.UTF_8))
+            return ExtractionFingerprint(HexFormat.of().formatHex(digest))
+        }
+
+        private const val NONE = "none"
+    }
+}
+
+/**
+ * What one extraction reports, one unit at a time.
+ *
+ * The stream is deliberately fine-grained: a document of ten thousand pages produces ten thousand
+ * events and never a list of ten thousand units, because the attempt must be interruptible between any
+ * two of them. A unit that fails is an event rather than an exception, so the units already delivered
+ * stay delivered and the document keeps whatever was readable. [Finished] is only ever sent after the
+ * extractor produced every unit it has: a terminal document failure must not send it, or the pipeline
+ * would record an extraction as complete when it stopped early.
+ */
+sealed interface ExtractionEvent {
+
+    /** One unit was produced and is ready to be committed. */
+    data class UnitReady(val key: String, val ordinal: Int, val unit: ContentUnitDraft) : ExtractionEvent
+
+    /** One unit could not be produced; the rest of the document is still attempted. */
+    data class UnitFailed(val key: String, val ordinal: Int, val code: String) : ExtractionEvent
+
+    /** Every unit this extractor has was delivered. [metadata] is what it learned about the document. */
+    data class Finished(val metadata: Map<String, String>, val totalUnits: Int) : ExtractionEvent
+}
+
+/**
+ * The boundary of one unit of extraction, and the only place an extractor is allowed to work.
+ *
+ * Everything expensive or mutating happens inside [unit]: the extractor builds the unit, writes whatever
+ * artifact belongs to it, and emits its event, and only then does this return. The collector holds the
+ * shared mutation permit for exactly that span, which is what keeps a collection deletion or an index
+ * rebuild from landing between an artifact and the checkpoint that describes it.
+ *
+ * The permit covers the collector's work as well, because a `flow` is collected inline: `emit` does not
+ * return until the collector's body for that event has run, and the collector commits inside that body
+ * without asking the gate again for work it is already admitted for. That in turn requires the flow to
+ * be **unbuffered and without a background producer** — a `buffer`, a `channelFlow`, or a `flowOn`
+ * would let the collector run after the permit was released, which is exactly the window this exists to
+ * close.
+ *
+ * The unit is the granularity for a reason: the exclusive side has no timeout, so a permit held for a
+ * whole document would stop every other writer in the process for as long as that document takes.
+ */
+interface UnitBoundary {
+
+    suspend fun <T> unit(block: suspend () -> T): T
+}
+
+/**
+ * What one extractor run needs to know.
+ *
+ * [committedUnitKeys] is the resume point: keys an earlier attempt already committed under this same
+ * fingerprint. The extractor must skip those before it does the expensive work — a cheap container parse
+ * to find out which units exist is fine, rendering a page or running OCR for a committed key is not.
+ * [artifactRoot] is a directory the extractor may write into, and it only ever writes inside [unit].
+ */
+data class ExtractionInput(
+    val documentId: DocumentId,
+    val managedPath: Path,
+    val artifactRoot: Path,
+    val settings: ExtractionSettings,
+    val fingerprint: ExtractionFingerprint,
+    val committedUnitKeys: Set<String>,
+    val boundary: UnitBoundary,
+) {
+
+    /** Whether an earlier attempt already committed this unit under the same fingerprint. */
+    fun isCommitted(key: String): Boolean = key in committedUnitKeys
+}
+
+/**
+ * One format's way of turning a managed original into citable units.
+ *
+ * An extractor is selected by media type and produces a [Flow] of events, in ordinal order, sequentially:
+ * the collector gates each unit, so a flow that produced units concurrently would defeat the gate. The
+ * implementation owns its own cheap-parsing-versus-expensive-work split; what it must not do is decide
+ * when a document is complete — that is what [ExtractionEvent.Finished] says, and only the extractor
+ * knows whether it got there.
+ */
+interface DocumentExtractor {
+
+    /** The media types this extractor claims, exactly as a detector reports them. */
+    val supportedMediaTypes: Set<String>
+
+    fun extract(input: ExtractionInput): Flow<ExtractionEvent>
+}
+
+/**
+ * Where the units of an extraction are committed, and what an attempt that resumes may skip.
+ *
+ * This is the durable half of the extraction contract. Both calls happen **inside** the unit boundary's
+ * permit, so an implementation writes text, artifacts, and its checkpoint in one place and must not ask
+ * the mutation gate again for the work it is already admitted for.
+ *
+ * The pipeline is honest about what it can promise: with [NONE], an extracted unit would live only as
+ * long as the attempt, so the import does not run extractors at all rather than performing OCR whose
+ * result is thrown away and letting a document look searchable when nothing was stored. Detection still
+ * runs, because that is what decides whether an item is importable.
+ */
+interface ExtractionSink {
+
+    /** Whether a unit committed here outlives the attempt. */
+    val storesUnits: Boolean
+
+    /** Keys a previous attempt committed for this document and fingerprint. */
+    suspend fun committedKeys(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+    ): Set<String>
+
+    /** Commits one delivered event. Returning means the unit is durable. */
+    suspend fun deliver(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+        event: ExtractionEvent,
+    )
+
+    companion object {
+
+        /**
+         * Used until the durable unit store exists. The extraction phase is an explicit no-op: the
+         * document is copied and detected and stays in `EXTRACTING`, because nothing about its text is
+         * durable and saying otherwise would claim it is searchable.
+         */
+        val NONE: ExtractionSink = object : ExtractionSink {
+
+            override val storesUnits: Boolean = false
+
+            override suspend fun committedKeys(
+                documentId: DocumentId,
+                fingerprint: ExtractionFingerprint,
+            ): Set<String> = emptySet()
+
+            override suspend fun deliver(
+                documentId: DocumentId,
+                fingerprint: ExtractionFingerprint,
+                event: ExtractionEvent,
+            ): Unit = Unit
+        }
+    }
+}
