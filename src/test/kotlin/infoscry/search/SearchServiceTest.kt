@@ -22,6 +22,7 @@ import infoscry.storage.Instants
 import infoscry.storage.SchemaMigrator
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -32,6 +33,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertContains
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
@@ -114,7 +116,7 @@ class SearchServiceTest {
     fun `keyword and semantic branches carry their own badge`() {
         val collection = collections.create("Default-collection")
         val document = insertDocument(collection.id, "single-branch.txt", "text/plain")
-        openService { FixedQueryEmbedder() }.let { (service, index) ->
+        openService(embedder = { FixedQueryEmbedder() }).let { (service, index) ->
             try {
                 runBlocking { indexChunk(index, collection.id, document.id, "nightfall across the sea") }
 
@@ -435,16 +437,98 @@ class SearchServiceTest {
         }
     }
 
+    @Test
+    fun `a criterion beyond the scope term bound is refused actionably instead of throwing`() {
+        val collection = collections.create("broad-filter-collection")
+        val bound = 5
+        val (service, index) = openService(absentEmbedder(), maxScopeTerms = bound)
+        try {
+            repeat(bound + 2) { count ->
+                insertDocument(collection.id, "bulk-$count.pdf", "text/plain")
+            }
+            val failure = assertFailsWith<SearchUnavailableException> {
+                service.search(
+                    "nightfall",
+                    mode = SearchMode.KEYWORD,
+                    filters = SearchFilters(mediaTypes = setOf("text/plain")),
+                )
+            }
+            assertEquals(SearchService.FILTER_TOO_BROAD_CODE, failure.code)
+            assertContains(failure.remedy, "narrow")
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
+    fun `a criterion within the scope term bound still searches`() {
+        val collection = collections.create("narrow-filter-collection")
+        val bound = 5
+        val (service, index) = openService(absentEmbedder(), maxScopeTerms = bound)
+        try {
+            repeat(bound - 1) { count ->
+                insertDocument(collection.id, "few-$count.txt", "text/plain")
+            }
+            val outcome = service.search(
+                "no-chunk-matches-this",
+                mode = SearchMode.KEYWORD,
+                filters = SearchFilters(mediaTypes = setOf("text/plain")),
+            )
+            assertEquals(0, outcome.hits.size)
+            assertEquals(0, outcome.staleFiltered)
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
+    fun `fusion scores are strictly one based`() {
+        val keyword = listOf(hit("c", "d", "rank-one-only", 0))
+        val fused = reciprocalRankFusion(keyword, emptyList(), k = 60, top = 5)
+        assertEquals(1.0 / 61.0, fused.single().score, "rank 1 must score exactly 1/(60+1)")
+    }
+
+    @Test
+    fun `a hit whose stored locator does not decode is dropped, not cited as line one`() {
+        val collection = collections.create("garbled-locator-collection")
+        val document = insertDocument(collection.id, "garbled.txt", "text/plain")
+        val (service, index) = openService(absentEmbedder())
+        try {
+            val garbage = fusedHit(collection.id.value, document.id.value, "unit-a", "not-json")
+            assertNull(service.resolveHit(garbage, "nightfall"), "an undecodable locator must drop the hit")
+
+            // A locator row as an earlier version persisted it: the discriminator is the explicit serial
+            // name (`text_lines`), not the Kotlin class name. The literal pins that stored contract, and the
+            // round-trip assertion below proves the current encoder still reads and writes the same form —
+            // a round trip alone would keep passing if the serial name changed and orphaned older rows.
+            val persisted = """{"type":"text_lines","start":2,"end":2}"""
+            assertEquals(
+                persisted,
+                Json.encodeToString(SourceLocation.serializer(), SourceLocation.TextLines(2, 2)),
+            )
+
+            val valid = fusedHit(collection.id.value, document.id.value, "unit-b", persisted)
+            val resolved = service.resolveHit(valid, "nightfall")
+            assertEquals(SourceLocation.TextLines(2, 2), resolved?.locator)
+        } finally {
+            index.close()
+        }
+    }
+
     // ---- fixtures ----
 
     /** One LuceneIndex for the whole test, shared by indexing and the service. */
-    private fun openService(embedder: () -> QueryEmbedder?): Pair<SearchService, LuceneIndex> {
+    private fun openService(
+        embedder: () -> QueryEmbedder?,
+        maxScopeTerms: Int = SearchService.DEFAULT_MAX_SCOPE_TERMS,
+    ): Pair<SearchService, LuceneIndex> {
         val index = LuceneIndex.open(paths.indexDir, IDENTITY)
         val service = SearchService(
             collections = collections,
             documents = documents,
             index = index,
             queryEmbedder = embedder,
+            maxScopeTerms = maxScopeTerms,
         )
         return service to index
     }
@@ -537,6 +621,16 @@ class SearchServiceTest {
                 statement.executeUpdate()
             }
         }
+    }
+
+    private fun fusedHit(
+        collectionId: String,
+        documentId: String,
+        unitId: String,
+        locator: String,
+    ): FusedSearchHit {
+        val indexHit = hit(collectionId, documentId, unitId, 0).copy(locator = locator)
+        return FusedSearchHit(indexHit, setOf(SearchMode.KEYWORD), 0.0)
     }
 
     private fun hit(collectionId: String, documentId: String, unitId: String, ordinal: Int) = IndexHit(

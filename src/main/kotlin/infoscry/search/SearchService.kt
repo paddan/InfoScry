@@ -10,10 +10,13 @@ import infoscry.embedding.GpuRuntime
 import infoscry.embedding.GpuUnavailableException
 import infoscry.embedding.ModelManager
 import infoscry.embedding.QueryEmbedder
+import infoscry.logging.LogFields
 import infoscry.storage.CollectionStore
 import infoscry.storage.DocumentCriterion
 import infoscry.storage.DocumentStore
+import java.util.Locale
 import kotlinx.serialization.json.Json
+import org.slf4j.LoggerFactory
 
 /**
  * Retrieval over one index: keyword, semantic, or hybrid, restricted before Lucene by the document
@@ -35,6 +38,7 @@ class SearchService(
     private val documents: DocumentStore,
     private val index: LuceneIndex,
     private val queryEmbedder: () -> QueryEmbedder?,
+    private val maxScopeTerms: Int = DEFAULT_MAX_SCOPE_TERMS,
 ) {
 
     /**
@@ -60,6 +64,13 @@ class SearchService(
             null
         }
         if (documentIds != null && documentIds.isEmpty()) return SearchOutcome(emptyList(), 0)
+        if (documentIds != null && documentIds.size > maxScopeTerms) {
+            throw SearchUnavailableException(
+                FILTER_TOO_BROAD_CODE,
+                "the filter matched ${documentIds.size} documents; narrow it " +
+                    "(media type, processing status, or date range) and search again",
+            )
+        }
 
         val keywordHits = when (mode) {
             SearchMode.KEYWORD, SearchMode.HYBRID ->
@@ -113,35 +124,56 @@ class SearchService(
         var stale = 0
         val hits = buildList {
             for (fusedHit in fused) {
-                val collection = collections.get(CollectionId(fusedHit.hit.collectionId))
-                val document = documents.get(DocumentId(fusedHit.hit.documentId))
-                val live = collection != null &&
-                    collection.lifecycle == CollectionLifecycle.ACTIVE &&
-                    document != null
-                if (!live) {
+                val resolved = resolveHit(fusedHit, queryText)
+                if (resolved == null) {
                     stale++
-                    continue
+                } else {
+                    add(resolved)
                 }
-                add(
-                    SearchHit(
-                        collectionId = CollectionId(fusedHit.hit.collectionId),
-                        documentId = DocumentId(fusedHit.hit.documentId),
-                        unitId = ContentUnitId(fusedHit.hit.unitId),
-                        chunkOrdinal = fusedHit.hit.chunkOrdinal,
-                        text = fusedHit.hit.text,
-                        highlighted = if (SearchMode.KEYWORD in fusedHit.matchedBy) {
-                            highlight(fusedHit.hit.text, queryText)
-                        } else {
-                            null
-                        },
-                        locator = decodeLocator(fusedHit.hit.locator),
-                        locatorLabel = fusedHit.hit.locatorLabel,
-                        matchedBy = fusedHit.matchedBy,
-                    ),
-                )
             }
         }
         return SearchOutcome(hits, stale)
+    }
+
+    /**
+     * Validates one fused hit against the live database and decodes its stored locator into a citable
+     * [SearchHit]. Returns null when the hit must not surface: its collection or document no longer
+     * exists or is tombstoned, or its stored locator no longer decodes (an older schema's JSON after a
+     * locator variant changed, or a corrupt row). An undecodable locator is dropped and counted with the
+     * stale rows — a fabricated fallback citation would be worse than the miss, because this
+     * application's core promise is exact page/section/cell citations.
+     */
+    internal fun resolveHit(fusedHit: FusedSearchHit, queryText: String): SearchHit? {
+        val collection = collections.get(CollectionId(fusedHit.hit.collectionId))
+        val document = documents.get(DocumentId(fusedHit.hit.documentId))
+        val live = collection != null &&
+            collection.lifecycle == CollectionLifecycle.ACTIVE &&
+            document != null
+        if (!live) return null
+
+        val locator = decodeLocator(fusedHit.hit.locator) ?: run {
+            LOGGER.atWarn()
+                .addKeyValue(LogFields.COMPONENT, COMPONENT_VALUE)
+                .addKeyValue(LogFields.DOCUMENT, fusedHit.hit.documentId)
+                .addKeyValue(UNIT_ID_FIELD, fusedHit.hit.unitId)
+                .log("a search hit's stored locator could not be decoded; dropping the hit")
+            return null
+        }
+        return SearchHit(
+            collectionId = CollectionId(fusedHit.hit.collectionId),
+            documentId = DocumentId(fusedHit.hit.documentId),
+            unitId = ContentUnitId(fusedHit.hit.unitId),
+            chunkOrdinal = fusedHit.hit.chunkOrdinal,
+            text = fusedHit.hit.text,
+            highlighted = if (SearchMode.KEYWORD in fusedHit.matchedBy) {
+                highlight(fusedHit.hit.text, queryText)
+            } else {
+                null
+            },
+            locator = locator,
+            locatorLabel = fusedHit.hit.locatorLabel,
+            matchedBy = fusedHit.matchedBy,
+        )
     }
 
     /**
@@ -167,7 +199,7 @@ class SearchService(
     }
 
     private fun queryTerms(queryText: String): List<String> =
-        queryText.lowercase()
+        queryText.lowercase(Locale.ROOT)
             .replace("\"", " ")
             .split(Regex("[^a-z0-9äöüß]+"))
             .filter { it.isNotBlank() }
@@ -176,11 +208,11 @@ class SearchService(
     private fun escapeHtml(text: String): String =
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    private fun decodeLocator(locator: String): SourceLocation =
+    private fun decodeLocator(locator: String): SourceLocation? =
         try {
             LOCATOR_JSON.decodeFromString(SourceLocation.serializer(), locator)
         } catch (failure: Exception) {
-            SourceLocation.TextLines(1, 1)
+            null
         }
 
     private fun SearchFilters.toCriterion(): DocumentCriterion = DocumentCriterion(
@@ -198,7 +230,25 @@ class SearchService(
         const val TOP_PER_BRANCH: Int = 50
         const val FUSION_TOP: Int = 30
         const val REBUILD_REQUIRED_CODE: String = "INDEX_REBUILD_REQUIRED"
+        const val FILTER_TOO_BROAD_CODE: String = "FILTER_TOO_BROAD"
+
+        /**
+         * How many candidate documents a document-level filter may select before a search is refused.
+         * With `LuceneIndex.MAX_BOOLEAN_CLAUSES` raised to 100 000, a filter selecting up to 50 000
+         * documents is comfortably inside the machine-built ceiling and five times the plan's 10
+         * 000-document archive target; beyond it, an actionable "narrow the filter" refusal is the honest
+         * outcome rather than a Lucene `TooManyClauses` 500.
+         */
+        const val DEFAULT_MAX_SCOPE_TERMS: Int = 50_000
 
         private val LOCATOR_JSON = Json { ignoreUnknownKeys = true }
     }
 }
+
+private val LOGGER = LoggerFactory.getLogger("infoscry.search")
+
+/** The structured top-level component name for search logs. */
+private const val COMPONENT_VALUE: String = "search"
+
+/** The structured field carrying the unit id of a hit dropped because its locator would not decode. */
+private const val UNIT_ID_FIELD: String = "unit_id"

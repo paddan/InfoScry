@@ -416,6 +416,20 @@ class LuceneIndex private constructor(
 
     companion object {
 
+        /**
+         * The machine-built boolean ceiling for scope filters, well above the plan's 10 000-document archive
+         * target. Lucene's default is 1024 clauses (enforced at rewrite time by `IndexSearcher`), which a
+         * scope filter over a broad criterion (processing status, media type, OCR-derived) on a large archive
+         * would exceed and then surface as `TooManyClauses` — a 500 on a plausible query. Raised once
+         * process-wide because every BooleanQuery this application constructs is either machine-built or a
+         * single parsed user query; no user input expands into an unbounded clause list.
+         */
+        const val MAX_BOOLEAN_CLAUSES: Int = 100_000
+
+        init {
+            IndexSearcher.setMaxClauseCount(MAX_BOOLEAN_CLAUSES)
+        }
+
         private const val MARKER_FILE: String = "current"
         private const val GENERATION_PREFIX: String = "lucene-"
 

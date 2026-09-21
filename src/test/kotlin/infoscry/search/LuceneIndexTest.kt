@@ -7,6 +7,10 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
 import java.nio.file.Files
+import org.apache.lucene.index.Term
+import org.apache.lucene.search.BooleanClause
+import org.apache.lucene.search.BooleanQuery
+import org.apache.lucene.search.TermQuery
 import java.nio.file.Path
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -33,6 +37,22 @@ class LuceneIndexTest {
     @AfterTest
     fun removeTemporaryIndexDirectory() {
         indexDir.toFile().deleteRecursively()
+    }
+
+    @Test
+    fun `scope filters on thousands of documents do not trip the boolean clause cap`() {
+        // Referencing the constant forces the companion init, which raises the machine-built clause cap the
+        // scope filter needs for the plan's 10 000-document archive target.
+        assertTrue(
+            LuceneIndex.MAX_BOOLEAN_CLAUSES >= 5_000,
+            "the machine-built ceiling must cover the design target",
+        )
+        val scope = BooleanQuery.Builder().apply {
+            repeat(5_000) { id ->
+                add(TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, "doc-$id")), BooleanClause.Occur.FILTER)
+            }
+        }.build()
+        assertEquals(5_000, scope.clauses().size)
     }
 
     @Test
