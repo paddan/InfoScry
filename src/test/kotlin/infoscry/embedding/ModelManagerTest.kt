@@ -270,6 +270,33 @@ class ModelManagerTest {
     }
 
     @Test
+    fun `a manifest whose file has an unknown checksum provenance is refused`() {
+        val json =
+            """
+            {
+              "model": "intfloat/multilingual-e5-base",
+              "revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+              "baseUrl": "https://huggingface.co/intfloat/multilingual-e5-base/onnx",
+              "dimension": 768,
+              "maxSequenceTokens": 512,
+              "pooling": "attention-mask-mean",
+              "prefixVersion": "r1",
+              "passagePrefix": "passage: ",
+              "queryPrefix": "query: ",
+              "nativeRuntime": { "artifact": "com.microsoft.onnxruntime:onnxruntime", "version": "1.22.0" },
+              "executionProvider": { "name": "CoreML", "options": { "MLComputeUnits": "CPUAndGPU", "ModelFormat": "MLProgram" } },
+              "files": [
+                { "name": "model.onnx", "bytes": 1, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sha256Source": "guessed" }
+              ]
+            }
+            """.trimIndent()
+
+        val thrown = assertFailsWith<IllegalArgumentException> { ModelManifest.parse(json) }
+        assertTrue("provenance" in thrown.message.orEmpty(), "message names the provenance, was: ${thrown.message}")
+        assertTrue("guessed" in thrown.message.orEmpty(), "message names the bad value, was: ${thrown.message}")
+    }
+
+    @Test
     fun `nothing in the manifest points at a cuda export`() {
         val manifest = ModelManifest.load()
 

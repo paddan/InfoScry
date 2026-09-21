@@ -35,10 +35,14 @@ data class ModelFile(
         require(name.isNotBlank()) { "a model file needs a name" }
         require(bytes > 0) { "ModelFile.bytes must be positive for '$name', was $bytes" }
         require(sha256.length == SHA256_HEX_LENGTH) { "'$name' needs a full SHA-256, was '${sha256}'" }
+        require(sha256Source in KNOWN_PROVENANCE_VALUES) {
+            "'$name' has an unknown checksum provenance '$sha256Source'; expected one of $KNOWN_PROVENANCE_VALUES"
+        }
     }
 
     internal companion object {
         const val SHA256_HEX_LENGTH: Int = 64
+        val KNOWN_PROVENANCE_VALUES: Set<String> = setOf("lfs-oid", "pinned-revision-bytes")
     }
 }
 
