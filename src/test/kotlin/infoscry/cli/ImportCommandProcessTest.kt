@@ -157,8 +157,13 @@ class ImportCommandProcessTest {
             "import", "--data-dir", dataDir.toString(), "--collection", "Default", source.toString(),
         )
 
-        assertEquals(0, result.exitCode, result.stderr)
+        // The dead runtime file must not send the command to a dead server: the import runs in this
+        // process. Without an installed embedding model the document's outcome is the model remedy rather
+        // than a finished import, so the assertion here is about where the import went, not that it
+        // completed — the bytes land locally, never on the dead process's port.
         assertEquals(1, managedOriginals(dataDir).size)
+        assertContains(result.stderr, "importing in this process")
+        assertContains(result.stdout + result.stderr, "MODEL_NOT_INSTALLED")
     }
 
     @Test

@@ -2,9 +2,16 @@ package infoscry.collection
 
 import infoscry.AppContext
 import infoscry.config.AppPaths
+import infoscry.domain.Chunk
+import infoscry.domain.ChunkId
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.domain.ContentUnitId
+import infoscry.domain.DocumentId
+import infoscry.domain.SourceLocation
 import infoscry.library.ManagedLibrary
+import infoscry.search.DocumentRow
+import infoscry.search.vectorFor
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
@@ -75,6 +82,10 @@ class CollectionDeletionRecoveryTest {
     fun `a deletion interrupted at DB_DELETED recovers`() = assertRecovered(StopAfter.DB_DELETED)
 
     @Test
+    fun `a deletion interrupted after the index removal but before the phase is recorded recovers`() =
+        assertRecovered(StopAfter.INDEX_REMOVED)
+
+    @Test
     fun `a deletion interrupted at INDEX_DELETED recovers`() = assertRecovered(StopAfter.INDEX_DELETED)
 
     @Test
@@ -122,6 +133,56 @@ class CollectionDeletionRecoveryTest {
                 report.blocked.single().phase,
                 "a blocked operation must stay at the phase that describes the disk",
             )
+        }
+    }
+
+    // ---- Real search entries are removed ----
+
+    @Test
+    fun `deleting a collection removes its search entries and makes it unsearchable`() {
+        val (collectionId, documentId) = AppContext.open(dataDir).use { context ->
+            val collection = runBlocking { context.collectionService.create(COLLECTION_NAME) }
+            // Index one chunk the way an import would, through the real index with a deterministic vector.
+            val documentId = DocumentId.new()
+            runBlocking {
+                context.index.replaceDocument(
+                    listOf(
+                        DocumentRow(
+                            collectionId = collection.id,
+                            documentId = documentId,
+                            unitId = ContentUnitId.new(),
+                            locator = SourceLocation.TextLines(1, 1),
+                            locatorLabel = "line 1",
+                            chunk = Chunk(
+                                id = ChunkId.new(),
+                                contentUnitId = ContentUnitId.new(),
+                                ordinal = 0,
+                                text = "classified report",
+                                startOffset = 0,
+                                endOffset = "classified report".length,
+                                tokenCount = "classified report".length,
+                                tokenStart = 0,
+                                tokenEnd = "classified report".length - 1,
+                            ),
+                            vector = vectorFor("classified report"),
+                        ),
+                    ),
+                )
+            }
+            assertEquals(1, context.index.chunkCount(collection.id, documentId))
+            assertTrue(context.index.searchKeyword(collection.id, "classified", limit = 10).isNotEmpty())
+            collection.id to documentId
+        }
+
+        // Deleting through the real index removes the entries, and a crash before the phase write is
+        // rolled forward by the next startup without leaving the collection searchable.
+        terminateHarnessAt(StopAfter.INDEX_REMOVED, collectionId)
+
+        AppContext.open(dataDir).use { reopened ->
+            assertTrue(reopened.deletionRecovery.blocked.isEmpty())
+            assertNull(reopened.collectionService.get(collectionId))
+            assertEquals(0, reopened.index.chunkCount(collectionId, documentId), "no deleted collection is searchable")
+            assertTrue(reopened.index.searchKeyword(collectionId, "classified", limit = 10).isEmpty())
         }
     }
 

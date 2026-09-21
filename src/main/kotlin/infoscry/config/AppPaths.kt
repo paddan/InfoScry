@@ -76,6 +76,14 @@ class AppPaths private constructor(val root: Path) {
     val logsDir: Path = root.resolve(LOGS_DIRECTORY)
     val tempDir: Path = root.resolve("tmp")
 
+    /**
+     * Where the accelerator records its one verification profile, under the temp root.
+     *
+     * A profile is a diagnostic artifact, not archive state: it is scratch the way `tmp` is scratch, and
+     * it has to be outside `library` because nothing here is imported or evidencing a document.
+     */
+    val embeddingProfileDir: Path get() = tempDir.resolve("gpu-profile")
+
     fun collectionDir(collectionId: CollectionId): Path = libraryDir.resolve(collectionId.value)
 
     fun documentDir(collectionId: CollectionId, documentId: DocumentId): Path =

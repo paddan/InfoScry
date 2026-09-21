@@ -45,7 +45,7 @@ class E5Embedder internal constructor(
     private val tokenizerPath: Path,
     private val runner: EmbeddingRunner,
     private val batchTokenBudget: Int = DEFAULT_BATCH_TOKEN_BUDGET,
-) : TokenCounter, AutoCloseable {
+) : TokenCounter, DocumentEmbedder, AutoCloseable {
 
     init {
         require(batchTokenBudget > 0) { "batchTokenBudget must be positive, was $batchTokenBudget" }
@@ -83,7 +83,7 @@ class E5Embedder internal constructor(
      * keep the input inside the budget, so an overflow here means the chunker and the embedder disagree about
      * the measurement and continuing would store a vector built from different text than the citation names.
      */
-    fun embedDocuments(texts: List<String>): List<FloatArray> {
+    override fun embedDocuments(texts: List<String>): List<FloatArray> {
         if (texts.isEmpty()) return emptyList()
         val rows = texts.map { text -> encodeRow(manifest.passagePrefix, text, EMBEDDING_INPUT_TOO_LONG_CODE) }
         return embedRows(rows)
@@ -284,6 +284,33 @@ class E5Embedder internal constructor(
          * starting the server, serving a request or reading an existing document should wait on 1.1 GB of
          * digests.
          */
+        /**
+         * Builds the document embedder on first use, or reports that the model is not installed.
+         *
+         * The returned supplier is the import stage's only source of vectors. It is checked once per
+         * process and memoised, and it returns `null` when the model files are absent — never a CPU
+         * fallback — so the missing model stays a per-document failure with the install remedy rather
+         * than a startup requirement.
+         */
+        fun productionDocumentEmbedder(
+            modelsDir: Path,
+            profileDirectory: Path,
+        ): () -> DocumentEmbedder? {
+            val cached: Lazy<DocumentEmbedder?> = lazy {
+                val manifest = ModelManifest.load()
+                if (!ModelManager(manifest).isInstalled(modelsDir)) {
+                    null
+                } else {
+                    production(
+                        manifest = manifest,
+                        installation = ModelInstallation(manifest, modelsDir.resolve(manifest.revision)),
+                        profileDirectory = profileDirectory,
+                    )
+                }
+            }
+            return { cached.value }
+        }
+
         fun productionCounter(
             modelsDir: Path,
             profileDirectory: Path,

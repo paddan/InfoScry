@@ -114,4 +114,26 @@ sealed interface SourceLocation {
             }
         }
     }
+
+    /**
+     * The human-readable label of this location, as a search result or citation shows it.
+     *
+     * One pointer per variant, in English: page numbers and slides are one-based, spreadsheet addresses
+     * keep the A1 spelling a reader recognises, and headings are joined into their ancestor chain so the
+     * label says where the section sits, not just what its last heading is.
+     */
+    fun describe(): String = when (this) {
+        is PdfPage -> "page $page"
+        is Image -> "image $name"
+        is Slide -> "slide $number"
+        is TextLines -> "lines $start" + if (end == start) "" else "–$end"
+        is SpreadsheetRange -> "$sheet!$startCell:$endCell"
+        is HtmlSection -> headingPath.joinToString(" › ")
+        is EbookSection -> {
+            val labels = listOfNotNull(chapter) + headingPath
+            labels.joinToString(" › ").ifEmpty { "section ${spineIndex + 1}" }
+        }
+        is WordSection -> headingPath.joinToString(" › ").ifEmpty { "document" } +
+            " paragraphs $paragraphStart" + if (paragraphEnd == paragraphStart) "" else "–$paragraphEnd"
+    }
 }

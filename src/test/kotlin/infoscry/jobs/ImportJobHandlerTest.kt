@@ -23,11 +23,14 @@ import infoscry.extract.ExtractorRegistry
 import infoscry.extract.MediaTypeDetector
 import infoscry.extract.TextualFallbackExtractor
 import infoscry.extract.emitDocumentRefusal
+import infoscry.embedding.E5Embedder
+import infoscry.embedding.ModelManager
+import infoscry.embedding.TestDocumentEmbedder
+import infoscry.extract.OCR_FAILED_CODE
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermissions
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -99,27 +102,46 @@ class ImportJobHandlerTest {
     fun `a resumed import reuses committed units instead of doing their work again`() {
         withHarness { harness ->
             val source = harness.writeText("minutes.txt", "Ordinary text\n")
-            val sink = FileExtractionSink(harness.directory.resolve("units"))
 
             // The first attempt commits two of its three units and then dies where a child tool would.
             val interrupted = RecordingUnits(units = 3, failProducingUnit = 2)
-            val first = harness.import(listOf(source), harness.pipeline(interrupted, sink))
+            val first = harness.importDurably(listOf(source), interrupted)
 
             assertEquals(listOf("unit-0", "unit-1"), interrupted.produced)
             assertEquals(ImportItemOutcome.FAILED, first.items.single().outcome)
-            assertEquals(setOf("unit-0", "unit-1"), sink.committedKeys())
+            val documentId = first.items.single().documentId!!
+            val firstDocument = first.documents.getValue(documentId)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(
+                    setOf("unit-0", "unit-1"),
+                    context.content
+                        .loadCheckpoints(
+                            documentId,
+                            ExtractionFingerprint.of(
+                                firstDocument.sha256,
+                                ExtractionSettings(ocrLanguages = "eng"),
+                            ),
+                        )
+                        .map { it.key }
+                        .toSet(),
+                )
+            }
 
             // The document is not finished, so importing the same file again resumes it rather than
             // declaring a duplicate and walking away from the unfinished extraction.
             val resumed = RecordingUnits(units = 3)
-            val second = harness.import(listOf(source), harness.pipeline(resumed, sink))
+            val second = harness.importDurably(listOf(source), resumed)
 
             assertEquals(listOf("unit-2"), resumed.produced, "a committed unit was extracted again")
             assertEquals(listOf("unit-0", "unit-1"), resumed.skipped)
-            assertEquals(setOf("unit-0", "unit-1", "unit-2"), sink.committedKeys())
-            // The bytes were already stored, so this item is a duplicate; what it did was finish them.
+            // The bytes were already stored, so this item is a duplicate; what it did was finish them —
+            // chunks, vectors and index entries included.
             assertEquals(ImportItemOutcome.DUPLICATE, second.items.single().outcome)
-            assertEquals(first.documents.keys.single(), second.items.single().documentId)
+            assertEquals(documentId, second.items.single().documentId)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(DocumentStatus.COMPLETE, context.documents.get(documentId)!!.status)
+                assertEquals(3, context.index.chunkCount(CollectionId("default"), documentId))
+            }
         }
     }
 
@@ -127,19 +149,25 @@ class ImportJobHandlerTest {
     fun `changed extraction settings do not reuse another fingerprint's units`() {
         withHarness { harness ->
             val source = harness.writeText("report.txt", "text\n")
-            val sink = FileExtractionSink(harness.directory.resolve("units"))
 
-            val first = RecordingUnits(units = 1)
-            harness.import(listOf(source), harness.pipeline(first, sink))
+            // The first pass fails after committing its first unit, so the second pass has a checkpoint
+            // to either reuse or refuse: a completed document would never re-enter extraction at all,
+            // which would test the wrong half of the fingerprint promise.
+            val first = RecordingUnits(units = 2, failProducingUnit = 1)
+            harness.importDurably(listOf(source), first, settings = ExtractionSettings(ocrLanguages = "eng"))
 
-            val changed = RecordingUnits(units = 1)
-            harness.import(
+            val changed = RecordingUnits(units = 2)
+            harness.importDurably(
                 listOf(source),
-                harness.pipeline(changed, sink),
+                changed,
                 settings = ExtractionSettings(ocrLanguages = "swe+eng"),
             )
 
-            assertEquals(listOf("unit-0"), changed.produced, "another fingerprint's unit was reused")
+            assertEquals(
+                listOf("unit-0", "unit-1"),
+                changed.produced,
+                "another fingerprint's unit was reused",
+            )
             assertTrue(changed.skipped.isEmpty())
             assertNotEquals(first.fingerprints.single(), changed.fingerprints.single())
         }
@@ -225,12 +253,11 @@ class ImportJobHandlerTest {
         withHarness { harness ->
             val source = harness.writeText("moved.txt", "Ordinary text\n")
             val canonical = source.toRealPath()
-            val sink = FileExtractionSink(harness.directory.resolve("units"))
             val parked = CompletableDeferred<Unit>()
 
             // The first attempt stores the bytes, commits its first unit, and dies while the next one is
             // still being worked on: the state a machine that loses power leaves behind.
-            val jobId = harness.interrupt(listOf(canonical), harness.pipeline(ParkedUnits(parked), sink), parked)
+            val jobId = harness.interruptDurably(listOf(canonical), ParkedUnits(parked), parked)
 
             val interrupted = AppContext.open(harness.dataDir).use { it.importItems.listForJob(jobId) }
             val stored = interrupted.single().documentId
@@ -243,7 +270,7 @@ class ImportJobHandlerTest {
             Files.delete(canonical)
 
             val resumed = RecordingUnits(units = 3)
-            val run = harness.resume(jobId, harness.pipeline(resumed, sink))
+            val run = harness.resumeDurably(jobId, resumed)
 
             assertEquals(JobState.COMPLETE, run.job.state)
             assertEquals(ImportItemOutcome.DUPLICATE, run.items.single().outcome)
@@ -251,7 +278,21 @@ class ImportJobHandlerTest {
             assertNotEquals("SOURCE_MISSING", run.items.single().errorCode)
             assertEquals(listOf("unit-1", "unit-2"), resumed.produced)
             assertEquals(listOf("unit-0"), resumed.skipped)
-            assertEquals(setOf("unit-0", "unit-1", "unit-2"), sink.committedKeys())
+            AppContext.open(harness.dataDir).use { context ->
+                val document = context.documents.get(stored)!!
+                assertEquals(DocumentStatus.COMPLETE, document.status)
+                assertEquals(3, context.index.chunkCount(CollectionId("default"), stored))
+                assertEquals(
+                    setOf("unit-0", "unit-1", "unit-2"),
+                    context.content
+                        .loadCheckpoints(
+                            stored,
+                            ExtractionFingerprint.of(document.sha256, ExtractionSettings(ocrLanguages = "eng")),
+                        )
+                        .map { it.key }
+                        .toSet(),
+                )
+            }
         }
     }
 
@@ -300,7 +341,7 @@ class ImportJobHandlerTest {
     }
 
     @Test
-    fun `a finished extraction commits its units and chunks them without calling the document complete`() {
+    fun `a finished extraction indexes its chunks and only then completes the document`() {
         withHarness { harness ->
             val source = harness.writeText("minutes.txt", "Ordinary text\n")
 
@@ -309,15 +350,20 @@ class ImportJobHandlerTest {
             val item = run.items.single()
             assertEquals(ImportItemOutcome.IMPORTED, item.outcome)
             val documentId = item.documentId!!
-            // Reading it back through a fresh process is the point: the text, the chunks, and the marker are
-            // durable state, not the attempt's memory.
+            val collectionId = CollectionId("default")
+            // Reading it back through a fresh process is the point: text, chunks, vectors and index entries
+            // are durable state, not the attempt's memory.
             AppContext.open(harness.dataDir).use { context ->
                 val document = context.documents.get(documentId)!!
-                assertEquals(DocumentStatus.CHUNKING, document.status)
+                assertEquals(DocumentStatus.COMPLETE, document.status)
                 val units = context.content.listUnits(documentId, afterOrdinal = -1, limit = 10)
                 assertEquals(listOf(0, 1, 2), units.map { it.ordinal })
                 assertEquals("unit 0", units.first().extractedText)
                 assertTrue(context.content.chunkCount(documentId) >= 3, "every unit produced chunks")
+                assertEquals(3, context.index.chunkCount(collectionId, documentId), "every chunk is searchable")
+                val hits = context.index.searchKeyword(collectionId, "unit", limit = 10)
+                assertEquals(3, hits.size)
+                assertEquals(documentId.value, hits.first().documentId)
                 assertEquals(
                     setOf("unit-0", "unit-1", "unit-2"),
                     context.content
@@ -332,6 +378,61 @@ class ImportJobHandlerTest {
                     context.content.extractionMarker(documentId),
                     "a pass that reported it finished leaves a marker",
                 )
+            }
+        }
+    }
+
+    @Test
+    fun `a document whose finished pass had failed units completes with warnings and stays searchable`() {
+        withHarness { harness ->
+            val source = harness.writeText("mixed.txt", "Ordinary text\n")
+
+            val run = harness.importDurably(listOf(source), FailedUnitsThenFinish(goodUnits = 2, failedUnits = 1))
+
+            val item = run.items.single()
+            assertEquals(ImportItemOutcome.IMPORTED, item.outcome)
+            val documentId = item.documentId!!
+            AppContext.open(harness.dataDir).use { context ->
+                val document = context.documents.get(documentId)!!
+                // The extraction marker names the failed unit, and the pass still finished, so the document
+                // is searchable with a warning rather than failed or silently complete.
+                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, document.status)
+                assertEquals(1, context.content.extractionMarker(documentId)?.failedUnits)
+                assertEquals(2, context.index.chunkCount(CollectionId("default"), documentId))
+            }
+        }
+    }
+
+    @Test
+    fun `a missing model fails the document at embedding with the install remedy`() {
+        withHarness { harness ->
+            val source = harness.writeText("missing.txt", "Ordinary text\n")
+
+            val jobId = AppContext.open(harness.dataDir).use { context ->
+                val job = harness.enqueueForTest(context, listOf(source.toRealPath()))
+                // The real embedder supplier against an empty models directory answers null, which is what
+                // makes the failure a per-document remedy rather than a startup crash.
+                ImportJobHandler.attachTo(
+                    context,
+                    harness.storedPipeline(context, RecordingUnits(units = 1)),
+                    documentEmbedder = E5Embedder.productionDocumentEmbedder(
+                        modelsDir = context.paths.modelsDir,
+                        profileDirectory = context.paths.embeddingProfileDir,
+                    ),
+                )
+                harness.awaitJob(context, job.id)
+                job.id
+            }
+
+            AppContext.open(harness.dataDir).use { context ->
+                val item = context.importItems.listForJob(jobId).single()
+                assertEquals(ImportItemOutcome.FAILED, item.outcome)
+                assertEquals(ModelManager.MODEL_NOT_INSTALLED_CODE, item.errorCode)
+                assertTrue(
+                    item.errorMessage.orEmpty().contains("embeddingModel"),
+                    "the remedy must name the install action, was ${item.errorMessage}",
+                )
+                assertEquals(DocumentStatus.FAILED, context.documents.get(item.documentId!!)!!.status)
             }
         }
     }
@@ -389,7 +490,7 @@ class ImportJobHandlerTest {
             // The attempt commits its first unit, then dies where a child tool would be working.
             val jobId = AppContext.open(harness.dataDir).use { context ->
                 val job = harness.enqueueForTest(context, listOf(source.toRealPath()))
-                ImportJobHandler.attachTo(context, harness.storedPipeline(context, ParkedUnits(parked, units = 3)))
+                harness.attach(context, harness.storedPipeline(context, ParkedUnits(parked, units = 3)))
                 runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { parked.await() } }
                 job.id
             }
@@ -403,13 +504,16 @@ class ImportJobHandlerTest {
             // The next process reads the rest and nothing else.
             val resumed = RecordingUnits(units = 3)
             AppContext.open(harness.dataDir).use { context ->
-                ImportJobHandler.attachTo(context, harness.storedPipeline(context, resumed))
+                harness.attach(context, harness.storedPipeline(context, resumed))
                 harness.awaitJob(context, jobId)
                 val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
                 assertEquals(listOf("unit-1", "unit-2"), resumed.produced)
                 assertEquals(listOf("unit-0"), resumed.skipped)
                 assertEquals(listOf(0, 1, 2), context.content.listUnits(document.id, -1, 10).map { it.ordinal })
                 assertTrue(context.content.chunkCount(document.id) >= 3, "the resumed pass chunks every unit")
+                // The resume ends the same way a first pass does: complete, and once in the index.
+                assertEquals(DocumentStatus.COMPLETE, document.status)
+                assertEquals(3, context.index.chunkCount(CollectionId("default"), document.id))
             }
         }
     }
@@ -429,13 +533,22 @@ class ImportJobHandlerTest {
             val run = harness.importDurably(listOf(source), second)
 
             assertEquals(ImportItemOutcome.DUPLICATE, run.items.single().outcome)
-            assertTrue(second.produced.isEmpty(), "a committed unit was read again")
-            assertEquals(listOf("unit-0", "unit-1"), second.skipped)
+            // The document is already complete and indexed, so the re-import is a duplicate that never
+            // re-enters extraction at all — not a resume that re-reads committed units.
+            assertTrue(second.produced.isEmpty(), "a completed document must not be read again")
+            assertTrue(second.skipped.isEmpty(), "the extractor is not even invoked for a completed duplicate")
             val after = AppContext.open(harness.dataDir).use { context ->
                 val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
                 context.content.listUnits(document.id, -1, 10).flatMap { context.content.chunksOf(it.id).map { chunk -> chunk.id } }
             }
             assertEquals(before, after, "unchanged text and tokenizer must not rebuild the chunks")
+
+            // Re-importing an already indexed document also leaves exactly one set of index entries.
+            AppContext.open(harness.dataDir).use { context ->
+                val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
+                assertEquals(DocumentStatus.COMPLETE, document.status)
+                assertEquals(2, context.index.chunkCount(CollectionId("default"), document.id))
+            }
         }
     }
 
@@ -520,7 +633,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
         collectionId: CollectionId = CollectionId("default"),
     ): ImportRun = AppContext.open(dataDir).use { context ->
         val job = enqueue(context, sources, settings, collectionId)
-        ImportJobHandler.attachTo(context, storedPipeline(context, extractor))
+        attach(context, storedPipeline(context, extractor))
         finish(context, job.id, collectionId)
     }
 
@@ -531,9 +644,17 @@ internal class Harness(val directory: Path) : AutoCloseable {
         collectionId: CollectionId = CollectionId("default"),
     ): ImportRun = AppContext.open(dataDir).use { context ->
         val job = enqueue(context, sources, settings, collectionId)
-        ImportJobHandler.attachTo(context, pipeline)
+        attach(context, pipeline)
         finish(context, job.id, collectionId)
     }
+
+    /**
+     * Attaches the import worker with a deterministic fake embedder, so documents are indexed without
+     * the pinned model. A missing model belongs to its own test, which uses the real embedder supplier
+     * against an empty models directory.
+     */
+    fun attach(context: AppContext, pipeline: ImportPipeline): JobRunner =
+        ImportJobHandler.attachTo(context, pipeline, documentEmbedder = { TestDocumentEmbedder() })
 
     /**
      * Starts an import and lets it die in the middle of extraction, the way a killed process does.
@@ -550,7 +671,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
         collectionId: CollectionId = CollectionId("default"),
     ): JobId = AppContext.open(dataDir).use { context ->
         val job = enqueue(context, sources, settings, collectionId)
-        ImportJobHandler.attachTo(context, pipeline)
+        attach(context, pipeline)
         runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { extractionParked.await() } }
         job.id
     }
@@ -561,7 +682,31 @@ internal class Harness(val directory: Path) : AutoCloseable {
         pipeline: ImportPipeline,
         collectionId: CollectionId = CollectionId("default"),
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        ImportJobHandler.attachTo(context, pipeline)
+        attach(context, pipeline)
+        finish(context, jobId, collectionId)
+    }
+
+    /** [interrupt] with the real durable unit store, so the resume has checkpoints to reuse. */
+    fun interruptDurably(
+        sources: List<Path>,
+        extractor: DocumentExtractor,
+        extractionParked: CompletableDeferred<Unit>,
+        settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
+        collectionId: CollectionId = CollectionId("default"),
+    ): JobId = AppContext.open(dataDir).use { context ->
+        val job = enqueue(context, sources, settings, collectionId)
+        attach(context, storedPipeline(context, extractor))
+        runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { extractionParked.await() } }
+        job.id
+    }
+
+    /** [resume] with the real durable unit store. */
+    fun resumeDurably(
+        jobId: JobId,
+        extractor: DocumentExtractor,
+        collectionId: CollectionId = CollectionId("default"),
+    ): ImportRun = AppContext.open(dataDir).use { context ->
+        attach(context, storedPipeline(context, extractor))
         finish(context, jobId, collectionId)
     }
 
@@ -693,59 +838,55 @@ internal class ParkedUnits(
 }
 
 /**
- * A sink whose committed keys survive the attempt, so a resume has something to resume from.
- *
- * It writes a file rather than rows on purpose: the durable unit store belongs to its own task, and what
- * this test needs is only that the checkpoint protocol is real — keys committed under a fingerprint are
- * visible to the next attempt, and another fingerprint's keys are not.
- */
-internal class FileExtractionSink(private val directory: Path) : ExtractionSink {
-
-    override val storesUnits: Boolean = true
-
-    private val delivered = mutableListOf<Triple<String, String, ExtractionEvent>>()
-
-    override suspend fun committedKeys(
-        documentId: DocumentId,
-        fingerprint: ExtractionFingerprint,
-    ): Set<String> = delivered
-        .filter { (id, print, _) -> id == documentId.value && print == fingerprint.value }
-        .mapNotNull { (_, _, event) -> keyOf(event) }
-        .toSet()
-
-    /** Every key committed by any attempt, for assertions about what a resume had to work with. */
-    fun committedKeys(): Set<String> = delivered.mapNotNull { (_, _, event) -> keyOf(event) }.toSet()
-
-    override suspend fun deliver(
-        documentId: DocumentId,
-        fingerprint: ExtractionFingerprint,
-        event: ExtractionEvent,
-    ) {
-        delivered += Triple(documentId.value, fingerprint.value, event)
-        Files.createDirectories(directory)
-        Files.writeString(
-            directory.resolve("committed.tsv"),
-            delivered.joinToString("\n") { (id, print, deliveredEvent) ->
-                listOf(id, print, keyOf(deliveredEvent) ?: "-").joinToString("\t")
-            },
-            StandardOpenOption.CREATE,
-        )
-    }
-
-    private fun keyOf(event: ExtractionEvent): String? = when (event) {
-        is ExtractionEvent.UnitReady -> event.key
-        is ExtractionEvent.UnitFailed -> event.key
-        is ExtractionEvent.Finished -> null
-    }
-}
-
-/**
  * An extractor that reports units and then refuses the rest of the document, the way a reader does when it
  * finds the container is protected half way through.
  *
  * The refusal is the real one from the extraction contract: a document-level failure with no `Finished`
  * afterwards, which is what tells the pipeline the document was not read to the end.
  */
+/**
+ * An extractor that reads part of the document, reports one unit it could not read, and still finishes
+ * the pass — the shape that makes a document `COMPLETE_WITH_WARNINGS`: what it read is searchable, and
+ * the failure is on record.
+ */
+internal class FailedUnitsThenFinish(
+    private val goodUnits: Int,
+    private val failedUnits: Int,
+) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        repeat(goodUnits) { index ->
+            val key = "unit-$index"
+            if (!input.isCommitted(key)) {
+                input.boundary.unit {
+                    emit(
+                        ExtractionEvent.UnitReady(
+                            key = key,
+                            ordinal = index,
+                            unit = ContentUnitDraft(
+                                locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
+                                extractedText = "unit $index",
+                                searchText = "unit $index",
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
+        repeat(failedUnits) { index ->
+            val ordinal = goodUnits + index
+            input.boundary.unit {
+                emit(ExtractionEvent.UnitFailed(key = "unit-failed-$index", ordinal = ordinal, code = OCR_FAILED_CODE))
+            }
+        }
+        input.boundary.unit {
+            emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = goodUnits + failedUnits))
+        }
+    }
+}
+
 internal class RefusingUnits(private val unitsBeforeRefusing: Int) : DocumentExtractor {
 
     override val supportedMediaTypes: Set<String> = setOf("text/plain")

@@ -9,6 +9,7 @@ import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.path
 import infoscry.AppContext
 import infoscry.config.AppPaths
+import infoscry.embedding.DocumentEmbedder
 import infoscry.config.ProcessLockUnavailable
 import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportPipeline
@@ -34,6 +35,7 @@ data class ServeResponse(val url: String, val port: Int, val pid: Long)
  */
 class ServeCommand(
     private val pipeline: (AppContext) -> ImportPipeline = { context -> ImportPipeline.production(context) },
+    private val importEmbedder: (AppContext) -> () -> DocumentEmbedder? = ::productionImportEmbedder,
 ) : CliktCommand(name = "serve") {
 
     private val port by option(
@@ -66,7 +68,7 @@ class ServeCommand(
             // The worker is attached before anything is served, so an enqueued import is always owned by a
             // live process: a request that was accepted while no runner existed would be a job nobody runs.
             // Attaching first makes that an ordering invariant rather than a comment about one.
-            ImportJobHandler.attachTo(opened, pipeline(opened))
+            ImportJobHandler.attachTo(opened, pipeline(opened), documentEmbedder = importEmbedder(opened))
             opened to startLoopbackServer(opened, port)
         }
         Runtime.getRuntime().addShutdownHook(

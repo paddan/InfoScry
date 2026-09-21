@@ -37,6 +37,9 @@ object DeletionHarness {
         /** The collection's rows are gone. */
         DB_DELETED,
 
+        /** The search entries have been removed but the phase that records it has not been written. */
+        INDEX_REMOVED,
+
         /** The search entries are gone. */
         INDEX_DELETED,
 
@@ -54,6 +57,7 @@ object DeletionHarness {
             RENAMED -> DeletionStep(DeletionPhase.FILES_MOVED, recorded = false)
             FILES_MOVED -> DeletionStep(DeletionPhase.FILES_MOVED, recorded = true)
             DB_DELETED -> DeletionStep(DeletionPhase.DB_DELETED, recorded = true)
+            INDEX_REMOVED -> DeletionStep(DeletionPhase.INDEX_DELETED, recorded = false)
             INDEX_DELETED -> DeletionStep(DeletionPhase.INDEX_DELETED, recorded = true)
             PURGED -> DeletionStep(DeletionPhase.DONE, recorded = false)
         }
@@ -63,7 +67,7 @@ object DeletionHarness {
             get() = when (this) {
                 PREPARED, RENAMED -> DeletionPhase.PREPARED
                 FILES_MOVED -> DeletionPhase.FILES_MOVED
-                DB_DELETED -> DeletionPhase.DB_DELETED
+                DB_DELETED, INDEX_REMOVED -> DeletionPhase.DB_DELETED
                 INDEX_DELETED, PURGED -> DeletionPhase.INDEX_DELETED
             }
 

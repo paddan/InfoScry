@@ -2,9 +2,14 @@ package infoscry.jobs
 
 import infoscry.AppContext
 import infoscry.chunk.Chunker
+import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.E5Embedder
+import infoscry.embedding.EmbeddingException
 import infoscry.embedding.GpuRuntime
+import infoscry.embedding.GpuUnavailableException
 import infoscry.embedding.ModelManager
+import infoscry.search.DocumentRow
+import infoscry.search.LuceneIndex
 import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
@@ -69,6 +74,8 @@ class ImportJobHandler(
     private val pipeline: ImportPipeline,
     private val content: ContentStore,
     private val chunker: Chunker,
+    private val index: LuceneIndex,
+    private val documentEmbedder: () -> DocumentEmbedder?,
 ) : JobHandler {
 
     override suspend fun handle(job: Job, stage: JobStage) {
@@ -201,7 +208,123 @@ class ImportJobHandler(
         }
 
         chunkContent(document, stage)
+        if (!embedAndIndex(job, collection, document, source, stage)) {
+            // The failure is recorded per item inside embedAndIndex; nothing further may overwrite the
+            // item's outcome with `attached.outcome` (which would turn a failed document into an
+            // "imported" one that a later resume walked past).
+            return
+        }
         stage.run(STAGE_RECORD) { items.record(job.id, source.key, attached.outcome, document.id) }
+    }
+
+    /**
+     * Turns the document's persisted chunks into vectors and publishes them to the search index.
+     *
+     * This is where ingestion stops being "read this file" and becomes "make it searchable". Embedding
+     * runs chunk by chunk inside the mutation permit (the expensive half, and the half that may need the
+     * accelerator); the index publication is a single replacement of the document's chunks followed by one
+     * commit, done under its own permit after a final lifecycle recheck, and only then is the document
+     * marked complete. Cancel before that commit and nothing is durable: the resume replays from the
+     * persisted chunks without re-reading the source or re-running OCR.
+     */
+    private suspend fun embedAndIndex(
+        job: Job,
+        collection: Collection,
+        document: Document,
+        source: ImportSource,
+        stage: JobStage,
+    ): Boolean {
+        val embedder = documentEmbedder()
+        if (embedder == null) {
+            recordFailure(
+                job = job,
+                source = source,
+                stage = stage,
+                document = document,
+                code = ModelManager.MODEL_NOT_INSTALLED_CODE,
+                message = ModelManager.installRemedy(),
+            )
+            return false
+        }
+
+        try {
+            stage.run(STAGE_EMBED) { documents.updateStatus(document.id, DocumentStatus.EMBEDDING) }
+            val rows = ArrayList<DocumentRow>()
+            var afterOrdinal = -1
+            while (true) {
+                val units = content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
+                if (units.isEmpty()) break
+                units.forEach { unit ->
+                    val chunks = content.chunksOf(unit.id)
+                    chunks.chunked(EMBED_BATCH).forEach { batch ->
+                        val vectors = stage.run(STAGE_EMBED) {
+                            embedder.embedDocuments(batch.map { it.text })
+                        }
+                        require(vectors.size == batch.size) {
+                            "the embedder returned ${vectors.size} vectors for ${batch.size} passages"
+                        }
+                        batch.forEachIndexed { index, chunk ->
+                            rows += DocumentRow(
+                                collectionId = collection.id,
+                                documentId = document.id,
+                                unitId = unit.id,
+                                locator = unit.locator,
+                                locatorLabel = unit.locator.describe(),
+                                chunk = chunk,
+                                vector = vectors[index],
+                            )
+                        }
+                    }
+                    afterOrdinal = unit.ordinal
+                }
+                if (units.size < CHUNK_BATCH) break
+            }
+
+            if (rows.isEmpty()) {
+                // Nothing to index means an extraction pass with no units, which the chunking stage
+                // would already have refused as a refusal rather than a finished pass. This guard keeps
+                // the record honest instead of silently publishing an empty replacement.
+                throw EmbeddingException(EMBEDDING_FAILED, "the document produced no searchable chunks")
+            }
+
+            stage.run(STAGE_INDEX) { documents.updateStatus(document.id, DocumentStatus.INDEXING) }
+            stage.run(STAGE_INDEX) {
+                // Recheck under the permit before publication: the collection may have been tombstoned
+                // while this document was being embedded, and publishing into a deleted collection would
+                // leave index entries nothing else could account for.
+                val live = collections.get(collection.id)
+                    ?: throw CollectionNotActiveException(collection.id)
+                if (live.lifecycle != CollectionLifecycle.ACTIVE) {
+                    throw CollectionNotActiveException(collection.id)
+                }
+                index.replaceDocument(rows)
+            }
+            stage.run(STAGE_RECORD) {
+                val failedUnits = content.extractionMarker(document.id)?.failedUnits ?: 0
+                val status = if (failedUnits > 0) DocumentStatus.COMPLETE_WITH_WARNINGS else DocumentStatus.COMPLETE
+                documents.updateStatus(document.id, status)
+            }
+            return true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (notActive: CollectionNotActiveException) {
+            throw notActive
+        } catch (failure: Exception) {
+            val code = when (failure) {
+                is GpuUnavailableException -> GpuRuntime.GPU_UNAVAILABLE_CODE
+                is EmbeddingException -> failure.code
+                else -> EMBEDDING_FAILED
+            }
+            recordFailure(
+                job = job,
+                source = source,
+                stage = stage,
+                document = document,
+                code = code,
+                message = failure.message ?: "the document could not be embedded",
+            )
+            return false
+        }
     }
 
     /**
@@ -499,13 +622,14 @@ class ImportJobHandler(
     companion object {
 
         /** Where a verified CoreML session writes its one profile, under the data directory's temp root. */
-        private const val PROFILE_DIRECTORY = "gpu-profile"
-
         private const val STAGE_QUEUE = "queue"
         private const val STAGE_COPY = "copy"
         private const val STAGE_EXTRACT = "extract"
         private const val STAGE_CHUNK = "chunk"
+        private const val STAGE_EMBED = "embed"
+        private const val STAGE_INDEX = "index"
         private const val STAGE_RECORD = "record"
+        private const val EMBEDDING_FAILED = "EMBEDDING_FAILED"
         private const val SOURCE_MISSING = "SOURCE_MISSING"
         private const val SOURCE_UNREADABLE = "SOURCE_UNREADABLE"
         private const val COPY_FAILED = "COPY_FAILED"
@@ -514,6 +638,9 @@ class ImportJobHandler(
 
         /** How many units one read of the chunking walk takes, so a large document stays interruptible. */
         private const val CHUNK_BATCH = 64
+
+        /** How many chunks one embedding step holds at once, so a long document stays interruptible. */
+        private const val EMBED_BATCH = 64
 
         private const val COMPONENT_FIELD = "component"
         private const val DOCUMENT_FIELD = "document_id"
@@ -541,8 +668,14 @@ class ImportJobHandler(
             chunker: Chunker = Chunker(
                 E5Embedder.productionCounter(
                     modelsDir = context.paths.modelsDir,
-                    profileDirectory = context.paths.tempDir.resolve(PROFILE_DIRECTORY),
+                    profileDirectory = context.paths.embeddingProfileDir,
                 ),
+            ),
+            // The document embedder, resolved lazily and per process, and null when the model is not
+            // installed. Tests inject a deterministic fake here; production uses the pinned model.
+            documentEmbedder: () -> DocumentEmbedder? = E5Embedder.productionDocumentEmbedder(
+                modelsDir = context.paths.modelsDir,
+                profileDirectory = context.paths.embeddingProfileDir,
             ),
         ): JobRunner {
             val handler = ImportJobHandler(
@@ -554,6 +687,8 @@ class ImportJobHandler(
                 pipeline = pipeline,
                 content = context.content,
                 chunker = chunker,
+                index = context.index,
+                documentEmbedder = documentEmbedder,
             )
             val runner = JobRunner(
                 store = context.jobs,

@@ -7,9 +7,13 @@ import infoscry.config.AppPaths
 import infoscry.config.ProcessLock
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.embedding.ModelManifest
 import infoscry.jobs.JobRunner
 import infoscry.library.ManagedLibrary
 import infoscry.logging.LoggingBootstrap
+import infoscry.search.IndexIdentity
+import infoscry.search.LuceneIndex
+import infoscry.search.LuceneSchema
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
 import infoscry.storage.Database
@@ -48,6 +52,7 @@ class AppContext private constructor(
     val mutations: MutationCoordinator,
     val collectionService: CollectionService,
     val jobs: JobStore,
+    val index: LuceneIndex,
     private val lock: ProcessLock,
 ) : AutoCloseable {
 
@@ -96,6 +101,10 @@ class AppContext private constructor(
                     .setCause(failure)
                     .log("the job runner did not finish handing its attempts back to the queue")
             }
+        // The index closes before the database: both are derived from it, and an index writer that held
+        // the directory open while the database closed would be the one thing this process owns that
+        // outlived its archive.
+        runCatching { index.close() }
         // The lock is released last: while the database is closing, this process still owns the data
         // directory, so no second process may open it in between.
         runCatching { database.close() }
@@ -136,38 +145,58 @@ class AppContext private constructor(
                     val jobs = JobStore(database)
                     val importItems = ImportItemStore(database)
                     val mutations = MutationCoordinator()
-                    val service = CollectionService(
-                        database = database,
-                        paths = paths,
-                        collections = collections,
-                        deletions = deletions,
-                        coordinator = mutations,
-                        index = index,
-                    )
-                    val context = AppContext(
-                        paths = paths,
-                        database = database,
-                        collections = collections,
-                        documents = documents,
-                        content = content,
-                        deletions = deletions,
-                        importItems = importItems,
-                        library = ManagedLibrary(paths, documents),
-                        mutations = mutations,
-                        collectionService = service,
-                        jobs = jobs,
-                        lock = lock,
-                    )
-                    context.deletionRecovery = runBlocking { service.recoverDeletions() }
-                    // After deletions are finished, because finishing one cascades its jobs away: an
-                    // attempt that a previous process was inside is queued again, and a cancellation
-                    // request that previous process recorded is honoured rather than re-run.
-                    val resumed = jobs.resetInterrupted()
-                    if (resumed > 0) {
-                        LOGGER.atInfo().addKeyValue(RESUMED_JOBS_FIELD, resumed)
-                            .log("queued interrupted job attempts again")
+
+                    // The search index is part of the data directory, so every open has exactly one. It is
+                    // created before recovery so an unfinished deletion can finish its index phase, and it
+                    // records the pinned model's identity so stale vectors are detected rather than searched.
+                    val searchIndex = LuceneIndex.open(paths.indexDir, identityForCurrentModel())
+                    try {
+                        // The removal seam stays injectable for tests that must observe an index failure;
+                        // production passes the real index and lets it fill the deletion machine's
+                        // INDEX_DELETED phase itself.
+                        val remover = if (index === CollectionIndexRemover.NONE) {
+                            CollectionIndexRemover { collectionId -> searchIndex.deleteCollection(collectionId) }
+                        } else {
+                            index
+                        }
+                        val service = CollectionService(
+                            database = database,
+                            paths = paths,
+                            collections = collections,
+                            deletions = deletions,
+                            coordinator = mutations,
+                            index = remover,
+                        )
+                        val context = AppContext(
+                            paths = paths,
+                            database = database,
+                            collections = collections,
+                            documents = documents,
+                            content = content,
+                            deletions = deletions,
+                            importItems = importItems,
+                            library = ManagedLibrary(paths, documents),
+                            mutations = mutations,
+                            collectionService = service,
+                            jobs = jobs,
+                            index = searchIndex,
+                            lock = lock,
+                        )
+                        context.deletionRecovery = runBlocking { service.recoverDeletions() }
+                        // After deletions are finished, because finishing one cascades its jobs away: an
+                        // attempt that a previous process was inside is queued again, and a cancellation
+                        // request that previous process recorded is honoured rather than re-run.
+                        val resumed = jobs.resetInterrupted()
+                        if (resumed > 0) {
+                            LOGGER.atInfo().addKeyValue(RESUMED_JOBS_FIELD, resumed)
+                                .log("queued interrupted job attempts again")
+                        }
+                        return context
+                    } catch (failure: Throwable) {
+                        runCatching { searchIndex.close() }
+                        runCatching { database.close() }
+                        throw failure
                     }
-                    return context
                 } catch (failure: Throwable) {
                     runCatching { database.close() }
                     throw failure
@@ -176,6 +205,18 @@ class AppContext private constructor(
                 lock.close()
                 throw failure
             }
+        }
+
+        /** The index identity of the pinned model: what the vectors are, and what a mismatch is measured on. */
+        internal fun identityForCurrentModel(): IndexIdentity {
+            val manifest = ModelManifest.load()
+            return IndexIdentity(
+                schemaVersion = LuceneSchema.SCHEMA_VERSION,
+                model = manifest.model,
+                modelRevision = manifest.revision,
+                modelFingerprint = manifest.fingerprint(),
+                dimension = manifest.dimension,
+            )
         }
 
         private const val RESUMED_JOBS_FIELD = "resumed_jobs"

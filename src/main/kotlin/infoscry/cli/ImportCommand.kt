@@ -11,6 +11,7 @@ import com.github.ajalt.clikt.parameters.types.path
 import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.config.ProcessLockUnavailable
+import infoscry.embedding.DocumentEmbedder
 import infoscry.config.RuntimeInfo
 import infoscry.diagnostics.ToolProbe
 import infoscry.domain.Job
@@ -64,6 +65,7 @@ data class ImportResult(
  */
 class ImportCommand(
     private val pipeline: (AppContext) -> ImportPipeline = { context -> ImportPipeline.production(context) },
+    private val importEmbedder: (AppContext) -> () -> DocumentEmbedder? = ::productionImportEmbedder,
 ) : CliktCommand(name = "import") {
 
     private val collection by option(
@@ -147,7 +149,7 @@ class ImportCommand(
             )
             // The worker is attached after the job exists, so there is no window where the runner is
             // claiming from a queue this command has not filled yet.
-            ImportJobHandler.attachTo(open, pipeline(open))
+            ImportJobHandler.attachTo(open, pipeline(open), documentEmbedder = importEmbedder(open))
             echo("Importing ${requested.size} path(s) as job ${job.id.value}.")
             val finished = runBlocking {
                 awaitTerminal {

@@ -59,6 +59,12 @@ dependencies {
     // The PDF extractor: PDFBox reads one page's text layer at a time and renders only the pages that
     // OCR has to read.
     implementation(libs.pdfbox)
+    // The search index: Lucene stores analyzed text, exact filters, stored citation labels, and the
+    // 768-dimension vectors, with ICU analysis so a European multilingual archive tokenizes consistently.
+    // QueryParser turns a user query string into a Lucene Query; the ICU module supplies ICUAnalyzer.
+    implementation(libs.lucene.core)
+    implementation(libs.lucene.analysis.icu)
+    implementation(libs.lucene.queryparser)
     // The local API: the embedded server, its Netty engine, and the loopback client the CLI and the
     // tests use to talk to a running server.
     implementation(libs.ktor.server.core)

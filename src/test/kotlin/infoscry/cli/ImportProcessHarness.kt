@@ -4,6 +4,8 @@ import com.github.ajalt.clikt.core.main
 import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.domain.SourceLocation
+import infoscry.embedding.DocumentEmbedder
+import infoscry.embedding.TestDocumentEmbedder
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.DocumentExtractor
 import infoscry.extract.ExtractionEvent
@@ -12,6 +14,7 @@ import infoscry.extract.ExtractorRegistry
 import infoscry.extract.MediaTypeDetector
 import infoscry.extract.TextualFallbackExtractor
 import infoscry.jobs.ImportPipeline
+import infoscry.jobs.StoredUnitsSink
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.delay
@@ -42,22 +45,38 @@ object ImportProcessHarness {
 
     @JvmStatic
     fun main(args: Array<String>) {
-        // The pipeline factory is the same seam production uses; only its contents differ.
-        RootCommand(pipeline = { context -> harnessPipeline(context) }).main(args)
+        // The pipeline factory is the same seam production uses; the embedder substitution is the same
+        // seam the import path uses, so the child documents are indexed without the pinned model.
+        RootCommand(
+            pipeline = { context -> harnessPipeline(context) },
+            importEmbedder = { _ -> { FakeDocumentEmbedder } },
+        ).main(args)
     }
 
-    /** The pipeline a harness run extracts with: the real detector, one fake extractor, a file sink. */
+    /**
+     * The pipeline a harness run extracts with: the real detector, the real durable unit store, and one
+     * fake extractor.
+     *
+     * The unit store is real on purpose: extraction, checkpoints, chunks, embeddings and index
+     * publication are one pipeline, and a harness that stops before the durable store would be a harness
+     * that tests an earlier version of it. The only substitution is the extractor and the embedder, and
+     * the gate below is what makes an import observable while it runs.
+     */
     fun harnessPipeline(context: AppContext): ImportPipeline = ImportPipeline(
         detector = MediaTypeDetector(),
         registry = ExtractorRegistry(listOf(HarnessExtractor()), TextualFallbackExtractor()),
-        // A sink that survives the attempt, because extraction is a no-op without one and the gate below
-        // is what makes an import observable while it runs.
-        sink = FileUnitsSink(context.paths.tempDir.resolve("harness-units")),
+        sink = StoredUnitsSink(context.paths, context.documents, context.content),
     )
 
     /** The gate path the child waits for, if the test asked for one. */
     fun gatePath(): Path? = System.getenv("INFOSCRY_TEST_GATE")?.takeIf { it.isNotBlank() }?.let(Path::of)
 
+}
+
+/** The fake embedder the process harness indexes with; a temporary data directory has no model. */
+internal object FakeDocumentEmbedder : DocumentEmbedder {
+    override fun embedDocuments(texts: List<String>): List<FloatArray> =
+        TestDocumentEmbedder().embedDocuments(texts)
 }
 
 /**
@@ -101,50 +120,5 @@ internal class HarnessExtractor : DocumentExtractor {
     private companion object {
         const val GATE_POLL_MILLIS = 20L
         const val GATE_TIMEOUT_NANOS = 120_000_000_000L
-    }
-}
-
-/** A sink that records committed unit keys under the data directory, so a child process's work is visible. */
-internal class FileUnitsSink(private val directory: Path) : infoscry.extract.ExtractionSink {
-
-    override val storesUnits: Boolean = true
-
-    override suspend fun committedKeys(
-        documentId: infoscry.domain.DocumentId,
-        fingerprint: infoscry.extract.ExtractionFingerprint,
-    ): Set<String> = readEntries()
-        .filter { (id, print, _) -> id == documentId.value && print == fingerprint.value }
-        .map { (_, _, key) -> key }
-        .toSet()
-
-    override suspend fun deliver(
-        documentId: infoscry.domain.DocumentId,
-        fingerprint: infoscry.extract.ExtractionFingerprint,
-        event: ExtractionEvent,
-    ) {
-        val key = when (event) {
-            is ExtractionEvent.UnitReady -> event.key
-            is ExtractionEvent.UnitFailed -> event.key
-            is ExtractionEvent.Finished -> return
-        }
-        Files.createDirectories(directory)
-        Files.writeString(
-            directory.resolve("units.txt"),
-            "${documentId.value}\t${fingerprint.value}\t$key\n",
-            java.nio.file.StandardOpenOption.CREATE,
-            java.nio.file.StandardOpenOption.APPEND,
-        )
-    }
-
-    /** Every committed entry as `(document, fingerprint, key)`. */
-    private fun readEntries(): List<Triple<String, String, String>> {
-        val file = directory.resolve("units.txt")
-        if (!Files.exists(file)) return emptyList()
-        return Files.readAllLines(file)
-            .filter { it.isNotBlank() }
-            .map { line ->
-                val parts = line.split('\t')
-                Triple(parts[0], parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
-            }
     }
 }

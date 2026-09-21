@@ -27,6 +27,7 @@ ktor-client-cio = { module = "io.ktor:ktor-client-cio-jvm", version.ref = "ktor"
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
 lucene-core = { module = "org.apache.lucene:lucene-core", version.ref = "lucene" }
 lucene-analysis-icu = { module = "org.apache.lucene:lucene-analysis-icu", version.ref = "lucene" }
+lucene-queryparser = { module = "org.apache.lucene:lucene-queryparser", version.ref = "lucene" }
 tika-core = { module = "org.apache.tika:tika-core", version.ref = "tika" }
 pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
 poi-ooxml = { module = "org.apache.poi:poi-ooxml", version.ref = "poi" }

@@ -7,7 +7,22 @@ import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.path
+import infoscry.embedding.DocumentEmbedder
+import infoscry.embedding.E5Embedder
 import java.nio.file.Path
+
+/**
+ * The document embedder production wiring, as one function a composition root can hand to the import path.
+ *
+ * It answers lazily and per process (the pinned model is 1.1 GB and deliberately not a startup
+ * requirement), and it returns `null` when the model is not installed so the import stage reports the
+ * install remedy per document. The harness substitutes a deterministic fake at this one seam.
+ */
+internal fun productionImportEmbedder(context: infoscry.AppContext): () -> DocumentEmbedder? =
+    E5Embedder.productionDocumentEmbedder(
+        modelsDir = context.paths.modelsDir,
+        profileDirectory = context.paths.embeddingProfileDir,
+    )
 
 /** The help text for the two options every command accepts, in one place. */
 internal const val JSON_HELP = "Print stable machine-readable JSON instead of text"
@@ -47,6 +62,8 @@ internal fun resolveOptions(parent: CliOptions?, json: Boolean, dataDir: Path?):
 class RootCommand(
     private val pipeline: (infoscry.AppContext) -> infoscry.jobs.ImportPipeline =
         { context -> infoscry.jobs.ImportPipeline.production(context) },
+    private val importEmbedder: (infoscry.AppContext) -> () -> DocumentEmbedder? =
+        ::productionImportEmbedder,
 ) : CliktCommand(name = "infoscry") {
 
     private val json by option("--json", help = JSON_HELP).flag()
@@ -66,10 +83,10 @@ class RootCommand(
     init {
         subcommands(
             LogsCommand(),
-            ServeCommand(pipeline),
+            ServeCommand(pipeline, importEmbedder),
             CollectionCommand(),
             JobsCommand(),
-            ImportCommand(pipeline),
+            ImportCommand(pipeline, importEmbedder),
         )
     }
 
