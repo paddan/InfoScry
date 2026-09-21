@@ -1,6 +1,7 @@
 package infoscry.search
 
 import infoscry.AppContext
+import infoscry.config.AppPaths
 import infoscry.domain.Chunk
 import infoscry.domain.ChunkId
 import infoscry.domain.CollectionId
@@ -115,7 +116,8 @@ class ReindexRecoveryTest {
             val outcome = runBlocking {
                 searchService(closed).search("nightfall", filters = SearchFilters(collectionId = collectionB))
             }
-            assertEquals(1, outcome.hits.size, "the carried-forward collection is still searchable")
+            // Hits are per chunk, and both of the carried-forward collection's chunks contain the term.
+            assertEquals(2, outcome.hits.size, "the carried-forward collection is still searchable")
         }
     }
 
@@ -155,7 +157,8 @@ class ReindexRecoveryTest {
             val before = runBlocking {
                 searchService(closed).search("nightfall", filters = SearchFilters(collectionId = collectionA))
             }
-            assertEquals(1, before.hits.size, "the archive is searchable before the rebuild")
+            // Hits are per chunk, and the seeded document's two chunks both contain the term.
+            assertEquals(2, before.hits.size, "the archive is searchable before the rebuild")
 
             val entered = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Unit>()
@@ -204,7 +207,8 @@ class ReindexRecoveryTest {
             val outcome = runBlocking {
                 searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
             }
-            assertEquals(1, outcome.hits.size, "the archive is searchable from the generation it kept")
+            // Hits are per chunk, and the seeded document's two chunks both contain the term.
+            assertEquals(2, outcome.hits.size, "the archive is searchable from the generation it kept")
             assertTrue(
                 generationDirectories().none { it != beforeName },
                 "an unreferenced successor is swept on the way in, kept: ${generationDirectories()}",
@@ -232,7 +236,8 @@ class ReindexRecoveryTest {
             val outcome = runBlocking {
                 searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
             }
-            assertEquals(1, outcome.hits.size, "the successor serves the same citations")
+            // Hits are per chunk, and the seeded document's two chunks both contain the term.
+            assertEquals(2, outcome.hits.size, "the successor serves the same citations")
             assertTrue(
                 generationDirectories().none { it == beforeName },
                 "the generation the marker replaced is swept",
@@ -268,7 +273,7 @@ class ReindexRecoveryTest {
      * One document whose chunks and index rows were produced by the same tokenizer and the same
      * identity the rebuild compares against, so the copy path can stand in for a rebuild.
      */
-    private fun seedSearchableDocument(
+    private suspend fun seedSearchableDocument(
         context: AppContext,
         collectionId: CollectionId,
         filename: String,
@@ -314,6 +319,7 @@ class ReindexRecoveryTest {
 
         var walked = 0
         var afterOrdinal = -1
+        val rows = mutableListOf<DocumentRow>()
         while (true) {
             val batch = context.content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = UNIT_BATCH)
             if (batch.isEmpty()) break
@@ -331,24 +337,25 @@ class ReindexRecoveryTest {
                     maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
                     overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
                 )
-                context.index().replaceDocument(
-                    plan.drafts.map { draft ->
-                        DocumentRow(
-                            collectionId = collectionId,
-                            documentId = document.id,
-                            unitId = unit.id,
-                            locator = unit.locator,
-                            locatorLabel = unit.locator.describe(),
-                            chunk = draft.asChunk(unit.id),
-                            vector = vectorFor(draft.text),
-                        )
-                    },
-                )
+                // The index replaces per document, so the fixture accumulates every unit's rows and
+                // publishes them in one call, exactly as ReindexService.indexDocument does.
+                rows += plan.drafts.map { draft ->
+                    DocumentRow(
+                        collectionId = collectionId,
+                        documentId = document.id,
+                        unitId = unit.id,
+                        locator = unit.locator,
+                        locatorLabel = unit.locator.describe(),
+                        chunk = draft.asChunk(unit.id),
+                        vector = vectorFor(draft.text),
+                    )
+                }
                 afterOrdinal = unit.ordinal
                 walked++
             }
             if (batch.size < UNIT_BATCH) break
         }
+        context.index().replaceDocument(rows)
         context.content.finishChunking(
             documentId = document.id,
             chunkerVersion = chunker.version,
@@ -442,11 +449,7 @@ class ReindexRecoveryTest {
         val context: AppContext,
         val first: CollectionId,
         val second: CollectionId?,
-    ) {
-        operator fun component1(): AppContext = context
-        operator fun component2(): CollectionId = first
-        operator fun component3(): CollectionId? = second
-    }
+    )
 
     private fun ChunkDraft.asChunk(contentUnitId: ContentUnitId): Chunk = Chunk(
         id = ChunkId.new(),
