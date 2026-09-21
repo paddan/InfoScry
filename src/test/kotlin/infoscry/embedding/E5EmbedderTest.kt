@@ -1,5 +1,9 @@
 package infoscry.embedding
 
+import ai.onnxruntime.OrtException
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import infoscry.chunk.Chunker
 import infoscry.chunk.WhitespaceTokenCounter
 import infoscry.domain.CollectionId
@@ -7,6 +11,7 @@ import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -94,12 +99,41 @@ class E5EmbedderTest {
     }
 
     @Test
-    fun `the query prefix is not the passage prefix`() {
+    fun `the query and passage prefixes cost the same tokens for a short text`() {
         val embedder = embedder()
 
-        // "query: " and "passage: " are different tokens in the fixture, so the counts can differ.
+        // "query: " and "passage: " are different tokens in the fixture, so the counts can differ; what the
+        // caller relies on is that neither prefix is free, so a short query is not refused for budget reasons.
         assertEquals(embedder.queryTokens("hej"), embedder.encodePassage("hej").totalTokens)
         assertTrue(embedder.queryTokens("hej") > 0)
+    }
+
+    @Test
+    fun `a query prefix is excluded from the body its tokens span`() {
+        val embedder = embedder()
+        val text = "hej världen"
+        val encoded = embedder.encodedQuery(text)
+
+        assertTrue(encoded.overheadTokens > 0, "the prefix itself costs tokens")
+        assertTrue(encoded.totalTokens > encoded.overheadTokens, "the text also produced tokens")
+        encoded.tokens.filter { it.span != null }.forEach { token ->
+            val span = token.span!!
+            assertTrue(
+                span.first >= 0 && span.last < text.length,
+                "a query prefix token must not enter the body, but $span addresses '$text'",
+            )
+        }
+    }
+
+    @Test
+    fun `the query and passage prefixes produce different added tokens`() {
+        val embedder = embedder()
+        val text = "hej världen"
+
+        val queryIds = embedder.encodedQuery(text).tokens.map { it.id }
+        val passageIds = embedder.encodePassage(text).tokens.map { it.id }
+
+        assertTrue(queryIds != passageIds, "different prefixes are different token sequences")
     }
 
     @Test
@@ -186,6 +220,30 @@ class E5EmbedderTest {
         assertTrue(E5Embedder.isOutOfMemory(IllegalStateException("Failed to allocate memory for tensor")))
         assertTrue(E5Embedder.isOutOfMemory(IllegalStateException("CoreML OOM while running")))
         assertTrue(!E5Embedder.isOutOfMemory(IllegalStateException("shape mismatch")))
+    }
+
+    @Test
+    fun `a provider failure the oom patterns do not recognise is logged and not retried`() {
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        val logger = LoggerFactory.getLogger(E5Embedder::class.java) as Logger
+        logger.addAppender(appender)
+        try {
+            val embedder = embedder(runner = RefusingOrtRunner)
+
+            val failure = assertFailsWith<OrtException> { embedder.embedDocuments(listOf("hej")) }
+            // ORT prefixes the message with the code, so the assertion looks for the provider's own text.
+            assertTrue(failure.message!!.contains("shape mismatch"), failure.message)
+
+            val event = appender.list.single()
+            val fields = event.keyValuePairs.associate { it.key to it.value }
+            assertEquals("ORT_FAIL", fields["provider_error_code"])
+            // The logged field is the message ORT itself reports, code prefix included.
+            val providerError = fields["provider_error"] as? String ?: ""
+            assertTrue(providerError.contains("shape mismatch"), providerError)
+            assertEquals("embedding", fields["component"])
+        } finally {
+            logger.detachAppender(appender)
+        }
     }
 
     @Test
@@ -305,6 +363,13 @@ private class RecordingRunner : EmbeddingRunner {
 }
 
 /** A runner that fails on any batch larger than [failAbove], as a device with too little memory does. */
+/** A runner that fails the way the provider does, with a typed error code that is not an allocation failure. */
+private object RefusingOrtRunner : EmbeddingRunner {
+    override fun embed(ids: Array<LongArray>, masks: Array<LongArray>): List<FloatArray> {
+        throw OrtException(OrtException.OrtErrorCode.ORT_FAIL, "shape mismatch")
+    }
+}
+
 private class OutOfMemoryRunner(private val failAbove: Int) : EmbeddingRunner {
     val results = mutableListOf<List<FloatArray>>()
 

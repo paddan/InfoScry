@@ -29,12 +29,15 @@ failure mode has no symptom, so the gate is built out of evidence instead:
 
 1. the readiness probe refuses a machine outside the matrix and a runtime that does not offer CoreML, and
 2. the session itself is created with profiling enabled, its warm-up is profiled, and the profile must show
-   CoreML kernel events — a graph that ran entirely on the CPU is refused with `GPU_UNAVAILABLE`.
+   CoreML kernel events **carrying more than half the measured kernel time**
+   (`GpuRuntime.REQUIRED_CORE_ML_SHARE`, the same bound the validation run asserts) — a graph that ran
+   entirely on the CPU, or one the CPU carries, is refused with `GPU_UNAVAILABLE`.
 
 The second check is `GpuRuntime.requireCoreMlExecution`, unit-tested against synthetic profiles in
-`GpuRuntimeTest` (a CoreML-only profile is accepted; a CPU-only profile is refused; an unreadable or empty
-profile is refused rather than read as "no evidence") and exercised against the real model by
-`GpuModelIntegrationTest`.
+`GpuRuntimeTest` (a CoreML-only profile is accepted; a CoreML kernel that carries the kernel time is accepted;
+a graph the CPU carries is refused even when CoreML ran something; a CPU-only profile is refused; an unreadable
+or empty profile is refused rather than read as "no evidence") and exercised against the real model by
+`GpuModelIntegrationTest`, which reads the bound from the same constant.
 
 ## The run this task passed on
 

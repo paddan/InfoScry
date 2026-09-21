@@ -94,7 +94,7 @@ class GpuModelIntegrationTest {
                 "CoreML must execute part of the graph, but the profile says: ${session.profile.describe()}",
             )
             assertTrue(
-                session.profile.coreMlShare > 0.5,
+                session.profile.coreMlShare > GpuRuntime.REQUIRED_CORE_ML_SHARE,
                 "CoreML must carry the compute, not a token node: ${session.profile.describe()}",
             )
             writeEvidence(session.profile, readiness, sessionMillis, runs[runs.size / 2])

@@ -60,7 +60,7 @@ internal fun manifestForFiles(contents: Map<String, ByteArray>, baseUrl: String)
                 name = name,
                 bytes = bytes.size.toLong(),
                 sha256 = sha256OfBytes(bytes),
-                sha256Source = "test-fixture",
+                sha256Source = "pinned-revision-bytes",
             )
         },
     )

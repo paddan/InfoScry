@@ -4,6 +4,7 @@ import ai.djl.huggingface.tokenizers.Encoding
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtException
 import infoscry.chunk.EncodedPassage
 import infoscry.chunk.EncodedToken
 import infoscry.chunk.TokenCounter
@@ -109,6 +110,15 @@ class E5Embedder internal constructor(
      */
     fun queryTokens(query: String): Int = encodeRow(manifest.queryPrefix, query, QUERY_OVERLONG_CODE).ids.size
 
+    /**
+     * Encodes a query the way the query path encodes it, exposing the passage rather than only its length.
+     *
+     * The production query path needs a count and a refusal; the body spans under the query prefix come from
+     * the same [measure] logic `encodePassage` uses, and this exists so a test can prove that the prefix is
+     * excluded from the body without a second, drifting definition of that rule.
+     */
+    internal fun encodedQuery(query: String): EncodedPassage = measure(manifest.queryPrefix, query)
+
     val dimension: Int get() = manifest.dimension
 
     val maxSequenceTokens: Int get() = manifest.maxSequenceTokens
@@ -138,7 +148,18 @@ class E5Embedder internal constructor(
             }
             return vectors
         } catch (failure: Throwable) {
-            if (!isOutOfMemory(failure)) throw failure
+            if (!isOutOfMemory(failure)) {
+                if (failure is OrtException) {
+                    // An unmatched provider failure is a real gap: a future ORT build can reword the message
+                    // and silently turn the retry off. Logging the typed code keeps the gap visible instead.
+                    LOGGER.atWarn()
+                        .addKeyValue(FIELD_COMPONENT, COMPONENT)
+                        .addKeyValue("provider_error_code", failure.code.name)
+                        .addKeyValue("provider_error", failure.message?.take(PROVIDER_MESSAGE_LIMIT) ?: "")
+                        .log("the provider failed for a reason the out-of-memory patterns do not recognise")
+                }
+                throw failure
+            }
             if (rows.size == 1) {
                 throw EmbeddingException(
                     code = OUT_OF_MEMORY_CODE,
@@ -326,11 +347,27 @@ class E5Embedder internal constructor(
         internal fun isOutOfMemory(failure: Throwable): Boolean {
             if (failure is OutOfMemoryError) return true
             val message = failure.message?.lowercase() ?: return false
-            return message.contains("out of memory") ||
-                message.contains("oom") ||
-                message.contains("failed to allocate") ||
-                message.contains("memory allocation")
+            return OOM_MESSAGE_PATTERNS.any(message::contains)
         }
+
+        /**
+         * The message fragments that have meant an allocation failure across ONNX Runtime 1.x.
+         *
+         * ONNX Runtime 1.22 has no typed out-of-memory error code in its Java API: an allocation failure
+         * surfaces as an `OrtException` whose message says so, so the message is the only signal available
+         * and a future build that rewords it would silently disable the retry. [runBatch] therefore logs
+         * every unmatched provider failure with its typed code, which is what keeps that gap visible instead
+         * of silent.
+         */
+        private val OOM_MESSAGE_PATTERNS: List<String> = listOf(
+            "out of memory",
+            "oom",
+            "failed to allocate",
+            "memory allocation",
+        )
+
+        /** A provider error is diagnosis material, not something to quote in full. */
+        private const val PROVIDER_MESSAGE_LIMIT: Int = 512
     }
 }
 

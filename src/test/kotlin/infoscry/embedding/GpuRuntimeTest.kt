@@ -1,5 +1,6 @@
 package infoscry.embedding
 
+import ai.onnxruntime.OrtProvider
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -111,7 +112,7 @@ class GpuRuntimeTest {
     }
 
     @Test
-    fun `one coreml kernel is enough to accept a run whose shape operators stayed on the cpu`() {
+    fun `a coreml kernel that carries the kernel time is enough to accept a run whose shape operators stayed on the cpu`() {
         val summary = OnnxProfile.summarise(
             profile(
                 kernelEvent("CoreMLExecutionProvider", 700, "/layer/MatMul_kernel_time"),
@@ -121,6 +122,23 @@ class GpuRuntimeTest {
         )
 
         assertEquals(summary, GpuRuntime.requireCoreMlExecution(summary, runtime().probe(), "model.onnx"))
+    }
+
+    @Test
+    fun `a graph the cpu carries is refused even when coreml ran something`() {
+        val summary = OnnxProfile.summarise(
+            profile(
+                kernelEvent("CoreMLExecutionProvider", 700, "/layer/MatMul_kernel_time"),
+                kernelEvent("CPUExecutionProvider", 5000, "/layer/Attention_kernel_time"),
+                kernelEvent("CPUExecutionProvider", 4000, "/layer/FeedForward_kernel_time"),
+            ),
+        )
+
+        val failure = assertFailsWith<GpuUnavailableException> {
+            GpuRuntime.requireCoreMlExecution(summary, runtime().probe(), "model.onnx")
+        }
+        assertEquals(GpuRuntime.GPU_UNAVAILABLE_CODE, failure.code)
+        assertTrue(failure.message!!.contains("most of the kernel time"), failure.message)
     }
 
     @Test
@@ -139,12 +157,11 @@ class GpuRuntimeTest {
     }
 
     @Test
-    fun `the required provider name is the one the runtime reports`() {
-        assertEquals("CORE_ML", GpuRuntime.requiredProvider)
-        assertTrue(
-            GpuRuntime.requiredProvider in GpuRuntime.availableProviders(),
-            "this machine's ONNX Runtime must offer ${GpuRuntime.requiredProvider}, or the gate cannot pass",
-        )
+    fun `the required provider is the coreml enum, and both spellings normalise to it`() {
+        assertEquals(OrtProvider.CORE_ML.name, GpuRuntime.requiredProvider)
+        assertTrue(GpuRuntime.sameProvider("CoreML", "CORE_ML"))
+        assertTrue(GpuRuntime.sameProvider("CORE_ML", "CoreML"))
+        assertTrue(!GpuRuntime.sameProvider("CUDA", "CORE_ML"), "a different provider is not the required one")
     }
 
     @Test

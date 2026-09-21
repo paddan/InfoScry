@@ -242,7 +242,13 @@ class GpuRuntime(
         } catch (failure: Throwable) {
             session.close()
             options.close()
-            throw failure
+            // An unreadable profile is a refusal with a remedy, not a crash: the KDoc on OnnxProfile says an
+            // unreadable profile is refused, and the operator needs the same remedy either way.
+            throw GpuUnavailableException(
+                code = GPU_UNAVAILABLE_CODE,
+                message = "the model ran, but its profile could not be read: ${failure.message}. ${remedy()}",
+                cause = failure,
+            )
         }
         options.close()
         return VerifiedSession(
@@ -295,12 +301,14 @@ class GpuRuntime(
                 required.filter { it.isLetterOrDigit() }.lowercase()
 
         /**
-         * Refuses a run whose graph executed entirely on the CPU, and answers with the evidence otherwise.
+         * Refuses a run whose accelerator did not carry the compute.
          *
          * This is the decision the whole GPU requirement rests on, so it is a function of what the profile
          * says rather than of whether a provider was registered: ONNX Runtime accepts CoreML happily and then
          * runs everything on the CPU when the provider cannot take a node, and only the profile can tell the
-         * two apart.
+         * two apart. Both refusals exist for the same reason — a graph that ran entirely on the CPU, and a
+         * graph where the CPU carried most of the kernel time while a token node stayed behind — and the
+         * second one is the degradation that is otherwise invisible.
          */
         internal fun requireCoreMlExecution(
             profile: GpuProfile,
@@ -314,8 +322,24 @@ class GpuRuntime(
                         "the CPU (${profile.describe()}). ${remedy()}",
                 )
             }
+            if (profile.coreMlShare <= REQUIRED_CORE_ML_SHARE) {
+                throw GpuUnavailableException(
+                    code = GPU_UNAVAILABLE_CODE,
+                    message = "$modelName loaded with ${readiness.provider} registered, but the CPU carried " +
+                        "most of the kernel time (${profile.describe()}). ${remedy()}",
+                )
+            }
             return profile
         }
+
+        /**
+         * The share of measured kernel time CoreML must carry before a session is accepted.
+         *
+         * One place on purpose: the validation run asserts this same bound, so a session production accepts
+         * is exactly a session the hardware gate would accept. Shape and control operators may stay on the
+         * CPU, but the transformer compute itself must be the accelerator's.
+         */
+        internal const val REQUIRED_CORE_ML_SHARE: Double = 0.5
 
         /** The provider enum name v1 requires, so the matrix and the runtime agree on one spelling. */
         internal val requiredProvider: String = OrtProvider.CORE_ML.name
