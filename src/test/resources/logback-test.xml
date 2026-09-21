@@ -7,6 +7,9 @@
 <configuration>
 
   <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <!-- Diagnostics go to stderr, because stdout carries the command's result: machine-readable
+         JSON output can be piped straight into a parser with no log line in front of it. -->
+    <target>System.err</target>
     <encoder>
       <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
     </encoder>

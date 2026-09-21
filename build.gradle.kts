@@ -27,7 +27,13 @@ application {
 dependencies {
     implementation(libs.clikt)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.core)
     implementation(libs.sqlite.jdbc)
+    // The local API: the embedded server, its Netty engine, and the loopback client the CLI and the
+    // tests use to talk to a running server.
+    implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.netty)
+    implementation(libs.ktor.client.cio)
     // Logging: the console encoder, the rolling JSON file sink, and the redaction filter the
     // configuration in logback.xml names.
     implementation(libs.logback.classic)
@@ -35,6 +41,7 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(kotlin("test-junit5"))
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.kotlinx.coroutines.core)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 

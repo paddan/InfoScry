@@ -84,6 +84,15 @@ class AppPaths private constructor(val root: Path) {
     fun artifactsDir(collectionId: CollectionId, documentId: DocumentId): Path =
         documentDir(collectionId, documentId).resolve(ARTIFACTS_DIRECTORY)
 
+    /**
+     * Where a collection's managed directory is parked while its deletion is in flight.
+     *
+     * The trash lives inside `library/` on purpose: parking it has to be an atomic rename, which needs
+     * the same filesystem, and the durable deletion record stores only the basename because the parent
+     * is derivable. The leading dot keeps a parked directory from being mistaken for a collection.
+     */
+    fun trashDirectory(trashBasename: String): Path = libraryDir.resolve(trashBasename)
+
     /** The immutable managed copy of an import, named after the source's extension. */
     fun originalFile(collectionId: CollectionId, documentId: DocumentId, extension: String): Path =
         documentDir(collectionId, documentId).resolve("original.$extension")

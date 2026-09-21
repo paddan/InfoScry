@@ -5,6 +5,7 @@ import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.path
+import com.github.ajalt.clikt.core.findObject
 import infoscry.config.AppPaths
 import infoscry.logging.LogFilter
 import infoscry.logging.LogLevel
@@ -43,8 +44,13 @@ class LogsCommand : CliktCommand(name = "logs") {
 
     private val since by option("--since", help = "Only records newer than this, e.g. 30m, 12h, 7d")
 
+    /** The root command's options, when this command was invoked through it. */
+    private val parentOptions by findObject<CliOptions>()
+
     override fun run() {
-        val root = dataDir ?: defaultDataDir()
+        // `logs` reads a directory without opening a context, so it keeps its own option; the root's
+        // `--data-dir` is the fallback, so either spelling names the same directory.
+        val root = dataDir ?: parentOptions?.dataDir ?: defaultDataDir()
         val logsDir = AppPaths.of(root).logsDir
         val filter = LogFilter(
             minimumLevel = level?.let { name ->
