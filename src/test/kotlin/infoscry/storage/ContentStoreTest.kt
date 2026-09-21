@@ -1,7 +1,11 @@
 package infoscry.storage
 
 import infoscry.chunk.ChunkDraft
+import infoscry.chunk.Chunker
+import infoscry.chunk.WhitespaceTokenCounter
+import infoscry.domain.Chunk
 import infoscry.domain.CollectionId
+import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -260,6 +264,56 @@ class ContentStoreTest {
     }
 
     @Test
+    fun `every stored chunk's offsets slice the unit's search text`() {
+        val document = newDocument()
+        val text = (1..60).joinToString(" ") { "word$it" }
+        val unit = store.commitExtractedUnit(
+            document, fingerprint, "page-1", 0, draftOf(search = text), artifactRoot(document),
+        ).unit
+
+        val chunks = chunkAndStore(unit.id)
+
+        assertTrue(chunks.size >= 2, "the fixture has to produce more than one chunk to test the invariant")
+        chunks.forEach { chunk ->
+            assertEquals(
+                text.substring(chunk.startOffset, chunk.endOffset),
+                chunk.text,
+                "chunk ${chunk.ordinal} does not address the characters it claims to cover",
+            )
+        }
+    }
+
+    @Test
+    fun `chunk offsets address the search text and not the extracted text`() {
+        val document = newDocument()
+        // The two forms differ by exactly the normalization the ruled offset space is about: the extracted
+        // text keeps the carriage returns and control characters the search text does not.
+        val base = (1..60).joinToString(" ") { "ord$it" }
+        val extracted = base.replace(" ", "\r\n")
+        val search = base.replace(" ", "\n")
+        val unit = store.commitExtractedUnit(
+            document, fingerprint, "page-1", 0,
+            draftOf(extracted = extracted, search = search),
+            artifactRoot(document),
+        ).unit
+
+        val chunks = chunkAndStore(unit.id)
+
+        assertTrue(chunks.size >= 2, "the fixture has to produce more than one chunk")
+        chunks.forEach { chunk ->
+            assertEquals(
+                search.substring(chunk.startOffset, chunk.endOffset),
+                chunk.text,
+                "chunk ${chunk.ordinal} does not address the search text",
+            )
+        }
+        assertTrue(
+            chunks.any { extracted.substring(it.startOffset, it.endOffset) != it.text },
+            "the offsets have to be the search text's: reading them against the extracted text must not match",
+        )
+    }
+
+    @Test
     fun `re-chunking is skipped only when the chunker and its tokenizer are unchanged`() {
         val document = newDocument()
         val unit = store.commitExtractedUnit(document, fingerprint, "page-1", 0, draftOf(), artifactRoot(document)).unit
@@ -392,6 +446,30 @@ class ContentStoreTest {
         assertNull(commit.unit.artifactRelativePath)
     }
 
+    /**
+     * Chunks a stored unit the way the pipeline does and returns what the store kept.
+     *
+     * The budget is small so a realistic unit produces several chunks: the offsets of a single chunk would
+     * agree with almost any space by accident.
+     */
+    private fun chunkAndStore(unitId: ContentUnitId, budget: Int = 24, overlap: Int = 6): List<Chunk> {
+        val unit = assertNotNull(store.readUnit(unitId), "the unit has to exist before it can be chunked")
+        val plan = Chunker(WhitespaceTokenCounter()).chunk(
+            unit = unit,
+            maxSequenceTokens = budget,
+            overlapTokens = overlap,
+        )
+        store.replaceUnitChunks(
+            unitId = unitId,
+            drafts = plan.drafts,
+            chunkerVersion = Chunker.CHUNKER_VERSION,
+            tokenizerId = "whitespace-2-1",
+            maxSequenceTokens = budget,
+            overlapTokens = overlap,
+        )
+        return store.chunksOf(unitId)
+    }
+
     private fun newDocument(): DocumentId {
         val document = Document(
             id = DocumentId.new(),
@@ -425,6 +503,20 @@ class ContentStoreTest {
         return artifact
     }
 
-    private fun sha256Of(path: Path): String =
-        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)))
+    private fun sha256Of(path: Path): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(path).use { input ->
+            val buffer = ByteArray(DIGEST_BUFFER_BYTES)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest())
+    }
+
+    private companion object {
+        const val DIGEST_BUFFER_BYTES = 64 * 1024
+    }
 }

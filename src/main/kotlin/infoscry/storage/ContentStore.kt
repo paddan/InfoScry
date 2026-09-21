@@ -157,13 +157,14 @@ class ContentStore(private val database: Database) {
     ) {
         require(key.isNotBlank()) { "a unit checkpoint needs a key" }
         require(code.isNotBlank()) { "a failed unit names a code" }
+        require(ordinal >= 0) { "a unit ordinal must not be negative, was $ordinal" }
         database.transaction { connection ->
             upsertCheckpoint(
                 connection = connection,
                 documentId = documentId,
                 fingerprint = fingerprint,
                 key = key,
-                ordinal = maxOf(ordinal, 0),
+                ordinal = ordinal,
                 succeeded = false,
                 errorCode = code,
                 artifactRelativePath = null,
@@ -527,8 +528,18 @@ class ContentStore(private val database: Database) {
         return if (resolved.startsWith(base)) resolved else null
     }
 
-    private fun sha256Of(path: Path): String =
-        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)))
+    private fun sha256Of(path: Path): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(path).use { input ->
+            val buffer = ByteArray(DIGEST_BUFFER_BYTES)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest())
+    }
 
     private fun Connection.selectUnit(documentId: DocumentId, ordinal: Int): ContentUnit? =
         prepareStatement("$SELECT_UNITS WHERE document_id = ? AND ordinal = ?").use { statement ->
@@ -765,6 +776,14 @@ class ContentStore(private val database: Database) {
                 "token_start, token_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
         private val JSON = Json { ignoreUnknownKeys = true }
+
+        /**
+         * How much of an artifact is read at a time when it is verified.
+         *
+         * The digest runs while a mutation permit is held, and an artifact can be a hundred megabytes of word
+         * boxes, so the checksum streams rather than materialising the file the way a one-shot read would.
+         */
+        private const val DIGEST_BUFFER_BYTES = 64 * 1024
 
         private val METADATA_SERIALIZER = MapSerializer(String.serializer(), String.serializer())
 

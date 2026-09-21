@@ -6,6 +6,7 @@ import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -254,6 +255,18 @@ class ChunkerTest {
         assertEquals(unit.searchText, covered(unit, plan))
     }
 
+    @Test
+    fun `a counter that reads no body token is refused rather than handed fabricated offsets`() {
+        val unit = unitOf("alpha beta")
+
+        val failure = assertFailsWith<IllegalStateException> { Chunker(HeadlessTokenCounter()).chunk(unit) }
+
+        assertTrue(
+            failure.message.orEmpty().contains("no body token"),
+            "the refusal has to name what went wrong, was: ${failure.message}",
+        )
+    }
+
     /** The characters the chunks of [unit] cover, in order, with the overlap counted once. */
     private fun covered(unit: ContentUnit, plan: ChunkPlan): String {
         val text = unit.searchText
@@ -305,4 +318,18 @@ private class CharacterTokenCounter : TokenCounter {
             add(EncodedToken(id = -2, span = null))
         },
     )
+}
+
+/**
+ * A counter that reads no body token at all: every token it produces is one the encoder added.
+ *
+ * A real tokenizer cannot behave this way, which is exactly why the chunker has to refuse it instead of
+ * inventing a range — a chunk built from fabricated offsets would cite characters it does not cover.
+ */
+private class HeadlessTokenCounter : TokenCounter {
+
+    override val id: String = "headless"
+
+    override fun encodePassage(text: String): EncodedPassage =
+        EncodedPassage(listOf(EncodedToken(id = 0, span = null), EncodedToken(id = 1, span = null)))
 }

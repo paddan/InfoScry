@@ -9,7 +9,6 @@ import infoscry.storage.ContentStore
 import infoscry.storage.DocumentStore
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.ConcurrentHashMap
 import org.slf4j.LoggerFactory
 
 /**
@@ -42,8 +41,18 @@ class StoredUnitsSink(
 
     override val storesUnits: Boolean = true
 
-    /** Where each document's artifacts live, resolved once per document for the life of this sink. */
-    private val artifactRoots = ConcurrentHashMap<DocumentId, Path>()
+    /**
+     * Where each document's artifacts live, kept only for the documents this process is working on.
+     *
+     * The lookup costs a document read and happens once per extraction event, so resolving it every time adds
+     * a query per page; caching it for the sink's life would instead keep one entry for every document a
+     * long-lived server ever imported. A small access-ordered map is the middle: the document being read
+     * stays resident and documents nobody is delivering to fall out.
+     */
+    private val artifactRoots = object : LinkedHashMap<DocumentId, Path>(CACHE_CAPACITY, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<DocumentId, Path>): Boolean =
+            size > CACHE_CAPACITY
+    }
 
     override suspend fun committedKeys(
         documentId: DocumentId,
@@ -106,10 +115,14 @@ class StoredUnitsSink(
         }
     }
 
-    private fun artifactRoot(documentId: DocumentId): Path = artifactRoots.computeIfAbsent(documentId) { id ->
-        val document = documents.get(id)
+    /** Resolves one document's artifact root, serving it from [artifactRoots] when it is already known. */
+    private fun artifactRoot(documentId: DocumentId): Path {
+        synchronized(artifactRoots) { artifactRoots[documentId]?.let { return it } }
+        val document = documents.get(documentId)
             ?: error("a document's units were delivered after the document was deleted")
-        paths.artifactsDir(document.collectionId, document.id)
+        val root = paths.artifactsDir(document.collectionId, document.id)
+        synchronized(artifactRoots) { artifactRoots[documentId] = root }
+        return root
     }
 
     /**
@@ -157,6 +170,9 @@ class StoredUnitsSink(
 
     private companion object {
         const val WORK_DIRECTORY_PREFIX = infoscry.extract.CalibreConverter.WORK_DIRECTORY_PREFIX
+
+        /** How many documents' artifact roots stay resolved at once. */
+        const val CACHE_CAPACITY = 64
         const val COMPONENT_FIELD = "component"
         const val DOCUMENT_FIELD = "document_id"
         const val CODE_FIELD = "code"

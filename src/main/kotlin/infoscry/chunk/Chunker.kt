@@ -134,7 +134,14 @@ class Chunker(
             val body = text.substring(start, end)
             val composed = if (header == null) body else header + body
             val passage = counter.encodePassage(composed)
-            val bodyRange = passage.bodyRange ?: 0..(passage.totalTokens - 1).coerceAtLeast(0)
+            // A counter that read no body token from non-empty text has broken its own contract, and the
+            // offsets it would produce address a passage whose text is not in the chunk. That is worse than
+            // failing: every citation built from it would point at the wrong characters. The message carries
+            // the length rather than the text, because an exception message ends up in a log.
+            val bodyRange = passage.bodyRange ?: error(
+                "the counter '${counter.id}' read no body token from a ${composed.length}-character chunk, " +
+                    "so the chunk has no offsets in the text it was built from",
+            )
             drafts += ChunkDraft(
                 ordinal = drafts.size,
                 text = composed,

@@ -146,6 +146,14 @@ data class ContentUnit(
  * special tokens, and [tokenStart] and [tokenEnd] are the first and last token indices of [text] inside that
  * passage. Tokens before [tokenStart] or after [tokenEnd] are the ones the encoder added, so the stored
  * offsets say both what the chunk covers and what its budget was spent on.
+ *
+ * The search text is the single offset space, and that is a ruled decision rather than an accident: chunk
+ * offsets, chunk text and every rendered citation all address it, `ContentUnit` keeps the extracted text
+ * beside it as evidence, and no mapping between the two is stored. The extracted text is the byte-faithful
+ * reading and the managed original is what a reader opens, so nothing needs offsets into it. The invariant
+ * that carries the decision is that slicing the unit's search text with [startOffset] and [endOffset] yields
+ * [text] — for a unit that repeats a header, [text] minus that header. It is asserted in `ContentStoreTest`;
+ * a chunk whose offsets address another space would cite the wrong characters.
  */
 @Serializable
 data class Chunk(

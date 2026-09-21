@@ -43,7 +43,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     text TEXT NOT NULL CHECK (length(text) > 0),
     start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
     end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
-    token_count INTEGER NOT NULL CHECK (token_count > 0),
+    -- The bounds match the domain's own requires rather than tightening them: `Chunk` already refuses a
+    -- passage with no room for a token, so a zero-length payload fails there with a message about the
+    -- passage instead of here with a driver-level constraint error.
+    token_count INTEGER NOT NULL CHECK (token_count >= 0),
     token_start INTEGER NOT NULL CHECK (token_start >= 0),
     token_end INTEGER NOT NULL CHECK (token_end >= token_start),
     created_at TEXT NOT NULL,
