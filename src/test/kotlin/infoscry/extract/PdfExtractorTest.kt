@@ -33,6 +33,7 @@ import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.common.PDRectangle
 import org.apache.pdfbox.pdmodel.encryption.AccessPermission
 import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy
+import org.apache.pdfbox.rendering.PDFRenderer
 
 /**
  * The PDF extractor: which pages it reads, which pages it hands to OCR, and what it does with a page it
@@ -217,6 +218,108 @@ class PdfExtractorTest {
         assertTrue(spy.pages.isEmpty(), "an image past the bound was allocated anyway")
     }
 
+    // ---- The OCR reading travels with its page -------------------------------------------------------
+
+    @Test
+    fun `an ocred page's unit carries its word boxes and the confidence ocr reported`() {
+        val spy = OcrSpy(
+            text = { page -> "läst sida $page" },
+            meanConfidence = { 88.5 },
+            artifact = { page -> "ocr/page-$page.tsv.gz" to "c".repeat(64) },
+        )
+
+        val units = units(collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe()))
+        val ocred = units.single { pageOf(it.key) == 3 }
+        val parsed = units.single { pageOf(it.key) == 1 }
+
+        assertEquals("ocr/page-3.tsv.gz", ocred.unit.artifactRelativePath)
+        assertEquals("c".repeat(64), ocred.unit.artifactSha256)
+        assertEquals(88.5, ocred.unit.meanConfidence)
+        assertEquals(
+            null,
+            parsed.unit.artifactRelativePath,
+            "a page with its own text layer claimed an artifact it never wrote",
+        )
+        assertEquals(null, parsed.unit.meanConfidence)
+    }
+
+    // ---- A page whose own text cannot be read is handed over, not failed ------------------------------
+
+    @Test
+    fun `a page whose own text cannot be read is handed to ocr instead of failing`() {
+        // Page 1 has a usable text layer, so it would be cited from its own text if the read succeeded.
+        // PDFBox is deliberately forgiving about damaged content and cannot be made to produce this
+        // failure from a fixture, which is why the reader is the seam that makes it reachable at all.
+        val spy = OcrSpy()
+
+        val events = collect(
+            PdfExtractor(spy.seam, pageText = FailingPageTextReader(failOn = { page -> page == 1 })),
+            inputFor(fixture(MIXED_NAME), probe()),
+            probe(),
+        )
+
+        assertEquals(
+            listOf(1) + MIXED_SCANNED_PAGES,
+            spy.pages.map { it.page },
+            "the page whose own text could not be read was not handed to ocr",
+        )
+        assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units(events).map { pageOf(it.key) })
+        assertTrue(
+            failures(events).none { it.code == PdfExtractor.PAGE_UNREADABLE_CODE },
+            "a page that OCR could still read was reported as unreadable",
+        )
+        assertEquals(
+            "1",
+            (events.last() as ExtractionEvent.Finished).metadata[PdfExtractor.EXTRACTION_WARNINGS_METADATA],
+        )
+    }
+
+    @Test
+    fun `a page whose text and raster both fail is reported as unreadable`() {
+        val events = collect(
+            PdfExtractor(
+                OcrSpy().seam,
+                pageText = FailingPageTextReader(failOn = { page -> page == MIXED_UNRENDERABLE_PAGE }),
+            ),
+            inputFor(fixture(MIXED_NAME), probe()),
+            probe(),
+        )
+
+        assertEquals(
+            PdfExtractor.PAGE_UNREADABLE_CODE,
+            failures(events).single { it.key == "page:$MIXED_UNRENDERABLE_PAGE" }.code,
+            "a page with neither text nor raster was not reported as unreadable",
+        )
+    }
+
+    @Test
+    fun `a rendered image that cannot be removed is a warning rather than a lost page`() {
+        // A directory where the renderer was asked to put an image: it exists, so the delete is attempted,
+        // and it holds a file, so the delete fails the way a real one would.
+        val renderer = PdfPageRenderer { _, page, _, where ->
+            val stubborn = where.resolve("page-$page.png")
+            Files.createDirectory(stubborn)
+            Files.write(stubborn.resolve("still-here.txt"), "not empty".toByteArray())
+            stubborn
+        }
+
+        val events = collect(
+            PdfExtractor(OcrSpy().seam, pageRenderer = renderer),
+            inputFor(fixture(MIXED_NAME), probe()),
+            probe(),
+        )
+
+        assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units(events).map { pageOf(it.key) })
+        assertTrue(
+            failures(events).none { it.code == PdfExtractor.OCR_FAILED_CODE },
+            "a page whose working image could not be deleted was reported as an OCR failure",
+        )
+        assertEquals(
+            MIXED_SCANNED_PAGES.size.toString(),
+            (events.last() as ExtractionEvent.Finished).metadata[PdfExtractor.EXTRACTION_WARNINGS_METADATA],
+        )
+    }
+
     // ---- One page that cannot be produced does not take the document with it -------------------------
 
     @Test
@@ -393,6 +496,51 @@ class PdfExtractorTest {
         assertTrue(spy.pages.none { it.page <= 3 }, "a page that was already committed was rendered again")
     }
 
+    @Test
+    fun `a resumed attempt never renders a page it was told is finished`() {
+        // Page 3 is a scanned page, which is exactly the case the skip has to cover: without the resume
+        // check it would be rendered again, so a counting renderer tells "skipped before rendering" apart
+        // from "skipped before OCR".
+        val committed = setOf("page:1", "page:2", "page:3")
+        val renderer = CountingRenderer()
+
+        collect(
+            PdfExtractor(OcrSpy().seam, pageRenderer = renderer),
+            inputFor(fixture(MIXED_NAME), probe(), committed = committed),
+            probe(),
+        )
+
+        assertEquals(listOf(4, 5), renderer.pages, "a page that was already committed was rendered again")
+    }
+
+    @Test
+    fun `a programming error while rendering is not reported as a bad page`() {
+        val renderer = PdfPageRenderer { _, _, _, _ ->
+            throw IllegalStateException("a bug in the extractor, not a page that cannot be rendered")
+        }
+
+        val failure = assertFailsWith<IllegalStateException> {
+            collect(
+                PdfExtractor(OcrSpy().seam, pageRenderer = renderer),
+                inputFor(fixture(MIXED_NAME), probe()),
+                probe(),
+            )
+        }
+
+        assertContains(failure.message.orEmpty(), "a bug in the extractor")
+    }
+
+    @Test
+    fun `a managed file that is gone is refused instead of throwing at the caller`() {
+        val missing = directory.resolve("managed").resolve("gone.pdf")
+
+        val events = collect(PdfExtractor(OcrSpy().seam), inputFor(missing, probe()), probe())
+
+        assertEquals(listOf(PdfExtractor.DOCUMENT_KEY), failures(events).map { it.key })
+        assertEquals(listOf(PdfExtractor.DOCUMENT_UNREADABLE_CODE), failures(events).map { it.code })
+        assertTrue(events.none { it is ExtractionEvent.Finished })
+    }
+
     // ---- The boundary protocol ----------------------------------------------------------------------
 
     @Test
@@ -544,6 +692,8 @@ class PdfExtractorTest {
  */
 private class OcrSpy(
     private val text: (Int) -> String = { page -> "läst sida $page" },
+    private val meanConfidence: (Int) -> Double? = { null },
+    private val artifact: (Int) -> Pair<String?, String?>? = { null },
     private val failOn: (Int) -> Boolean = { false },
     private val unavailable: String? = null,
     private val cancelOn: (Int) -> Boolean = { false },
@@ -563,6 +713,43 @@ private class OcrSpy(
         if (cancelOn(page.page)) throw CancellationException("cancelled by the test")
         unavailable?.let { code -> throw OcrUnavailableException(code, "no OCR tool in this build") }
         if (failOn(page.page)) throw IOException("OCR could not read page ${page.page}")
-        return OcrResult(text(page.page))
+        val written = artifact(page.page)
+        return OcrResult(
+            text = text(page.page),
+            meanConfidence = meanConfidence(page.page),
+            artifactRelativePath = written?.first,
+            artifactSha256 = written?.second,
+        )
+    }
+}
+
+/**
+ * A text reader that cannot read one page.
+ *
+ * It delegates to the real reader for every other page, so the pages around the failure are read exactly
+ * as the extractor reads them in production: what the test varies is the failure, not the reading.
+ */
+private class FailingPageTextReader(private val failOn: (Int) -> Boolean) : PdfPageTextReader {
+
+    override fun read(document: PDDocument, page: Int): String {
+        if (failOn(page)) throw IOException("the page's own text layer could not be read")
+        return PdfBoxPageTextReader.read(document, page)
+    }
+}
+
+/**
+ * A renderer that records the pages it was asked for, delegating the work to the real one.
+ *
+ * Rendering is what a resume must not repeat, and the working directory it happens in is gone before a
+ * test can look at it, so counting the calls is the only way to see that a committed page was skipped
+ * before the expensive step rather than after it.
+ */
+private class CountingRenderer : PdfPageRenderer {
+
+    val pages: MutableList<Int> = mutableListOf()
+
+    override fun render(renderer: PDFRenderer, page: Int, dpi: Int, directory: Path): Path {
+        pages += page
+        return PngPageRenderer.render(renderer, page, dpi, directory)
     }
 }

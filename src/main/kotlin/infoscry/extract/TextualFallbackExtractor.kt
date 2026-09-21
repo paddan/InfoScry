@@ -24,7 +24,7 @@ class TextualFallbackExtractor : DocumentExtractor {
     override val supportedMediaTypes: Set<String> = TEXTUAL_MEDIA_TYPES
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
-        val key = WHOLE_DOCUMENT_KEY
+        val key = DOCUMENT_REFUSED_KEY
         if (!input.isCommitted(key) && Files.size(input.managedPath) > MAX_TEXT_DOCUMENT_BYTES) {
             input.boundary.unit {
                 emit(ExtractionEvent.UnitFailed(key = key, ordinal = 0, code = DOCUMENT_TOO_LARGE_CODE))
@@ -59,9 +59,6 @@ class TextualFallbackExtractor : DocumentExtractor {
     private fun lineCount(text: String): Int = if (text.isEmpty()) 1 else text.count { it == '\n' } + 1
 
     companion object {
-
-        /** The one unit a whole-document reader produces, and the key a resume matches on. */
-        const val WHOLE_DOCUMENT_KEY = "document"
 
         /** The types a text reader can honestly claim: the containers no format extractor owns. */
         val TEXTUAL_MEDIA_TYPES: Set<String> = setOf(

@@ -8,7 +8,6 @@ import java.nio.file.Path
 import java.util.Locale
 import javax.imageio.ImageIO
 import kotlin.math.ceil
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
@@ -38,10 +37,22 @@ data class RenderedPage(
     val renderDpi: Int,
 )
 
-/** What OCR read from one page. */
+/**
+ * What OCR read from one page, and what it wrote down while reading it.
+ *
+ * [meanConfidence] is the tool's own answer for this page and travels with the page's unit rather than
+ * only in the document's summary, because a citation has to be able to say how sure the reading was.
+ * [artifactRelativePath] and [artifactSha256] name the word boxes the seam wrote under the artifact root
+ * the page carried — relative to that root, the same way [ContentUnitDraft] names its artifact — so the
+ * unit and its artifact commit together and a reader can later verify they still belong to each other.
+ * An implementation that writes no artifact leaves both absent rather than naming a file that is not
+ * there.
+ */
 data class OcrResult(
     val text: String,
     val meanConfidence: Double? = null,
+    val artifactRelativePath: String? = null,
+    val artifactSha256: String? = null,
 )
 
 /**
@@ -54,6 +65,56 @@ data class OcrResult(
  * against the document instead.
  */
 class OcrUnavailableException(val code: String, message: String) : IOException(message)
+
+/**
+ * Reads one page's own text layer.
+ *
+ * A page whose text cannot be read is the first of the three reasons the decision hands a page to OCR,
+ * and it has to route there rather than fail the page. PDFBox is deliberately forgiving about damaged
+ * content — it warns where another reader would stop — so that failure cannot be produced from a fixture.
+ * The reader is a parameter for that one reason: the trigger's behaviour is exercised deterministically
+ * instead of being claimed.
+ */
+fun interface PdfPageTextReader {
+    fun read(document: PDDocument, page: Int): String
+}
+
+/**
+ * Renders one page to an image inside the attempt's working directory and returns the file.
+ *
+ * A parameter for the same reason as [PdfPageTextReader]: which pages were rendered, and at what
+ * resolution, is exactly what a resumed attempt has to get right, and the working directory is deleted
+ * before a test could look at it. The default writes a PNG next to the other pages of this attempt.
+ */
+fun interface PdfPageRenderer {
+    fun render(renderer: PDFRenderer, page: Int, dpi: Int, directory: Path): Path
+}
+
+/** The reader every page goes through: PDFBox's own text stripper, one page at a time. */
+internal object PdfBoxPageTextReader : PdfPageTextReader {
+
+    override fun read(document: PDDocument, page: Int): String {
+        val stripper = PDFTextStripper()
+        stripper.startPage = page
+        stripper.endPage = page
+        return stripper.getText(document)
+    }
+}
+
+/** The renderer every page goes through: one page, at one resolution, as a PNG. */
+internal object PngPageRenderer : PdfPageRenderer {
+
+    override fun render(renderer: PDFRenderer, page: Int, dpi: Int, directory: Path): Path {
+        val image = renderer.renderImageWithDPI(page - 1, dpi.toFloat(), ImageType.RGB)
+        val target = directory.resolve(String.format(Locale.ROOT, IMAGE_NAME_FORMAT, page))
+        try {
+            ImageIO.write(image, "png", target.toFile())
+        } finally {
+            image.flush()
+        }
+        return target
+    }
+}
 
 /**
  * One page's own text layer, and the decision that follows from it.
@@ -135,6 +196,8 @@ data class PdfPageCandidate(val page: Int, val text: String) {
  */
 class PdfExtractor(
     private val ocr: suspend (RenderedPage) -> OcrResult,
+    private val pageText: PdfPageTextReader = PdfBoxPageTextReader,
+    private val pageRenderer: PdfPageRenderer = PngPageRenderer,
     private val maxDocumentBytes: Long = MAX_DOCUMENT_BYTES,
     private val maxRenderedPixels: Long = MAX_RENDERED_PIXELS,
 ) : DocumentExtractor {
@@ -151,7 +214,15 @@ class PdfExtractor(
     override val supportedMediaTypes: Set<String> = setOf(PDF_MEDIA_TYPE)
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
-        val containerBytes = Files.size(input.managedPath)
+        val containerBytes = try {
+            Files.size(input.managedPath)
+        } catch (unreadable: IOException) {
+            // The managed copy this job recorded is not there to be read. That is a refusal about the
+            // document, not an exception for the caller to interpret: every other extraction failure in
+            // this pipeline is reported as a code, and a missing file is not different.
+            refuseDocument(input, DOCUMENT_REFUSED_KEY, DOCUMENT_UNREADABLE_CODE)
+            return@flow
+        }
         if (containerBytes > maxDocumentBytes) {
             refuseDocument(input, DOCUMENT_TOO_LARGE_KEY, DOCUMENT_TOO_LARGE_CODE)
             return@flow
@@ -217,30 +288,33 @@ class PdfExtractor(
                     val key = pageKey(page)
                     if (input.isCommitted(key)) return@unit
 
-                    val candidate = try {
-                        PdfPageCandidate(page, pageText(document, page))
-                    } catch (failure: Exception) {
-                        rethrowUnlessAPageFailure(failure)
-                        emit(ExtractionEvent.UnitFailed(key, page - 1, PAGE_UNREADABLE_CODE))
-                        return@unit
+                    // A page whose own text cannot be read is a page this reader has nothing to say
+                    // about, which is the first of the three reasons to hand it to OCR. It is not yet a
+                    // failure: the page still has a raster, and the reading may well succeed where the
+                    // text layer could not be parsed at all.
+                    val text = try {
+                        pageText.read(document, page)
+                    } catch (failure: IOException) {
+                        run.warnings += "page $page: its own text could not be read (${failure::class.simpleName})"
+                        null
                     }
-                    if (!candidate.needsOcr) {
-                        emitTextUnit(key, page, candidate.text)
+                    if (text != null && !PdfPageCandidate(page, text).needsOcr) {
+                        emitTextUnit(key, page, text)
                         return@unit
                     }
 
                     val requested = input.settings.renderDpi ?: DEFAULT_RENDER_DPI
                     val dpi = resolutionFor(document.getPage(page - 1), requested)
                     if (dpi == null) {
-                        emit(ExtractionEvent.UnitFailed(key, page - 1, PAGE_RENDER_REFUSED_CODE))
+                        emitUnreadablePage(run, key, page, text)
                         return@unit
                     }
                     val directory = workDirectory ?: createWorkDirectory().also { workDirectory = it }
                     val image = try {
-                        render(renderer, page, dpi, directory)
-                    } catch (failure: Exception) {
-                        rethrowUnlessAPageFailure(failure)
-                        emit(ExtractionEvent.UnitFailed(key, page - 1, PAGE_RENDER_REFUSED_CODE))
+                        pageRenderer.render(renderer, page, dpi, directory)
+                    } catch (failure: IOException) {
+                        run.warnings += "page $page: its raster could not be produced (${failure::class.simpleName})"
+                        emitUnreadablePage(run, key, page, text)
                         return@unit
                     }
                     val result = try {
@@ -259,31 +333,30 @@ class PdfExtractor(
                         // read, and one failure per page would only bury the fact that matters.
                         run.abortCode = unavailable.code
                         return@unit
-                    } catch (failure: Exception) {
-                        rethrowUnlessAPageFailure(failure)
+                    } catch (failure: IOException) {
+                        run.warnings += "page $page: OCR could not read it (${failure::class.simpleName})"
                         emit(ExtractionEvent.UnitFailed(key, page - 1, OCR_FAILED_CODE))
                         return@unit
                     }
                     run.ocrPages++
                     run.confidences += result.meanConfidence
-                    emitTextUnit(key, page, result.text)
+                    emitTextUnit(
+                        key = key,
+                        page = page,
+                        text = result.text,
+                        artifactRelativePath = result.artifactRelativePath,
+                        artifactSha256 = result.artifactSha256,
+                        meanConfidence = result.meanConfidence,
+                    )
                     // The collector has committed the unit by the time `emit` returns, so the working image
                     // has done its job and is removed inside the same permit that produced it.
-                    Files.deleteIfExists(image)
+                    discardRenderedImage(run, image)
                 }
             }
         } finally {
             workDirectory?.let { directory -> directory.toFile().deleteRecursively() }
         }
         return run
-    }
-
-    /** The page's own text layer, read on its own so a damaged page is that page's problem. */
-    private fun pageText(document: PDDocument, page: Int): String {
-        val stripper = PDFTextStripper()
-        stripper.startPage = page
-        stripper.endPage = page
-        return stripper.getText(document)
     }
 
     /**
@@ -308,21 +381,61 @@ class PdfExtractor(
     }
 
     /** Renders one page to a PNG inside this attempt's working directory and returns the file. */
-    private fun render(renderer: PDFRenderer, page: Int, dpi: Int, directory: Path): Path {
-        val image = renderer.renderImageWithDPI(page - 1, dpi.toFloat(), ImageType.RGB)
-        val target = directory.resolve(String.format(Locale.ROOT, IMAGE_NAME_FORMAT, page))
-        try {
-            ImageIO.write(image, "png", target.toFile())
-        } finally {
-            image.flush()
-        }
-        return target
-    }
-
     private fun createWorkDirectory(): Path = Files.createTempDirectory(WORK_DIRECTORY_PREFIX)
 
-    /** Emits one page's text as a unit, in both of the forms a unit carries. */
-    private suspend fun FlowCollector<ExtractionEvent>.emitTextUnit(key: String, page: Int, text: String) {
+    /**
+     * Reports a page whose raster could not be produced.
+     *
+     * The code distinguishes the two ways that happens, because the two need different things done about
+     * them. A page whose own text could not be read either is `PAGE_UNREADABLE`: nothing about this page
+     * could be produced, so OCR was the only way it could have been read. A page with readable text that
+     * could not be rasterised is `PAGE_RENDER_REFUSED`: the page is too large to render at any legible
+     * resolution. Neither takes the document with it.
+     */
+    private suspend fun FlowCollector<ExtractionEvent>.emitUnreadablePage(
+        run: PageRun,
+        key: String,
+        page: Int,
+        text: String?,
+    ) {
+        if (text == null) run.unreadablePages++
+        emit(ExtractionEvent.UnitFailed(key, page - 1, unreadableCode(text)))
+    }
+
+    private fun unreadableCode(text: String?): String =
+        if (text == null) PAGE_UNREADABLE_CODE else PAGE_RENDER_REFUSED_CODE
+
+    /**
+     * Removes the working image a page was read from.
+     *
+     * The image is working material rather than evidence, so it is deleted as soon as its reading is
+     * committed. Failing to delete it is not a reason to lose a page that has just been delivered, and
+     * the failure is recorded as a warning instead of ending the document from inside its own permit.
+     */
+    private fun discardRenderedImage(run: PageRun, image: Path) {
+        try {
+            Files.deleteIfExists(image)
+        } catch (failure: IOException) {
+            run.warnings += "page ${image.fileName}: its rendered image could not be removed " +
+                "(${failure::class.simpleName})"
+        }
+    }
+
+    /**
+     * Emits one page's text as a unit, in both of the forms a unit carries.
+     *
+     * Everything an OCR page has to commit alongside its text travels here: how sure the tool was, and the
+     * word boxes it wrote under the artifact root. A page with its own text layer carries neither, since
+     * neither exists for it.
+     */
+    private suspend fun FlowCollector<ExtractionEvent>.emitTextUnit(
+        key: String,
+        page: Int,
+        text: String,
+        artifactRelativePath: String? = null,
+        artifactSha256: String? = null,
+        meanConfidence: Double? = null,
+    ) {
         val normalised = TextNormalizer.normalize(text)
         emit(
             ExtractionEvent.UnitReady(
@@ -332,6 +445,9 @@ class PdfExtractor(
                     locator = SourceLocation.PdfPage(page),
                     extractedText = normalised.extracted,
                     searchText = normalised.search,
+                    artifactRelativePath = artifactRelativePath,
+                    artifactSha256 = artifactSha256,
+                    meanConfidence = meanConfidence,
                 ),
             ),
         )
@@ -345,6 +461,14 @@ class PdfExtractor(
             if (confidences.isNotEmpty()) {
                 put("ocr_mean_confidence", String.format(Locale.ROOT, "%.3f", confidences.average()))
             }
+        }
+        if (run.unreadablePages > 0) {
+            put("unreadable_pages", run.unreadablePages.toString())
+        }
+        if (run.warnings.isNotEmpty()) {
+            // A count rather than the texts: what a warning says is a tool's message about a page, which is
+            // working detail for the log, while the number is what a reader of the document can act on.
+            put(EXTRACTION_WARNINGS_METADATA, run.warnings.size.toString())
         }
     }
 
@@ -392,6 +516,9 @@ class PdfExtractor(
 
         /** The key a PDF refused before its first unit is recorded under. */
         internal const val DOCUMENT_KEY: String = DOCUMENT_REFUSED_KEY
+
+        /** The metadata key holding how many pages of this document produced a warning. */
+        internal const val EXTRACTION_WARNINGS_METADATA: String = "extraction_warnings"
     }
 }
 
@@ -399,8 +526,10 @@ class PdfExtractor(
 private class PageRun(
     var total: Int = 0,
     var ocrPages: Int = 0,
+    var unreadablePages: Int = 0,
     var abortCode: String? = null,
     val confidences: MutableList<Double?> = mutableListOf(),
+    val warnings: MutableList<String> = mutableListOf(),
 )
 
 /** The key of one page's unit: the page is the only stable position a PDF has. */
@@ -421,16 +550,6 @@ private suspend fun FlowCollector<ExtractionEvent>.refuseDocument(
     input.boundary.unit {
         emit(ExtractionEvent.UnitFailed(key = key, ordinal = 0, code = code))
     }
-}
-
-/**
- * Lets cancellation and interruption out of a page's failure handling.
- *
- * A page that fails is a unit that failed; a run that was cancelled and a thread that was interrupted are
- * not, and turning either into a page failure would report a stopped attempt as a readable document.
- */
-private fun rethrowUnlessAPageFailure(failure: Exception) {
-    if (failure is CancellationException || failure is InterruptedException) throw failure
 }
 
 /** Points per inch: a PDF's own unit, and what a rendered resolution is relative to. */

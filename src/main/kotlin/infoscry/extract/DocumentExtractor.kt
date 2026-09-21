@@ -70,6 +70,8 @@ internal const val DOCUMENT_REFUSED_KEY: String = "document"
  * index will hold. [artifactRelativePath] and [artifactSha256] name a file the extractor wrote under the
  * document's artifact root — the OCR word boxes, a rendered page — so the unit and its artifact commit
  * together and a reader can later verify the artifact still matches the unit it belongs to.
+ * [meanConfidence] is how sure an OCR tool was about this unit, and is absent for text that a parser read
+ * rather than a tool recognised.
  */
 data class ContentUnitDraft(
     val locator: SourceLocation,
@@ -77,6 +79,7 @@ data class ContentUnitDraft(
     val searchText: String,
     val artifactRelativePath: String? = null,
     val artifactSha256: String? = null,
+    val meanConfidence: Double? = null,
 )
 
 /**
@@ -190,6 +193,8 @@ interface UnitBoundary {
  * fingerprint. The extractor must skip those before it does the expensive work — a cheap container parse
  * to find out which units exist is fine, rendering a page or running OCR for a committed key is not.
  * [artifactRoot] is a directory the extractor may write into, and it only ever writes inside [unit].
+ * [artifactRoot] is where an artifact a unit names is resolved from, so a draft's
+ * [ContentUnitDraft.artifactRelativePath] is relative to it.
  */
 data class ExtractionInput(
     val documentId: DocumentId,
