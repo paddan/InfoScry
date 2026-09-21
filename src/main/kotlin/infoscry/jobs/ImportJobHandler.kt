@@ -76,6 +76,7 @@ class ImportJobHandler(
     private val chunker: Chunker,
     private val index: LuceneIndex,
     private val documentEmbedder: () -> DocumentEmbedder?,
+    private val maxChunksPerDocument: Int,
 ) : JobHandler {
 
     override suspend fun handle(job: Job, stage: JobStage) {
@@ -248,8 +249,22 @@ class ImportJobHandler(
         }
 
         try {
+            // The index publishes a single replacement per document, so every row lives in one in-memory
+            // list until the commit. A document's rows are bounded by its chunks; the ceiling turns "however
+            // large a real archive can get" into a documented limit a later resume can out-grow. It is
+            // checked inside the failure mapping so an over-ceiling document is recorded per item with an
+            // actionable code, and before any embedding work or index publication.
+            val chunkCount = content.chunkCount(document.id)
+            if (chunkCount > maxChunksPerDocument) {
+                throw EmbeddingException(
+                    INDEX_TOO_LARGE,
+                    "the document has $chunkCount chunks, which exceeds the " +
+                        "$maxChunksPerDocument that an import may publish in one index transaction",
+                )
+            }
+
             stage.run(STAGE_EMBED) { documents.updateStatus(document.id, DocumentStatus.EMBEDDING) }
-            val rows = ArrayList<DocumentRow>()
+            val rows = ArrayList<DocumentRow>(chunkCount)
             var afterOrdinal = -1
             while (true) {
                 val units = content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
@@ -642,6 +657,21 @@ class ImportJobHandler(
         /** How many chunks one embedding step holds at once, so a long document stays interruptible. */
         private const val EMBED_BATCH = 64
 
+        /**
+         * The largest document one import may publish in a single index transaction.
+         *
+         * Each published row carries its chunk text (bounded by the 512-token chunker, a few KB) plus a
+         * 768-float vector (3072 bytes), so 50 000 rows are on the order of 250-300 MB of heap held for one
+         * document — generous, and far past what a realistic single document (≈ 25 million tokens) reaches.
+         * It is deliberately explicit rather than silent: an over-ceiling document is refused with an
+         * actionable code before any embedding work, and its chunks stay durable so raising the ceiling
+         * later lets the same resume re-embed without re-extraction or OCR.
+         */
+        const val MAX_CHUNKS_PER_DOCUMENT: Int = 50_000
+
+        /** The document was refused before embedding because it exceeds [MAX_CHUNKS_PER_DOCUMENT]. */
+        private const val INDEX_TOO_LARGE = "INDEX_TOO_LARGE"
+
         private const val COMPONENT_FIELD = "component"
         private const val DOCUMENT_FIELD = "document_id"
         private const val ORDINAL_FIELD = "unit_ordinal"
@@ -677,6 +707,8 @@ class ImportJobHandler(
                 modelsDir = context.paths.modelsDir,
                 profileDirectory = context.paths.embeddingProfileDir,
             ),
+            // A document may hold at most this many chunks in a single index transaction's in-memory rows.
+            maxChunksPerDocument: Int = MAX_CHUNKS_PER_DOCUMENT,
         ): JobRunner {
             val handler = ImportJobHandler(
                 paths = context.paths,
@@ -689,6 +721,7 @@ class ImportJobHandler(
                 chunker = chunker,
                 index = context.index,
                 documentEmbedder = documentEmbedder,
+                maxChunksPerDocument = maxChunksPerDocument,
             )
             val runner = JobRunner(
                 store = context.jobs,

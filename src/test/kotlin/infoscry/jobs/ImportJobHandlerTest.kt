@@ -23,6 +23,7 @@ import infoscry.extract.ExtractorRegistry
 import infoscry.extract.MediaTypeDetector
 import infoscry.extract.TextualFallbackExtractor
 import infoscry.extract.emitDocumentRefusal
+import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.E5Embedder
 import infoscry.embedding.ModelManager
 import infoscry.embedding.TestDocumentEmbedder
@@ -438,6 +439,64 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a document over the embedding ceiling is refused before any embedding`() {
+        withHarness { harness ->
+            val source = harness.writeText("huge.txt", "x\n")
+            var embedCalls = 0
+            val countingEmbedder = object : DocumentEmbedder {
+                override fun embedDocuments(texts: List<String>): List<FloatArray> {
+                    embedCalls++
+                    return TestDocumentEmbedder().embedDocuments(texts)
+                }
+            }
+
+            // 4 units -> 4 chunks, over the test ceiling of 3.
+            val run = harness.importDurably(
+                sources = listOf(source),
+                extractor = RecordingUnits(units = 4),
+                embedder = countingEmbedder,
+                maxChunksPerDocument = 3,
+            )
+
+            val item = run.items.single()
+            assertEquals(ImportItemOutcome.FAILED, item.outcome)
+            assertEquals("INDEX_TOO_LARGE", item.errorCode)
+            assertTrue(
+                item.errorMessage.orEmpty().contains("chunks"),
+                "the message names the measured property, was ${item.errorMessage}",
+            )
+            assertEquals(0, embedCalls, "an over-ceiling document is refused before any embedding work")
+            val documentId = item.documentId!!
+            assertNotEquals(DocumentStatus.COMPLETE, run.documents.getValue(documentId).status)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(0, context.index.chunkCount(CollectionId("default"), documentId))
+            }
+        }
+    }
+
+    @Test
+    fun `a document at the embedding ceiling is indexed normally`() {
+        withHarness { harness ->
+            val source = harness.writeText("just-under.txt", "x\n")
+
+            // 3 units -> 3 chunks, exactly at the test ceiling of 3.
+            val run = harness.importDurably(
+                sources = listOf(source),
+                extractor = RecordingUnits(units = 3),
+                maxChunksPerDocument = 3,
+            )
+
+            val item = run.items.single()
+            assertEquals(ImportItemOutcome.IMPORTED, item.outcome)
+            val documentId = item.documentId!!
+            assertEquals(DocumentStatus.COMPLETE, run.documents.getValue(documentId).status)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(3, context.index.chunkCount(CollectionId("default"), documentId))
+            }
+        }
+    }
+
+    @Test
     fun `a document refused before its first unit fails and stores nothing`() {
         withHarness { harness ->
             val source = harness.writeText("secret.txt", "not readable\n")
@@ -631,9 +690,11 @@ internal class Harness(val directory: Path) : AutoCloseable {
         extractor: DocumentExtractor,
         settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
         collectionId: CollectionId = CollectionId("default"),
+        embedder: DocumentEmbedder = TestDocumentEmbedder(),
+        maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
     ): ImportRun = AppContext.open(dataDir).use { context ->
         val job = enqueue(context, sources, settings, collectionId)
-        attach(context, storedPipeline(context, extractor))
+        attach(context, storedPipeline(context, extractor), embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
 
@@ -642,9 +703,11 @@ internal class Harness(val directory: Path) : AutoCloseable {
         pipeline: ImportPipeline,
         settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
         collectionId: CollectionId = CollectionId("default"),
+        embedder: DocumentEmbedder = TestDocumentEmbedder(),
+        maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
     ): ImportRun = AppContext.open(dataDir).use { context ->
         val job = enqueue(context, sources, settings, collectionId)
-        attach(context, pipeline)
+        attach(context, pipeline, embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
 
@@ -653,8 +716,18 @@ internal class Harness(val directory: Path) : AutoCloseable {
      * the pinned model. A missing model belongs to its own test, which uses the real embedder supplier
      * against an empty models directory.
      */
-    fun attach(context: AppContext, pipeline: ImportPipeline): JobRunner =
-        ImportJobHandler.attachTo(context, pipeline, documentEmbedder = { TestDocumentEmbedder() })
+    fun attach(
+        context: AppContext,
+        pipeline: ImportPipeline,
+        embedder: DocumentEmbedder = TestDocumentEmbedder(),
+        maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
+    ): JobRunner =
+        ImportJobHandler.attachTo(
+            context,
+            pipeline,
+            documentEmbedder = { embedder },
+            maxChunksPerDocument = maxChunksPerDocument,
+        )
 
     /**
      * Starts an import and lets it die in the middle of extraction, the way a killed process does.
