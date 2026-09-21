@@ -18,11 +18,16 @@ kotlin {
 
 application {
     mainClass.set("infoscry.MainKt")
+    // The SQLite JDBC driver and, later, ONNX Runtime load their native libraries through
+    // System.load. JDK 25 warns about that unless native access is granted, and a future JDK
+    // blocks it, so the permission is part of how the application and its tests are started.
+    applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
 }
 
 dependencies {
     implementation(libs.clikt)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.sqlite.jdbc)
 
     testImplementation(kotlin("test"))
     testImplementation(kotlin("test-junit5"))
@@ -32,6 +37,7 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
 
 val webDir = layout.projectDirectory.dir("web")
