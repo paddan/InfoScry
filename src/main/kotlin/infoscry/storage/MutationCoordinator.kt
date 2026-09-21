@@ -117,6 +117,15 @@ class MutationCoordinator {
      * Requests the exclusive permit, waits for the stages already inside to drain, runs [block], and
      * releases. A second maintenance call waits for the first rather than failing, because the callers
      * are a deletion and a rebuild that both have to happen, in some order.
+     *
+     * **The drain has no timeout, and that is load-bearing.** A shared permit is only ever held for one
+     * bounded unit of work — a copy, one page's checkpoint, one chunk batch — because every mutation
+     * stage yields it at a durable checkpoint before starting the next unit. That is what makes waiting
+     * for the drain correct rather than deadlock-prone: the wait is bounded by the longest single unit,
+     * not by the length of a job. A handler that holds a permit across an unbounded wait (a network
+     * call with no timeout, a queue it never leaves, a lock held while awaiting maintenance) turns this
+     * drain into a permanent stall in which every mutation is refused and maintenance never starts. If a
+     * stage needs to make a slow call, it does so on either side of its permit, never inside it.
      */
     suspend fun <T> withExclusiveMaintenance(operation: String, block: suspend () -> T): T {
         maintenanceOrder.withLock {

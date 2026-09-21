@@ -22,6 +22,7 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.server.http.content.staticResources
+import org.slf4j.LoggerFactory
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -205,7 +206,8 @@ class BadRequestException(message: String) : IllegalArgumentException(message)
  * Renders the outcome of one handler: the value it produced, or the status that describes its failure.
  *
  * Mapping happens here, once, so no handler has to remember which exception means which status — and so
- * a failure that is not recognised becomes a plain 500 with its message intact rather than a success.
+ * a failure that is not recognised becomes a plain 500 with a message that says nothing about InfoScry's
+ * internals.
  */
 suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
     try {
@@ -246,11 +248,26 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             ApiErrorResponse(ApiError(code = "INVALID_REQUEST", message = invalid.message.orEmpty())),
         )
     } catch (failure: Exception) {
+        // The client gets a code it can act on. The detail goes to the log, as a named field and as the
+        // logged cause, because an internal message can name absolute paths inside the data directory —
+        // and it is never interpolated into the message, where named-field redaction cannot see it.
+        LOGGER.atError()
+            .addKeyValue(ERROR_DETAIL_FIELD, failure.message ?: failure::class.simpleName ?: "unknown failure")
+            .setCause(failure)
+            .log("a request failed with an unhandled error")
         respondJson(
             HttpStatusCode.InternalServerError,
             ApiErrorResponse(
-                ApiError(code = "INTERNAL_ERROR", message = failure.message ?: failure::class.simpleName.orEmpty()),
+                ApiError(
+                    code = "INTERNAL_ERROR",
+                    message = "the request could not be completed; see the InfoScry log for the detail",
+                ),
             ),
         )
     }
 }
+
+private val LOGGER = LoggerFactory.getLogger("infoscry.server")
+
+/** The name of the structured field carrying an unhandled failure's own message. */
+private const val ERROR_DETAIL_FIELD = "error_detail"

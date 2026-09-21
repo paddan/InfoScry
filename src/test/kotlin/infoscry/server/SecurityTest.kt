@@ -103,14 +103,36 @@ class SecurityTest {
 
     @Test
     fun `a mutation with a wrong bearer token is refused`() = runBlocking {
-        val response = harness.request(
-            io.ktor.http.HttpMethod.Post,
-            "/api/collections",
-            body = """{"name":"Uninvited"}""",
-            credential = Credential.NONE,
-        )
+        val response = harness.createCollection("Uninvited", Credential.WRONG_BEARER)
 
-        assertEquals(HttpStatusCode.Unauthorized, response.status)
+        assertEquals(HttpStatusCode.Unauthorized, response.status, response.bodyAsText())
+        assertContains(response.bodyAsText(), "MUTATION_REQUIRES_CREDENTIALS")
+    }
+
+    @Test
+    fun `a mutation with a wrong CSRF token is refused`() = runBlocking {
+        val response = harness.createCollection("Uninvited", Credential.WRONG_CSRF)
+
+        assertEquals(HttpStatusCode.Unauthorized, response.status, response.bodyAsText())
+        assertContains(response.bodyAsText(), "MUTATION_REQUIRES_CREDENTIALS")
+    }
+
+    @Test
+    fun `an internal failure does not hand its message, or a path, to the caller`() = runBlocking {
+        // Closing the database is the cheapest honest way to make one handler fail inside the server
+        // without a test-only fault injection hook in the product.
+        harness.context.database.close()
+
+        val response = harness.createCollection("Uninvited", Credential.BEARER)
+        val body = response.bodyAsText()
+
+        assertEquals(HttpStatusCode.InternalServerError, response.status, body)
+        assertContains(body, "INTERNAL_ERROR")
+        assertFalse(
+            body.contains(dataDir.toString()),
+            "an internal message can name paths inside the data directory and is not the caller's to read",
+        )
+        assertFalse(body.contains("SQLException"), "the caller gets a code, not an internal class name")
     }
 
     @Test

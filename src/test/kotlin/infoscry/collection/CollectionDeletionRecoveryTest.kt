@@ -3,11 +3,17 @@ package infoscry.collection
 import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.domain.CollectionId
+import infoscry.domain.CollectionLifecycle
+import infoscry.library.ManagedLibrary
 import infoscry.storage.CollectionConfirmationMismatchException
+import infoscry.storage.CollectionNotActiveException
+import infoscry.storage.CollectionStore
 import infoscry.storage.Database
 import infoscry.storage.DeletionPhase
 import infoscry.storage.DeletionStore
+import infoscry.storage.DocumentStore
 import infoscry.storage.MaintenanceInProgressException
+import infoscry.storage.MutationCoordinator
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -223,20 +229,81 @@ class CollectionDeletionRecoveryTest {
     // ---- Exclusion and confirmation ----
 
     @Test
+    fun `a collection being deleted cannot receive new documents`() {
+        val collectionId = AppContext.open(dataDir).use { context ->
+            val collection = runBlocking { context.collectionService.create(COLLECTION_NAME) }
+            context.library.importFile(collection.id, writeSource())
+            // The tombstone and nothing else: this is the state an import that is already holding bytes
+            // finds the collection in when its deletion has begun.
+            context.collectionService.beginDeletion(collection.id, COLLECTION_NAME)
+            collection.id
+        }
+
+        // Opened through the stores rather than through AppContext, so the tombstone is not recovered
+        // before the assertion: the rows and the files are still there and only the lifecycle says
+        // "deleting". Task 8's import path is the real producer of this call; the publish boundary it
+        // must go through is what is asserted here.
+        val paths = AppPaths.from(dataDir)
+        Database(paths.databaseFile).use { database ->
+            val documents = DocumentStore(database)
+            val collections = CollectionStore(database)
+            val library = ManagedLibrary(paths, documents)
+            val service = CollectionService(
+                database,
+                paths,
+                collections,
+                DeletionStore(database),
+                MutationCoordinator(),
+            )
+
+            assertEquals(
+                CollectionLifecycle.DELETING,
+                collections.get(collectionId)?.lifecycle,
+                "the row survives the tombstone; the lifecycle is what refuses new work",
+            )
+            assertFailsWith<NoSuchElementException> { service.requireActive(collectionId) }
+
+            val published = documents.countByCollection(collectionId)
+            val directories = documentDirectories(paths, collectionId).size
+            // Different bytes from the document already in the collection: a duplicate never reaches the
+            // publish boundary, and the claim under test is that a *new* document cannot enter a
+            // collection whose deletion has started.
+            assertFailsWith<CollectionNotActiveException> {
+                library.importFile(collectionId, writeSource("bytes that have not been imported yet"))
+            }
+
+            assertEquals(
+                published,
+                documents.countByCollection(collectionId),
+                "a refused import must not publish a document row into a deleting collection",
+            )
+            assertEquals(
+                directories,
+                documentDirectories(paths, collectionId).size,
+                "a refused import must not leave a managed original behind either",
+            )
+        }
+    }
+
+    @Test
     fun `mutating commands are refused while a deletion holds exclusive maintenance`() {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        val gated = CollectionIndexRemover {
-            started.complete(Unit)
-            release.await()
-        }
 
-        AppContext.open(dataDir, gated).use { context ->
+        AppContext.open(dataDir).use { context ->
             val collection = runBlocking { context.collectionService.create(COLLECTION_NAME) }
 
             runBlocking {
+                // Held at the tombstone instant, which is the state an import that is already holding
+                // bytes sees: the deletion owns the only writer, and the collection is not ACTIVE yet
+                // still has its rows.
                 val deletion = launch(Dispatchers.Default) {
-                    context.collectionService.deleteConfirmed(collection.id, COLLECTION_NAME)
+                    context.collectionService.deleteConfirmed(collection.id, COLLECTION_NAME) { instant ->
+                        if (instant == DeletionStep(DeletionPhase.PREPARED, recorded = true)) {
+                            started.complete(Unit)
+                            release.await()
+                        }
+                    }
                 }
                 withTimeout(TIMEOUT_MILLIS) { started.await() }
 
@@ -245,6 +312,13 @@ class CollectionDeletionRecoveryTest {
                 }
                 assertContains(refusal.operation, "delete collection")
                 assertNotNull(context.mutations.maintenanceInProgress)
+
+                // The other half of the same exclusion: an import that is already holding bytes must
+                // not be able to publish them once the tombstone is durable.
+                assertFailsWith<CollectionNotActiveException> {
+                    context.library.importFile(collection.id, writeSource("bytes held during a deletion"))
+                }
+                assertEquals(0, context.documents.countByCollection(collection.id))
 
                 release.complete(Unit)
                 withTimeout(TIMEOUT_MILLIS) { deletion.join() }
@@ -311,6 +385,11 @@ class CollectionDeletionRecoveryTest {
      * deletion: the rows are gone, nothing is left parked, nothing points at a moved file, and the
      * user's own source file was never touched. Running recovery twice must change nothing, because a
      * recovered deletion is not work that is still pending.
+     *
+     * Before recovery runs, the state the kill left behind is asserted too — the recorded phase and
+     * which of the two directories exists. That is what makes each stop point prove *its* instant rather
+     * than the same end state six times: a harness that stopped somewhere else would still recover, and
+     * only the interrupted state tells the six apart.
      */
     private fun assertRecovered(stopAfter: StopAfter) {
         val source = writeSource()
@@ -322,6 +401,7 @@ class CollectionDeletionRecoveryTest {
         }
 
         terminateHarnessAt(stopAfter, collectionId)
+        assertInterruptedState(stopAfter, collectionId)
 
         AppContext.open(dataDir).use { reopened ->
             val report = reopened.deletionRecovery
@@ -394,10 +474,10 @@ class CollectionDeletionRecoveryTest {
     private fun javaExecutable(): String =
         Path.of(System.getProperty("java.home"), "bin", "java").toString()
 
-    private fun writeSource(): Path {
+    private fun writeSource(content: String = SOURCE_CONTENT): Path {
         val directory = Files.createDirectories(dataDir.resolve("sources"))
         val source = directory.resolve("nightfall-${SOURCE_SEQUENCE.incrementAndGet()}.txt")
-        Files.writeString(source, SOURCE_CONTENT)
+        Files.writeString(source, content)
         return source
     }
 
@@ -407,12 +487,48 @@ class CollectionDeletionRecoveryTest {
                 ?: error("the deletion record disappeared")
         }
 
+    /**
+     * The state a kill at [stopAfter] left on disk, read without opening the application so recovery
+     * has not run yet: the phase the record still shows, and whether the managed directory is in place,
+     * parked, or already purged.
+     */
+    private fun assertInterruptedState(stopAfter: StopAfter, collectionId: CollectionId) {
+        val paths = AppPaths.from(dataDir)
+        val operation = Database(paths.databaseFile).use { database ->
+            DeletionStore(database).unfinishedFor(collectionId).singleOrNull()
+                ?: error("no unfinished deletion record for collection ${collectionId.value}")
+        }
+
+        assertEquals(
+            stopAfter.recordedPhase,
+            operation.phase,
+            "a kill at $stopAfter must leave the deletion record at the phase the disk can still explain",
+        )
+        assertEquals(
+            stopAfter.managedDirectoryPresent,
+            Files.exists(paths.collectionDir(collectionId)),
+            "whether the managed directory was still in place after a kill at $stopAfter",
+        )
+        assertEquals(
+            stopAfter.parkedDirectoryPresent,
+            Files.exists(paths.trashDirectory(operation.trashBasename)),
+            "whether the managed directory was parked after a kill at $stopAfter",
+        )
+    }
+
     /** The parked directories, which are the ones with the trash prefix inside `library/`. */
     private fun parkedDirectories(paths: AppPaths): List<Path> {
         if (!Files.isDirectory(paths.libraryDir)) return emptyList()
         return Files.list(paths.libraryDir).use { entries ->
             entries.filter { it.fileName.toString().startsWith(".deleted-") }.toList()
         }
+    }
+
+    /** The managed originals of one collection: one directory per document. */
+    private fun documentDirectories(paths: AppPaths, collectionId: CollectionId): List<Path> {
+        val collectionDir = paths.collectionDir(collectionId)
+        if (!Files.isDirectory(collectionDir)) return emptyList()
+        return Files.list(collectionDir).use { entries -> entries.toList() }
     }
 
     private companion object {

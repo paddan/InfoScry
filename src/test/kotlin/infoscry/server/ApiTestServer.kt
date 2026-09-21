@@ -18,11 +18,18 @@ import io.ktor.http.contentType
 import java.nio.file.Path
 import kotlinx.coroutines.runBlocking
 
-/** Which credential a request carries. `NONE` is the unauthenticated caller the guard must refuse. */
+/**
+ * Which credential a request carries.
+ *
+ * `WRONG_BEARER` and `WRONG_CSRF` are well-formed credentials that are not this server's: the point is
+ * that presenting *a* token is not enough, only the right one is.
+ */
 internal enum class Credential {
     NONE,
     BEARER,
     CSRF,
+    WRONG_BEARER,
+    WRONG_CSRF,
 }
 
 /**
@@ -67,6 +74,8 @@ internal class ApiTestServer(
             Credential.NONE -> Unit
             Credential.BEARER -> header(HttpHeaders.Authorization, "Bearer $bearer")
             Credential.CSRF -> header(CSRF_HEADER, csrfToken)
+            Credential.WRONG_BEARER -> header(HttpHeaders.Authorization, "Bearer $WRONG_CREDENTIAL_VALUE")
+            Credential.WRONG_CSRF -> header(CSRF_HEADER, WRONG_CREDENTIAL_VALUE)
         }
         if (body != null) {
             contentType(ContentType.Application.Json)
@@ -101,5 +110,8 @@ internal class ApiTestServer(
     private companion object {
         const val SESSION_PATH = "/api/session"
         const val COLLECTIONS_PATH = "/api/collections"
+
+        /** A credential-shaped value that is deliberately not the server's. */
+        const val WRONG_CREDENTIAL_VALUE = "not-the-credential-this-server-issued"
     }
 }

@@ -1,10 +1,12 @@
 package infoscry.storage
 
 import infoscry.domain.CollectionId
+import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import java.sql.Connection
+import java.sql.PreparedStatement
 import java.sql.ResultSet
 import java.sql.SQLException
 
@@ -16,35 +18,37 @@ class DuplicateDocumentException(val collectionId: CollectionId, val sha256: Str
     IllegalStateException("collection ${collectionId.value} already contains a document with sha256 $sha256")
 
 /**
+ * The collection is being deleted, so it may not receive documents any more.
+ *
+ * Raised by the publish boundary itself rather than by a caller's precondition. A deletion tombstone and
+ * a document insert can race — an import that started before the tombstone is still holding bytes it
+ * wants to publish — so the guard has to be part of the write, which is what [DocumentStore.insert]
+ * does. A caller additionally rechecks the lifecycle after it is admitted, to avoid doing the work at
+ * all when it can see the tombstone early.
+ */
+class CollectionNotActiveException(val collectionId: CollectionId) :
+    IllegalStateException(
+        "collection ${collectionId.value} is being deleted and cannot receive documents",
+    )
+
+/**
  * Persistence for documents. The row-level constraints are the authority: the unique
  * `(collection_id, sha256)` index decides duplicates, and the foreign key to `collections` decides
- * whether a collection exists, so no caller has to race a `SELECT` before writing.
+ * whether a collection exists, so no caller has to race a `SELECT` before writing. The collection's
+ * lifecycle is checked in the same statement for the same reason.
  */
 class DocumentStore(private val database: Database) {
 
     fun insert(document: Document): Document {
         database.transaction { connection ->
             connection.prepareStatement(INSERT_DOCUMENT).use { statement ->
-                statement.setString(1, document.id.value)
-                statement.setString(2, document.collectionId.value)
-                statement.setString(3, document.sha256)
-                statement.setString(4, document.mediaType)
-                statement.setString(5, document.originalFilename)
-                statement.setString(6, document.sourcePath)
-                statement.setLong(7, document.sizeBytes)
-                statement.setString(8, document.status.name)
-                statement.setString(9, document.title)
-                statement.setString(10, document.author)
-                statement.setString(11, document.language)
-                statement.setString(12, document.errorCode)
-                statement.setString(13, document.errorMessage)
-                statement.setString(14, document.createdAt)
-                statement.setString(15, document.updatedAt)
-                try {
+                bindDocument(statement, document)
+                val inserted = try {
                     statement.executeUpdate()
                 } catch (failure: SQLException) {
                     failure.rethrowAsConstraintViolation(document)
                 }
+                if (inserted == 0) throw refusalFor(connection, document)
             }
         }
         return document
@@ -144,6 +148,50 @@ class DocumentStore(private val database: Database) {
         else -> throw this
     }
 
+    private fun bindDocument(statement: PreparedStatement, document: Document) {
+        statement.setString(1, document.id.value)
+        statement.setString(2, document.collectionId.value)
+        statement.setString(3, document.sha256)
+        statement.setString(4, document.mediaType)
+        statement.setString(5, document.originalFilename)
+        statement.setString(6, document.sourcePath)
+        statement.setLong(7, document.sizeBytes)
+        statement.setString(8, document.status.name)
+        statement.setString(9, document.title)
+        statement.setString(10, document.author)
+        statement.setString(11, document.language)
+        statement.setString(12, document.errorCode)
+        statement.setString(13, document.errorMessage)
+        statement.setString(14, document.createdAt)
+        statement.setString(15, document.updatedAt)
+        // The guard's own parameters: which collection must still be active for the row to appear.
+        statement.setString(16, document.collectionId.value)
+        statement.setString(17, CollectionLifecycle.ACTIVE.name)
+    }
+
+    /**
+     * Why the guarded insert matched no row.
+     *
+     * Both a missing collection and a tombstoned one match nothing, and the two callers deserve
+     * different answers: the first is a bug in the caller, the second is a deletion that won the race.
+     * Reading the lifecycle back inside the same transaction is what tells them apart.
+     */
+    private fun refusalFor(connection: Connection, document: Document): RuntimeException {
+        val lifecycle = connection.prepareStatement(SELECT_LIFECYCLE).use { statement ->
+            statement.setString(1, document.collectionId.value)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
+        }
+        return when (lifecycle) {
+            null -> NoSuchElementException("no collection with id ${document.collectionId.value}")
+            CollectionLifecycle.ACTIVE.name -> IllegalStateException(
+                "the guarded insert matched no row although collection ${document.collectionId.value} " +
+                    "is ${CollectionLifecycle.ACTIVE}",
+            )
+
+            else -> CollectionNotActiveException(document.collectionId)
+        }
+    }
+
     private fun ResultSet.toDocument(): Document = Document(
         id = DocumentId(getString("id")),
         collectionId = CollectionId(getString("collection_id")),
@@ -169,7 +217,17 @@ class DocumentStore(private val database: Database) {
 
         const val SELECT_DOCUMENTS = "SELECT $DOCUMENT_COLUMNS FROM documents"
 
+        const val SELECT_LIFECYCLE = "SELECT lifecycle FROM collections WHERE id = ?"
+
+        /**
+         * The insert is guarded by the collection's lifecycle, so a deletion tombstone and a publish
+         * cannot both win: the row exists only if the collection was still `ACTIVE` at the instant of
+         * the write. A plain `INSERT` would let an import that read the lifecycle earlier publish into
+         * a collection whose deletion had already started.
+         */
         const val INSERT_DOCUMENT =
-            "INSERT INTO documents ($DOCUMENT_COLUMNS) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO documents ($DOCUMENT_COLUMNS) " +
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
+                "WHERE EXISTS (SELECT 1 FROM collections WHERE id = ? AND lifecycle = ?)"
     }
 }

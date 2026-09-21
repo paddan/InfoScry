@@ -12,9 +12,10 @@ import kotlinx.coroutines.runBlocking
  *
  * "The process was killed between two phases" cannot be produced from inside the process being killed,
  * so the recovery test starts this harness as a real child JVM, waits for it to report the instant it
- * reached, and then terminates it forcibly. The harness drives the same internal steps the real
- * deletion drives — not a re-implementation of them — so the state it leaves behind is exactly the
- * state production would leave if it were killed at that instant.
+ * reached, and then terminates it forcibly. The harness runs the *real* deletion and stops it through
+ * the service's own observation seam, so the state it leaves behind is exactly the state production
+ * would leave if it were killed at that instant — and the phase order it follows is production's, not a
+ * second copy of it that could drift.
  *
  * It prints `HARNESS READY <stop-after>` on stdout and then blocks until it is killed. The data
  * directory lock stays held while it blocks, just as it would in a running server, and the operating
@@ -41,6 +42,38 @@ object DeletionHarness {
 
         /** The parked directory is gone but the phase has not been advanced. */
         PURGED,
+
+        ;
+
+        /**
+         * The instant this stop point corresponds to. [DeletionStep] is the service's, so a phase that
+         * changes shape there fails here rather than passing silently.
+         */
+        internal fun instant(): DeletionStep = when (this) {
+            PREPARED -> DeletionStep(DeletionPhase.PREPARED, recorded = true)
+            RENAMED -> DeletionStep(DeletionPhase.FILES_MOVED, recorded = false)
+            FILES_MOVED -> DeletionStep(DeletionPhase.FILES_MOVED, recorded = true)
+            DB_DELETED -> DeletionStep(DeletionPhase.DB_DELETED, recorded = true)
+            INDEX_DELETED -> DeletionStep(DeletionPhase.INDEX_DELETED, recorded = true)
+            PURGED -> DeletionStep(DeletionPhase.DONE, recorded = false)
+        }
+
+        /** The phase the deletion record must still show when the process was killed here. */
+        internal val recordedPhase: DeletionPhase
+            get() = when (this) {
+                PREPARED, RENAMED -> DeletionPhase.PREPARED
+                FILES_MOVED -> DeletionPhase.FILES_MOVED
+                DB_DELETED -> DeletionPhase.DB_DELETED
+                INDEX_DELETED, PURGED -> DeletionPhase.INDEX_DELETED
+            }
+
+        /** Whether the managed directory is still in place when the process was killed here. */
+        internal val managedDirectoryPresent: Boolean
+            get() = this == PREPARED
+
+        /** Whether the managed directory has been parked when the process was killed here. */
+        internal val parkedDirectoryPresent: Boolean
+            get() = this != PREPARED && this != PURGED
     }
 
     @JvmStatic
@@ -55,42 +88,13 @@ object DeletionHarness {
                 exitProcess(2)
             }
 
-        val context = AppContext.open(dataDir)
-        runBlocking {
-            val operation = context.collectionService.beginDeletion(collectionId, confirmName)
-            if (stopAfter == StopAfter.PREPARED) {
-                waitForKill(stopAfter)
-                return@runBlocking
+        val wanted = stopAfter.instant()
+        AppContext.open(dataDir).use { context ->
+            runBlocking {
+                context.collectionService.deleteConfirmed(collectionId, confirmName) { instant ->
+                    if (instant == wanted) waitForKill(stopAfter)
+                }
             }
-
-            context.collectionService.parkManagedDirectory(operation)
-            if (stopAfter == StopAfter.RENAMED) {
-                waitForKill(stopAfter)
-                return@runBlocking
-            }
-
-            var current = context.deletions.advance(operation.id, DeletionPhase.FILES_MOVED)
-            if (stopAfter == StopAfter.FILES_MOVED) {
-                waitForKill(stopAfter)
-                return@runBlocking
-            }
-
-            context.collectionService.deleteCollectionRows(current)
-            current = context.deletions.get(current.id) ?: error("the deletion record disappeared")
-            if (stopAfter == StopAfter.DB_DELETED) {
-                waitForKill(stopAfter)
-                return@runBlocking
-            }
-
-            context.collectionService.removeSearchEntries(current)
-            current = context.deletions.advance(current.id, DeletionPhase.INDEX_DELETED)
-            if (stopAfter == StopAfter.INDEX_DELETED) {
-                waitForKill(stopAfter)
-                return@runBlocking
-            }
-
-            context.collectionService.purgeTrash(current)
-            waitForKill(stopAfter)
         }
     }
 

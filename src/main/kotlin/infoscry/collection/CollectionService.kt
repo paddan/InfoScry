@@ -62,6 +62,18 @@ data class DeletionRecoveryReport(
 )
 
 /**
+ * One instant in a deletion: the phase the operation is in or is about to enter, and whether that phase
+ * is already recorded.
+ *
+ * `recorded = false` marks the instants a crash is hardest to recover from — the step's side effect has
+ * happened but the phase that makes it durable has not been written yet. The deletion-recovery harness
+ * stops a real child process at one of these instants to prove the next startup can still tell what
+ * happened. Every phase whose side effect and phase write are one transaction (the row deletion) has no
+ * such instant, because it cannot be observed from outside by construction.
+ */
+internal data class DeletionStep(val phase: DeletionPhase, val recorded: Boolean)
+
+/**
  * Collections: the one place that changes them, and the state machine that removes one.
  *
  * Deletion is a durable, resumable operation rather than a sequence of calls, because it spans three
@@ -133,9 +145,25 @@ class CollectionService(
      * touched: they were never InfoScry's to remove.
      */
     suspend fun deleteConfirmed(collectionId: CollectionId, confirmName: String): DeletionOperation =
+        deleteConfirmed(collectionId, confirmName) { }
+
+    /**
+     * [deleteConfirmed] with the observation seam the deletion-recovery harness stops a child process
+     * through.
+     *
+     * The seam is internal and has no production caller: the tests that prove recovery need to interrupt
+     * the real deletion at a named instant, and the alternative — a harness that drives the individual
+     * steps itself — would spell the phase order a second time and could keep passing while exercising a
+     * sequence production no longer runs.
+     */
+    internal suspend fun deleteConfirmed(
+        collectionId: CollectionId,
+        confirmName: String,
+        observe: suspend (DeletionStep) -> Unit,
+    ): DeletionOperation =
         coordinator.withExclusiveMaintenance("delete collection ${collectionId.value}") {
             assertMutationsAllowed()
-            rollForward(beginDeletion(collectionId, confirmName))
+            rollForward(beginDeletion(collectionId, confirmName), observe)
         }
 
     /**
@@ -197,30 +225,42 @@ class CollectionService(
         return deletions.begin(operation)
     }
 
-    /** Runs whatever is left of [operation], returning it in its final state. */
-    internal suspend fun rollForward(operation: DeletionOperation): DeletionOperation {
+    /**
+     * Runs whatever is left of [operation], returning it in its final state.
+     *
+     * The order of the phases lives here and nowhere else. [observe] is called at each instant of the
+     * deletion so the recovery harness can stop a child process at one of them; the default does
+     * nothing, which is what every production caller uses.
+     */
+    internal suspend fun rollForward(
+        operation: DeletionOperation,
+        observe: suspend (DeletionStep) -> Unit = {},
+    ): DeletionOperation {
         var current = operation
         while (current.phase != DeletionPhase.DONE) {
+            observe(DeletionStep(current.phase, recorded = true))
             current = when (current.phase) {
                 DeletionPhase.PREPARED -> {
                     assertRecoverable(current)
                     parkManagedDirectory(current)
+                    observe(DeletionStep(DeletionPhase.FILES_MOVED, recorded = false))
                     deletions.advance(current.id, DeletionPhase.FILES_MOVED)
                 }
 
                 DeletionPhase.FILES_MOVED -> {
                     assertRecoverable(current)
                     deleteCollectionRows(current)
-                    deletions.advance(current.id, DeletionPhase.DB_DELETED)
                 }
 
                 DeletionPhase.DB_DELETED -> {
                     removeSearchEntries(current)
+                    observe(DeletionStep(DeletionPhase.INDEX_DELETED, recorded = false))
                     deletions.advance(current.id, DeletionPhase.INDEX_DELETED)
                 }
 
                 DeletionPhase.INDEX_DELETED -> {
                     purgeTrash(current)
+                    observe(DeletionStep(DeletionPhase.DONE, recorded = false))
                     deletions.advance(current.id, DeletionPhase.DONE)
                 }
 
@@ -250,17 +290,18 @@ class CollectionService(
 
     /**
      * Removes the collection's rows, its documents and its jobs in one transaction with the phase
-     * that records that they are gone.
+     * that records that they are gone, and returns the advanced operation.
      */
-    internal fun deleteCollectionRows(operation: DeletionOperation) {
+    internal fun deleteCollectionRows(operation: DeletionOperation): DeletionOperation =
         database.transaction {
             // Returns false when a previous attempt already removed the rows, which is why a retry is
             // safe. A name mismatch here would mean the collection was renamed while being deleted,
             // which the tombstone prevents.
             collections.delete(operation.collectionId, operation.collectionName)
+            // The phase write is inside the same transaction as the deletion it records: an observer
+            // outside it can never see rows that are gone while the phase still says they are not.
             deletions.advance(operation.id, DeletionPhase.DB_DELETED)
         }
-    }
 
     /**
      * Removes the collection's search entries. Before an index exists this is an explicit no-op.
