@@ -2,7 +2,9 @@ package infoscry.jobs
 
 import infoscry.AppContext
 import infoscry.chunk.Chunker
-import infoscry.chunk.WhitespaceTokenCounter
+import infoscry.embedding.E5Embedder
+import infoscry.embedding.GpuRuntime
+import infoscry.embedding.ModelManager
 import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
@@ -481,6 +483,10 @@ class ImportJobHandler(
         TesseractOcr.NEEDS_TESSERACT_CODE ->
             "the OCR tool (Tesseract) is not installed, so pages without a text layer cannot be read"
 
+        ModelManager.MODEL_NOT_INSTALLED_CODE -> ModelManager.installRemedy()
+
+        GpuRuntime.GPU_UNAVAILABLE_CODE -> GpuRuntime.remedy()
+
         CalibreConverter.NEEDS_CALIBRE_CODE ->
             "this e-book format needs the Calibre converter, which is not installed"
 
@@ -491,6 +497,9 @@ class ImportJobHandler(
     }
 
     companion object {
+
+        /** Where a verified CoreML session writes its one profile, under the data directory's temp root. */
+        private const val PROFILE_DIRECTORY = "gpu-profile"
 
         private const val STAGE_QUEUE = "queue"
         private const val STAGE_COPY = "copy"
@@ -526,7 +535,15 @@ class ImportJobHandler(
         fun attachTo(
             context: AppContext,
             pipeline: ImportPipeline = ImportPipeline.production(context),
-            chunker: Chunker = Chunker(WhitespaceTokenCounter()),
+            // The pinned model's own tokenizer measures a passage, so what the chunker fits and what the
+            // embedder consumes are the same measurement. It is built on first use, so a machine that has
+            // not installed the model yet still serves requests and reports the remedy per document.
+            chunker: Chunker = Chunker(
+                E5Embedder.productionCounter(
+                    modelsDir = context.paths.modelsDir,
+                    profileDirectory = context.paths.tempDir.resolve(PROFILE_DIRECTORY),
+                ),
+            ),
         ): JobRunner {
             val handler = ImportJobHandler(
                 paths = context.paths,

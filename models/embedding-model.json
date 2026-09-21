@@ -1,0 +1,61 @@
+{
+  "model": "intfloat/multilingual-e5-base",
+  "revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+  "baseUrl": "https://huggingface.co/intfloat/multilingual-e5-base/resolve/d128750597153bb5987e10b1c3493a34e5a4502a/onnx",
+  "dimension": 768,
+  "maxSequenceTokens": 512,
+  "pooling": "attention-mask-mean",
+  "prefixVersion": "e5-query-passage-1",
+  "passagePrefix": "passage: ",
+  "queryPrefix": "query: ",
+  "nativeRuntime": {
+    "artifact": "com.microsoft.onnxruntime:onnxruntime",
+    "version": "1.22.0"
+  },
+  "executionProvider": {
+    "name": "CoreML",
+    "options": {
+      "MLComputeUnits": "CPUAndGPU",
+      "ModelFormat": "MLProgram",
+      "EnableOnSubgraphs": "1"
+    }
+  },
+  "files": [
+    {
+      "name": "model.onnx",
+      "bytes": 1110059084,
+      "sha256": "84a4d426f7e87a6bf5bf195f0bae2c4a7d15f675b23ca96f42fab8326d7a77aa",
+      "sha256Source": "lfs-oid"
+    },
+    {
+      "name": "tokenizer.json",
+      "bytes": 17082660,
+      "sha256": "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626",
+      "sha256Source": "lfs-oid"
+    },
+    {
+      "name": "sentencepiece.bpe.model",
+      "bytes": 5069051,
+      "sha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865",
+      "sha256Source": "lfs-oid"
+    },
+    {
+      "name": "config.json",
+      "bytes": 686,
+      "sha256": "4c27930e59106027abab56f7531c1fa6b14bbf31e8229ec36d68affa4e869bcd",
+      "sha256Source": "pinned-revision-bytes"
+    },
+    {
+      "name": "special_tokens_map.json",
+      "bytes": 280,
+      "sha256": "06e405a36dfe4b9604f484f6a1e619af1a7f7d09e34a8555eb0b77b66318067f",
+      "sha256Source": "pinned-revision-bytes"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "bytes": 418,
+      "sha256": "efb5c0d09722e5fe59a462cd2a9976ee216d55b037597d997cd3fe833216da15",
+      "sha256Source": "pinned-revision-bytes"
+    }
+  ]
+}
