@@ -467,9 +467,64 @@ class ImportJobHandlerTest {
             )
             assertEquals(0, embedCalls, "an over-ceiling document is refused before any embedding work")
             val documentId = item.documentId!!
-            assertNotEquals(DocumentStatus.COMPLETE, run.documents.getValue(documentId).status)
+            assertEquals(DocumentStatus.FAILED, run.documents.getValue(documentId).status)
             AppContext.open(harness.dataDir).use { context ->
                 assertEquals(0, context.index.chunkCount(CollectionId("default"), documentId))
+            }
+        }
+    }
+
+    @Test
+    fun `a document refused over the ceiling resumes from its persisted chunks once the ceiling is raised`() {
+        withHarness { harness ->
+            val source = harness.writeText("resume-after-ceiling.txt", "x\n")
+
+            // Run 1: 4 units -> 4 chunks, refused at a ceiling of 3 before any embedding. The chunks are
+            // persisted before the refusal: that is what the raised-ceiling re-run re-embeds.
+            val run1Extractor = RecordingUnits(units = 4)
+            val run1 = harness.importDurably(
+                sources = listOf(source),
+                extractor = run1Extractor,
+                maxChunksPerDocument = 3,
+            )
+            val item1 = run1.items.single()
+            val documentId = item1.documentId!!
+            assertEquals(ImportItemOutcome.FAILED, item1.outcome)
+            assertEquals("INDEX_TOO_LARGE", item1.errorCode)
+            assertEquals(DocumentStatus.FAILED, run1.documents.getValue(documentId).status)
+            assertEquals(4, run1Extractor.produced.size, "run 1 must extract all four units for the resume to have them")
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(0, context.index.chunkCount(CollectionId("default"), documentId))
+            }
+
+            // Run 2: the same file against the same durable state ("a new process over the same data
+            // directory"), with the ceiling raised to 4. It must attach to the same failed document via its
+            // stored managed copy, skip every already-committed unit, and finish embedding from the
+            // persisted chunks -- no new extraction, no repeated OCR.
+            var embedCallsRun2 = 0
+            val countingEmbedder = object : DocumentEmbedder {
+                override fun embedDocuments(texts: List<String>): List<FloatArray> {
+                    embedCallsRun2++
+                    return TestDocumentEmbedder().embedDocuments(texts)
+                }
+            }
+            val run2Extractor = RecordingUnits(units = 4)
+            val run2 = harness.importDurably(
+                sources = listOf(source),
+                extractor = run2Extractor,
+                maxChunksPerDocument = 4,
+                embedder = countingEmbedder,
+            )
+
+            val item2 = run2.items.single()
+            assertEquals(documentId, item2.documentId, "the re-run must finish the same document")
+            assertEquals(ImportItemOutcome.DUPLICATE, item2.outcome, "the bytes were already in the managed library")
+            assertEquals(DocumentStatus.COMPLETE, run2.documents.getValue(documentId).status)
+            assertTrue(run2Extractor.produced.isEmpty(), "the re-run must not re-extract committed units")
+            assertEquals(4, run2Extractor.skipped.size, "every committed unit must be reused from its checkpoint")
+            assertEquals(4, embedCallsRun2, "the re-run embeds each unit's persisted chunk exactly once (one call per unit)")
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(4, context.index.chunkCount(CollectionId("default"), documentId))
             }
         }
     }
