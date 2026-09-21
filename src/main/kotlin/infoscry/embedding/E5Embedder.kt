@@ -45,7 +45,7 @@ class E5Embedder internal constructor(
     private val tokenizerPath: Path,
     private val runner: EmbeddingRunner,
     private val batchTokenBudget: Int = DEFAULT_BATCH_TOKEN_BUDGET,
-) : TokenCounter, DocumentEmbedder, AutoCloseable {
+) : TokenCounter, DocumentEmbedder, QueryEmbedder, AutoCloseable {
 
     init {
         require(batchTokenBudget > 0) { "batchTokenBudget must be positive, was $batchTokenBudget" }
@@ -95,7 +95,7 @@ class E5Embedder internal constructor(
      * Queries are rejected rather than truncated, and the message says what to do about it, because a
      * truncated query embeds a different question than the one asked while looking like a normal result.
      */
-    fun embedQuery(query: String): FloatArray {
+    override fun embedQuery(query: String): FloatArray {
         if (query.isBlank()) {
             throw EmbeddingException(EMPTY_QUERY_CODE, "an embedding query must not be blank")
         }
@@ -284,6 +284,33 @@ class E5Embedder internal constructor(
          * starting the server, serving a request or reading an existing document should wait on 1.1 GB of
          * digests.
          */
+        /**
+         * Builds the query embedder on first use, or reports that the model is not installed.
+         *
+         * This is the search-side twin of [productionDocumentEmbedder]: same laziness, same memoisation,
+         * same `null` when the model is absent, same refusal (never a CPU fallback) when it is not. The
+         * search service only touches it for a semantic or hybrid request, so keyword search and source
+         * reads never wait on the accelerator.
+         */
+        fun productionQueryEmbedder(
+            modelsDir: Path,
+            profileDirectory: Path,
+        ): () -> QueryEmbedder? {
+            val cached: Lazy<QueryEmbedder?> = lazy {
+                val manifest = ModelManifest.load()
+                if (!ModelManager(manifest).isInstalled(modelsDir)) {
+                    null
+                } else {
+                    production(
+                        manifest = manifest,
+                        installation = ModelInstallation(manifest, modelsDir.resolve(manifest.revision)),
+                        profileDirectory = profileDirectory,
+                    )
+                }
+            }
+            return { cached.value }
+        }
+
         /**
          * Builds the document embedder on first use, or reports that the model is not installed.
          *

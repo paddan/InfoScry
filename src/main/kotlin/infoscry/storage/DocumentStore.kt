@@ -37,7 +37,97 @@ class CollectionNotActiveException(val collectionId: CollectionId) :
  * whether a collection exists, so no caller has to race a `SELECT` before writing. The collection's
  * lifecycle is checked in the same statement for the same reason.
  */
+/**
+ * The document-level criteria a search can be restricted by, in the storage vocabulary.
+ *
+ * [filenameOrPathContains] and [titleAuthorOrLanguageContains] match anywhere in the named columns,
+ * case-insensitively via SQLite's LIKE; [ocrOnly] keeps only documents that have at least one content
+ * unit read by OCR (a unit whose mean confidence is recorded). Dates are ISO-8601 UTC strings, which
+ * compare lexicographically.
+ */
+data class DocumentCriterion(
+    val collectionId: CollectionId? = null,
+    val mediaTypes: Set<String> = emptySet(),
+    val filenameOrPathContains: String? = null,
+    val titleAuthorOrLanguageContains: String? = null,
+    val importedFrom: String? = null,
+    val importedUntil: String? = null,
+    val statuses: Set<DocumentStatus> = emptySet(),
+    val ocrOnly: Boolean = false,
+)
+
 class DocumentStore(private val database: Database) {
+
+    /**
+     * The document ids matching [criterion], in no particular order.
+     *
+     * This is the pre-retrieval restriction half of a search: the Lucene query itself is narrowed to
+     * these ids, so a criterion can never be applied after the fact. An empty result means no document
+     * passes the criteria and the search is empty without touching the index.
+     */
+    fun findIds(criterion: DocumentCriterion): List<DocumentId> = database.read { connection ->
+        connection.prepareStatement(criterionSql(criterion)).use { statement ->
+            var index = 1
+            criterion.collectionId?.let { collectionId ->
+                statement.setString(index++, collectionId.value)
+            }
+            criterion.mediaTypes.forEach { mediaType -> statement.setString(index++, mediaType) }
+            criterion.filenameOrPathContains?.let { contains ->
+                val pattern = likePattern(contains)
+                statement.setString(index++, pattern)
+                statement.setString(index++, pattern)
+            }
+            criterion.titleAuthorOrLanguageContains?.let { contains ->
+                val pattern = likePattern(contains)
+                statement.setString(index++, pattern)
+                statement.setString(index++, pattern)
+                statement.setString(index++, pattern)
+            }
+            criterion.importedFrom?.let { statement.setString(index++, it) }
+            criterion.importedUntil?.let { statement.setString(index++, it) }
+            criterion.statuses.forEach { status -> statement.setString(index++, status.name) }
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(DocumentId(rows.getString(1))) }
+            }
+        }
+    }
+
+    private fun criterionSql(criterion: DocumentCriterion): String = buildString {
+        append("SELECT id FROM documents d WHERE 1=1")
+        criterion.collectionId?.let { append(" AND d.collection_id = ?") }
+        if (criterion.mediaTypes.isNotEmpty()) {
+            append(" AND d.media_type IN (")
+            append(criterion.mediaTypes.joinToString(",") { "?" })
+            append(")")
+        }
+        if (criterion.filenameOrPathContains != null) {
+            append(" AND (d.original_filename LIKE ? ESCAPE '\\' OR d.original_path LIKE ? ESCAPE '\\')")
+        }
+        if (criterion.titleAuthorOrLanguageContains != null) {
+            append(
+                " AND (d.title LIKE ? ESCAPE '\\' OR d.author LIKE ? ESCAPE '\\' " +
+                    "OR d.language LIKE ? ESCAPE '\\')",
+            )
+        }
+        criterion.importedFrom?.let { append(" AND d.created_at >= ?") }
+        criterion.importedUntil?.let { append(" AND d.created_at <= ?") }
+        if (criterion.statuses.isNotEmpty()) {
+            append(" AND d.status IN (")
+            append(criterion.statuses.joinToString(",") { "?" })
+            append(")")
+        }
+        if (criterion.ocrOnly) {
+            append(
+                " AND EXISTS (SELECT 1 FROM content_units cu " +
+                    "WHERE cu.document_id = d.id AND cu.mean_confidence IS NOT NULL)",
+            )
+        }
+    }
+
+    /** Wraps a contains-match in LIKE wildcards, escaping the user's own LIKE metacharacters. */
+    private fun likePattern(contains: String): String =
+        "%" + contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
 
     fun insert(document: Document): Document {
         database.transaction { connection ->

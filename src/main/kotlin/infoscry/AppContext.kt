@@ -7,6 +7,7 @@ import infoscry.config.AppPaths
 import infoscry.config.ProcessLock
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.embedding.E5Embedder
 import infoscry.embedding.ModelManifest
 import infoscry.jobs.JobRunner
 import infoscry.library.ManagedLibrary
@@ -14,6 +15,7 @@ import infoscry.logging.LoggingBootstrap
 import infoscry.search.IndexIdentity
 import infoscry.search.LuceneIndex
 import infoscry.search.LuceneSchema
+import infoscry.search.SearchService
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
 import infoscry.storage.Database
@@ -55,6 +57,19 @@ class AppContext private constructor(
     val index: LuceneIndex,
     private val lock: ProcessLock,
 ) : AutoCloseable {
+
+    /**
+     * Retrieval over this context's index, resolved lazily so a command that never searches does not
+     * touch the query embedder or the accelerator.
+     */
+    val search: SearchService by lazy {
+        SearchService(
+            collections = collections,
+            documents = documents,
+            index = index,
+            queryEmbedder = E5Embedder.productionQueryEmbedder(paths.modelsDir, paths.embeddingProfileDir),
+        )
+    }
 
     /**
      * The worker that owns this data directory's job queue, once a composition root has wired its

@@ -1,0 +1,20 @@
+{
+  "note": "CI-quality keyword expectations over the committed fixture corpus, indexed with the deterministic fake embedder. Each entry: the query, the fixture file the expected unit comes from, and a fragment the expected unit's search text must contain. Semantic expectations over the real model are recorded in docs/gpu-validation.md, not here.",
+  "expectations": [
+    {
+      "query": "arendet",
+      "fixture": "sample.txt",
+      "expectedTextContains": "Beslut: arendet"
+    },
+    {
+      "query": "diariet",
+      "fixture": "sample.md",
+      "expectedTextContains": "Diariet innehaller tre volymer"
+    },
+    {
+      "query": "vittnen",
+      "fixture": "sample.md",
+      "expectedTextContains": "vittnen"
+    }
+  ]
+}

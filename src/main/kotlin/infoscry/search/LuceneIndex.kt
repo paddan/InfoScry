@@ -254,42 +254,45 @@ class LuceneIndex private constructor(
     /**
      * Keyword search over the analyzed text field.
      *
-     * [collectionId] narrows the match exactly; `null` searches every collection. A query the classic
-     * parser cannot parse is a caller error, not a corrupt index.
+     * [collectionId] and [documentIds] narrow the match exactly in the query itself. A query the classic
+     * parser cannot parse is escaped into a safe terms query rather than surfacing as an error — invalid
+     * syntax is user input, not a corrupt index.
      */
-    fun searchKeyword(collectionId: CollectionId?, queryText: String, limit: Int): List<IndexHit> =
-        readSearcher { searcher ->
-            val parsed = try {
-                QueryParser(LuceneSchema.FIELD_TEXT, handle.analyzer).parse(queryText)
-            } catch (failure: ParseException) {
-                throw IllegalArgumentException("could not parse the search query '${queryText}'", failure)
-            }
-            val query = filteredByCollection(parsed, collectionId)
-            toHits(searcher, searcher.search(query, limit))
-        }
+    fun searchKeyword(
+        collectionId: CollectionId?,
+        queryText: String,
+        documentIds: Set<String>? = null,
+        limit: Int,
+    ): List<IndexHit> = readSearcher { searcher ->
+        val parsed = parseSafely(queryText)
+        val query = filteredBy(parsed, collectionId, documentIds)
+        toHits(searcher, searcher.search(query, limit))
+    }
 
     /**
      * Vector search over the index's embedding field.
      *
-     * Returns the nearest vectors to [vector], narrowed by [collectionId] when one is given. The
-     * caller is the search service, which decides whether the index's [schemaStatus] still matches the
+     * Returns the nearest vectors to [vector], narrowed by [collectionId] and [documentIds] when given.
+     * The caller is the search service, which decides whether the index's [schemaStatus] still matches the
      * model it embeds with before calling this.
      */
-    fun searchVector(collectionId: CollectionId?, vector: FloatArray, limit: Int): List<IndexHit> =
-        readSearcher { searcher ->
-            require(vector.size == handle.identity.dimension) {
-                "a query vector must match the index's dimension (${handle.identity.dimension}), was ${vector.size}"
-            }
-            val filter = collectionId?.let {
-                TermQuery(Term(LuceneSchema.FIELD_COLLECTION_ID, it.value))
-            }
-            val query = if (filter != null) {
-                KnnFloatVectorQuery(LuceneSchema.FIELD_VECTOR, vector, limit, filter)
-            } else {
-                KnnFloatVectorQuery(LuceneSchema.FIELD_VECTOR, vector, limit)
-            }
-            toHits(searcher, searcher.search(query, limit))
+    fun searchVector(
+        collectionId: CollectionId?,
+        vector: FloatArray,
+        documentIds: Set<String>? = null,
+        limit: Int,
+    ): List<IndexHit> = readSearcher { searcher ->
+        require(vector.size == handle.identity.dimension) {
+            "a query vector must match the index's dimension (${handle.identity.dimension}), was ${vector.size}"
         }
+        val filter = scopeFilter(collectionId, documentIds)
+        val query = if (filter != null) {
+            KnnFloatVectorQuery(LuceneSchema.FIELD_VECTOR, vector, limit, filter)
+        } else {
+            KnnFloatVectorQuery(LuceneSchema.FIELD_VECTOR, vector, limit)
+        }
+        toHits(searcher, searcher.search(query, limit))
+    }
 
     /** How many chunks [documentId] currently has in the index, for the idempotency guarantees. */
     fun chunkCount(collectionId: CollectionId, documentId: DocumentId): Int = readSearcher { searcher ->
@@ -332,12 +335,42 @@ class LuceneIndex private constructor(
         }
     }
 
-    private fun filteredByCollection(query: Query, collectionId: CollectionId?): Query = when (collectionId) {
-        null -> query
-        else -> BooleanQuery.Builder().apply {
+    private fun filteredBy(
+        query: Query,
+        collectionId: CollectionId?,
+        documentIds: Set<String>?,
+    ): Query {
+        val scope = scopeFilter(collectionId, documentIds)
+        if (scope == null) return query
+        return BooleanQuery.Builder().apply {
             add(query, BooleanClause.Occur.MUST)
-            add(TermQuery(Term(LuceneSchema.FIELD_COLLECTION_ID, collectionId.value)), BooleanClause.Occur.FILTER)
+            add(scope, BooleanClause.Occur.FILTER)
         }.build()
+    }
+
+    /** One filter query naming the collection and document ids a hit must belong to. */
+    private fun scopeFilter(collectionId: CollectionId?, documentIds: Set<String>?): Query? {
+        if (collectionId == null && documentIds.isNullOrEmpty()) return null
+        return BooleanQuery.Builder().apply {
+            if (collectionId != null) {
+                add(TermQuery(Term(LuceneSchema.FIELD_COLLECTION_ID, collectionId.value)), BooleanClause.Occur.FILTER)
+            }
+            documentIds?.forEach { id ->
+                add(TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, id)), BooleanClause.Occur.FILTER)
+            }
+        }.build()
+    }
+
+    /**
+     * Parses a user query, falling back to the parser's own escaping when the input is not valid syntax.
+     *
+     * `QueryParser.escape` quotes every reserved character, so the escaped text is always parseable and the
+     * result matches the user's words literally rather than failing on their phrasing.
+     */
+    private fun parseSafely(queryText: String): Query = try {
+        QueryParser(LuceneSchema.FIELD_TEXT, handle.analyzer).parse(queryText)
+    } catch (failure: ParseException) {
+        QueryParser(LuceneSchema.FIELD_TEXT, handle.analyzer).parse(QueryParser.escape(queryText))
     }
 
     private fun toHits(searcher: IndexSearcher, top: TopDocs): List<IndexHit> =
