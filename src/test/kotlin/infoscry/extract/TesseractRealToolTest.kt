@@ -1,5 +1,6 @@
 package infoscry.extract
 
+import infoscry.EXTERNAL_TAG
 import infoscry.diagnostics.ToolProbe
 import infoscry.domain.DocumentId
 import infoscry.fixtures.OcrFixtureGenerator
@@ -91,8 +92,5 @@ class TesseractRealToolTest {
 
         const val SWEDISH: String = "swe"
         const val ENGLISH: String = "eng"
-
-        /** How the suite is told to leave this test out of a run that has no tools installed. */
-        const val EXTERNAL_TAG: String = "external"
     }
 }

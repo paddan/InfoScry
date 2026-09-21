@@ -248,6 +248,26 @@ class ImageExtractorTest {
         )
     }
 
+    @Test
+    fun `a refusal found mid-unit is emitted inside that unit's permit`() = runBlocking {
+        val managed = managedImage(OcrFixtureGenerator.IMAGE_NAME)
+        val probe = PermitProbeBoundary()
+        val seam = OcrSpy(unavailable = TesseractOcr.NEEDS_TESSERACT_CODE).seam
+
+        val events = collect(ImageExtractor(seam), inputFor(managed, probe), probe)
+
+        assertEquals(emptyList(), probe.eventsOutsidePermit)
+        assertEquals(
+            events.size,
+            probe.permits,
+            "the document-level refusal opened a second permit for one step of work",
+        )
+        val refusal = failures(events).single()
+        assertEquals(DOCUMENT_REFUSED_KEY, refusal.key)
+        assertEquals(TesseractOcr.NEEDS_TESSERACT_CODE, refusal.code)
+        assertTrue(events.none { it is ExtractionEvent.Finished }, "a refused document was reported done")
+    }
+
     // ---- Wiring and formats ------------------------------------------------------------------------
 
     @Test

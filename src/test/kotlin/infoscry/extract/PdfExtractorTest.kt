@@ -558,6 +558,25 @@ class PdfExtractorTest {
     }
 
     @Test
+    fun `a refusal found mid-page is emitted inside that page's permit`() {
+        val probe = PermitProbeBoundary()
+        val seam = OcrSpy(unavailable = TesseractOcr.NEEDS_TESSERACT_CODE).seam
+
+        val events = collect(PdfExtractor(seam), inputFor(fixture(MIXED_NAME), probe), probe)
+
+        assertEquals(emptyList(), probe.eventsOutsidePermit)
+        assertEquals(
+            events.size,
+            probe.permits,
+            "the document-level refusal opened a permit of its own instead of using the page's",
+        )
+        val refusal = failures(events).single()
+        assertEquals(DOCUMENT_REFUSED_KEY, refusal.key)
+        assertEquals(TesseractOcr.NEEDS_TESSERACT_CODE, refusal.code)
+        assertTrue(events.none { it is ExtractionEvent.Finished }, "a refused document was reported done")
+    }
+
+    @Test
     fun `the extractor produces the same keys locators and ordinals twice`() {
         val first = units(collect(PdfExtractor(OcrSpy().seam), inputFor(fixture(MIXED_NAME), probe()), probe()))
         val second = units(collect(PdfExtractor(OcrSpy().seam), inputFor(fixture(MIXED_NAME), probe()), probe()))

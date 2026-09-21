@@ -2,12 +2,12 @@ package infoscry.server
 
 import infoscry.AppContext
 import infoscry.collection.DeletionRecoveryBlockedException
+import infoscry.diagnostics.ToolProbe
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobType
-import infoscry.extract.ExtractionSettings
 import infoscry.jobs.ImportJobPayload
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
@@ -166,10 +166,13 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
                 call.handle {
                     val request = call.receiveJson<ImportRequest>()
                     val collection = context.collectionService.requireActiveByNameOrId(request.collection)
+                    // The job records the tool version it will run with, so its checkpoints are keyed by
+                    // what actually produced them. That is why the probe happens once per job creation.
+                    val settings = ToolProbe.extractionSettings(collection.ocrLanguages)
                     val payload = ImportJobPayload.of(
                         collectionId = collection.id,
                         sources = request.paths,
-                        settings = ExtractionSettings(ocrLanguages = collection.ocrLanguages),
+                        settings = settings,
                     )
                     val job = context.jobs.enqueue(
                         type = JobType.IMPORT,

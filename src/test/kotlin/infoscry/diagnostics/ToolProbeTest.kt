@@ -3,12 +3,14 @@ package infoscry.diagnostics
 import infoscry.extract.writeFakeExecutable
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -107,5 +109,16 @@ class ToolProbeTest {
         assertEquals("tesseract 5.5.3", status.version)
         assertEquals(emptyList(), status.languages)
         assertContains(status.summary, "0 languages")
+    }
+
+    @Test
+    fun `a tool that never answers is unusable rather than an exception`() = runBlocking {
+        val tool = writeFakeExecutable(directory, "tesseract", "sleep 60")
+
+        val status = ToolProbe.tesseract(tool.toString(), timeout = Duration.ofMillis(700))
+
+        assertFalse(status.available, "a tool that hung was reported as usable")
+        assertNotNull(status.remedy, "a tool that cannot be used has to say what to do about it")
+        assertEquals(emptyList(), status.languages, "a tool that never answered was asked more questions")
     }
 }

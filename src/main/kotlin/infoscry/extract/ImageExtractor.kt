@@ -80,8 +80,11 @@ class ImageExtractor(
                 )
             } catch (unavailable: OcrUnavailableException) {
                 // Not this image's failure: the tool cannot read any image, so one row in the queue saying
-                // so is worth more than every picture failing identically.
+                // so is worth more than every picture failing identically. The refusal is emitted inside
+                // this unit's permit rather than under a second one, because the permit already covers
+                // this step of work.
                 abortCode = unavailable.code
+                emitDocumentRefusal(input, DOCUMENT_REFUSED_KEY, unavailable.code)
                 return@unit
             } catch (failure: IOException) {
                 emit(ExtractionEvent.UnitFailed(UNIT_KEY, ORDINAL, OCR_FAILED_CODE))
@@ -105,9 +108,9 @@ class ImageExtractor(
             )
         }
 
-        val code = abortCode
-        if (code != null) {
-            refuseDocument(input, DOCUMENT_REFUSED_KEY, code)
+        if (abortCode != null) {
+            // The refusal was emitted inside the unit's permit above; nothing is left to report, and a
+            // document that was refused is not reported as finished either.
             return@flow
         }
         input.boundary.unit {

@@ -1,7 +1,10 @@
 package infoscry.diagnostics
 
+import infoscry.extract.ExtractionSettings
 import infoscry.extract.ExternalProcess
+import infoscry.extract.ExternalProcessTimeoutException
 import infoscry.extract.ExternalToolMissingException
+import infoscry.extract.PdfExtractor
 import infoscry.extract.TesseractOcr
 import java.time.Duration
 
@@ -57,8 +60,11 @@ object ToolProbe {
      * that runs but cannot list its languages is reported as available with no languages, because that is
      * what happened: the fix for it is a language pack, and the fix for a missing tool is an install.
      */
-    suspend fun tesseract(executable: String = TesseractOcr.DEFAULT_EXECUTABLE): ToolStatus {
-        val version = probe(executable, VERSION_FLAG)
+    suspend fun tesseract(
+        executable: String = TesseractOcr.DEFAULT_EXECUTABLE,
+        timeout: Duration = PROBE_TIMEOUT,
+    ): ToolStatus {
+        val version = probe(executable, VERSION_FLAG, timeout)
         if (!version.available) {
             return ToolStatus(
                 name = NAME,
@@ -72,20 +78,61 @@ object ToolProbe {
             executable = executable,
             available = true,
             version = version.firstLine,
-            languages = probe(executable, LANGUAGES_FLAG).let { listing ->
+            languages = probe(executable, LANGUAGES_FLAG, timeout).let { listing ->
                 if (listing.available) parseLanguages(listing.output) else emptyList()
             },
         )
     }
 
-    private suspend fun probe(executable: String, flag: String): Probe = try {
-        val outcome = ExternalProcess.run(command = listOf(executable, flag), timeout = PROBE_TIMEOUT, cwd = null)
+    /**
+     * The version this machine's tool reports, or `null` when it cannot be run at all.
+     *
+     * This is the one question an import asks before it records what its extraction ran with, so it is one
+     * process rather than the two [tesseract] spends on a tool's full report: the languages a job reads with
+     * come from the collection, not from the tool's listing.
+     */
+    suspend fun tesseractVersion(
+        executable: String = TesseractOcr.DEFAULT_EXECUTABLE,
+        timeout: Duration = PROBE_TIMEOUT,
+    ): String? = probe(executable, VERSION_FLAG, timeout).takeIf { it.available }?.firstLine
+
+    /**
+     * What one import job must record about the machine it was created on.
+     *
+     * A document's checkpoints are keyed by a fingerprint that covers the tool which produced them, so the
+     * tool's own version has to be captured when the job is enqueued rather than looked up later: a
+     * Tesseract upgrade must not silently reuse a reading an older version committed, and a paused job
+     * resumed tomorrow must compare against the settings it started with. The same goes for the resolution
+     * pages are rendered at — it changes what a reading is worth, so it is part of what the reading is.
+     *
+     * The probe runs **once per job**, not once per page, and a tool that is absent is recorded as absent
+     * rather than left unrecorded: "this run had no tool" is a different fingerprint from "this run used
+     * version X", which is what makes installing the tool later a new extraction rather than a silent one.
+     */
+    suspend fun extractionSettings(
+        ocrLanguages: String,
+        executable: String = TesseractOcr.DEFAULT_EXECUTABLE,
+        timeout: Duration = PROBE_TIMEOUT,
+    ): ExtractionSettings = ExtractionSettings(
+        ocrLanguages = ocrLanguages,
+        ocrTool = tesseractVersion(executable, timeout) ?: OCR_TOOL_ABSENT,
+        renderDpi = PdfExtractor.DEFAULT_RENDER_DPI,
+    )
+
+    private suspend fun probe(executable: String, flag: String, timeout: Duration): Probe = try {
+        val outcome = ExternalProcess.run(command = listOf(executable, flag), timeout = timeout, cwd = null)
         if (outcome.succeeded) {
             Probe(available = true, output = outcome.stdout)
         } else {
             Probe(available = false, output = "")
         }
     } catch (notInstalled: ExternalToolMissingException) {
+        Probe(available = false, output = "")
+    } catch (timedOut: ExternalProcessTimeoutException) {
+        // A tool that is present but does not answer is not usable either, and this method answers a
+        // yes/no question rather than throwing: the callers are a diagnostic and a job's own bookkeeping,
+        // and both need an answer, not an exception. Reporting it as available would promise a reading
+        // that cannot be produced.
         Probe(available = false, output = "")
     }
 
@@ -110,6 +157,15 @@ object ToolProbe {
 
     /** The name this tool is known by in the product's own copy. */
     const val NAME: String = "Tesseract"
+
+    /**
+     * What a job records when the probe found no usable tool.
+     *
+     * It is a word rather than a blank so that the two states stay apart in a fingerprint: a run that had
+     * no tool is not the same as a run whose tool could not be identified, and neither is the same as a
+     * version string.
+     */
+    internal const val OCR_TOOL_ABSENT: String = "absent"
 
     private const val VERSION_FLAG: String = "--version"
     private const val LANGUAGES_FLAG: String = "--list-langs"

@@ -63,17 +63,6 @@ data class OcrResult(
 )
 
 /**
- * The OCR tool cannot read this document at all, so the whole document fails.
- *
- * The distinction matters: a page OCR could not read is one failed unit among many and the rest of the
- * document still delivers, while a missing or unusable tool means every page would fail the same way.
- * Reporting the second as a page failure would fill a document with identical failures and bury the one
- * thing the operator has to act on, which is why this exception carries a code the pipeline reports
- * against the document instead.
- */
-class OcrUnavailableException(val code: String, message: String) : IOException(message)
-
-/**
  * Reads one page's own text layer.
  *
  * A page whose text cannot be read is the first of the three reasons the decision hands a page to OCR,
@@ -255,8 +244,7 @@ class PdfExtractor(
                 return@flow
             }
             val run = emitPages(input, document)
-            val code = run.abortCode
-            if (code == null) {
+            if (run.abortCode == null) {
                 input.boundary.unit {
                     emit(
                         ExtractionEvent.Finished(
@@ -265,9 +253,9 @@ class PdfExtractor(
                         ),
                     )
                 }
-            } else {
-                refuseDocument(input, DOCUMENT_REFUSED_KEY, code)
             }
+            // A document whose pages aborted was refused inside that page's permit, and it deliberately
+            // does not send `Finished`: an extraction that stopped early must not be recorded as complete.
         } finally {
             document.close()
         }
@@ -338,8 +326,11 @@ class PdfExtractor(
                         )
                     } catch (unavailable: OcrUnavailableException) {
                         // Not a page failure: the tool cannot read any page, so the document cannot be
-                        // read, and one failure per page would only bury the fact that matters.
+                        // read, and one failure per page would only bury the fact that matters. The
+                        // refusal is emitted inside this page's permit rather than under a second one —
+                        // the permit already covers this step of work.
                         run.abortCode = unavailable.code
+                        emitDocumentRefusal(input, DOCUMENT_REFUSED_KEY, unavailable.code)
                         return@unit
                     } catch (failure: IOException) {
                         run.warnings += "page $page: OCR could not read it (${failure::class.simpleName})"

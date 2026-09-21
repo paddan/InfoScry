@@ -79,6 +79,31 @@ val externalTest = tasks.register<Test>("externalTest") {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
 
+/*
+ * The tag above and the one the tests annotate themselves with have to be the same string, or the default
+ * suite silently gains a test that fails wherever a tool is absent — the exact outcome the tag prevents.
+ * Kotlin needs the annotation's value at compile time, so it cannot be read from this script; instead this
+ * checks that the one place the tests declare it declares the same value.
+ */
+val externalTagSource = layout.projectDirectory.file("src/test/kotlin/infoscry/ExternalTag.kt")
+
+val verifyExternalTag = tasks.register("verifyExternalTag") {
+    group = "verification"
+    description = "Fail if the tests and this build declare different external JUnit tags"
+    val source = externalTagSource.asFile
+    val tag = EXTERNAL_TAG
+    inputs.file(source)
+    doLast {
+        val declaration = "const val EXTERNAL_TAG: String = \"$tag\""
+        check(source.readText().contains(declaration)) {
+            "${source.path} must declare `$declaration` so the default suite keeps excluding the " +
+                "tests that need installed tools"
+        }
+    }
+}
+
+tasks.named("check") { dependsOn(verifyExternalTag) }
+
 val webDir = layout.projectDirectory.dir("web")
 
 val frontendInstall = tasks.register<Exec>("frontendInstall") {

@@ -121,6 +121,42 @@ class TesseractOcrTest {
     }
 
     @Test
+    fun `rows that arrive out of order still come back in reading order`() = runBlocking {
+        // The tool's rows are its reading order, but nothing in the format promises it: the last block is
+        // emitted first, and each line's words follow. A parser that trusted arrival order would return the
+        // page inside out, which is why the grouping is sorted rather than assumed.
+        val tool = tesseractEmitting(
+            tsv(
+                wordRow(block = 2, par = 1, line = 1, word = 1, conf = "90", text = "sist"),
+                wordRow(block = 1, par = 2, line = 1, word = 1, conf = "90", text = "mitten"),
+                wordRow(block = 1, par = 1, line = 2, word = 1, conf = "90", text = "ett"),
+                wordRow(block = 1, par = 1, line = 2, word = 2, conf = "90", text = "två"),
+                wordRow(block = 1, par = 1, line = 1, word = 1, conf = "90", text = "a"),
+                wordRow(block = 1, par = 1, line = 1, word = 2, conf = "90", text = "b"),
+            ),
+        )
+
+        val reading = TesseractOcr(executable = tool.toString()).recognize(pageFor())
+
+        assertEquals("a b\nett två\nmitten\nsist", reading.text)
+    }
+
+    @Test
+    fun `a reading that spans two pages keeps the pages apart and in order`() = runBlocking {
+        val tool = tesseractEmitting(
+            tsv(
+                wordRow(page = 2, block = 1, par = 1, line = 1, word = 1, conf = "90", text = "andra"),
+                wordRow(page = 1, block = 1, par = 1, line = 1, word = 1, conf = "80", text = "första"),
+            ),
+        )
+
+        val reading = TesseractOcr(executable = tool.toString()).recognize(pageFor())
+
+        assertEquals("första\nandra", reading.text)
+        assertEquals(0.85, reading.meanConfidence, "both pages' words belong to one reading")
+    }
+
+    @Test
     fun `the mean confidence is a fraction of the words the tool was sure about`() = runBlocking {
         val tool = tesseractEmitting(
             tsv(
@@ -422,12 +458,14 @@ class TesseractOcrTest {
             word: Int,
             conf: String,
             text: String,
+            page: Int = 1,
             left: Int = 44,
             top: Int = 52,
             width: Int = 214,
             height: Int = 41,
         ): String = row(
             level = 5,
+            page = page,
             block = block,
             par = par,
             line = line,
@@ -444,6 +482,7 @@ class TesseractOcrTest {
 
         private fun row(
             level: Int,
+            page: Int = 1,
             block: Int = 0,
             par: Int = 0,
             line: Int = 0,
@@ -456,7 +495,7 @@ class TesseractOcrTest {
             text: String = "",
         ): String = listOf(
             level.toString(),
-            "1",
+            page.toString(),
             block.toString(),
             par.toString(),
             line.toString(),

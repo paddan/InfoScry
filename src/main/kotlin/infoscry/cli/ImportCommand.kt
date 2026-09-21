@@ -12,6 +12,7 @@ import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.config.ProcessLockUnavailable
 import infoscry.config.RuntimeInfo
+import infoscry.diagnostics.ToolProbe
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobState
@@ -20,7 +21,6 @@ import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportJobPayload
 import infoscry.jobs.ImportPipeline
 import infoscry.logging.LoggingBootstrap
-import infoscry.extract.ExtractionSettings
 import infoscry.server.ApiJson
 import infoscry.server.PRODUCT_NAME
 import infoscry.storage.ImportItem
@@ -130,10 +130,14 @@ class ImportCommand(
                 err = true,
             )
             val collection = open.collectionService.requireActiveByNameOrId(collection)
+            // The tool's version is asked for once here, before the job exists, because it is part of what
+            // the job's checkpoints are keyed by. `runBlocking` rather than a suspend command: the CLI is
+            // a blocking program, and this is the one suspension it has before its own job loop starts.
+            val settings = runBlocking { ToolProbe.extractionSettings(collection.ocrLanguages) }
             val payload = ImportJobPayload.of(
                 collectionId = collection.id,
                 sources = requested,
-                settings = ExtractionSettings(ocrLanguages = collection.ocrLanguages),
+                settings = settings,
             )
             val job = open.jobs.enqueue(
                 type = JobType.IMPORT,

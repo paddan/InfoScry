@@ -2,6 +2,7 @@ package infoscry.extract
 
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
+import java.io.IOException
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.HexFormat
@@ -83,6 +84,22 @@ internal const val DOCUMENT_UNREADABLE_CODE: String = "DOCUMENT_UNREADABLE"
 internal const val OCR_FAILED_CODE: String = "OCR_FAILED"
 
 /**
+ * The OCR tool cannot read this document at all, so the whole document fails.
+ *
+ * The distinction matters: a page OCR could not read is one failed unit among many and the rest of the
+ * document still delivers, while a missing or unusable tool means every page would fail the same way.
+ * Reporting the second as a page failure would fill a document with identical failures and bury the one
+ * thing the operator has to act on, which is why this exception carries a code the pipeline reports
+ * against the document instead.
+ *
+ * It lives beside the shared codes rather than in the one extractor that first needed it, because it is
+ * not a PDF fact: the OCR seam throws it, every extractor that hands a page to a tool catches it, and it
+ * is the type a whole-document refusal travels as. A copy per extractor would let the two disagree about
+ * what the code means.
+ */
+class OcrUnavailableException(val code: String, message: String) : IOException(message)
+
+/**
  * One citable unit an extractor produced, before the store gives it an identifier.
  *
  * Both text forms are carried: [extractedText] is what the tool produced, [searchText] is the form the
@@ -104,10 +121,14 @@ data class ContentUnitDraft(
 /**
  * The extraction settings one import ran with.
  *
- * They are captured when the job is enqueued and travel in its payload, because a paused job must be
- * resumable: a collection whose OCR languages change afterwards does not silently rewrite the meaning of
- * the checkpoints an earlier attempt committed. [ocrTool] and [renderDpi] are filled in by the tasks that
- * own those tools; until then they are absent, and "absent" is itself part of the fingerprint.
+ * They are captured when the job is enqueued and travel in its payload, because a paused job has to be
+ * resumable: a collection whose OCR languages change afterwards must not silently redefine which units are
+ * already done.
+ *
+ * [ocrTool] and [renderDpi] are filled when the job is created, from `ToolProbe.extractionSettings` — the
+ * tool's reported version and the resolution pages are rendered at. They stay absent only for settings a
+ * caller assembled by hand, and "absent" is itself part of the fingerprint: a job whose tool nobody
+ * recorded must not compare equal to one whose tool was identified.
  */
 @Serializable
 data class ExtractionSettings(
@@ -199,6 +220,10 @@ sealed interface ExtractionEvent {
  *
  * The unit is the granularity for a reason: the exclusive side has no timeout, so a permit held for a
  * whole document would stop every other writer in the process for as long as that document takes.
+ *
+ * What a permit guarantees is that **every event is emitted inside one** — not that every event gets one
+ * of its own. An extractor that discovers halfway through a unit that the document cannot be read at all
+ * emits the document-level refusal inside the permit it already holds.
  */
 interface UnitBoundary {
 
@@ -235,12 +260,16 @@ data class ExtractionInput(
 }
 
 /**
- * Reports a document-level refusal once, inside a permit, and never twice for the same attempt.
+ * Reports a document-level refusal once, inside its own permit.
  *
  * A refusal already committed under this fingerprint is the answer to this attempt too: the next attempt
  * recognises it instead of deriving it again from the same bytes. Every extractor that can refuse a whole
  * document before it has a unit to name — an unreadable container, protected material, a missing tool, a
  * bound that the document is past — reports it this way, so the key is the same word in every extractor.
+ *
+ * This is for a refusal the extractor knows about before it starts producing units. An extractor that
+ * discovers one *while* it holds a unit's permit — a tool that turns out to be unusable on the first page
+ * it reads — uses [emitDocumentRefusal] instead of opening a second permit for one event.
  */
 internal suspend fun FlowCollector<ExtractionEvent>.refuseDocument(
     input: ExtractionInput,
@@ -249,9 +278,34 @@ internal suspend fun FlowCollector<ExtractionEvent>.refuseDocument(
 ) {
     if (input.isCommitted(key)) return
     input.boundary.unit {
-        emit(ExtractionEvent.UnitFailed(key = key, ordinal = 0, code = code))
+        emitDocumentRefusal(input, key, code)
     }
 }
+
+/**
+ * Emits a document-level refusal into the permit the caller is already inside.
+ *
+ * The rule this and [refuseDocument] both keep is that every event is emitted inside a permit — not that
+ * every event gets a permit of its own. An abort discovered in the middle of a unit belongs to the same
+ * permit as that unit: opening a second one for the refusal would charge the gate twice for one step of
+ * work without protecting anything extra.
+ */
+internal suspend fun FlowCollector<ExtractionEvent>.emitDocumentRefusal(
+    input: ExtractionInput,
+    key: String,
+    code: String,
+) {
+    if (input.isCommitted(key)) return
+    emit(ExtractionEvent.UnitFailed(key = key, ordinal = REFUSAL_ORDINAL, code = code))
+}
+
+/**
+ * The ordinal a document-level refusal carries.
+ *
+ * It names no unit, so the ordinal only has to be the same one on every such row; the key is what says
+ * the row is about the document rather than about one of its units.
+ */
+private const val REFUSAL_ORDINAL: Int = 0
 
 /**
  * One format's way of turning a managed original into citable units.
