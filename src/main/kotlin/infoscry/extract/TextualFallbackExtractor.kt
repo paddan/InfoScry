@@ -26,9 +26,7 @@ class TextualFallbackExtractor : DocumentExtractor {
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
         val key = DOCUMENT_REFUSED_KEY
         if (!input.isCommitted(key) && Files.size(input.managedPath) > MAX_TEXT_DOCUMENT_BYTES) {
-            input.boundary.unit {
-                emit(ExtractionEvent.UnitFailed(key = key, ordinal = 0, code = DOCUMENT_TOO_LARGE_CODE))
-            }
+            refuseDocument(input, key, DOCUMENT_TOO_LARGE_CODE)
             return@flow
         }
         if (!input.isCommitted(key)) {

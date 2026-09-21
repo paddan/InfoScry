@@ -61,44 +61,37 @@ class ExtractorRegistry(
          *
          * Each extractor claims its own media types, so a document goes to the reader that understands
          * its structure, and [TextualFallbackExtractor] takes only the text containers no format
-         * extractor owns. The OCR and e-book extractors are added by the tasks that own them and register
-         * their own types here.
+         * extractor owns. The e-book extractor is added by the task that owns it and registers its own
+         * types here.
          *
-         * The PDF reader is wired to [refusingOcr] because the tool that reads a rendered page is the
-         * Tesseract task's; the PDF reader itself, including its page decisions and its rendering, is
-         * complete. A page that has its own text is extracted and cited as usual, and a page that needs
-         * OCR reports [PdfExtractor.OCR_UNAVAILABLE_CODE] against the document instead of being dropped
-         * silently.
-         */
-        fun production(): ExtractorRegistry = ExtractorRegistry(
-            listOf(
-                PlainTextExtractor(),
-                MarkdownExtractor(),
-                HtmlExtractor(),
-                CsvExtractor(),
-                WordExtractor(OfficeFormat.OOXML),
-                WordExtractor(OfficeFormat.LEGACY),
-                SpreadsheetExtractor(OfficeFormat.OOXML),
-                SpreadsheetExtractor(OfficeFormat.LEGACY),
-                PresentationExtractor(OfficeFormat.OOXML),
-                PresentationExtractor(OfficeFormat.LEGACY),
-                PdfExtractor(refusingOcr),
-            ),
-            TextualFallbackExtractor(),
-        )
-
-        /**
-         * The OCR seam the production registry uses until the Tesseract implementation replaces it.
+         * Both readers that need a raster read it with the same tool: the PDF reader hands a page that has
+         * no text of its own to [TesseractOcr], and the image reader hands it the picture itself. One
+         * instance serves both, so the languages, the timeout, and the artifact layout are decided in one
+         * place. A build without Tesseract installed is not a build that cannot read documents: pages that
+         * have their own text are extracted and cited as usual, and a page that needs OCR is reported
+         * against the document with [TesseractOcr.NEEDS_TESSERACT_CODE] instead of quietly going missing.
          *
-         * It refuses the whole document rather than each page, because a build with no OCR tool fails
-         * every page of a scan the same way, and one actionable code beats a document full of identical
-         * page failures. Nothing is substituted for the missing reading: a scanned page is reported as
-         * unread, never indexed as though it were empty.
+         * [tesseract] is a parameter so that a test can prove this wiring by reading a page with a
+         * stand-in tool: a registry that compiled against the real one but never reached it would pass
+         * every other test in the suite while reading nothing a person could cite.
          */
-        private val refusingOcr: suspend (RenderedPage) -> OcrResult = { _ ->
-            throw OcrUnavailableException(
-                PdfExtractor.OCR_UNAVAILABLE_CODE,
-                "this build has no OCR implementation, so a page without its own text cannot be read",
+        fun production(tesseract: TesseractOcr = TesseractOcr()): ExtractorRegistry {
+            return ExtractorRegistry(
+                listOf(
+                    PlainTextExtractor(),
+                    MarkdownExtractor(),
+                    HtmlExtractor(),
+                    CsvExtractor(),
+                    WordExtractor(OfficeFormat.OOXML),
+                    WordExtractor(OfficeFormat.LEGACY),
+                    SpreadsheetExtractor(OfficeFormat.OOXML),
+                    SpreadsheetExtractor(OfficeFormat.LEGACY),
+                    PresentationExtractor(OfficeFormat.OOXML),
+                    PresentationExtractor(OfficeFormat.LEGACY),
+                    PdfExtractor(tesseract::recognize),
+                    ImageExtractor(tesseract::recognize),
+                ),
+                TextualFallbackExtractor(),
             )
         }
     }

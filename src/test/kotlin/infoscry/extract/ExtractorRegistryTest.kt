@@ -9,6 +9,7 @@ import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
@@ -57,6 +58,33 @@ class ExtractorRegistryTest {
 
         assertEquals(setOf("text/plain"), registry.claimedMediaTypes())
         assertFailsWith<UnsupportedMediaTypeException> { registry.select("application/zip") }
+    }
+
+    @Test
+    fun `the production registry routes every type it can read to a reader that claims it`() {
+        val registry = ExtractorRegistry.production()
+
+        // The types the pipeline can read, one per format family it ships. A type listed here that no
+        // reader claims is a lie in the doctor's output; a type a reader claims and this list omits is a
+        // format nobody noticed had become reachable.
+        val readable = listOf(
+            "text/plain",
+            "text/csv",
+            "application/pdf",
+            "image/png",
+            "image/jpeg",
+            "image/tiff",
+        )
+        readable.forEach { mediaType ->
+            assertTrue(
+                mediaType in registry.claimedMediaTypes(),
+                "the production registry cannot read $mediaType",
+            )
+            registry.select(mediaType)
+        }
+        // A container nobody handles is refused by name rather than handed to a reader that would cite
+        // its bytes as text.
+        assertFailsWith<UnsupportedMediaTypeException> { registry.select("application/x-msdownload") }
     }
 
     @Test

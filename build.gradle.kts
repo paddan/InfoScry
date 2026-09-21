@@ -1,5 +1,8 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+/** The JUnit tag for tests that need a tool installed on this machine rather than a stand-in. */
+val EXTERNAL_TAG = "external"
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.serialization)
@@ -60,7 +63,19 @@ dependencies {
 }
 
 tasks.test {
-    useJUnitPlatform()
+    // `external` is the tag for the tests that need a tool installed on this machine: the real OCR
+    // reading, and later the real Calibre conversion. They are excluded here and run by `externalTest`,
+    // because a suite that failed wherever a tool is absent would be a suite people learn to ignore.
+    useJUnitPlatform { excludeTags(EXTERNAL_TAG) }
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+}
+
+val externalTest = tasks.register<Test>("externalTest") {
+    group = "verification"
+    description = "Run the tests that need the tools this machine has installed ($EXTERNAL_TAG)"
+    useJUnitPlatform { includeTags(EXTERNAL_TAG) }
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
     jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
 
@@ -120,4 +135,14 @@ val pdfFixtures = tasks.register<JavaExec>("pdfFixtures") {
     description = "Regenerate the committed PDF fixtures under src/test/resources/fixtures"
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("infoscry.fixtures.PdfFixtureGenerator")
+}
+
+// The OCR fixture is a rendered page, so its bytes follow this machine's glyph rasteriser rather than
+// this repository; the task exists so the image can be rebuilt and re-read by a person, not so its bytes
+// can be compared.
+val ocrFixtures = tasks.register<JavaExec>("ocrFixtures") {
+    group = "build"
+    description = "Regenerate the committed OCR image fixture under src/test/resources/fixtures"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("infoscry.fixtures.OcrFixtureGenerator")
 }

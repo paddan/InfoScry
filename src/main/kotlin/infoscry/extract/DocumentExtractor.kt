@@ -6,6 +6,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.HexFormat
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.serialization.Serializable
 
 /**
@@ -62,6 +63,24 @@ internal const val ENCRYPTED_DOCUMENT_CODE: String = "ENCRYPTED_DOCUMENT"
  * does not report it a second time.
  */
 internal const val DOCUMENT_REFUSED_KEY: String = "document"
+
+/**
+ * The code a container that cannot be opened at all fails under.
+ *
+ * The bytes said what the file was, and then nothing could be read from it: a truncated download, a file
+ * whose header promised a format its body does not have. One spelling, because it reaches the queue and the
+ * CLI the same way every other code does.
+ */
+internal const val DOCUMENT_UNREADABLE_CODE: String = "DOCUMENT_UNREADABLE"
+
+/**
+ * The code a unit whose OCR call failed fails under.
+ *
+ * The tool ran and could not read *this* unit, which is a different thing from the tool being missing: the
+ * rest of the document still delivers, so the failure belongs to the unit rather than to the document. One
+ * spelling, because it reaches the queue and the CLI the same way every other code does.
+ */
+internal const val OCR_FAILED_CODE: String = "OCR_FAILED"
 
 /**
  * One citable unit an extractor produced, before the store gives it an identifier.
@@ -195,6 +214,10 @@ interface UnitBoundary {
  * [artifactRoot] is a directory the extractor may write into, and it only ever writes inside [unit].
  * [artifactRoot] is where an artifact a unit names is resolved from, so a draft's
  * [ContentUnitDraft.artifactRelativePath] is relative to it.
+ *
+ * [originalFilename] is the name the file was published under, which is what a citation to a document whose
+ * units have no numbering of their own — a picture — can honestly point at. It defaults to the managed
+ * copy's own name so an extractor never has to guess, and callers that know the original pass it.
  */
 data class ExtractionInput(
     val documentId: DocumentId,
@@ -204,10 +227,30 @@ data class ExtractionInput(
     val fingerprint: ExtractionFingerprint,
     val committedUnitKeys: Set<String>,
     val boundary: UnitBoundary,
+    val originalFilename: String = managedPath.fileName.toString(),
 ) {
 
     /** Whether an earlier attempt already committed this unit under the same fingerprint. */
     fun isCommitted(key: String): Boolean = key in committedUnitKeys
+}
+
+/**
+ * Reports a document-level refusal once, inside a permit, and never twice for the same attempt.
+ *
+ * A refusal already committed under this fingerprint is the answer to this attempt too: the next attempt
+ * recognises it instead of deriving it again from the same bytes. Every extractor that can refuse a whole
+ * document before it has a unit to name — an unreadable container, protected material, a missing tool, a
+ * bound that the document is past — reports it this way, so the key is the same word in every extractor.
+ */
+internal suspend fun FlowCollector<ExtractionEvent>.refuseDocument(
+    input: ExtractionInput,
+    key: String,
+    code: String,
+) {
+    if (input.isCommitted(key)) return
+    input.boundary.unit {
+        emit(ExtractionEvent.UnitFailed(key = key, ordinal = 0, code = code))
+    }
 }
 
 /**

@@ -138,6 +138,7 @@ class ImportJobHandler(
             fingerprint = fingerprint,
             committedUnitKeys = pipeline.sink.committedKeys(document.id, fingerprint),
             boundary = StageBoundary(stage),
+            originalFilename = document.originalFilename,
         )
 
         try {

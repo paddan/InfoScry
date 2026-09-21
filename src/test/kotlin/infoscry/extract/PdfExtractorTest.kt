@@ -311,7 +311,7 @@ class PdfExtractorTest {
 
         assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units(events).map { pageOf(it.key) })
         assertTrue(
-            failures(events).none { it.code == PdfExtractor.OCR_FAILED_CODE },
+            failures(events).none { it.code == OCR_FAILED_CODE },
             "a page whose working image could not be deleted was reported as an OCR failure",
         )
         assertEquals(
@@ -347,7 +347,7 @@ class PdfExtractorTest {
 
         val events = collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe())
 
-        val ocrFailures = failures(events).filter { it.code == PdfExtractor.OCR_FAILED_CODE }
+        val ocrFailures = failures(events).filter { it.code == OCR_FAILED_CODE }
         assertEquals(listOf("page:4"), ocrFailures.map { it.key })
         assertEquals(
             MIXED_SCANNED_PAGES,
@@ -450,7 +450,7 @@ class PdfExtractorTest {
 
         val events = collect(PdfExtractor(OcrSpy().seam), inputFor(path, probe()), probe())
 
-        assertEquals(listOf(PdfExtractor.DOCUMENT_UNREADABLE_CODE), failures(events).map { it.code })
+        assertEquals(listOf(DOCUMENT_UNREADABLE_CODE), failures(events).map { it.code })
         assertEquals(listOf(PdfExtractor.DOCUMENT_KEY), failures(events).map { it.key })
         assertTrue(events.none { it is ExtractionEvent.Finished })
     }
@@ -537,7 +537,7 @@ class PdfExtractorTest {
         val events = collect(PdfExtractor(OcrSpy().seam), inputFor(missing, probe()), probe())
 
         assertEquals(listOf(PdfExtractor.DOCUMENT_KEY), failures(events).map { it.key })
-        assertEquals(listOf(PdfExtractor.DOCUMENT_UNREADABLE_CODE), failures(events).map { it.code })
+        assertEquals(listOf(DOCUMENT_UNREADABLE_CODE), failures(events).map { it.code })
         assertTrue(events.none { it is ExtractionEvent.Finished })
     }
 

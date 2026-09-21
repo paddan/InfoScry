@@ -24,9 +24,15 @@ import org.apache.pdfbox.text.PDFTextStripper
  * What one page of OCR needs: the image to read and where the reading belongs.
  *
  * The seam carries the document and page this image came from, the artifact root the reading may write
- * its word boxes into, and the language codes the collection asked for. Passing them here rather than
- * reading them from an ambient service keeps the OCR implementation a plain function of its input: the
- * extractor already knows all four, and a tool that had to look them up would need the extractor's state.
+ * its word boxes into, the languages the collection asked for, and the fingerprint the reading belongs to.
+ * Passing them here rather than reading them from an ambient service keeps the OCR implementation a plain
+ * function of its input: the extractor already knows all of them, and a tool that had to look them up
+ * would need the extractor's state. The fingerprint is carried because the artifact is written under it:
+ * two extractions of the same document under different settings must not be able to overwrite each
+ * other's evidence.
+ *
+ * [renderDpi] is the resolution this image was produced at, and is absent when the image is the document
+ * itself rather than a rendering of one — an imported picture has no resolution this pipeline chose.
  */
 data class RenderedPage(
     val documentId: DocumentId,
@@ -34,7 +40,8 @@ data class RenderedPage(
     val imagePath: Path,
     val artifactRoot: Path,
     val ocrLanguages: String,
-    val renderDpi: Int,
+    val renderDpi: Int?,
+    val fingerprint: ExtractionFingerprint,
 )
 
 /**
@@ -326,6 +333,7 @@ class PdfExtractor(
                                 artifactRoot = input.artifactRoot,
                                 ocrLanguages = input.settings.ocrLanguages,
                                 renderDpi = dpi,
+                                fingerprint = input.fingerprint,
                             ),
                         )
                     } catch (unavailable: OcrUnavailableException) {
@@ -477,27 +485,11 @@ class PdfExtractor(
         /** The media type this extractor claims, which is what its own bytes report. */
         internal const val PDF_MEDIA_TYPE: String = "application/pdf"
 
-        /** The code a container that cannot be opened as a PDF at all fails under. */
-        internal const val DOCUMENT_UNREADABLE_CODE: String = "DOCUMENT_UNREADABLE"
-
         /** The code a page whose raster cannot exist fails under. */
         internal const val PAGE_RENDER_REFUSED_CODE: String = "PAGE_RENDER_REFUSED"
 
-        /** The code a page whose OCR call failed fails under. */
-        internal const val OCR_FAILED_CODE: String = "OCR_FAILED"
-
         /** The code a page whose own text layer cannot be read fails under. */
         internal const val PAGE_UNREADABLE_CODE: String = "PAGE_UNREADABLE"
-
-        /**
-         * The code a build with no OCR implementation reports for a page that needs one.
-         *
-         * The page decision, the rendering, and the permit discipline are this task's. The tool that reads
-         * a rendered page belongs to the Tesseract task, which replaces the seam the production registry
-         * wires; until then a page that has to be read by OCR is reported rather than silently left out of
-         * the document.
-         */
-        internal const val OCR_UNAVAILABLE_CODE: String = "OCR_UNAVAILABLE"
 
         /** The resolution a page is rendered at when the job does not ask for another one. */
         internal const val DEFAULT_RENDER_DPI: Int = 300
@@ -534,23 +526,6 @@ private class PageRun(
 
 /** The key of one page's unit: the page is the only stable position a PDF has. */
 private fun pageKey(page: Int): String = "page:$page"
-
-/**
- * Reports a document-level refusal once, inside a permit, and never twice for the same attempt.
- *
- * A refusal already committed under this fingerprint is the answer to this attempt too: the next attempt
- * recognises it instead of deriving it again from the same bytes.
- */
-private suspend fun FlowCollector<ExtractionEvent>.refuseDocument(
-    input: ExtractionInput,
-    key: String,
-    code: String,
-) {
-    if (input.isCommitted(key)) return
-    input.boundary.unit {
-        emit(ExtractionEvent.UnitFailed(key = key, ordinal = 0, code = code))
-    }
-}
 
 /** Points per inch: a PDF's own unit, and what a rendered resolution is relative to. */
 private const val POINTS_PER_INCH: Double = 72.0
