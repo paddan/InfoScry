@@ -136,6 +136,136 @@ class MediaTypeDetectorTest {
         assertEquals("text/plain", detector.detect(zipNamedText).value)
     }
 
+    // ---- E-books: a container the bytes describe only as "a zip" or "some binary" ------------------
+
+    @Test
+    fun `an epub is named by its own mimetype entry rather than by its extension`() {
+        val file = directory.resolve("book.zip")
+        writeEpub(file, epub + "\n")
+
+        assertEquals("application/epub+zip", detector.detect(file).value)
+    }
+
+    @Test
+    fun `a kepub is the same container as an epub`() {
+        val file = directory.resolve("book.kepub.epub")
+        writeEpub(file, epub)
+
+        assertEquals("application/epub+zip", detector.detect(file).value)
+    }
+
+    @Test
+    fun `an ibooks file is named by the type it declares`() {
+        val file = directory.resolve("book.ibooks")
+        writeEpub(file, "application/x-ibooks+zip")
+
+        assertEquals("application/x-ibooks+zip", detector.detect(file).value)
+    }
+
+    @Test
+    fun `an epub whose mimetype entry is missing is recognised by its container index`() {
+        val file = directory.resolve("book.epub")
+        writeZip(file, "META-INF/container.xml", "<container/>")
+
+        assertEquals(
+            "application/epub+zip",
+            detector.detect(file).value,
+            "a book whose mimetype entry is missing is still the book its own index describes",
+        )
+    }
+
+    @Test
+    fun `a zipped fictionbook is named by the document it wraps`() {
+        val file = directory.resolve("book.fbz")
+        writeZip(file, "book/sample.fb2", "<FictionBook/>")
+
+        assertEquals("application/x-fictionbook+zip", detector.detect(file).value)
+    }
+
+    @Test
+    fun `a fictionbook is detected from its own root element`() {
+        val file = directory.resolve("book.dat")
+        Files.writeString(
+            file,
+            """<?xml version="1.0" encoding="UTF-8"?>
+               <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0"><body/></FictionBook>
+            """.trimIndent(),
+        )
+
+        assertEquals("application/x-fictionbook+xml", detector.detect(file).value)
+    }
+
+    @Test
+    fun `a kindle book is named from its magic rather than its name`() {
+        val file = directory.resolve("book.dat")
+        Files.write(file, mobipocketBytes())
+
+        assertEquals("application/x-mobipocket-ebook", detector.detect(file).value)
+    }
+
+    @Test
+    fun `a legacy e-book whose bytes name nothing is routed by the name it was published under`() {
+        val file = directory.resolve("book.lit")
+        Files.write(file, ByteArray(256) { index -> (index and 0xFF).toByte() })
+
+        assertEquals(
+            "application/x-infoscry-ebook",
+            detector.detect(file).value,
+            "a converter is the only reader for this family, and the name is the only evidence there is",
+        )
+    }
+
+    @Test
+    fun `a legacy e-book extension does not claim bytes that are a readable format`() {
+        val file = directory.resolve("photo.lit")
+        writePng(file)
+
+        assertEquals(
+            "image/png",
+            detector.detect(file).value,
+            "the name overruled the bytes for a format this build can read itself",
+        )
+    }
+
+    @Test
+    fun `an unnameable binary with an unknown name stays unnamed`() {
+        val file = directory.resolve("data.xyz")
+        Files.write(file, ByteArray(256) { index -> (index and 0xFF).toByte() })
+
+        assertEquals("application/octet-stream", detector.detect(file).value)
+    }
+
+    @Test
+    fun `a plain zip is still a plain zip and not claimed as a book`() {
+        val file = directory.resolve("archive.epub")
+        writeZip(file, "notes.txt", "just words")
+
+        assertEquals("application/zip", detector.detect(file).value)
+    }
+
+    /** An EPUB as the format requires it: the mimetype entry first, holding the declared type. */
+    private fun writeEpub(file: Path, declaredMimetype: String) {
+        Files.newOutputStream(file).use { output ->
+            ZipOutputStream(output).use { zip ->
+                zip.putNextEntry(ZipEntry("mimetype"))
+                zip.write(declaredMimetype.toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("META-INF/container.xml"))
+                zip.write("<container/>".toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+            }
+        }
+    }
+
+    /** A Palm database header that says BOOKMOBI, which is what makes a file a Mobipocket container. */
+    private fun mobipocketBytes(): ByteArray {
+        val bytes = ByteArray(512)
+        "BOOKMOBI".toByteArray(Charsets.US_ASCII).copyInto(bytes, destinationOffset = 60)
+        return bytes
+    }
+
+    private val epub: String = "application/epub+zip"
+
     private fun writePng(file: Path) {
         val image = BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB)
         image.setRGB(0, 0, 0x102030)

@@ -1,5 +1,6 @@
 package infoscry.diagnostics
 
+import infoscry.extract.CalibreConverter
 import infoscry.extract.ExtractionSettings
 import infoscry.extract.ExternalProcess
 import infoscry.extract.ExternalProcessTimeoutException
@@ -97,6 +98,47 @@ object ToolProbe {
     ): String? = probe(executable, VERSION_FLAG, timeout).takeIf { it.available }?.firstLine
 
     /**
+     * What the optional e-book converter reports about itself.
+     *
+     * Calibre is not required to run this pipeline: every format whose reader is in this build works
+     * without it, and only a Kindle or legacy container needs it. The probe therefore reports absence
+     * rather than failing, and the remedy names the install because the person who sees `NEEDS_TOOL` has to
+     * be told what to install.
+     */
+    suspend fun calibre(
+        executable: String = CalibreConverter.DEFAULT_EXECUTABLE,
+        timeout: Duration = PROBE_TIMEOUT,
+    ): ToolStatus {
+        val version = probe(executable, VERSION_FLAG, timeout)
+        if (!version.available) {
+            return ToolStatus(
+                name = CALIBRE_NAME,
+                executable = executable,
+                available = false,
+                remedy = CalibreConverter.installRemedy(),
+            )
+        }
+        return ToolStatus(
+            name = CALIBRE_NAME,
+            executable = executable,
+            available = true,
+            version = version.firstLine,
+        )
+    }
+
+    /**
+     * The converter version this machine reports, or `null` when it cannot be run at all.
+     *
+     * One process, for the same reason [tesseractVersion] is one: the question an import asks is what to
+     * record in its fingerprint, and a job that spends two child processes answering it has paid twice for
+     * one answer.
+     */
+    suspend fun calibreVersion(
+        executable: String = CalibreConverter.DEFAULT_EXECUTABLE,
+        timeout: Duration = PROBE_TIMEOUT,
+    ): String? = probe(executable, VERSION_FLAG, timeout).takeIf { it.available }?.firstLine
+
+    /**
      * What one import job must record about the machine it was created on.
      *
      * A document's checkpoints are keyed by a fingerprint that covers the tool which produced them, so the
@@ -112,11 +154,13 @@ object ToolProbe {
     suspend fun extractionSettings(
         ocrLanguages: String,
         executable: String = TesseractOcr.DEFAULT_EXECUTABLE,
+        calibreExecutable: String = CalibreConverter.DEFAULT_EXECUTABLE,
         timeout: Duration = PROBE_TIMEOUT,
     ): ExtractionSettings = ExtractionSettings(
         ocrLanguages = ocrLanguages,
         ocrTool = tesseractVersion(executable, timeout) ?: OCR_TOOL_ABSENT,
         renderDpi = PdfExtractor.DEFAULT_RENDER_DPI,
+        ebookTool = calibreVersion(calibreExecutable, timeout) ?: CALIBRE_TOOL_ABSENT,
     )
 
     private suspend fun probe(executable: String, flag: String, timeout: Duration): Probe = try {
@@ -155,8 +199,11 @@ object ToolProbe {
         val firstLine: String? get() = output.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
     }
 
-    /** The name this tool is known by in the product's own copy. */
+    /** The name the reading tool is known by in the product's own copy. */
     const val NAME: String = "Tesseract"
+
+    /** The name the e-book converter is known by in the product's own copy. */
+    const val CALIBRE_NAME: String = "Calibre"
 
     /**
      * What a job records when the probe found no usable tool.
@@ -166,6 +213,15 @@ object ToolProbe {
      * version string.
      */
     internal const val OCR_TOOL_ABSENT: String = "absent"
+
+    /**
+     * What a job records when the converter probe found no usable tool.
+     *
+     * A word rather than a blank, for the same reason as [OCR_TOOL_ABSENT]: "this run had no converter" is
+     * a different fingerprint from "nobody asked", and installing one later must be a new extraction rather
+     * than a silent reuse.
+     */
+    internal const val CALIBRE_TOOL_ABSENT: String = "absent"
 
     private const val VERSION_FLAG: String = "--version"
     private const val LANGUAGES_FLAG: String = "--list-langs"

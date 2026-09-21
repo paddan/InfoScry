@@ -125,10 +125,15 @@ data class ContentUnitDraft(
  * resumable: a collection whose OCR languages change afterwards must not silently redefine which units are
  * already done.
  *
- * [ocrTool] and [renderDpi] are filled when the job is created, from `ToolProbe.extractionSettings` — the
- * tool's reported version and the resolution pages are rendered at. They stay absent only for settings a
- * caller assembled by hand, and "absent" is itself part of the fingerprint: a job whose tool nobody
- * recorded must not compare equal to one whose tool was identified.
+ * [ocrTool], [renderDpi], and [ebookTool] are filled when the job is created, from
+ * `ToolProbe.extractionSettings` — the reading tool's reported version, the resolution pages are rendered
+ * at, and the version of the converter that turns a Kindle or legacy container into an EPUB. They stay
+ * absent only for settings a caller assembled by hand, and "absent" is itself part of the fingerprint: a
+ * job whose tool nobody recorded must not compare equal to one whose tool was identified.
+ *
+ * [ebookTool] is here for the same reason as [ocrTool]: the converter produces the markup every Unit of a
+ * converted book is read from, so a converter upgrade can change what a chapter says, and a fingerprint
+ * that did not cover it would reuse the older version's sections as if they were the same evidence.
  */
 @Serializable
 data class ExtractionSettings(
@@ -136,6 +141,7 @@ data class ExtractionSettings(
     val extractorSchemaVersion: String = EXTRACTOR_SCHEMA_VERSION,
     val ocrTool: String? = null,
     val renderDpi: Int? = null,
+    val ebookTool: String? = null,
 )
 
 /**
@@ -171,6 +177,7 @@ value class ExtractionFingerprint(val value: String) {
                 "ocr_languages=${settings.ocrLanguages}",
                 "ocr_tool=${settings.ocrTool ?: NONE}",
                 "render_dpi=${settings.renderDpi ?: NONE}",
+                "ebook_tool=${settings.ebookTool ?: NONE}",
             ).joinToString("\n")
             val digest = MessageDigest.getInstance("SHA-256")
                 .digest(canonical.toByteArray(Charsets.UTF_8))

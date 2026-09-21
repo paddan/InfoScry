@@ -171,3 +171,13 @@ val ocrFixtures = tasks.register<JavaExec>("ocrFixtures") {
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("infoscry.fixtures.OcrFixtureGenerator")
 }
+
+// The e-book fixtures are zips, so their compressed streams follow the JDK's deflate implementation;
+// the task exists so a maintainer can rebuild them and see which content changed. The tests assert what
+// the extraction reads rather than comparing the containers byte for byte.
+val ebookFixtures = tasks.register<JavaExec>("ebookFixtures") {
+    group = "build"
+    description = "Regenerate the committed e-book fixtures under src/test/resources/fixtures"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("infoscry.fixtures.EbookFixtureGenerator")
+}

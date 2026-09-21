@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info>
+      <book-title>Nattens protokoll</book-title>
+      <author><first-name>Anna</first-name><last-name>Lind</last-name></author>
+      <lang>sv</lang>
+    </title-info>
+    <document-info><id>urn:isbn:978-91-0000000-0</id></document-info>
+  </description>
+  <body>
+    <section>
+      <title><p>Första kapitlet</p></title>
+      <p>Kapitlet redogör för den inledande utredningen.</p>
+      <section>
+        <title><p>Avsnittet om överföringarna</p></title>
+        <p>Överföringarna godkändes av två personer.</p>
+      </section>
+    </section>
+  </body>
+</FictionBook>

@@ -124,6 +124,47 @@ class ExtractionSettingsProbeTest {
         )
     }
 
+    @Test
+    fun `the converter's own version is what a converted book's sections are keyed by`() = runBlocking {
+        val older = toolReporting("calibre 7.0.0")
+        val newer = toolReporting("calibre 8.1.0")
+
+        val before = ToolProbe.extractionSettings(
+            ocrLanguages = "eng",
+            executable = tesseractReporting("tesseract 5.5.3").toString(),
+            calibreExecutable = older.toString(),
+        )
+        val after = ToolProbe.extractionSettings(
+            ocrLanguages = "eng",
+            executable = tesseractReporting("tesseract 5.5.3").toString(),
+            calibreExecutable = newer.toString(),
+        )
+
+        assertEquals("calibre 7.0.0", before.ebookTool)
+        assertEquals("calibre 8.1.0", after.ebookTool)
+        assertNotEquals(
+            ExtractionFingerprint.of(DOCUMENT, before),
+            ExtractionFingerprint.of(DOCUMENT, after),
+            "an upgraded converter would have reused the sections the older version produced",
+        )
+    }
+
+    @Test
+    fun `a machine with no converter records that rather than leaving it unrecorded`() = runBlocking {
+        val absent = ToolProbe.extractionSettings(
+            ocrLanguages = "eng",
+            executable = tesseractReporting("tesseract 5.5.3").toString(),
+            calibreExecutable = directory.resolve("no-such-ebook-convert").toString(),
+        )
+
+        assertEquals(ToolProbe.CALIBRE_TOOL_ABSENT, absent.ebookTool)
+        assertNotEquals(
+            ExtractionFingerprint.of(DOCUMENT, absent),
+            ExtractionFingerprint.of(DOCUMENT, ExtractionSettings(ocrLanguages = "eng")),
+            "\"this run had no converter\" must not fingerprint as \"nobody asked\"",
+        )
+    }
+
     /** The artifact path a reading under [settings] would be written to. */
     private fun artifactPathUnder(settings: ExtractionSettings): String = TesseractOcr.relativeArtifactPath(
         RenderedPage(
@@ -143,6 +184,17 @@ class ExtractionSettingsProbeTest {
      * Each version gets its own file because these tests compare two versions: one path that both write to
      * would leave only the last one to be found, and the comparison would be between a version and itself.
      */
+    /** A stand-in tool that reports [banner] as its version, for the converter probe. */
+    private fun toolReporting(banner: String): Path = writeFakeExecutable(
+        directory,
+        banner.replace(' ', '-'),
+        """
+        case "${'$'}1" in
+          --version) echo "$banner" ;;
+        esac
+        """.trimIndent(),
+    )
+
     private fun tesseractReporting(banner: String): Path = writeFakeExecutable(
         directory,
         banner.replace(' ', '-'),

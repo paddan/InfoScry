@@ -74,6 +74,12 @@ class ExtractorRegistryTest {
             "image/png",
             "image/jpeg",
             "image/tiff",
+            "application/epub+zip",
+            "application/x-ibooks+zip",
+            "application/x-fictionbook+xml",
+            "application/x-fictionbook+zip",
+            "application/x-mobipocket-ebook",
+            "application/x-infoscry-ebook",
         )
         readable.forEach { mediaType ->
             assertTrue(

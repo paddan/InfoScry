@@ -415,8 +415,12 @@ class HtmlExtractor(
  * everything inside it, so a nested block must not report it again, and a wrapper that only exists to hold
  * headings must not report the headings' text on top of the heading sections. The first is handled by
  * remembering which elements were claimed, the second by treating such a wrapper as transparent.
+ *
+ * It is shared with the e-book reader rather than copied there: a chapter of an EPUB is an XHTML document
+ * with the same shape as a web page, and two walks would eventually disagree about what a heading path is,
+ * which is exactly what a citation is made of.
  */
-private object HtmlSections {
+internal object HtmlSections {
 
     data class Section(val headingPath: List<String>, val text: String)
 

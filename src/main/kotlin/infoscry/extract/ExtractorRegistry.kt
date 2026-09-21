@@ -61,8 +61,13 @@ class ExtractorRegistry(
          *
          * Each extractor claims its own media types, so a document goes to the reader that understands
          * its structure, and [TextualFallbackExtractor] takes only the text containers no format
-         * extractor owns. The e-book extractor is added by the task that owns it and registers its own
-         * types here.
+         * extractor owns.
+         *
+         * The two e-book readers are one path with two entrances. [EpubExtractor] reads a book's own
+         * container, and [CalibreBackedEbookExtractor] converts a Kindle or legacy container into an EPUB
+         * and hands it to **the same instance**: one reader for the format, one set of section keys, and one
+         * place where a citation is decided. A second EPUB reader behind the converter would be a second
+         * answer to what a chapter is, and the two would drift.
          *
          * Both readers that need a raster read it with the same tool: the PDF reader hands a page that has
          * no text of its own to [TesseractOcr], and the image reader hands it the picture itself. One
@@ -71,11 +76,16 @@ class ExtractorRegistry(
          * have their own text are extracted and cited as usual, and a page that needs OCR is reported
          * against the document with [TesseractOcr.NEEDS_TESSERACT_CODE] instead of quietly going missing.
          *
-         * [tesseract] is a parameter so that a test can prove this wiring by reading a page with a
-         * stand-in tool: a registry that compiled against the real one but never reached it would pass
-         * every other test in the suite while reading nothing a person could cite.
+         * [tesseract] and [calibre] are parameters so that a test can prove this wiring by reading a page
+         * and converting a book with stand-in tools: a registry that compiled against the real ones but
+         * never reached them would pass every other test in the suite while reading nothing a person could
+         * cite.
          */
-        fun production(tesseract: TesseractOcr = TesseractOcr()): ExtractorRegistry {
+        fun production(
+            tesseract: TesseractOcr = TesseractOcr(),
+            calibre: CalibreConverter = CalibreConverter(),
+        ): ExtractorRegistry {
+            val epub = EpubExtractor(tesseract::recognize)
             return ExtractorRegistry(
                 listOf(
                     PlainTextExtractor(),
@@ -90,6 +100,9 @@ class ExtractorRegistry(
                     PresentationExtractor(OfficeFormat.LEGACY),
                     PdfExtractor(tesseract::recognize),
                     ImageExtractor(tesseract::recognize),
+                    epub,
+                    Fb2Extractor(),
+                    CalibreBackedEbookExtractor(calibre, epub),
                 ),
                 TextualFallbackExtractor(),
             )

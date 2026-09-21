@@ -121,4 +121,26 @@ class ToolProbeTest {
         assertNotNull(status.remedy, "a tool that cannot be used has to say what to do about it")
         assertEquals(emptyList(), status.languages, "a tool that never answered was asked more questions")
     }
+
+    @Test
+    fun `the optional converter reports its version when it is installed`() = runBlocking {
+        val tool = writeFakeExecutable(directory, "ebook-convert", "echo 'calibre 8.1.0'")
+
+        val status = ToolProbe.calibre(tool.toString())
+
+        assertEquals(ToolProbe.CALIBRE_NAME, status.name)
+        assertTrue(status.available)
+        assertEquals("calibre 8.1.0", status.version)
+        assertNull(status.remedy, "an installed tool needs no remedy")
+    }
+
+    @Test
+    fun `a missing converter is reported with the command that installs it`() = runBlocking {
+        val status = ToolProbe.calibre(directory.resolve("no-such-ebook-convert").toString())
+
+        assertFalse(status.available, "the converter is optional, and its absence is a fact rather than a failure")
+        assertNotNull(status.remedy, "a person who sees NEEDS_TOOL has to be told what to install")
+        assertContains(status.remedy.orEmpty(), "calibre")
+        assertNull(ToolProbe.calibreVersion(directory.resolve("no-such-ebook-convert").toString()))
+    }
 }

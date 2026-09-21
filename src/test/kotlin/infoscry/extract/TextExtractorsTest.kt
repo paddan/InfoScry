@@ -601,6 +601,15 @@ internal class PermitProbeBoundary : UnitBoundary {
 
     private var open: Int = 0
 
+    /**
+     * How many permits are open right now.
+     *
+     * An injected tool checks this before it does its work: that a page was read is not the property —
+     * that it was read while the collector held the unit's permit is, because only then does the artifact
+     * it wrote belong to the checkpoint that describes it.
+     */
+    val openPermits: Int get() = open
+
     override suspend fun <T> unit(block: suspend () -> T): T {
         permits++
         open++
