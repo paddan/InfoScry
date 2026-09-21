@@ -32,6 +32,10 @@ dependencies {
     // Content-based media type detection. Only Tika's core is wired here: the format *parsers* arrive
     // with the tasks that own those formats, which use PDFBox, POI, jsoup, and Commons CSV directly.
     implementation(libs.tika.core)
+    // The text, Markdown, HTML, and CSV extractors: jsoup parses and sanitises markup, Commons CSV parses
+    // records whose fields may contain the delimiter or a newline.
+    implementation(libs.jsoup)
+    implementation(libs.commons.csv)
     // The local API: the embedded server, its Netty engine, and the loopback client the CLI and the
     // tests use to talk to a running server.
     implementation(libs.ktor.server.core)

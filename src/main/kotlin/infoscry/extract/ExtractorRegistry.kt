@@ -59,11 +59,19 @@ class ExtractorRegistry(
         /**
          * The registry the first release ships with.
          *
-         * It holds no format extractor yet: the text, Office, PDF, OCR, and e-book extractors are added
-         * by the tasks that own them, and each registers its own media types here. What exists today is
-         * the fallback, so a plain-text document is importable now and a container nobody can read is
-         * refused by name.
+         * Each extractor claims its own media types, so a document goes to the reader that understands
+         * its structure, and [TextualFallbackExtractor] takes only the text containers no format
+         * extractor owns. The Office, PDF, OCR, and e-book extractors are added by the tasks that own
+         * them and register their own types here.
          */
-        fun production(): ExtractorRegistry = ExtractorRegistry(emptyList(), TikaFallbackExtractor())
+        fun production(): ExtractorRegistry = ExtractorRegistry(
+            listOf(
+                PlainTextExtractor(),
+                MarkdownExtractor(),
+                HtmlExtractor(),
+                CsvExtractor(),
+            ),
+            TextualFallbackExtractor(),
+        )
     }
 }

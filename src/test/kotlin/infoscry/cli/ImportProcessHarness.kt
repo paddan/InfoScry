@@ -9,7 +9,7 @@ import infoscry.extract.ExtractionEvent
 import infoscry.extract.ExtractionInput
 import infoscry.extract.ExtractorRegistry
 import infoscry.extract.MediaTypeDetector
-import infoscry.extract.TikaFallbackExtractor
+import infoscry.extract.TextualFallbackExtractor
 import infoscry.jobs.ImportPipeline
 import java.nio.file.Files
 import java.nio.file.Path
@@ -48,7 +48,7 @@ object ImportProcessHarness {
     /** The pipeline a harness run extracts with: the real detector, one fake extractor, a file sink. */
     fun harnessPipeline(paths: AppPaths): ImportPipeline = ImportPipeline(
         detector = MediaTypeDetector(),
-        registry = ExtractorRegistry(listOf(HarnessExtractor()), TikaFallbackExtractor()),
+        registry = ExtractorRegistry(listOf(HarnessExtractor()), TextualFallbackExtractor()),
         // A sink that survives the attempt, because extraction is a no-op without one and the gate below
         // is what makes an import observable while it runs.
         sink = FileUnitsSink(paths.tempDir.resolve("harness-units")),

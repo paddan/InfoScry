@@ -19,7 +19,7 @@ import infoscry.extract.ExtractionSettings
 import infoscry.extract.ExtractionSink
 import infoscry.extract.ExtractorRegistry
 import infoscry.extract.MediaTypeDetector
-import infoscry.extract.TikaFallbackExtractor
+import infoscry.extract.TextualFallbackExtractor
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import java.nio.file.Files
@@ -350,7 +350,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
         sink: ExtractionSink = ExtractionSink.NONE,
     ): ImportPipeline = ImportPipeline(
         detector = MediaTypeDetector(),
-        registry = ExtractorRegistry(listOf(extractor), TikaFallbackExtractor()),
+        registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
         sink = sink,
     )
 

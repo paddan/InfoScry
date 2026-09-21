@@ -1,0 +1,4 @@
+# Extraction fixtures are byte-exact evidence, not prose: sample.txt and sample.csv carry CRLF line
+# endings on purpose, because that is what the text extractor and the normalizer are tested against.
+# Letting Git normalise them would silently turn the tests into assertions about something else.
+src/test/resources/fixtures/** -text
