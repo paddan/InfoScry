@@ -269,6 +269,30 @@ class LuceneIndex private constructor(
     }
 
     /**
+     * The document identities this generation still holds rows for, read from the index itself.
+     *
+     * A rebuild cannot ask the database what the index holds — the whole point of a stale-row check is
+     * that the two have diverged — so the identities come from the stored field through this
+     * generation's own searcher. The terms dictionary yields every distinct document identity across
+     * all of the generation's segments, and a term whose every row is deleted does not count, which
+     * is what keeps a document the database no longer has from being mistaken for a live one.
+     */
+    fun storedDocumentIds(): Set<String> = readSearcher { searcher ->
+        val identities = buildSet {
+            for (leaf in searcher.indexReader.leaves()) {
+                val terms = leaf.reader().terms(LuceneSchema.FIELD_DOCUMENT_ID) ?: continue
+                val iterator = terms.iterator()
+                while (iterator.next() != null) {
+                    add(iterator.term().utf8ToString())
+                }
+            }
+        }
+        identities.filterTo(HashSet(identities.size)) { id ->
+            searcher.count(TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, id))) > 0
+        }
+    }
+
+    /**
      * Waits, bounded, for every search that is still reading this generation to finish.
      *
      * A rebuild publishes a successor and then retires the generation it replaced: readers that

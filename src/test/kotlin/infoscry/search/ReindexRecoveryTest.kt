@@ -121,6 +121,130 @@ class ReindexRecoveryTest {
         }
     }
 
+    // ---- What a rebuild must not carry forward ----
+
+    @Test
+    fun `a document deleted from the database does not survive a full rebuild`() {
+        val (context, collectionA, collectionB) = openSeededArchive(collections = 2, documentsPerCollection = 1)
+        assertNotNull(collectionB, "the fixture named two collections")
+        context.use { closed ->
+            val deletedId = runBlocking {
+                closed.documents.listByCollection(collectionA, Int.MAX_VALUE).single().id
+            }
+            runBlocking { closed.documents.delete(deletedId) }
+
+            val result = runBlocking { reindexService(closed).reindex(ReindexRequest()) }
+
+            assertEquals(1, result.staleDocuments, "the rows the copy inherited are accounted for")
+            val liveIds = liveDocumentIds(closed)
+            assertEquals(
+                liveIds,
+                closed.index().storedDocumentIds(),
+                "the published generation is exactly the database's live document set",
+            )
+            assertTrue(
+                deletedId.value !in closed.index().storedDocumentIds(),
+                "a document the database deleted does not survive the rebuild",
+            )
+            assertEquals(0, closed.index().rowCount(collectionA), "the deleted document's rows are gone")
+            assertEquals(
+                chunkCount(closed, collectionB),
+                closed.index().rowCount(collectionB),
+                "the other collection's rows were carried forward",
+            )
+        }
+    }
+
+    @Test
+    fun `a narrowed rebuild purges stale rows from the collections it does not rebuild`() {
+        val (context, collectionA, collectionB) = openSeededArchive(collections = 2, documentsPerCollection = 1)
+        assertNotNull(collectionB, "the fixture named two collections")
+        context.use { closed ->
+            val staleId = runBlocking {
+                closed.documents.listByCollection(collectionB, Int.MAX_VALUE).single().id
+            }
+            runBlocking { closed.documents.delete(staleId) }
+
+            val result = runBlocking {
+                reindexService(closed).reindex(ReindexRequest(collectionId = collectionA))
+            }
+
+            assertEquals(1, result.documents, "the narrowed rebuild walks only the named collection")
+            assertEquals(1, result.staleDocuments, "the purge is not scoped to the named collection")
+            assertEquals(
+                liveDocumentIds(closed),
+                closed.index().storedDocumentIds(),
+                "the published generation is the live set, whatever the rebuild's scope was",
+            )
+            assertEquals(0, closed.index().rowCount(collectionB), "the stale collection's rows are gone")
+            assertEquals(
+                chunkCount(closed, collectionA),
+                closed.index().rowCount(collectionA),
+                "the named collection's rows match the chunks its database holds",
+            )
+            val outcome = runBlocking {
+                searchService(closed).search("nightfall", filters = SearchFilters(collectionId = collectionA))
+            }
+            assertEquals(2, outcome.hits.size, "the narrowed rebuild still serves the named collection")
+        }
+    }
+
+    @Test
+    fun `a rebuild that re-chunks a document keeps its unit identities`() {
+        val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
+        context.use { closed ->
+            val documentId = runBlocking {
+                closed.documents.listByCollection(collectionA, Int.MAX_VALUE).single().id
+            }
+            val unitsBefore = runBlocking {
+                closed.content.listUnits(documentId, afterOrdinal = -1, limit = UNIT_BATCH)
+            }
+            // A marker naming another tokenizer makes the document need chunking under this build's
+            // tokenizer without touching any chunk: the disagreement is in the metadata, not the text,
+            // so the rebuild re-chunks from the same persisted units and must keep their identities.
+            val chunker = Chunker(
+                E5Embedder.productionCounter(context.paths.modelsDir, context.paths.embeddingProfileDir),
+            )
+            runBlocking {
+                closed.content.finishChunking(
+                    documentId = documentId,
+                    chunkerVersion = chunker.version,
+                    tokenizerId = "not-the-tokenizer-this-build-embeds-with",
+                    maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
+                    overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
+                    unitCount = unitsBefore.size,
+                )
+            }
+
+            val result = runBlocking { reindexService(closed).reindex(ReindexRequest()) }
+
+            assertEquals(1, result.documentsRebuilt, "the stale marker is what forced the rebuild")
+            val unitsAfter = runBlocking {
+                closed.content.listUnits(documentId, afterOrdinal = -1, limit = UNIT_BATCH)
+            }
+            assertEquals(
+                unitsBefore.map { it.id },
+                unitsAfter.map { it.id },
+                "a rebuild re-chunks derived data but does not mint new citation identities",
+            )
+            assertEquals(
+                unitsBefore.map { it.ordinal },
+                unitsAfter.map { it.ordinal },
+                "the units keep their document order through a re-chunk",
+            )
+            assertEquals(
+                chunkCount(closed, collectionA),
+                closed.index().rowCount(collectionA),
+                "the rebuilt rows are the chunks the database now holds",
+            )
+            assertEquals(
+                0,
+                runBlocking { reindexService(closed).reindex(ReindexRequest()) }.documentsRebuilt,
+                "the re-chunk landed durably, so the next rebuild is a copy",
+            )
+        }
+    }
+
     // ---- What maintenance excludes ----
 
     @Test
@@ -371,6 +495,12 @@ class ReindexRecoveryTest {
         context.documents.listByCollection(collectionId, Int.MAX_VALUE).sumOf { document ->
             context.content.chunkCount(document.id)
         }
+
+    /** The document identities the database holds, the set a published generation must equal. */
+    private fun liveDocumentIds(context: AppContext): Set<String> =
+        context.collections.list().flatMap { collection ->
+            context.documents.listByCollection(collection.id, Int.MAX_VALUE).map { it.id.value }
+        }.toSet()
 
     private fun searchService(context: AppContext): SearchService = SearchService(
         collections = context.collections,

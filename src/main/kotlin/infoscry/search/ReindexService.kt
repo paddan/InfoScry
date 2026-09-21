@@ -43,6 +43,7 @@ data class ReindexResult(
     val documents: Int,
     val chunks: Int,
     val documentsRebuilt: Int,
+    val staleDocuments: Int = 0,
 )
 
 /**
@@ -157,7 +158,10 @@ class ReindexService(
      * The copy is what keeps a narrowed rebuild cheap: the successor starts as a copy of the committed
      * current generation, so every collection the caller did not name keeps its rows and vectors
      * without being rewritten, and the named collection's rows are deleted from the copy and built
-     * again from the persisted text. Nothing is published until the whole successor validates.
+     * again from the persisted text. The copy is also where rows outlive the database — a document
+     * whose deletion never reached the index, or a collection whose deletion crashed before its index
+     * phase — so the copy is purged against the database's live identities before anything is built:
+     * the successor must hold exactly the live document set, whatever the rebuild's scope was.
      */
     private suspend fun buildGeneration(
         previous: LuceneIndex,
@@ -183,6 +187,18 @@ class ReindexService(
 
         val next = LuceneIndex.openGeneration(paths.indexDir, nextName, identity)
         try {
+            // Purge the rows the copy inherited for documents the database no longer has, by identity
+            // rather than by count: a count can agree while a deleted document still holds rows. The
+            // purge covers every collection, not only the rebuild's scope, because the successor is
+            // the one index every collection reads. A document's collection never changes and a
+            // re-import mints a new identity, so an identity present in the copy but absent from the
+            // database is stale, however it got there.
+            val liveIds = liveDocumentIds()
+            val staleIds = next.storedDocumentIds() - liveIds
+            for (id in staleIds) {
+                next.deleteDocument(DocumentId(id))
+            }
+
             // The copied generation carries rows the previous reading wrote. A document keeps them
             // when the chunking marker still agrees with this tokenizer and the copy holds exactly
             // as many rows as the database holds chunks, because that is the state where the index
@@ -220,7 +236,7 @@ class ReindexService(
             // complete while the marker still names the generation this process is serving.
             next.commit()
             next.close()
-            validate(nextName, scope)
+            validate(nextName, liveIds, narrowed = requested != null)
 
             val reopened = LuceneIndex.openGeneration(paths.indexDir, nextName, identity)
             observe(ReindexStep.BEFORE_MARKER_SWAP)
@@ -236,6 +252,7 @@ class ReindexService(
                 documents = completed,
                 chunks = chunks,
                 documentsRebuilt = rebuilt,
+                staleDocuments = staleIds.size,
             )
         } catch (failure: Throwable) {
             runCatching { next.close() }
@@ -378,13 +395,36 @@ class ReindexService(
     }
 
     /**
+     * Every document identity the database currently holds, whatever its collection's lifecycle.
+     *
+     * The live set is the database's, not the serving generation's: the rebuild's job is to make the
+     * two agree, so it reads the set it is aiming at rather than the state it is repairing. Search
+     * already masks rows whose collection is not active, so a tombstoned collection's rows stay in the
+     * set until its own deletion reaches the index — that is the deletion state machine's phase, not
+     * the rebuild's.
+     */
+    private fun liveDocumentIds(): Set<String> {
+        val identities = HashSet<String>()
+        for (collection in collections.list()) {
+            for (document in documents.listByCollection(collection.id, Int.MAX_VALUE)) {
+                identities += document.id.value
+            }
+        }
+        return identities
+    }
+
+    /**
      * Confirms the successor agrees with the database before anything is published.
      *
-     * The count is the check that means something: one Lucene row per chunk, so a generation whose row
-     * count does not match the chunks the database holds is a generation that lost or invented rows,
-     * and publishing it would publish a citation set nothing can account for.
+     * Two checks, both against the database rather than against what the rebuild happened to write.
+     * The identity comparison is the one that catches a stale row: a count can agree while a document
+     * the database deleted still holds rows, so the successor's document identities are compared with
+     * the database's live set, not merely counted. Row counts are then checked per collection — one
+     * Lucene row per chunk — so a row the count cannot explain is caught wherever it sits, and every
+     * collection in the database is checked, not only the rebuild's scope, because the successor is
+     * the one index every collection reads.
      */
-    private suspend fun validate(nextName: String, scope: List<infoscry.domain.Collection>) {
+    private suspend fun validate(nextName: String, liveIds: Set<String>, narrowed: Boolean) {
         val reopened = LuceneIndex.openGeneration(paths.indexDir, nextName, identity)
         try {
             if (reopened.schemaStatus !is SchemaStatus.Ready) {
@@ -392,7 +432,21 @@ class ReindexService(
                     "the rebuilt generation does not record this build's model identity",
                 )
             }
-            for (collection in scope) {
+            val identities = reopened.storedDocumentIds()
+            if (identities != liveIds) {
+                val unexplained = identities - liveIds
+                val missing = liveIds - identities
+                val remedy = if (narrowed) {
+                    " Run `infoscry reindex` without --collection to rebuild every collection."
+                } else {
+                    ""
+                }
+                throw IllegalStateException(
+                    "the rebuilt generation holds ${unexplained.size} document(s) the database does not " +
+                        "have and is missing ${missing.size} it does; refusing to publish.$remedy",
+                )
+            }
+            for (collection in collections.list()) {
                 val expected = documents.listByCollection(collection.id, Int.MAX_VALUE).sumOf { document ->
                     content.chunkCount(document.id)
                 }
