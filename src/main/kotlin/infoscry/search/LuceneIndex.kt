@@ -41,10 +41,12 @@ import org.apache.lucene.search.Query
 import org.apache.lucene.search.ScoreDoc
 import org.apache.lucene.search.SearcherFactory
 import org.apache.lucene.search.SearcherManager
+import org.apache.lucene.search.TermInSetQuery
 import org.apache.lucene.search.TermQuery
 import org.apache.lucene.search.TopDocs
 import org.apache.lucene.store.Directory
 import org.apache.lucene.store.FSDirectory
+import org.apache.lucene.util.BytesRef
 
 /**
  * Which embeddings this index's vectors were built with, recorded in the commit user data so a model
@@ -256,17 +258,22 @@ class LuceneIndex private constructor(
      *
      * [collectionId] and [documentIds] narrow the match exactly in the query itself. A query the classic
      * parser cannot parse is escaped into a safe terms query rather than surfacing as an error — invalid
-     * syntax is user input, not a corrupt index.
+     * syntax is user input, not a corrupt index. A query that analyzes into more tokens than
+     * [MAX_QUERY_TOKENS] is refused before it is parsed, because Lucene's clause ceiling is enforced when a
+     * query is rewritten during a search and would otherwise surface as an exception rather than a refusal.
      */
     fun searchKeyword(
         collectionId: CollectionId?,
         queryText: String,
         documentIds: Set<String>? = null,
         limit: Int,
-    ): List<IndexHit> = readSearcher { searcher ->
-        val parsed = parseSafely(queryText)
-        val query = filteredBy(parsed, collectionId, documentIds)
-        toHits(searcher, searcher.search(query, limit))
+    ): List<IndexHit> {
+        requireQueryWithinClauseCeiling(queryText)
+        return readSearcher { searcher ->
+            val parsed = parseSafely(queryText)
+            val query = filteredBy(parsed, collectionId, documentIds)
+            toHits(searcher, searcher.search(query, limit))
+        }
     }
 
     /**
@@ -348,17 +355,53 @@ class LuceneIndex private constructor(
         }.build()
     }
 
-    /** One filter query naming the collection and document ids a hit must belong to. */
+    /**
+     * One filter query naming the collection and document ids a hit must belong to.
+     *
+     * The document ids go in as a single [TermInSetQuery] rather than one `TermQuery` per id: a set query is
+     * a `MultiTermQuery` and is not counted against Lucene's boolean clause ceiling, so a criterion that
+     * matches every document in a large archive costs one clause instead of one per document.
+     */
     private fun scopeFilter(collectionId: CollectionId?, documentIds: Set<String>?): Query? {
         if (collectionId == null && documentIds.isNullOrEmpty()) return null
         return BooleanQuery.Builder().apply {
             if (collectionId != null) {
                 add(TermQuery(Term(LuceneSchema.FIELD_COLLECTION_ID, collectionId.value)), BooleanClause.Occur.FILTER)
             }
-            documentIds?.forEach { id ->
-                add(TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, id)), BooleanClause.Occur.FILTER)
+            if (!documentIds.isNullOrEmpty()) {
+                add(
+                    TermInSetQuery(LuceneSchema.FIELD_DOCUMENT_ID, documentIds.map { BytesRef(it) }),
+                    BooleanClause.Occur.FILTER,
+                )
             }
         }.build()
+    }
+
+    /**
+     * Refuses a query that analyzes into more tokens than the clause ceiling can hold.
+     *
+     * The classic parser emits roughly one boolean clause per analyzed token, and Lucene enforces its ceiling
+     * when the query is rewritten during the search — so counting the tokens first turns "the search box threw
+     * an exception" into an actionable refusal.
+     */
+    private fun requireQueryWithinClauseCeiling(queryText: String) {
+        if (countAnalyzedTokens(queryText) > MAX_QUERY_TOKENS) {
+            throw SearchUnavailableException(
+                QUERY_TOO_LONG_CODE,
+                "the query has more than $MAX_QUERY_TOKENS words; shorten it and search again",
+            )
+        }
+    }
+
+    /** The tokens [queryText] analyzes into, counted with this index's own analyzer, stopping at the bound. */
+    private fun countAnalyzedTokens(queryText: String): Int {
+        val stream = handle.analyzer.tokenStream(LuceneSchema.FIELD_TEXT, queryText)
+        return stream.use {
+            it.reset()
+            var count = 0
+            while (count <= MAX_QUERY_TOKENS && it.incrementToken()) count++
+            count
+        }
     }
 
     /**
@@ -417,18 +460,23 @@ class LuceneIndex private constructor(
     companion object {
 
         /**
-         * The machine-built boolean ceiling for scope filters, well above the plan's 10 000-document archive
-         * target. Lucene's default is 1024 clauses (enforced at rewrite time by `IndexSearcher`), which a
-         * scope filter over a broad criterion (processing status, media type, OCR-derived) on a large archive
-         * would exceed and then surface as `TooManyClauses` — a 500 on a plausible query. Raised once
-         * process-wide because every BooleanQuery this application constructs is either machine-built or a
-         * single parsed user query; no user input expands into an unbounded clause list.
+         * How many analyzed tokens a user query may carry.
+         *
+         * Lucene keeps its own boolean clause ceiling at its default (1 024), enforced when a query is
+         * rewritten during a search, and the classic parser emits roughly one clause per analyzed token — so a
+         * longer query would surface as `IndexSearcher.TooManyClauses` rather than a refusal. The bound sits
+         * below the ceiling deliberately: a token does not have to map to exactly one clause (a phrase, a
+         * boost, a field group or a wildcard need not), and the scope and wrapper queries this application
+         * adds around the parsed query have to fit in the same ceiling.
+         *
+         * Raise the ceiling here and the query path pays for it: `IndexSearcher.setMaxClauseCount` is
+         * process-wide and governs user parsing exactly as much as machine-built filters, which is why the
+         * broad-scope case is solved by a set query instead of a higher ceiling.
          */
-        const val MAX_BOOLEAN_CLAUSES: Int = 100_000
+        const val MAX_QUERY_TOKENS: Int = 1_000
 
-        init {
-            IndexSearcher.setMaxClauseCount(MAX_BOOLEAN_CLAUSES)
-        }
+        /** The code a refusal carries when a query analyzes into more tokens than the ceiling can hold. */
+        const val QUERY_TOO_LONG_CODE: String = "QUERY_TOO_LONG"
 
         private const val MARKER_FILE: String = "current"
         private const val GENERATION_PREFIX: String = "lucene-"

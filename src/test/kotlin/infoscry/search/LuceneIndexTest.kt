@@ -7,10 +7,6 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
 import java.nio.file.Files
-import org.apache.lucene.index.Term
-import org.apache.lucene.search.BooleanClause
-import org.apache.lucene.search.BooleanQuery
-import org.apache.lucene.search.TermQuery
 import java.nio.file.Path
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -40,19 +36,29 @@ class LuceneIndexTest {
     }
 
     @Test
-    fun `scope filters on thousands of documents do not trip the boolean clause cap`() {
-        // Referencing the constant forces the companion init, which raises the machine-built clause cap the
-        // scope filter needs for the plan's 10 000-document archive target.
-        assertTrue(
-            LuceneIndex.MAX_BOOLEAN_CLAUSES >= 5_000,
-            "the machine-built ceiling must cover the design target",
-        )
-        val scope = BooleanQuery.Builder().apply {
-            repeat(5_000) { id ->
-                add(TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, "doc-$id")), BooleanClause.Occur.FILTER)
+    fun `a scope filter naming more documents than the clause ceiling searches`() {
+        // Lucene's default ceiling is 1 024 clauses and it is enforced when a query is rewritten during a
+        // search, so this exercises the real mechanism rather than a constant: 1 100 documents indexed, 1 100
+        // ids in the scope, one query. A scope expressed as one TermQuery per id would throw
+        // IndexSearcher.TooManyClauses here; a single set query searches.
+        val documentIds = (1..1_100).map { DocumentId("doc-$it") }
+        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+            runBlocking {
+                documentIds.forEach { documentId ->
+                    index.replaceDocument(chunksFor(documentId, listOf("budget nightfall report")))
+                }
             }
-        }.build()
-        assertEquals(5_000, scope.clauses().size)
+
+            val hits = index.searchKeyword(
+                COLLECTION,
+                "budget",
+                documentIds = documentIds.map { it.value }.toSet(),
+                limit = 5,
+            )
+
+            assertEquals(5, hits.size, "the scope must match the indexed documents rather than refuse")
+            assertTrue(hits.all { it.text.contains("budget") })
+        }
     }
 
     @Test

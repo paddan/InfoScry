@@ -424,6 +424,43 @@ class SearchServiceTest {
     }
 
     @Test
+    fun `an over-long query is refused actionably instead of tripping the clause ceiling`() {
+        val collection = collections.create("long-query-collection")
+        val document = insertDocument(collection.id, "long.txt", "text/plain")
+        val (service, index) = openService(absentEmbedder())
+        try {
+            runBlocking { indexChunk(index, collection.id, document.id, "nightfall report") }
+
+            // Lucene enforces its clause ceiling when a query is rewritten during the search, and the parser
+            // emits roughly one clause per analyzed token, so a query this long must be refused before it is
+            // parsed rather than surface as an exception.
+            val overLong = (1..(LuceneIndex.MAX_QUERY_TOKENS + 100)).joinToString(" ") { "term$it" }
+            val failure = assertFailsWith<SearchUnavailableException> {
+                service.search(
+                    overLong,
+                    mode = SearchMode.KEYWORD,
+                    filters = SearchFilters(collectionId = collection.id),
+                )
+            }
+            assertEquals(LuceneIndex.QUERY_TOO_LONG_CODE, failure.code)
+            assertContains(failure.remedy, "shorten")
+
+            // A query within the bound still searches, so the refusal is a bound and not a blanket rejection.
+            val withinBound = (1..LuceneIndex.MAX_QUERY_TOKENS).joinToString(" ") { "term$it" }
+            assertEquals(
+                0,
+                service.search(
+                    withinBound,
+                    mode = SearchMode.KEYWORD,
+                    filters = SearchFilters(collectionId = collection.id),
+                ).hits.size,
+            )
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
     fun `blank query is an empty outcome`() {
         val collection = collections.create("Empty")
         val document = insertDocument(collection.id, "any.pdf", "application/pdf")

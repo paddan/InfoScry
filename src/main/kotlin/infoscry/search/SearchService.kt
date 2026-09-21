@@ -234,10 +234,11 @@ class SearchService(
 
         /**
          * How many candidate documents a document-level filter may select before a search is refused.
-         * With `LuceneIndex.MAX_BOOLEAN_CLAUSES` raised to 100 000, a filter selecting up to 50 000
-         * documents is comfortably inside the machine-built ceiling and five times the plan's 10
-         * 000-document archive target; beyond it, an actionable "narrow the filter" refusal is the honest
-         * outcome rather than a Lucene `TooManyClauses` 500.
+         *
+         * The scope itself is a set query, so a broad criterion is not a clause-ceiling problem — the bound is
+         * an early, cheap, actionable refusal instead of doing a 50 000-term scope and a ranking pass over its
+         * results. Five times the plan's 10 000-document archive target, so it does not bite a real archive;
+         * beyond it, "narrow the filter" is a better answer than a slow search.
          */
         const val DEFAULT_MAX_SCOPE_TERMS: Int = 50_000
 
