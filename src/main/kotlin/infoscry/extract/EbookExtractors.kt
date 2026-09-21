@@ -1014,9 +1014,13 @@ class CalibreConverter(
         val target = input.artifactRoot.resolve(relativeArtifactPath(input.fingerprint))
         if (isReusable(target)) return target
 
-        val workDirectory = Files.createTempDirectory(WORK_DIRECTORY_PREFIX)
+        // The attempt's private directory is created inside the artifact root, so the book is published with
+        // a same-filesystem rename. A work directory under the system temp directory can sit on another
+        // filesystem, where the publish degrades into a copy and a process killed mid-copy leaves a
+        // truncated book at exactly the path [isReusable] accepts.
+        val workDirectory = Files.createTempDirectory(input.artifactRoot, WORK_DIRECTORY_PREFIX)
         try {
-            // The converter writes into this attempt's own directory rather than into the artifact root. The
+            // The converter writes into this attempt's own directory rather than at the target path. The
             // target path is what a later attempt looks at for an answer, so a process that is stopped on
             // timeout or dies mid-write must not be able to leave a truncated book there; only a conversion
             // that succeeded and produced bytes is moved in.
@@ -1047,7 +1051,7 @@ class CalibreConverter(
                     "the converter reported success without writing a book",
                 )
             }
-            moveIntoPlace(converted, target)
+            publish(converted, target)
             return target
         } finally {
             workDirectory.toFile().deleteRecursively()
@@ -1066,13 +1070,39 @@ class CalibreConverter(
         false
     }
 
-    /** Moves a finished conversion into the artifact root, creating the directory it belongs to. */
-    private fun moveIntoPlace(converted: Path, target: Path) {
-        Files.createDirectories(target.parent)
+    /**
+     * Publishes a finished conversion at the path a later attempt reads as its answer.
+     *
+     * The move is required to be atomic. A copy-based fallback would leave a partial book at exactly the
+     * path [isReusable] accepts if the process dies mid-copy, and every later attempt would then derive its
+     * failure from that stub instead of converting again; refusing and clearing the destination keeps the
+     * answer either absent or whole.
+     */
+    private fun publish(converted: Path, target: Path) {
         try {
+            Files.createDirectories(target.parent)
             Files.move(converted, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-        } catch (unsupported: java.nio.file.AtomicMoveNotSupportedException) {
-            Files.move(converted, target, StandardCopyOption.REPLACE_EXISTING)
+        } catch (failure: IOException) {
+            discard(target)
+            throw ConversionRefusedException(
+                DOCUMENT_UNREADABLE_CODE,
+                "the artifact directory could not publish the converted book in place ($failure); " +
+                    "check that the data directory's filesystem supports atomic renames",
+            )
+        }
+    }
+
+    /**
+     * Removes a destination that must not be mistaken for a finished conversion.
+     *
+     * A destination that cannot be removed is not reusable either, because [isReusable] examines it rather
+     * than trusting it, so a failed attempt at cleanup cannot turn a stub into an answer.
+     */
+    private fun discard(target: Path) {
+        try {
+            Files.deleteIfExists(target)
+        } catch (undeletable: IOException) {
+            // Left for [isReusable], which treats an unexaminable path as no answer at all.
         }
     }
 

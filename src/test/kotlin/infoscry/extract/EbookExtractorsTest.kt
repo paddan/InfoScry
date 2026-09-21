@@ -546,13 +546,19 @@ class EbookExtractorsTest {
 
         val passed = Files.readAllLines(args)
         assertEquals(book.toString(), passed[0], "the managed original is what the converter is given")
+        val handedOutput = Path.of(passed[1])
         assertFalse(
-            passed[1].startsWith(artifactRoot.toString()),
-            "the converter was handed a path in the artifact root, where a stopped run would leave a book: ${passed[1]}",
+            handedOutput == expectedConvertedBook(),
+            "the converter was handed the path a later attempt reads as its answer: $handedOutput",
+        )
+        assertTrue(
+            handedOutput.startsWith(artifactRoot),
+            "the converter's private directory is outside the artifact root, so publishing the book is " +
+                "not a rename within one filesystem: $handedOutput",
         )
         assertFalse(
-            Files.exists(Path.of(passed[1])),
-            "the converter's own output path outlived the attempt, so a partial book could have stayed at it: ${passed[1]}",
+            Files.exists(handedOutput),
+            "the converter's own output path outlived the attempt, so a partial book could have stayed at it: $handedOutput",
         )
         assertTrue(
             Files.isRegularFile(expectedConvertedBook()),
@@ -567,6 +573,85 @@ class EbookExtractorsTest {
             units(events).first().unit.locator,
             "the converted book is cited by the structure it was converted into",
         )
+    }
+
+    @Test
+    fun `a conversion works inside the artifact root so its book is published by a rename`() = runBlocking {
+        val probe = probe()
+        val args = directory.resolve("converter-args.txt")
+        val converter = CalibreConverter(executable = fakeConverter(args).toString())
+
+        collect(
+            CalibreBackedEbookExtractor(converter, EpubExtractor(EbookOcrSpy().seam)),
+            inputFor(managedEpub(name = "kindle.azw3"), probe),
+            probe,
+        )
+
+        val handedOutput = Path.of(Files.readAllLines(args)[1])
+        assertEquals(
+            artifactRoot,
+            handedOutput.parent.parent,
+            "the attempt worked outside the artifact root, where the publish is a cross-filesystem copy " +
+                "rather than a rename: $handedOutput",
+        )
+        assertTrue(
+            handedOutput.parent.fileName.toString().startsWith(CalibreConverter.WORK_DIRECTORY_PREFIX),
+            "the converter did not work inside one private directory under the artifact root: $handedOutput",
+        )
+        assertTrue(
+            expectedConvertedBook().startsWith(artifactRoot),
+            "the published book does not live under the artifact root the attempt worked in, so the publish " +
+                "cannot be a rename on one filesystem",
+        )
+        assertFalse(
+            Files.exists(handedOutput),
+            "the attempt's own output path outlived it: $handedOutput",
+        )
+        assertNoWorkingDirectoryUnder(artifactRoot)
+    }
+
+    /** Fails if an attempt left its private directory behind under [root]. */
+    private fun assertNoWorkingDirectoryUnder(root: Path) {
+        val leftovers = Files.list(root).use { entries ->
+            entries.map { it.fileName.toString() }.toList()
+        }
+        assertTrue(
+            leftovers.none { it.startsWith(CalibreConverter.WORK_DIRECTORY_PREFIX) },
+            "the attempt's private directory outlived it: $leftovers",
+        )
+    }
+
+    @Test
+    fun `a conversion that cannot be published leaves nothing a later attempt would read`() = runBlocking {
+        val probe = probe()
+        val converter = CalibreConverter(executable = fakeConverter(directory.resolve("args.txt")).toString())
+        val blocked = expectedConvertedBook()
+
+        // Something that is not a book already occupies the published path and cannot be replaced by a
+        // rename, so the publish fails. The attempt must refuse rather than fall back to copying the book in.
+        Files.createDirectories(blocked)
+        Files.writeString(blocked.resolve("occupied"), "not a book")
+
+        val events = collect(
+            CalibreBackedEbookExtractor(converter, EpubExtractor(EbookOcrSpy().seam)),
+            inputFor(managedEpub(name = "kindle.azw3"), probe),
+            probe,
+        )
+
+        assertEquals(
+            DOCUMENT_UNREADABLE_CODE,
+            failures(events).single().code,
+            "a publish that cannot be atomic was reported as something other than a refusal",
+        )
+        assertFalse(
+            Files.isRegularFile(blocked),
+            "a partial book was left where the next attempt reads its answer: $blocked",
+        )
+        assertTrue(
+            Files.isRegularFile(blocked.resolve("occupied")),
+            "the obstruction at the published path was removed, so the refusal no longer describes the state",
+        )
+        assertNoWorkingDirectoryUnder(artifactRoot)
     }
 
     @Test
