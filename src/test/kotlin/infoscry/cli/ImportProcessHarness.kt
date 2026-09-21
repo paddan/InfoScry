@@ -1,6 +1,7 @@
 package infoscry.cli
 
 import com.github.ajalt.clikt.core.main
+import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
@@ -42,16 +43,16 @@ object ImportProcessHarness {
     @JvmStatic
     fun main(args: Array<String>) {
         // The pipeline factory is the same seam production uses; only its contents differ.
-        RootCommand(pipeline = { paths -> harnessPipeline(paths) }).main(args)
+        RootCommand(pipeline = { context -> harnessPipeline(context) }).main(args)
     }
 
     /** The pipeline a harness run extracts with: the real detector, one fake extractor, a file sink. */
-    fun harnessPipeline(paths: AppPaths): ImportPipeline = ImportPipeline(
+    fun harnessPipeline(context: AppContext): ImportPipeline = ImportPipeline(
         detector = MediaTypeDetector(),
         registry = ExtractorRegistry(listOf(HarnessExtractor()), TextualFallbackExtractor()),
         // A sink that survives the attempt, because extraction is a no-op without one and the gate below
         // is what makes an import observable while it runs.
-        sink = FileUnitsSink(paths.tempDir.resolve("harness-units")),
+        sink = FileUnitsSink(context.paths.tempDir.resolve("harness-units")),
     )
 
     /** The gate path the child waits for, if the test asked for one. */

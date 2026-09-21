@@ -58,9 +58,12 @@ class SchemaMigrator(private val database: Database) {
 
     companion object {
         /** The schema version this build writes and understands. */
-        const val SUPPORTED_VERSION = 1
+        const val SUPPORTED_VERSION = 2
 
-        private val MIGRATIONS = listOf(Migration(version = 1, resource = "db/migration/001_core.sql"))
+        private val MIGRATIONS = listOf(
+            Migration(version = 1, resource = "db/migration/001_core.sql"),
+            Migration(version = 2, resource = "db/migration/002_content.sql"),
+        )
     }
 }
 

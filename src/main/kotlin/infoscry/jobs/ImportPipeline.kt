@@ -1,5 +1,6 @@
 package infoscry.jobs
 
+import infoscry.AppContext
 import infoscry.extract.ExtractionSink
 import infoscry.extract.ExtractorRegistry
 import infoscry.extract.MediaTypeDetector
@@ -25,15 +26,19 @@ class ImportPipeline(
         /**
          * The pipeline the application runs with.
          *
-         * The sink is [ExtractionSink.NONE] until the durable unit store exists: an import copies and
-         * detects, and its documents stay in `EXTRACTING` instead of being reported as searchable. Running
-         * extractors into a store that cannot keep their output would spend OCR time and leave a document
-         * looking extracted when nothing was stored.
+         * It takes the open data directory rather than a path because the sink writes the authoritative
+         * database: the units an extractor produces are committed through the same store every reader uses,
+         * inside the same permit the extraction boundary holds. A sink built from a path alone could only
+         * open a second connection to the archive, which is the one thing the single-writer design forbids.
          */
-        fun production(): ImportPipeline = ImportPipeline(
+        fun production(context: AppContext): ImportPipeline = ImportPipeline(
             detector = MediaTypeDetector(),
             registry = ExtractorRegistry.production(),
-            sink = ExtractionSink.NONE,
+            sink = StoredUnitsSink(
+                paths = context.paths,
+                documents = context.documents,
+                content = context.content,
+            ),
         )
     }
 }

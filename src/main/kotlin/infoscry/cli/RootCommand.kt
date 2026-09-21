@@ -45,8 +45,8 @@ internal fun resolveOptions(parent: CliOptions?, json: Boolean, dataDir: Path?):
  * accepted after a subcommand name; see [resolveOptions].
  */
 class RootCommand(
-    private val pipeline: (infoscry.config.AppPaths) -> infoscry.jobs.ImportPipeline =
-        { infoscry.jobs.ImportPipeline.production() },
+    private val pipeline: (infoscry.AppContext) -> infoscry.jobs.ImportPipeline =
+        { context -> infoscry.jobs.ImportPipeline.production(context) },
 ) : CliktCommand(name = "infoscry") {
 
     private val json by option("--json", help = JSON_HELP).flag()

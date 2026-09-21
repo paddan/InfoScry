@@ -109,6 +109,12 @@ data class Document(
 /**
  * The smallest independently readable and citable part of a document. Both text forms are kept:
  * [extractedText] is the extractor's output, [searchText] is the normalized form used for indexing.
+ *
+ * [artifactRelativePath] names a file the extractor wrote for this unit under the document's artifact root —
+ * the OCR word boxes of a scanned page, a converted book's normalized EPUB — and [artifactSha256] is what
+ * makes the reference verifiable: an artifact that no longer matches is not the evidence the unit was
+ * committed with, so the unit is read again rather than cited against it. [meanConfidence] is how sure an OCR
+ * tool was about this unit and is absent for text a parser read rather than a tool recognised.
  */
 @Serializable
 data class ContentUnit(
@@ -118,9 +124,15 @@ data class ContentUnit(
     val locator: SourceLocation,
     val extractedText: String,
     val searchText: String,
+    val artifactRelativePath: String? = null,
+    val artifactSha256: String? = null,
+    val meanConfidence: Double? = null,
 ) {
     init {
         require(ordinal >= 0) { "ContentUnit.ordinal must not be negative, was $ordinal" }
+        require((artifactRelativePath == null) == (artifactSha256 == null)) {
+            "a unit's artifact reference is either complete or absent"
+        }
     }
 }
 
@@ -128,9 +140,12 @@ data class ContentUnit(
  * A retrieval excerpt of one content unit. A chunk never crosses a unit boundary, so its citation
  * is always the unit's locator.
  *
- * [startOffset] and [endOffset] are character offsets into the unit's search text; [tokenCount] is
- * the encoded passage length measured with the embedding tokenizer, including prefix and special
- * tokens.
+ * [startOffset] and [endOffset] are character offsets into the unit's search text, and [text] is what the
+ * embedder and the index receive — the span itself, preceded by the unit's repeated header when it has one.
+ * [tokenCount] is the encoded passage length measured with the embedding tokenizer, including prefix and
+ * special tokens, and [tokenStart] and [tokenEnd] are the first and last token indices of [text] inside that
+ * passage. Tokens before [tokenStart] or after [tokenEnd] are the ones the encoder added, so the stored
+ * offsets say both what the chunk covers and what its budget was spent on.
  */
 @Serializable
 data class Chunk(
@@ -141,6 +156,8 @@ data class Chunk(
     val startOffset: Int,
     val endOffset: Int,
     val tokenCount: Int,
+    val tokenStart: Int,
+    val tokenEnd: Int,
 ) {
     init {
         require(ordinal >= 0) { "Chunk.ordinal must not be negative, was $ordinal" }
@@ -149,6 +166,12 @@ data class Chunk(
             "Chunk.endOffset ($endOffset) must not precede startOffset ($startOffset)"
         }
         require(tokenCount >= 0) { "Chunk.tokenCount must not be negative, was $tokenCount" }
+        require(tokenStart in 0..<tokenCount) {
+            "Chunk.tokenStart ($tokenStart) is outside a passage of $tokenCount tokens"
+        }
+        require(tokenEnd in tokenStart..<tokenCount) {
+            "Chunk.tokenEnd ($tokenEnd) must follow tokenStart ($tokenStart) inside the passage"
+        }
     }
 }
 

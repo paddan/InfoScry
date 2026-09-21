@@ -364,9 +364,14 @@ interface ExtractionSink {
     companion object {
 
         /**
-         * Used until the durable unit store exists. The extraction phase is an explicit no-op: the
-         * document is copied and detected and stays in `EXTRACTING`, because nothing about its text is
-         * durable and saying otherwise would claim it is searchable.
+         * The sink a pipeline uses when it has nowhere durable to put a unit.
+         *
+         * The extraction phase is then an explicit no-op: the document is copied and detected and stays in
+         * `EXTRACTING`, because nothing about its text is durable and saying otherwise would claim it is
+         * searchable. The application does not run this way — [StoredUnitsSink] is what an import commits
+         * through — but a caller that has no store (a test of the no-store contract, a future pipeline that
+         * reads without writing) gets a sink that refuses to pretend rather than one that silently drops
+         * what it read.
          */
         val NONE: ExtractionSink = object : ExtractionSink {
 

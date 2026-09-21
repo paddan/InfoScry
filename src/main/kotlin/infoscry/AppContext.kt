@@ -11,6 +11,7 @@ import infoscry.jobs.JobRunner
 import infoscry.library.ManagedLibrary
 import infoscry.logging.LoggingBootstrap
 import infoscry.storage.CollectionStore
+import infoscry.storage.ContentStore
 import infoscry.storage.Database
 import infoscry.storage.DeletionStore
 import infoscry.storage.DocumentStore
@@ -40,6 +41,7 @@ class AppContext private constructor(
     val database: Database,
     val collections: CollectionStore,
     val documents: DocumentStore,
+    val content: ContentStore,
     val deletions: DeletionStore,
     val importItems: ImportItemStore,
     val library: ManagedLibrary,
@@ -129,6 +131,7 @@ class AppContext private constructor(
                     SchemaMigrator(database).migrate()
                     val collections = CollectionStore(database)
                     val documents = DocumentStore(database)
+                    val content = ContentStore(database)
                     val deletions = DeletionStore(database)
                     val jobs = JobStore(database)
                     val importItems = ImportItemStore(database)
@@ -146,6 +149,7 @@ class AppContext private constructor(
                         database = database,
                         collections = collections,
                         documents = documents,
+                        content = content,
                         deletions = deletions,
                         importItems = importItems,
                         library = ManagedLibrary(paths, documents),

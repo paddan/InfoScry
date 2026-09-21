@@ -33,7 +33,7 @@ data class ServeResponse(val url: String, val port: Int, val pid: Long)
  * tells a later CLI that nobody is listening.
  */
 class ServeCommand(
-    private val pipeline: (AppPaths) -> ImportPipeline = { ImportPipeline.production() },
+    private val pipeline: (AppContext) -> ImportPipeline = { context -> ImportPipeline.production(context) },
 ) : CliktCommand(name = "serve") {
 
     private val port by option(
@@ -66,7 +66,7 @@ class ServeCommand(
             // The worker is attached before anything is served, so an enqueued import is always owned by a
             // live process: a request that was accepted while no runner existed would be a job nobody runs.
             // Attaching first makes that an ordering invariant rather than a comment about one.
-            ImportJobHandler.attachTo(opened, pipeline(opened.paths))
+            ImportJobHandler.attachTo(opened, pipeline(opened))
             opened to startLoopbackServer(opened, port)
         }
         Runtime.getRuntime().addShutdownHook(

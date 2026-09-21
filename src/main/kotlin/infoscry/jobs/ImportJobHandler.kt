@@ -1,6 +1,8 @@
 package infoscry.jobs
 
 import infoscry.AppContext
+import infoscry.chunk.Chunker
+import infoscry.chunk.WhitespaceTokenCounter
 import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
@@ -8,16 +10,23 @@ import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Document
 import infoscry.domain.DocumentStatus
 import infoscry.domain.Job
+import infoscry.extract.CalibreConverter
+import infoscry.extract.DOCUMENT_TOO_LARGE_CODE
+import infoscry.extract.DOCUMENT_UNREADABLE_CODE
+import infoscry.extract.ENCRYPTED_DOCUMENT_CODE
+import infoscry.extract.OCR_FAILED_CODE
+import infoscry.extract.ExtractionEvent
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionInput
 import infoscry.extract.ExtractionSettings
-import infoscry.extract.ExtractionSink
+import infoscry.extract.TesseractOcr
 import infoscry.extract.UnitBoundary
 import infoscry.extract.UnsupportedMediaTypeException
 import infoscry.library.ManagedImportOutcome
 import infoscry.library.ManagedLibrary
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
+import infoscry.storage.ContentStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
@@ -29,6 +38,7 @@ import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import kotlinx.coroutines.CancellationException
+import org.slf4j.LoggerFactory
 
 /**
  * The import: one job's worth of source files become managed documents with a per-file result.
@@ -55,6 +65,8 @@ class ImportJobHandler(
     private val library: ManagedLibrary,
     private val items: ImportItemStore,
     private val pipeline: ImportPipeline,
+    private val content: ContentStore,
+    private val chunker: Chunker,
 ) : JobHandler {
 
     override suspend fun handle(job: Job, stage: JobStage) {
@@ -141,10 +153,19 @@ class ImportJobHandler(
             originalFilename = document.originalFilename,
         )
 
+        var finished = false
+        var lastFailureCode: String? = null
         try {
             // The collector commits inside the boundary's permit: a flow is collected inline, so `emit` does
             // not return until the sink has stored that unit, and the permit is still held while it does.
+            // The events are read on the way past because the document's own outcome depends on them: only a
+            // flow that reported it delivered everything may be called extracted.
             pipeline.registry.extract(input, mediaType.value).collect { event ->
+                when (event) {
+                    is ExtractionEvent.Finished -> finished = true
+                    is ExtractionEvent.UnitFailed -> lastFailureCode = event.code
+                    is ExtractionEvent.UnitReady -> Unit
+                }
                 pipeline.sink.deliver(document.id, fingerprint, event)
             }
         } catch (cancelled: CancellationException) {
@@ -165,7 +186,83 @@ class ImportJobHandler(
             return
         }
 
+        if (!finished) {
+            // The extractor stopped without saying it delivered everything: a refusal it recognised before
+            // it had a unit to name, or an abort in the middle. What it did commit stays committed — a page
+            // read before the abort is still evidence — but the document is reported as failed rather than as
+            // extracted with warnings, because nothing about it is complete enough to search.
+            val code = lastFailureCode
+                ?: content.loadCheckpoints(document.id, fingerprint).lastOrNull { !it.succeeded }?.errorCode
+                ?: EXTRACTION_FAILED
+            recordFailure(job, source, stage, document, code = code, message = messageFor(code))
+            return
+        }
+
+        chunkContent(document, stage)
         stage.run(STAGE_RECORD) { items.record(job.id, source.key, attached.outcome, document.id) }
+    }
+
+    /**
+     * Splits every unit of a finished extraction into embeddable chunks, one bounded unit per stage.
+     *
+     * The pass reads the units back out of the store rather than chunking them as they are extracted, which
+     * is what lets re-chunking happen without re-reading the document: another tokenizer or another passage
+     * budget rebuilds the chunks from the text that is already there and touches neither the text nor the OCR
+     * checkpoints.
+     *
+     * It runs unit by unit on purpose. A document can hold tens of thousands of units, and one list of them
+     * would be both a memory cost and a permit held for a whole document — and the exclusive side of the
+     * mutation gate has no timeout, so that hold would stop every other writer in the process.
+     */
+    private suspend fun chunkContent(document: Document, stage: JobStage) {
+        val version = chunker.version
+        val tokenizerId = chunker.counterId
+        val maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS
+        val overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS
+        if (!content.needsChunking(document.id, version, tokenizerId, maxSequenceTokens, overlapTokens)) return
+
+        stage.run(STAGE_CHUNK) { documents.updateStatus(document.id, DocumentStatus.CHUNKING) }
+        var afterOrdinal = -1
+        var walked = 0
+        while (true) {
+            val batch = content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
+            if (batch.isEmpty()) break
+            batch.forEach { unit ->
+                val plan = chunker.chunk(unit, maxSequenceTokens, overlapTokens)
+                stage.run(STAGE_CHUNK) {
+                    content.replaceUnitChunks(
+                        unitId = unit.id,
+                        drafts = plan.drafts,
+                        chunkerVersion = version,
+                        tokenizerId = tokenizerId,
+                        maxSequenceTokens = maxSequenceTokens,
+                        overlapTokens = overlapTokens,
+                    )
+                }
+                if (plan.headerDropped) {
+                    LOGGER.atWarn()
+                        .addKeyValue(COMPONENT_FIELD, IMPORT_COMPONENT)
+                        .addKeyValue(DOCUMENT_FIELD, document.id.value)
+                        .addKeyValue(ORDINAL_FIELD, unit.ordinal)
+                        .log("a repeated header left no room for a body, so the unit was chunked without it")
+                }
+                afterOrdinal = unit.ordinal
+                walked++
+            }
+            if (batch.size < CHUNK_BATCH) break
+        }
+        // Only now is the document chunked: a marker written per unit would let a pass that died halfway look
+        // like a pass that finished.
+        stage.run(STAGE_CHUNK) {
+            content.finishChunking(
+                documentId = document.id,
+                chunkerVersion = version,
+                tokenizerId = tokenizerId,
+                maxSequenceTokens = maxSequenceTokens,
+                overlapTokens = overlapTokens,
+                unitCount = walked,
+            )
+        }
     }
 
     /**
@@ -363,17 +460,56 @@ class ImportJobHandler(
         else -> EXTRACTION_FAILED
     }
 
+    /**
+     * What a refusal code means to the person who has to act on it.
+     *
+     * A code alone is a word; the item's message is where the remedy lives. Only the codes whose remedy is
+     * not obvious are spelled out. Anything else keeps a generic sentence, because a sentence invented for a
+     * code nobody documented would be a guess presented as an explanation — the code itself is still stored
+     * beside it for whoever needs to look it up.
+     */
+    private fun messageFor(code: String): String = when (code) {
+        DOCUMENT_TOO_LARGE_CODE ->
+            "the document is larger than the pipeline reads in one piece, so nothing was extracted"
+
+        ENCRYPTED_DOCUMENT_CODE ->
+            "the document is password-protected or DRM-encrypted, and InfoScry does not decrypt documents"
+
+        DOCUMENT_UNREADABLE_CODE ->
+            "the container could not be opened: its bytes do not match what the file says it is"
+
+        TesseractOcr.NEEDS_TESSERACT_CODE ->
+            "the OCR tool (Tesseract) is not installed, so pages without a text layer cannot be read"
+
+        CalibreConverter.NEEDS_CALIBRE_CODE ->
+            "this e-book format needs the Calibre converter, which is not installed"
+
+        OCR_FAILED_CODE ->
+            "the OCR tool ran but could not read part of this document; the rest of it was extracted"
+
+        else -> "the extractor stopped before it delivered every unit of this document"
+    }
+
     companion object {
 
         private const val STAGE_QUEUE = "queue"
         private const val STAGE_COPY = "copy"
         private const val STAGE_EXTRACT = "extract"
+        private const val STAGE_CHUNK = "chunk"
         private const val STAGE_RECORD = "record"
         private const val SOURCE_MISSING = "SOURCE_MISSING"
         private const val SOURCE_UNREADABLE = "SOURCE_UNREADABLE"
         private const val COPY_FAILED = "COPY_FAILED"
         private const val EXTRACTION_FAILED = "EXTRACTION_FAILED"
         private const val GONE_MESSAGE = "the file was gone before the import reached it"
+
+        /** How many units one read of the chunking walk takes, so a large document stays interruptible. */
+        private const val CHUNK_BATCH = 64
+
+        private const val COMPONENT_FIELD = "component"
+        private const val DOCUMENT_FIELD = "document_id"
+        private const val ORDINAL_FIELD = "unit_ordinal"
+        private const val IMPORT_COMPONENT = "import"
 
         /** A document with this status has nothing left to extract. */
         private val FINISHED_STATUSES = setOf(
@@ -389,7 +525,8 @@ class ImportJobHandler(
          */
         fun attachTo(
             context: AppContext,
-            pipeline: ImportPipeline = ImportPipeline.production(),
+            pipeline: ImportPipeline = ImportPipeline.production(context),
+            chunker: Chunker = Chunker(WhitespaceTokenCounter()),
         ): JobRunner {
             val handler = ImportJobHandler(
                 paths = context.paths,
@@ -398,6 +535,8 @@ class ImportJobHandler(
                 library = context.library,
                 items = context.importItems,
                 pipeline = pipeline,
+                content = context.content,
+                chunker = chunker,
             )
             val runner = JobRunner(
                 store = context.jobs,
@@ -411,3 +550,5 @@ class ImportJobHandler(
         }
     }
 }
+
+private val LOGGER = LoggerFactory.getLogger("infoscry.import")

@@ -63,7 +63,7 @@ data class ImportResult(
  * ownerless.
  */
 class ImportCommand(
-    private val pipeline: (AppPaths) -> ImportPipeline = { ImportPipeline.production() },
+    private val pipeline: (AppContext) -> ImportPipeline = { context -> ImportPipeline.production(context) },
 ) : CliktCommand(name = "import") {
 
     private val collection by option(
@@ -147,7 +147,7 @@ class ImportCommand(
             )
             // The worker is attached after the job exists, so there is no window where the runner is
             // claiming from a queue this command has not filled yet.
-            ImportJobHandler.attachTo(open, pipeline(paths))
+            ImportJobHandler.attachTo(open, pipeline(open))
             echo("Importing ${requested.size} path(s) as job ${job.id.value}.")
             val finished = runBlocking {
                 awaitTerminal {
