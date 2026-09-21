@@ -1,1 +1,8 @@
 .DS_Store
+.gradle/
+.kotlin/
+build/
+dist/
+web/node_modules/
+web/build/
+web/.svelte-kit/

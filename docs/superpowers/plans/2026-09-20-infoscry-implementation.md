@@ -43,10 +43,15 @@ Commons CSV 1.14.1                  ONNX Runtime 1.22.0 (platform-specific EP bu
 DJL tokenizers 0.33.0               Logback 1.5.18
 Svelte 5.57.1                       SvelteKit 2.70.3
 adapter-static 3.0.10               Vite 8.3.0
-TypeScript 7.0.2                    Vitest 5.0.1
+TypeScript 6.0.3                    Vitest 5.0.1
 Playwright 1.63.0                   pdfjs-dist 6.3.289
 Testing Library Svelte 5.4.2        jsdom 30.1.0
 ```
+
+Baseline amendment (2026-09-21, Task 1): TypeScript was pinned at 7.0.2. `@sveltejs/kit@2.70.3`
+declares peer `typescript@^5.3.3 || ^6.0.0` and `svelte-check@4.7.6` declares `^5.0.0 || ^6.0.0`, so
+`npm install` fails with `ERESOLVE`. 6.0.3 is the highest published version satisfying both ranges.
+This is the documented-incompatibility path permitted above; no other baseline entry changed.
 
 ## Review Focus
 
