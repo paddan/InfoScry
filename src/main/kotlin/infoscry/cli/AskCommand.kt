@@ -35,8 +35,8 @@ class AskCommand : CliktCommand(name = "ask") {
                     LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(p, System::getenv)
                     LlmProvider.ANTHROPIC -> AnthropicClient(p, System::getenv)
                 }
-            }, persistence = infoscry.ask.AskPersistence { ask, answer, evidence, citations, input, output ->
-                open.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, citations, input, output)
+            }, persistence = infoscry.ask.AskPersistence { ask, answer, evidence, citations, input, output, correction ->
+                open.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, citations, input, output, correction)
             })
             runBlocking {
                 val events = mutableListOf<AskEvent>()

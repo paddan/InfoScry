@@ -13,6 +13,7 @@ import java.sql.SQLException
 import java.util.UUID
 import infoscry.ask.Evidence
 import infoscry.ask.CitationValidation
+import infoscry.ask.CorrectionSnapshot
 import infoscry.domain.CollectionId
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -39,7 +40,7 @@ class LlmStore(private val database: Database) {
 
     /** Durable Ask snapshot; payloads contain source snippets but never credentials. */
     fun persistAsk(collectionId: CollectionId, profile: LlmProfile, question: String, answer: String,
-                   evidence: List<Evidence>, citations: CitationValidation, inputTokens: Long, outputTokens: Long) {
+                   evidence: List<Evidence>, citations: CitationValidation, inputTokens: Long, outputTokens: Long, correction: CorrectionSnapshot? = null) {
         val conversationId = UUID.randomUUID().toString()
         val callId = UUID.randomUUID().toString()
         database.transaction { connection ->
@@ -49,14 +50,22 @@ class LlmStore(private val database: Database) {
             connection.prepareStatement("INSERT INTO messages (id,conversation_id,seq,role,content,created_at) VALUES (?,?,?,?,?,?)").use { s ->
                 listOf(UUID.randomUUID().toString() to question, UUID.randomUUID().toString() to answer).forEachIndexed { i, pair -> s.setString(1,pair.first); s.setString(2,conversationId); s.setInt(3,i); s.setString(4,if(i==0) "user" else "assistant"); s.setString(5,pair.second); s.setString(6,Instants.now()); s.addBatch() }; s.executeBatch()
             }
-            connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)").use { s ->
-                listOf(callId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,"1",Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,inputTokens); s.setLong(12,outputTokens); s.setLong(13,0); s.executeUpdate()
+            val initialCost = inputTokens / 1_000_000.0 * profile.inputPricePerMillion + outputTokens / 1_000_000.0 * profile.outputPricePerMillion
+            connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
+                listOf(callId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,"1",Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,inputTokens); s.setLong(12,outputTokens); s.setLong(13,0); s.setDouble(14,initialCost); s.executeUpdate()
+            }
+            correction?.let { c ->
+                val correctionId = UUID.randomUUID().toString(); val cost = c.usage.inputTokens / 1_000_000.0 * profile.inputPricePerMillion + c.usage.outputTokens / 1_000_000.0 * profile.outputPricePerMillion
+                connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd,correction_of) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
+                    listOf(correctionId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,"1",Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,c.usage.inputTokens); s.setLong(12,c.usage.outputTokens); s.setLong(13,c.usage.cacheReadTokens); s.setDouble(14,cost); s.setString(15,callId); s.executeUpdate()
+                }
             }
             connection.prepareStatement("INSERT INTO citations (id,model_call_id,conversation_id,source_unit_id,locator_json,snippet,validated,evidence_id,returned_id,supplied,invalid_marker) VALUES (?,?,?,?,?,?,?,?,?,?,?)").use { s ->
                 evidence.forEach { e -> s.setString(1,UUID.randomUUID().toString()); s.setString(2,callId); s.setString(3,conversationId); s.setString(4,e.unitId); s.setString(5,Json.encodeToString(e.locator)); s.setString(6,e.text); s.setInt(7,if(e.id in citations.valid) 1 else 0); s.setString(8,e.id); s.setString(9,null); s.setInt(10,1); s.setInt(11,0); s.addBatch() }
                 citations.invalid.forEach { id -> s.setString(1,UUID.randomUUID().toString()); s.setString(2,callId); s.setString(3,conversationId); s.setString(4,"invalid:$id"); s.setString(5,"{}"); s.setString(6,""); s.setInt(7,0); s.setString(8,null); s.setString(9,id); s.setInt(10,0); s.setInt(11,1); s.addBatch() }
                 s.executeBatch()
             }
+            connection.prepareStatement("INSERT INTO usage_totals (profile_id,calls,input_tokens,output_tokens,cache_read_tokens,cost_usd) VALUES (?,?,?,?,?,?) ON CONFLICT(profile_id) DO UPDATE SET calls=usage_totals.calls+excluded.calls,input_tokens=usage_totals.input_tokens+excluded.input_tokens,output_tokens=usage_totals.output_tokens+excluded.output_tokens,cache_read_tokens=usage_totals.cache_read_tokens+excluded.cache_read_tokens,cost_usd=usage_totals.cost_usd+excluded.cost_usd").use { s -> s.setString(1,profile.id); s.setInt(2,if(correction == null) 1 else 2); s.setLong(3,inputTokens + (correction?.usage?.inputTokens ?: 0)); s.setLong(4,outputTokens + (correction?.usage?.outputTokens ?: 0)); s.setLong(5,correction?.usage?.cacheReadTokens ?: 0); s.setDouble(6,initialCost + (correction?.let { it.usage.inputTokens / 1_000_000.0 * profile.inputPricePerMillion + it.usage.outputTokens / 1_000_000.0 * profile.outputPricePerMillion } ?: 0.0)); s.executeUpdate() }
         }
     }
 

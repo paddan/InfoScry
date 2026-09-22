@@ -37,8 +37,8 @@ fun Routing.configureAskRoutes(context: AppContext) {
                         infoscry.llm.LlmProvider.ANTHROPIC -> AnthropicClient(selected, System::getenv)
                     }
                 },
-                persistence = infoscry.ask.AskPersistence { ask, answer, evidence, citations, input, output ->
-                    context.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, citations, input, output)
+                persistence = infoscry.ask.AskPersistence { ask, answer, evidence, citations, input, output, correction ->
+                    context.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, citations, input, output, correction)
                 },
             )
             call.respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {

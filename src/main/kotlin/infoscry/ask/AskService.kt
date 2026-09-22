@@ -27,7 +27,8 @@ sealed interface AskEvent {
 }
 
 /** Minimal persistence seam; production wiring can store the immutable evidence/citation snapshot. */
-fun interface AskPersistence { fun save(request: AskRequest, answer: String, evidence: List<Evidence>, citations: CitationValidation, inputTokens: Long, outputTokens: Long) }
+data class CorrectionSnapshot(val answer: String, val usage: infoscry.llm.TokenUsage)
+fun interface AskPersistence { fun save(request: AskRequest, answer: String, evidence: List<Evidence>, citations: CitationValidation, inputTokens: Long, outputTokens: Long, correction: CorrectionSnapshot?) }
 
 class AskService(
     private val search: SearchService,
@@ -69,24 +70,26 @@ class AskService(
             }
             var finalAnswer = answer.toString()
             var validation = CitationValidator().validate(finalAnswer, packed.evidences)
+            var correctionSnapshot: CorrectionSnapshot? = null
             if (validation.invalid.isNotEmpty()) {
                 val correction = LlmRequest(
                     messages = listOf(
-                        infoscry.llm.LlmMessage("system", "Return the answer with citations only from these allowed IDs: ${packed.evidences.joinToString { it.id }}. Do not add any other citation."),
+                        infoscry.llm.LlmMessage("system", "Return the answer with citations only from these allowed IDs: ${packed.evidences.joinToString { it.id }}. Do not add any other citation. Evidence follows:\n" + packed.evidences.joinToString("\n") { "<evidence id=\"${it.id}\" locator=\"${it.locatorLabel}\">${it.text}</evidence>" }),
                         infoscry.llm.LlmMessage("user", finalAnswer),
                     ), maxOutputTokens = request.profile.maxOutputTokens,
                 )
-                if (!budget.measure(request.profile, correction).fits) throw ContextBudgetExceeded()
+                if (!budget.measure(request.profile, correction, stream = false).fits) throw ContextBudgetExceeded()
                 if (modelClient !is LlmCompletionClient) throw IllegalStateException("the configured provider cannot perform citation correction")
                 val correctionResult = modelClient.complete(correction)
                 usageInput += correctionResult.usage.inputTokens
                 usageOutput += correctionResult.usage.outputTokens
                 finalAnswer = correctionResult.text
+                correctionSnapshot = CorrectionSnapshot(finalAnswer, correctionResult.usage)
                 validation = CitationValidator().validate(finalAnswer, packed.evidences)
             }
             validation.valid.forEach { emit(AskEvent.Citation(it, true)) }
             validation.invalid.forEach { emit(AskEvent.Citation(it, false)) }
-            persistence.save(request, finalAnswer, packed.evidences, validation, usageInput, usageOutput)
+            persistence.save(request, finalAnswer, packed.evidences, validation, usageInput, usageOutput, correctionSnapshot)
             emit(AskEvent.Done(finalAnswer, packed.evidences))
         } catch (budgetFailure: ContextBudgetExceeded) {
             emit(AskEvent.Error("CONTEXT_BUDGET_EXCEEDED", "the request is too large for the configured model"))

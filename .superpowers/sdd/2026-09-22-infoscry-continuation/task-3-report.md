@@ -42,6 +42,12 @@ RED/GREEN: schema-testet blev rött med gamla version 4-förväntningar och blev
 
 Verifiering: `JAVA_HOME="$(asdf where java)" ./gradlew test --tests 'infoscry.ask.*' --tests infoscry.llm.RequestBudgetTest --tests infoscry.storage.SchemaMigratorTest` — PASS; `JAVA_HOME="$(asdf where java)" ./gradlew check` — PASS; `git diff --check` — PASS.
 
+## Fixrunda 3/5
+
+Budgeten har nu explicit `stream`-parameter och provider-envelope för correction mäts med `stream=false`. Correction-requesten innehåller allowed IDs samt hela relevanta supplied evidence med locator/text. Persistence skapar separata initial/correction `model_calls`, länkar correction via `correction_of`, beräknar profilbaserad kostnad, sparar cache reads och uppdaterar `usage_totals` transaktionellt.
+
+RED/GREEN: fokustesterna kördes efter ändringen och blev gröna: `JAVA_HOME="$(asdf where java)" ./gradlew test --tests 'infoscry.ask.*' --tests infoscry.llm.RequestBudgetTest --tests infoscry.storage.SchemaMigratorTest` — PASS. Fullständig `AskServiceTest` med riktig SearchService-captured-flow behöver fortfarande stärkas; nuvarande AskServiceTest verifierar completion-boundaryn och usage, medan serviceflödet saknar full fake-search injection.
+
 ## Changed files
 
 `src/main/kotlin/infoscry/ask/ContextPacker.kt`, `CitationValidator.kt`, `AskService.kt`; `src/main/kotlin/infoscry/llm/RequestBudget.kt`; `src/main/kotlin/infoscry/server/AskRoutes.kt`; `src/main/kotlin/infoscry/cli/AskCommand.kt`; `src/main/kotlin/infoscry/cli/RootCommand.kt`; `src/main/kotlin/infoscry/server/Routes.kt`; mirrored Ask/request-budget tests.
