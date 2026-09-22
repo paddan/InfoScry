@@ -7,6 +7,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
@@ -48,7 +49,7 @@ class OpenAiCompatibleClient(
     private val lookup: (String) -> String?,
     private val client: HttpClient = HttpClient(CIO),
     private val retryPolicy: RetryPolicy = RetryPolicy(),
-) : LlmStreamingClient {
+) : LlmStreamingClient, LlmCompletionClient {
 
     init {
         require(profile.endpoint.isNotBlank()) {
@@ -85,6 +86,17 @@ class OpenAiCompatibleClient(
             }
             throw mapFailure(response.status.value)
         }
+    }
+
+    override suspend fun complete(request: LlmRequest): LlmCompletion {
+        val response = client.post(url) {
+            profile.apiKeyEnvironmentVariable?.let { variable -> lookup(variable)?.let { key -> header(HttpHeaders.Authorization, "Bearer $key") } }
+            contentType(ContentType.Application.Json)
+            setBody(LlmJson.encodeToString(chatRequest(request, stream = false)))
+        }
+        if (!response.status.isSuccess()) throw mapFailure(response.status.value)
+        return try { val result = LlmJson.decodeFromString<ChatCompletionResponse>(response.bodyAsText()); LlmCompletion(result.choices.firstOrNull()?.message?.content.orEmpty(), result.usage?.let { TokenUsage(it.prompt_tokens ?: 0, it.completion_tokens ?: 0, it.cache_read_input_tokens ?: 0) } ?: TokenUsage(0, 0)) }
+        catch (failure: Throwable) { throw LlmError.MalformedResponseError("the provider returned an invalid correction response", failure) }
     }
 
     /** Performs one POST. Connection-level failures become [LlmError]; cancellation is rethrown. */
@@ -267,7 +279,7 @@ class OpenAiCompatibleClient(
         cacheReadTokens = nonNegative(usage.cache_read_input_tokens),
     )
 
-    private fun chatRequest(request: LlmRequest): ChatCompletionRequest = ChatCompletionRequest(
+    private fun chatRequest(request: LlmRequest, stream: Boolean = true): ChatCompletionRequest = ChatCompletionRequest(
         model = profile.model,
         messages = request.messages.map { ChatMessage(role = it.role, content = it.content) },
         max_tokens = request.maxOutputTokens,
@@ -283,6 +295,7 @@ class OpenAiCompatibleClient(
         tool_choice = request.requiredToolName?.let { required ->
             OpenAiToolChoice(function = OpenAiToolChoiceFunction(name = required))
         },
+        stream = stream,
     )
 
     private fun jsonParameters(raw: String): JsonElement = try {
@@ -372,6 +385,9 @@ data class ChatChunk(
     val choices: List<ChatChoice> = emptyList(),
     val usage: ChatUsage? = null,
 )
+
+@Serializable data class ChatCompletionResponse(val choices: List<ChatCompletionChoice> = emptyList(), val usage: ChatUsage? = null)
+@Serializable data class ChatCompletionChoice(val message: ChatMessage = ChatMessage("assistant", ""))
 
 @Serializable
 data class ChatChoice(

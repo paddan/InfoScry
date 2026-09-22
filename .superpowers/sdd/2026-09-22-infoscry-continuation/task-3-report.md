@@ -34,6 +34,14 @@ RED/GREEN: provider-envelope-testet och fokustesterna kördes efter implementati
 
 Fixrunda-verifiering: `JAVA_HOME="$(asdf where java)" ./gradlew test --tests 'infoscry.ask.*' --tests infoscry.llm.RequestBudgetTest` — PASS. Full `check` återstår efter denna fixrunda.
 
+## Fixrunda 2/5
+
+Införde provider-neutral `LlmCompletionClient` med riktiga icke-streamade OpenAI- och Anthropic-envelope-anrop, utan streaming fallback. Correction-usage summeras och går vidare till persistence. `ContextPacker` kastar nu `ContextBudgetExceeded` i stället för ett generiskt fel. Migration 005 lägger till correction-linkage och evidence-/returned-ID-fält som skiljer supplied-but-uncited från invalid markers; `SchemaMigrator` och tester är uppdaterade.
+
+RED/GREEN: schema-testet blev rött med gamla version 4-förväntningar och blev grönt efter uppdatering till version 5/6-fixture. Provider completion-/capture-testet och Ask-/budget-/migrationstesterna passerade.
+
+Verifiering: `JAVA_HOME="$(asdf where java)" ./gradlew test --tests 'infoscry.ask.*' --tests infoscry.llm.RequestBudgetTest --tests infoscry.storage.SchemaMigratorTest` — PASS; `JAVA_HOME="$(asdf where java)" ./gradlew check` — PASS; `git diff --check` — PASS.
+
 ## Changed files
 
 `src/main/kotlin/infoscry/ask/ContextPacker.kt`, `CitationValidator.kt`, `AskService.kt`; `src/main/kotlin/infoscry/llm/RequestBudget.kt`; `src/main/kotlin/infoscry/server/AskRoutes.kt`; `src/main/kotlin/infoscry/cli/AskCommand.kt`; `src/main/kotlin/infoscry/cli/RootCommand.kt`; `src/main/kotlin/infoscry/server/Routes.kt`; mirrored Ask/request-budget tests.

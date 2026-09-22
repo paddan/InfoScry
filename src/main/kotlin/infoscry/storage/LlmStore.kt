@@ -52,8 +52,10 @@ class LlmStore(private val database: Database) {
             connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)").use { s ->
                 listOf(callId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,"1",Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,inputTokens); s.setLong(12,outputTokens); s.setLong(13,0); s.executeUpdate()
             }
-            connection.prepareStatement("INSERT INTO citations (id,model_call_id,conversation_id,source_unit_id,locator_json,snippet,validated) VALUES (?,?,?,?,?,?,?)").use { s ->
-                evidence.forEach { e -> s.setString(1,UUID.randomUUID().toString()); s.setString(2,callId); s.setString(3,conversationId); s.setString(4,e.unitId); s.setString(5,Json.encodeToString(e.locator)); s.setString(6,e.text); s.setInt(7,if(e.id in citations.valid) 1 else 0); s.addBatch() }; s.executeBatch()
+            connection.prepareStatement("INSERT INTO citations (id,model_call_id,conversation_id,source_unit_id,locator_json,snippet,validated,evidence_id,returned_id,supplied,invalid_marker) VALUES (?,?,?,?,?,?,?,?,?,?,?)").use { s ->
+                evidence.forEach { e -> s.setString(1,UUID.randomUUID().toString()); s.setString(2,callId); s.setString(3,conversationId); s.setString(4,e.unitId); s.setString(5,Json.encodeToString(e.locator)); s.setString(6,e.text); s.setInt(7,if(e.id in citations.valid) 1 else 0); s.setString(8,e.id); s.setString(9,null); s.setInt(10,1); s.setInt(11,0); s.addBatch() }
+                citations.invalid.forEach { id -> s.setString(1,UUID.randomUUID().toString()); s.setString(2,callId); s.setString(3,conversationId); s.setString(4,"invalid:$id"); s.setString(5,"{}"); s.setString(6,""); s.setInt(7,0); s.setString(8,null); s.setString(9,id); s.setInt(10,0); s.setInt(11,1); s.addBatch() }
+                s.executeBatch()
             }
         }
     }

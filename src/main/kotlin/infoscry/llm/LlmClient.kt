@@ -87,8 +87,10 @@ interface LlmStreamingClient {
 
 /** Optional non-streaming completion boundary used for one-shot citation correction. */
 interface LlmCompletionClient {
-    suspend fun complete(request: LlmRequest): String
+    suspend fun complete(request: LlmRequest): LlmCompletion
 }
+
+data class LlmCompletion(val text: String, val usage: TokenUsage = TokenUsage(0, 0))
 
 /**
  * A provider call failed.

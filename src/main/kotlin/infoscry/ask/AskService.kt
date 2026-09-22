@@ -77,13 +77,11 @@ class AskService(
                     ), maxOutputTokens = request.profile.maxOutputTokens,
                 )
                 if (!budget.measure(request.profile, correction).fits) throw ContextBudgetExceeded()
-                finalAnswer = if (modelClient is LlmCompletionClient) {
-                    modelClient.complete(correction)
-                } else {
-                    val corrected = StringBuilder()
-                    modelClient.stream(correction).collect { if (it is LlmEvent.TextDelta) corrected.append(it.text) }
-                    corrected.toString()
-                }
+                if (modelClient !is LlmCompletionClient) throw IllegalStateException("the configured provider cannot perform citation correction")
+                val correctionResult = modelClient.complete(correction)
+                usageInput += correctionResult.usage.inputTokens
+                usageOutput += correctionResult.usage.outputTokens
+                finalAnswer = correctionResult.text
                 validation = CitationValidator().validate(finalAnswer, packed.evidences)
             }
             validation.valid.forEach { emit(AskEvent.Citation(it, true)) }

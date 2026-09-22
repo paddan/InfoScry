@@ -5,6 +5,7 @@ import infoscry.llm.LlmMessage
 import infoscry.llm.LlmRequest
 import infoscry.llm.RequestBudget
 import infoscry.llm.LlmProfile
+import infoscry.llm.ContextBudgetExceeded
 import infoscry.search.SearchHit
 
 data class Evidence(
@@ -52,7 +53,7 @@ class ContextPacker(private val maxEvidence: Int = 12) {
             Evidence("S${index + 1}", hit.collectionId.value, hit.documentId.value, hit.unitId.value, hit.locator, hit.locatorLabel, hit.text)
         }
         val finalRequest = request(question, systemPrompt, selected, maxOutputTokens)
-        if (profile == null) budget.requireFits(finalRequest) else if (!budget.measure(profile, finalRequest).fits) error("request exceeds context")
+        if (profile == null) budget.requireFits(finalRequest) else if (!budget.measure(profile, finalRequest).fits) throw ContextBudgetExceeded()
         return PackedContext(evidences, finalRequest)
     }
 

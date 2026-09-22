@@ -7,6 +7,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
@@ -55,7 +56,7 @@ class AnthropicClient(
     private val lookup: (String) -> String?,
     private val client: HttpClient = HttpClient(CIO),
     private val retryPolicy: RetryPolicy = RetryPolicy(),
-) : LlmStreamingClient {
+) : LlmStreamingClient, LlmCompletionClient {
 
     init {
         require(profile.endpoint.isNotBlank()) {
@@ -92,6 +93,18 @@ class AnthropicClient(
             }
             throw mapFailure(response.status.value)
         }
+    }
+
+    override suspend fun complete(request: LlmRequest): LlmCompletion {
+        val response = client.post(url) {
+            profile.apiKeyEnvironmentVariable?.let { variable -> lookup(variable)?.let { key -> header("x-api-key", key) } }
+            header("anthropic-version", "2023-06-01")
+            contentType(ContentType.Application.Json)
+            setBody(LlmJson.encodeToString(messagesRequest(request, stream = false)))
+        }
+        if (!response.status.isSuccess()) throw mapFailure(response.status.value)
+        return try { val result = LlmJson.decodeFromString<AnthropicCompletionResponse>(response.bodyAsText()); LlmCompletion(result.content.firstOrNull()?.text.orEmpty(), result.usage?.let { TokenUsage(it.input_tokens ?: 0, it.output_tokens ?: 0, it.cache_read_input_tokens ?: 0) } ?: TokenUsage(0, 0)) }
+        catch (failure: Throwable) { throw LlmError.MalformedResponseError("the provider returned an invalid correction response", failure) }
     }
 
     /** Performs one POST. Connection-level failures become [LlmError]; cancellation is rethrown. */
@@ -293,9 +306,10 @@ class AnthropicClient(
 
     // ---- Request encoding ----
 
-    private fun messagesRequest(request: LlmRequest): AnthropicMessagesRequest = AnthropicMessagesRequest(
+    private fun messagesRequest(request: LlmRequest, stream: Boolean = true): AnthropicMessagesRequest = AnthropicMessagesRequest(
         model = profile.model,
         max_tokens = request.maxOutputTokens,
+        stream = stream,
         messages = request.messages.map { AnthropicMessage(role = it.role, content = it.content) },
         tools = request.tools.takeIf { it.isNotEmpty() }?.map { tool ->
             AnthropicTool(
@@ -408,3 +422,4 @@ data class AnthropicUsage(
     val output_tokens: Long? = null,
     val cache_read_input_tokens: Long? = null,
 )
+@Serializable data class AnthropicCompletionResponse(val content: List<AnthropicContentBlock> = emptyList(), val usage: AnthropicUsage? = null)
