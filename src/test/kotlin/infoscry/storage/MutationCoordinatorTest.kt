@@ -114,6 +114,32 @@ class MutationCoordinatorTest {
     }
 
     @Test
+    fun `a competing exclusive maintenance request is refused and can retry after release`() = runBlocking {
+        val coordinator = MutationCoordinator()
+        val maintenanceStarted = CompletableDeferred<Unit>()
+        val releaseMaintenance = CompletableDeferred<Unit>()
+
+        val maintenance = async {
+            coordinator.withExclusiveMaintenance("reindex") {
+                maintenanceStarted.complete(Unit)
+                releaseMaintenance.await()
+            }
+        }
+        withTimeout(TIMEOUT_MILLIS) { maintenanceStarted.await() }
+
+        val refusal = withTimeout(TIMEOUT_MILLIS) {
+            assertFailsWith<MaintenanceInProgressException> {
+                coordinator.withExclusiveMaintenance("delete-collection") { "never runs" }
+            }
+        }
+        assertEquals("reindex", refusal.operation)
+
+        releaseMaintenance.complete(Unit)
+        withTimeout(TIMEOUT_MILLIS) { maintenance.await() }
+        assertEquals("retried", coordinator.withExclusiveMaintenance("delete-collection") { "retried" })
+    }
+
+    @Test
     fun `a job stage waits for maintenance and then runs`() = runBlocking {
         val coordinator = MutationCoordinator()
         val order = mutableListOf<String>()
@@ -137,24 +163,24 @@ class MutationCoordinatorTest {
     }
 
     @Test
-    fun `exclusive maintenance is serialized`() = runBlocking {
+    fun `exclusive maintenance does not overlap and rejects competing owners`() = runBlocking {
         val coordinator = MutationCoordinator()
-        val inside = AtomicInteger()
-        val peak = AtomicInteger()
-
-        val operations = (1..3).map { index ->
-            async {
-                coordinator.withExclusiveMaintenance("operation-$index") {
-                    val now = inside.incrementAndGet()
-                    peak.updateAndGet { previous -> maxOf(previous, now) }
-                    delay(HOLD_MILLIS)
-                    inside.decrementAndGet()
-                }
+        val maintenanceStarted = CompletableDeferred<Unit>()
+        val releaseMaintenance = CompletableDeferred<Unit>()
+        val winner = async {
+            coordinator.withExclusiveMaintenance("operation-1") {
+                maintenanceStarted.complete(Unit)
+                releaseMaintenance.await()
             }
         }
-        operations.awaitAll()
-
-        assertEquals(1, peak.get(), "two exclusive operations must never overlap")
+        withTimeout(TIMEOUT_MILLIS) { maintenanceStarted.await() }
+        withTimeout(TIMEOUT_MILLIS) {
+            assertFailsWith<MaintenanceInProgressException> {
+                coordinator.withExclusiveMaintenance("operation-2") { "never runs" }
+            }
+        }
+        releaseMaintenance.complete(Unit)
+        withTimeout(TIMEOUT_MILLIS) { winner.await() }
     }
 
     @Test

@@ -293,6 +293,14 @@ class LuceneIndex private constructor(
     }
 
     /**
+     * Runs a caller operation while holding this generation's reader lease.
+     *
+     * Production search methods keep leases short; the internal seam lets recovery tests hold a real
+     * generation reader across publication and prove retirement does not close it prematurely.
+     */
+    internal fun <T> withReaderLease(block: () -> T): T = readSearcher { block() }
+
+    /**
      * Waits, bounded, for every search that is still reading this generation to finish.
      *
      * A rebuild publishes a successor and then retires the generation it replaced: readers that

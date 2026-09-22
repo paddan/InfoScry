@@ -29,12 +29,13 @@ import kotlin.system.exitProcess
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
-import org.junit.jupiter.api.Disabled
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -248,24 +249,18 @@ class ReindexRecoveryTest {
 
     // ---- What maintenance excludes ----
 
-    /**
-     * Disabled 2026-09-21: the fixture deadlocks instead of screening. `BlockingDocumentEmbedder` blocks
-     * inside the reindex coroutine, so the rebuild never yields and this test can never observe maintenance
-     * being held. Fix the harness first — block off the reindex dispatcher, or drive the rebuild from a
-     * separate coroutine and release it from the test thread — then re-enable. See
-     * `docs/implementation-status.md` Stage 4 for the seed change that makes the rebuild reach the embedder.
-     */
-    @Disabled("fixture deadlock: the blocking embedder blocks the reindex coroutine itself")
+    /** A rebuild runs on a separate dispatcher so the controlled embedder can hold maintenance. */
     @Test
     fun `a rebuild excludes a concurrent import and a concurrent deletion, and admits them again afterwards`() {
         val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
         context.use { closed ->
+            markChunkingStale(closed, collectionA)
             val entered = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Unit>()
             val service = reindexService(closed) { BlockingDocumentEmbedder(entered, release) }
 
             runBlocking {
-                val rebuild = launch { service.reindex(ReindexRequest(collectionId = collectionA)) }
+                val rebuild = launch(Dispatchers.Default) { service.reindex(ReindexRequest(collectionId = collectionA)) }
                 withTimeout(SCREEN_TIMEOUT_MILLIS) { entered.await() }
 
                 assertFailsWith<MaintenanceInProgressException> {
@@ -279,20 +274,17 @@ class ReindexRecoveryTest {
                 withTimeout(SCREEN_TIMEOUT_MILLIS) { rebuild.join() }
 
                 closed.mutations.withMutation { }
+                closed.collectionService.deleteConfirmed(collectionA, COLLECTION_A)
             }
         }
     }
 
-    /**
-     * Disabled 2026-09-21 for the same harness deadlock as the test above: while `BlockingDocumentEmbedder`
-     * occupies the reindex coroutine, the rebuild cannot be observed from this thread. Re-enable once the
-     * fixture blocks off the reindex dispatcher.
-     */
-    @Disabled("fixture deadlock: the blocking embedder blocks the reindex coroutine itself")
+    /** A reader lease remains valid while publication and maintenance happen concurrently. */
     @Test
     fun `readers keep searching the generation they leased while a rebuild holds maintenance`() {
         val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
         context.use { closed ->
+            markChunkingStale(closed, collectionA)
             val before = runBlocking {
                 searchService(closed).search("nightfall", filters = SearchFilters(collectionId = collectionA))
             }
@@ -301,11 +293,21 @@ class ReindexRecoveryTest {
 
             val entered = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Unit>()
+            val leaseEntered = CompletableDeferred<Unit>()
+            val leaseRelease = CompletableDeferred<Unit>()
+            val previous = closed.index()
             val service = reindexService(closed) { BlockingDocumentEmbedder(entered, release) }
 
             runBlocking {
-                val rebuild = launch { service.reindex(ReindexRequest(collectionId = collectionA)) }
+                val readerLease = launch(Dispatchers.Default) {
+                    previous.withReaderLease {
+                        leaseEntered.complete(Unit)
+                        runBlocking { leaseRelease.await() }
+                    }
+                }
+                val rebuild = launch(Dispatchers.Default) { service.reindex(ReindexRequest(collectionId = collectionA)) }
                 withTimeout(SCREEN_TIMEOUT_MILLIS) { entered.await() }
+                withTimeout(SCREEN_TIMEOUT_MILLIS) { leaseEntered.await() }
 
                 val during = runBlocking {
                     searchService(closed).search("nightfall", filters = SearchFilters(collectionId = collectionA))
@@ -317,7 +319,20 @@ class ReindexRecoveryTest {
                 )
 
                 release.complete(Unit)
+                withTimeout(SCREEN_TIMEOUT_MILLIS) {
+                    while (closed.index() === previous) delay(POLL_MILLIS)
+                }
+                assertTrue(
+                    Files.exists(AppPaths.from(dataDir).indexDir.resolve(previous.name)),
+                    "the leased old generation remains on disk after publication",
+                )
+                leaseRelease.complete(Unit)
                 withTimeout(SCREEN_TIMEOUT_MILLIS) { rebuild.join() }
+                withTimeout(SCREEN_TIMEOUT_MILLIS) { readerLease.join() }
+                assertTrue(
+                    !Files.exists(AppPaths.from(dataDir).indexDir.resolve(previous.name)),
+                    "the old generation is retired after its reader lease drains",
+                )
             }
         }
     }
@@ -589,6 +604,25 @@ class ReindexRecoveryTest {
         context.documents.listByCollection(collectionId, Int.MAX_VALUE).sumOf { document ->
             context.content.chunkCount(document.id)
         }
+
+    private fun markChunkingStale(context: AppContext, collectionId: CollectionId) {
+        val document = runBlocking {
+            context.documents.listByCollection(collectionId, Int.MAX_VALUE).single()
+        }
+        val units = runBlocking {
+            context.content.listUnits(document.id, afterOrdinal = -1, limit = UNIT_BATCH)
+        }
+        runBlocking {
+            context.content.finishChunking(
+                documentId = document.id,
+                chunkerVersion = "test-stale",
+                tokenizerId = "test-stale",
+                maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
+                overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
+                unitCount = units.size,
+            )
+        }
+    }
 
     /** The document identities the database holds, the set a published generation must equal. */
     private fun liveDocumentIds(context: AppContext): Set<String> =

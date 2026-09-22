@@ -40,9 +40,6 @@ class MutationCoordinator {
 
     private val gate = Mutex()
 
-    /** Serializes exclusive maintenance, so two deletions or a deletion and a rebuild never overlap. */
-    private val maintenanceOrder = Mutex()
-
     private var activeStages = 0
 
     /** Completed when [activeStages] returns to zero, which is what maintenance waits for. */
@@ -115,8 +112,9 @@ class MutationCoordinator {
      * Runs [block] as the only writer in the process.
      *
      * Requests the exclusive permit, waits for the stages already inside to drain, runs [block], and
-     * releases. A second maintenance call waits for the first rather than failing, because the callers
-     * are a deletion and a rebuild that both have to happen, in some order.
+     * releases. A second external maintenance call fails immediately: interactive callers need a
+     * deterministic `MAINTENANCE_IN_PROGRESS` response rather than waiting behind a potentially long
+     * rebuild or deletion. Existing background stages use [awaitMutation] when they should wait.
      *
      * **The drain has no timeout, and that is load-bearing.** A shared permit is only ever held for one
      * bounded unit of work — a copy, one page's checkpoint, one chunk batch — because every mutation
@@ -128,24 +126,24 @@ class MutationCoordinator {
      * stage needs to make a slow call, it does so on either side of its permit, never inside it.
      */
     suspend fun <T> withExclusiveMaintenance(operation: String, block: suspend () -> T): T {
-        maintenanceOrder.withLock {
-            val drained = gate.withLock {
-                maintenanceInProgress = operation
-                maintenanceSignal = CompletableDeferred()
-                prepareDrainLocked()
-            }
-            drained.await()
+        val drained = gate.withLock {
+            val current = maintenanceInProgress
+            if (current != null) throw MaintenanceInProgressException(current)
+            maintenanceInProgress = operation
+            maintenanceSignal = CompletableDeferred()
+            prepareDrainLocked()
+        }
+        drained.await()
 
-            try {
-                return block()
-            } finally {
-                val waiting = gate.withLock {
-                    maintenanceInProgress = null
-                    drainSignal = null
-                    maintenanceSignal.also { maintenanceSignal = null }
-                }
-                waiting?.complete(Unit)
+        try {
+            return block()
+        } finally {
+            val waiting = gate.withLock {
+                maintenanceInProgress = null
+                drainSignal = null
+                maintenanceSignal.also { maintenanceSignal = null }
             }
+            waiting?.complete(Unit)
         }
     }
 
