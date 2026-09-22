@@ -5,6 +5,7 @@ import infoscry.config.BearerToken
 import infoscry.config.RuntimeInfo
 import infoscry.domain.JobState
 import infoscry.server.ApiJson
+import infoscry.server.ApiTestServer
 import infoscry.server.JobsResponse
 import java.nio.file.Files
 import java.nio.file.Path
@@ -17,6 +18,11 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 /**
  * `infoscry import` as a real process, on both sides of the ownership question.
@@ -186,6 +192,33 @@ class ImportCommandProcessTest {
         } finally {
             Files.writeString(gate, "go")
             holder.waitFor(WAIT_SECONDS)
+        }
+    }
+
+    @Test
+    fun `a server-owned import refuses maintenance before the CLI creates a job`() = runBlocking {
+        val source = writeSource("maintenance.txt", "Under maintenance.\n")
+        ApiTestServer(dataDir).use { server ->
+            val started = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val maintenance = async(Dispatchers.Default) {
+                server.context.mutations.withExclusiveMaintenance("reindex") {
+                    started.complete(Unit)
+                    release.await()
+                }
+            }
+            withTimeout(WAIT_SECONDS) { started.await() }
+
+            val refused = CliProcess.run(
+                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", source.toString(),
+            )
+
+            assertNotEquals(0, refused.exitCode, "stdout=${refused.stdout} stderr=${refused.stderr}")
+            assertContains(refused.stderr, "MAINTENANCE_IN_PROGRESS")
+            assertEquals(0, server.context.jobs.list(100, 0).size, "refused CLI import must not create a job row")
+
+            release.complete(Unit)
+            withTimeout(WAIT_SECONDS) { maintenance.await() }
         }
     }
 

@@ -298,7 +298,20 @@ class LuceneIndex private constructor(
      * Production search methods keep leases short; the internal seam lets recovery tests hold a real
      * generation reader across publication and prove retirement does not close it prematurely.
      */
-    internal fun <T> withReaderLease(block: () -> T): T = readSearcher { block() }
+    internal fun <T> withReaderLease(block: (IndexSearcher) -> T): T = readSearcher(block)
+
+    /** Executes the keyword query against a caller-held reader lease. */
+    internal fun searchKeywordWithReader(
+        searcher: IndexSearcher,
+        collectionId: CollectionId?,
+        queryText: String,
+        limit: Int,
+    ): List<IndexHit> {
+        requireQueryWithinClauseCeiling(queryText)
+        val parsed = parseSafely(queryText)
+        val query = filteredBy(parsed, collectionId, documentIds = null)
+        return toHits(searcher, searcher.search(query, limit))
+    }
 
     /**
      * Waits, bounded, for every search that is still reading this generation to finish.
@@ -332,11 +345,15 @@ class LuceneIndex private constructor(
         documentIds: Set<String>? = null,
         limit: Int,
     ): List<IndexHit> {
-        requireQueryWithinClauseCeiling(queryText)
         return readSearcher { searcher ->
-            val parsed = parseSafely(queryText)
-            val query = filteredBy(parsed, collectionId, documentIds)
-            toHits(searcher, searcher.search(query, limit))
+            if (documentIds == null) {
+                searchKeywordWithReader(searcher, collectionId, queryText, limit)
+            } else {
+                requireQueryWithinClauseCeiling(queryText)
+                val parsed = parseSafely(queryText)
+                val query = filteredBy(parsed, collectionId, documentIds)
+                toHits(searcher, searcher.search(query, limit))
+            }
         }
     }
 

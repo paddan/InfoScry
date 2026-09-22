@@ -63,3 +63,46 @@ validation all passed. `check` completed successfully in 5m 50s.
   `awaitMutation` and wait as required.
 - No production behavior beyond the explicitly ruled-in fail-fast external maintenance admission was
   changed.
+
+## Fix round 1
+
+Addressed the review findings without touching the controller-owned README, status/plans, or journal.
+
+### RED/GREEN
+
+- Added a real `POST /api/imports` regression through `ApiTestServer`: before the fix it returned 202
+  and created a queued job during held maintenance; after the fix it returns HTTP 423 with
+  `MAINTENANCE_IN_PROGRESS`, creates no job row, and accepts after release.
+- Added a real server-owned CLI regression through `ImportCommandProcessTest`: before the fix the child
+  exited 0 despite the remote refusal and did not expose the typed code; after the fix it exits nonzero,
+  includes `MAINTENANCE_IN_PROGRESS`, and creates no job row.
+- Added admission around the local CLI enqueue path as well; `RemoteApiFailure` now becomes a typed
+  `CliFailure` preserving its error code.
+- Extended the old-generation lease test to signal after publication and run an actual keyword search
+  through the held old `IndexSearcher`. The result remains searchable after the successor is current;
+  retirement is asserted only after releasing the lease.
+- The lease RED compile run failed with the expected missing `searchKeywordWithReader` seam; focused
+  GREEN tests passed after adding the minimal internal reader-query seam.
+
+### Fix-round verification
+
+Passed:
+
+```text
+JAVA_HOME="$(asdf where java)" ./gradlew test \
+  --tests infoscry.search.ReindexRecoveryTest \
+  --tests infoscry.server.CollectionRoutesTest \
+  --tests infoscry.cli.ImportCommandProcessTest
+```
+
+The combined focused run passed all selected tests. The final recovery gate and full `check` are run
+after this report append before the follow-up commit.
+
+### Fix-round self-review
+
+- HTTP admission encloses the enqueue side effect in `MutationCoordinator.withMutation`; existing
+  claimed job stages remain on `awaitMutation` and continue waiting at checkpoints.
+- Local CLI admission is also before `jobs.enqueue`; remote CLI receives the server's typed refusal and
+  preserves its code in the process error.
+- The lease seam exposes the held `IndexSearcher` only internally and reuses the index's normal parser,
+  filtering, and hit conversion for the post-publication proof.

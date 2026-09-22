@@ -295,13 +295,22 @@ class ReindexRecoveryTest {
             val release = CompletableDeferred<Unit>()
             val leaseEntered = CompletableDeferred<Unit>()
             val leaseRelease = CompletableDeferred<Unit>()
+            val published = CompletableDeferred<Unit>()
             val previous = closed.index()
             val service = reindexService(closed) { BlockingDocumentEmbedder(entered, release) }
 
             runBlocking {
                 val readerLease = launch(Dispatchers.Default) {
-                    previous.withReaderLease {
+                    previous.withReaderLease { searcher ->
                         leaseEntered.complete(Unit)
+                        runBlocking { published.await() }
+                        val heldReaderHits = previous.searchKeywordWithReader(
+                            searcher = searcher,
+                            collectionId = collectionA,
+                            queryText = "nightfall",
+                            limit = 10,
+                        )
+                        assertEquals(2, heldReaderHits.size, "the held old reader still searches after publication")
                         runBlocking { leaseRelease.await() }
                     }
                 }
@@ -322,6 +331,7 @@ class ReindexRecoveryTest {
                 withTimeout(SCREEN_TIMEOUT_MILLIS) {
                     while (closed.index() === previous) delay(POLL_MILLIS)
                 }
+                published.complete(Unit)
                 assertTrue(
                     Files.exists(AppPaths.from(dataDir).indexDir.resolve(previous.name)),
                     "the leased old generation remains on disk after publication",

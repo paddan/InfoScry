@@ -26,6 +26,7 @@ import infoscry.server.ApiJson
 import infoscry.server.PRODUCT_NAME
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
+import infoscry.storage.MaintenanceInProgressException
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.delay
@@ -141,12 +142,20 @@ class ImportCommand(
                 sources = requested,
                 settings = settings,
             )
-            val job = open.jobs.enqueue(
-                type = JobType.IMPORT,
-                collectionId = collection.id,
-                payload = payload.encode(),
-                total = 0,
-            )
+            val job = try {
+                runBlocking {
+                    open.mutations.withMutation {
+                        open.jobs.enqueue(
+                            type = JobType.IMPORT,
+                            collectionId = collection.id,
+                            payload = payload.encode(),
+                            total = 0,
+                        )
+                    }
+                }
+            } catch (maintenance: MaintenanceInProgressException) {
+                throw CliFailure("MAINTENANCE_IN_PROGRESS: ${maintenance.message.orEmpty()}", maintenance)
+            }
             // The worker is attached after the job exists, so there is no window where the runner is
             // claiming from a queue this command has not filled yet.
             ImportJobHandler.attachTo(open, pipeline(open), documentEmbedder = importEmbedder(open))
@@ -167,7 +176,11 @@ class ImportCommand(
     /** Enqueues the import on the server that owns the data directory. */
     private fun importThroughServer(runtime: RuntimeInfo, requested: List<String>, options: CliOptions) {
         LoopbackApi(runtime).use { api ->
-            val accepted = runBlocking { api.enqueueImport(collection, requested) }
+            val accepted = try {
+                runBlocking { api.enqueueImport(collection, requested) }
+            } catch (failure: RemoteApiFailure) {
+                throw CliFailure("${failure.code}: ${failure.message}", failure)
+            }
             if (!waitFlag) {
                 reportAccepted(accepted.job.id, accepted.job.state, options, executedHere = false)
                 return

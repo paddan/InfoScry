@@ -165,26 +165,28 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
         route("/api/imports") {
             post {
                 call.handle {
-                    val request = call.receiveJson<ImportRequest>()
-                    val collection = context.collectionService.requireActiveByNameOrId(request.collection)
-                    // The job records the tool version it will run with, so its checkpoints are keyed by
-                    // what actually produced them. That is why the probe happens once per job creation.
-                    val settings = ToolProbe.extractionSettings(collection.ocrLanguages)
-                    val payload = ImportJobPayload.of(
-                        collectionId = collection.id,
-                        sources = request.paths,
-                        settings = settings,
-                    )
-                    val job = context.jobs.enqueue(
-                        type = JobType.IMPORT,
-                        collectionId = collection.id,
-                        payload = payload.encode(),
-                        total = 0,
-                    )
-                    call.respondJson(
-                        HttpStatusCode.Accepted,
-                        ImportAcceptedResponse(accepted = true, job = job),
-                    )
+                    context.mutations.withMutation {
+                        val request = call.receiveJson<ImportRequest>()
+                        val collection = context.collectionService.requireActiveByNameOrId(request.collection)
+                        // The job records the tool version it will run with, so its checkpoints are keyed by
+                        // what actually produced them. That is why the probe happens once per job creation.
+                        val settings = ToolProbe.extractionSettings(collection.ocrLanguages)
+                        val payload = ImportJobPayload.of(
+                            collectionId = collection.id,
+                            sources = request.paths,
+                            settings = settings,
+                        )
+                        val job = context.jobs.enqueue(
+                            type = JobType.IMPORT,
+                            collectionId = collection.id,
+                            payload = payload.encode(),
+                            total = 0,
+                        )
+                        call.respondJson(
+                            HttpStatusCode.Accepted,
+                            ImportAcceptedResponse(accepted = true, job = job),
+                        )
+                    }
                 }
             }
         }

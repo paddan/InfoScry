@@ -203,6 +203,43 @@ class CollectionRoutesTest {
     }
 
     @Test
+    fun `an import request during maintenance is refused before creating a job`() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val source = dataDir.resolve("during-maintenance.txt")
+        Files.writeString(source, "A report.")
+        val maintenance = async(Dispatchers.Default) {
+            harness.context.mutations.withExclusiveMaintenance("reindex") {
+                started.complete(Unit)
+                release.await()
+            }
+        }
+        withTimeout(TIMEOUT_MILLIS) { started.await() }
+
+        val refused = harness.request(
+            HttpMethod.Post,
+            "/api/imports",
+            body = """{"collection":"Default","paths":["$source"]}""",
+            credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.Locked, refused.status, refused.bodyAsText())
+        assertContains(refused.bodyAsText(), "MAINTENANCE_IN_PROGRESS")
+        assertEquals(0, harness.context.jobs.list(100, 0).size, "refused import must not create a job row")
+
+        release.complete(Unit)
+        withTimeout(TIMEOUT_MILLIS) { maintenance.await() }
+        val accepted = harness.request(
+            HttpMethod.Post,
+            "/api/imports",
+            body = """{"collection":"Default","paths":["$source"]}""",
+            credential = Credential.BEARER,
+        )
+        assertEquals(HttpStatusCode.Accepted, accepted.status, accepted.bodyAsText())
+        assertEquals(1, harness.context.jobs.list(100, 0).size)
+    }
+
+    @Test
     fun `the compiled web application is served and client-side routes fall back to it`() = runBlocking {
         val root = harness.get("/")
 
