@@ -12,14 +12,29 @@ import com.github.ajalt.clikt.parameters.types.double
 import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.path
 import infoscry.config.AppPaths
+import infoscry.llm.AnthropicClient
+import infoscry.llm.LlmCapabilityProbe
+import infoscry.llm.LlmError
+import infoscry.llm.LlmEvent
+import infoscry.llm.LlmMessage
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmPromptRole.ASK
 import infoscry.llm.LlmPromptRole.INVESTIGATE
 import infoscry.llm.LlmProvider
+import infoscry.llm.LlmRequest
+import infoscry.llm.LlmStreamingClient
+import infoscry.llm.OpenAiCompatibleClient
+import infoscry.llm.RetryPolicy
+import infoscry.llm.ToolDefinition
 import infoscry.server.ApiJson
+import infoscry.storage.Instants
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.cio.CIO
 import java.nio.file.Path
 import java.util.UUID
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.toList
 import kotlinx.serialization.Serializable
 
 /**
@@ -55,13 +70,12 @@ data class LlmProfilesJson(
     val profiles: List<LlmProfile> = emptyList(),
 )
 
-/** The typed result of a profile probe; Task 20 supplies the real transport. */
+/** The typed result of a profile probe: what the real two-request probe measured. */
 @Serializable
 data class LlmTestJson(
     val profileName: String,
     val textRequestSupported: Boolean,
     val toolCallingSupported: Boolean?,
-    val notWiredReason: String? = null,
 )
 
 /** `infoscry llm list [--json]`. */
@@ -191,7 +205,7 @@ class SetDefaultLlmCommand : CliktCommand(name = "set-default") {
     }
 }
 
-/** `infoscry llm test <name>` — a typed result; Task 20 wires the transport. */
+/** `infoscry llm test <name>` — the real two-request capability probe, persisted. */
 class TestLlmProfileCommand : CliktCommand(name = "test") {
 
     private val profileArg by argument("name", help = "The profile to probe")
@@ -200,12 +214,51 @@ class TestLlmProfileCommand : CliktCommand(name = "test") {
 
     override fun run() {
         val options = resolveOptions(parentOptions, json = false, dataDir = dataDirOption)
-        val result = LlmTestJson(
-            profileName = profileArg,
-            textRequestSupported = false,
-            toolCallingSupported = null,
-            notWiredReason = "LLM provider adapters are not wired yet (Task 20); this profile was saved but not probed.",
-        )
-        echo(ApiJson.encodeToString(result))
+        infoscry.AppContext.open(AppPaths.of(options.dataDir)).use { context ->
+            val profile = context.llm.findByName(profileArg)
+                ?: throw CliFailure("no LLM profile named '" + profileArg + "' exists")
+            val lookup: (String) -> String? = { variable -> System.getenv(variable) }
+            val client = HttpClient(CIO)
+            try {
+                val adapter = when (profile.provider) {
+                    LlmProvider.OPENAI_COMPATIBLE ->
+                        OpenAiCompatibleClient(profile, lookup, client, RetryPolicy())
+                    LlmProvider.ANTHROPIC ->
+                        AnthropicClient(profile, lookup, client, RetryPolicy())
+                }
+                val textOk = probesText(adapter)
+                val toolsOk = probesToolCalling(adapter)
+                context.llm.recordCapability(
+                    profile.name,
+                    LlmCapabilityProbe(toolCallingSupported = toolsOk, checkedAt = Instants.now()),
+                )
+                echo(ApiJson.encodeToString(LlmTestJson(profile.name, textOk, toolsOk)))
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    /** One tiny request: does the endpoint answer and stream to completion? */
+    private fun probesText(adapter: LlmStreamingClient): Boolean = try {
+        runBlocking {
+            adapter.stream(LlmRequest(messages = listOf(LlmMessage("user", "Say ok.")))).toList()
+        }.any { event -> event is LlmEvent.TextDelta || event == LlmEvent.Completed }
+    } catch (failure: LlmError) {
+        false
+    }
+
+    /** One harmless tool request: does the endpoint ever request a call? */
+    private fun probesToolCalling(adapter: LlmStreamingClient): Boolean = try {
+        runBlocking {
+            adapter.stream(
+                LlmRequest(
+                    messages = listOf(LlmMessage("user", "Call the ping tool.")),
+                    tools = listOf(ToolDefinition(name = "ping", description = "Nothing but a reply.")),
+                ),
+            ).toList()
+        }.any { event -> event is LlmEvent.ToolCallReady }
+    } catch (failure: LlmError) {
+        false
     }
 }
