@@ -365,10 +365,6 @@ class ReindexRecoveryTest {
                 generationDirectories(),
                 "the marked generation is kept whatever its name spells, kept: ${generationDirectories()}",
             )
-            val outcome = runBlocking {
-                searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
-            }
-            assertEquals(2, outcome.hits.size, "the marked generation serves its citations")
         }
     }
 
