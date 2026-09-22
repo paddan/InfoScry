@@ -18,6 +18,7 @@ import infoscry.domain.DocumentStatus
 import infoscry.logging.LoggingBootstrap
 import infoscry.search.SearchMode
 import infoscry.search.SearchOutcome
+import infoscry.search.SearchUnavailableException
 import infoscry.server.ApiJson
 import infoscry.server.PRODUCT_NAME
 import java.nio.file.Files
@@ -93,9 +94,18 @@ class SearchCommand : CliktCommand(name = "search") {
     override fun run() {
         val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
         val paths = AppPaths.of(options.dataDir)
-        val outcome = RuntimeInfo.discover(paths.runtimeFile)?.let { remote ->
-            searchThroughServer(remote)
-        } ?: searchHere(paths)
+        val outcome = try {
+            RuntimeInfo.discover(paths.runtimeFile)?.let { remote ->
+                searchThroughServer(remote)
+            } ?: searchHere(paths)
+        } catch (refused: SearchUnavailableException) {
+            // A search can be refused for something the caller can fix (an over-long query) or something
+            // the environment has to fix (no model, no usable GPU). Either way the status code travels
+            // as the failure text, so the terminal says what to do instead of a stack trace.
+            throw CliFailure("search was refused ${refused.code}: ${refused.remedy}", refused)
+        } catch (remote: RemoteApiFailure) {
+            throw CliFailure(remote.message.orEmpty(), remote)
+        }
         report(outcome, options)
     }
 
