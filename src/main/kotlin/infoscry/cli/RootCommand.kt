@@ -90,6 +90,7 @@ class RootCommand(
             SearchCommand(),
             ReindexCommand(),
             LlmCommand(),
+            AskCommand(),
         )
     }
 

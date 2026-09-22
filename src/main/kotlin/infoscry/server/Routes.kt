@@ -235,6 +235,7 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
         }
 
         configureSearchRoutes(context, context.mutations)
+        configureAskRoutes(context)
 
         // The compiled SvelteKit application. Its client-side routes all fall back to this file.
         staticResources("/", STATIC_RESOURCES, index = "index.html")
