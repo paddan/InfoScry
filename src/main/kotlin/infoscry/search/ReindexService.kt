@@ -243,9 +243,21 @@ class ReindexService(
             LuceneIndex.publishMarker(paths.indexDir, nextName)
             observe(ReindexStep.AFTER_MARKER_SWAP)
             publish(reopened, previous)
-            previous.drainLeases(RETIRE_TIMEOUT_MILLIS)
-            previous.close()
-            removeGenerationDirectory(previousDirectory, nextName)
+            if (previous.drainLeases(RETIRE_TIMEOUT_MILLIS)) {
+                previous.close()
+                removeGenerationDirectory(previousDirectory, nextName)
+            } else {
+                // A reader is still inside the retired generation. Closing it would cut that reader off,
+                // and deleting the directory would do the same on a non-POSIX filesystem; the contract of
+                // drainLeases says to leave the generation alone. It is unreferenced — the marker names the
+                // successor — so the next startup's sweep removes it, exactly as it removes other leftovers.
+                LOGGER.atWarn()
+                    .addKeyValue(GENERATION_FIELD, previous.name)
+                    .log(
+                        "retired generation still had readers after ${RETIRE_TIMEOUT_MILLIS} ms; " +
+                            "left in place for the next startup sweep",
+                    )
+            }
 
             return ReindexResult(
                 generation = nextName,
