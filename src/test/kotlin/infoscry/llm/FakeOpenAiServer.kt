@@ -7,6 +7,7 @@ import java.net.InetSocketAddress
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.Collections
 import kotlin.math.max
 import kotlin.math.min
 
@@ -42,12 +43,14 @@ internal class FakeOpenAiServer(
     private val lastAuthorization: AtomicReference<String?> = AtomicReference(null)
     private val lastApiKey: AtomicReference<String?> = AtomicReference(null)
     private val lastRequestBody: AtomicReference<String?> = AtomicReference(null)
+    private val capturedRequestBodies: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
     val url: String get() = "http://$LOOPBACK_HOST:${server.address.port}"
     val handledRequests: Int get() = handled.get()
     val authorization: String? get() = lastAuthorization.get()
     val xApiKey: String? get() = lastApiKey.get()
     val requestBody: String? get() = lastRequestBody.get()
+    val requestBodies: List<String> get() = synchronized(capturedRequestBodies) { capturedRequestBodies.toList() }
 
     init {
         server.createContext("/") { exchange -> serve(exchange) }
@@ -63,7 +66,9 @@ internal class FakeOpenAiServer(
             val index = handled.getAndIncrement()
             lastAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"))
             lastApiKey.set(exchange.getRequestHeaders().getFirst("x-api-key"))
-            lastRequestBody.set(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
+            val requestBody = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+            lastRequestBody.set(requestBody)
+            capturedRequestBodies.add(requestBody)
             val response = script[min(index, script.size - 1)]
             if (response.stream) {
                 streamResponse(exchange, response)

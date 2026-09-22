@@ -61,3 +61,25 @@ is checked after reading another column), so an unchecked profile can appear as
 capability timestamp to preserve the required three visible states without
 expanding this task into the storage file outside the brief's file list. A
 follow-up storage fix may be warranted if JSON-level null fidelity is required.
+
+## Fixrunde 1/5
+
+Åtgärdade tre reviewfynd utan produktionsändringar utanför Task 1:s LLM/CLI-
+gräns:
+
+- `FakeOpenAiServer` fångar nu alla request bodies. CLI-testet inspekterar den
+  faktiska andra requesten från `llm test` och verifierar
+  `tool_choice.function.name == "ping"`.
+- OpenAI-adaptertestet verifierar att `requiredToolName = "other"` med endast
+  `ping` ger `IllegalArgumentException`.
+- Båda adaptertesterna verifierar att vanliga requests med tools men utan
+  `requiredToolName` saknar `tool_choice`.
+
+Täckande verifiering:
+
+- `JAVA_HOME="$(asdf where java)" ./gradlew test --tests infoscry.llm.OpenAiCompatibleClientTest --tests infoscry.llm.AnthropicClientTest --tests infoscry.cli.LlmCommandTest` — PASS.
+- `JAVA_HOME="$(asdf where java)" ./gradlew check` — PASS.
+- `git diff --check` — PASS.
+
+Den uppföljande ändringen är begränsad till regressionstester och test-fixture;
+ingen Ask/Investigate-funktionalitet eller senare Task ändrades.

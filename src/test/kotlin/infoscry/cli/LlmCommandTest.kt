@@ -17,6 +17,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * `infoscry llm` over the real process boundary with a local fake endpoint: the two-request capability
@@ -61,6 +64,13 @@ class LlmCommandTest {
             val probe = runTest("probe")
             assertTrue(probe.textRequestSupported, "the text probe succeeded: $probe")
             assertFalse(probe.toolCallingSupported ?: true, "the tool probe was rejected: $probe")
+            val toolRequest = Json.parseToJsonElement(server.requestBodies[1]).jsonObject
+            assertEquals(
+                "ping",
+                toolRequest.getValue("tool_choice").jsonObject
+                    .getValue("function").jsonObject.getValue("name").jsonPrimitive.content,
+                "the actual CLI tool probe must force the ping function",
+            )
             val stored = ApiJson.decodeFromString<LlmProfilesJson>(runList()).profiles.first { it.name == "probe" }
             assertEquals(false, stored.toolCallingMeasured, "the measured result was persisted as false")
             assertNotNull(stored.capabilityCheckedAt, "the capability check time was persisted")

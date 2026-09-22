@@ -23,6 +23,32 @@ import kotlin.time.Duration.Companion.seconds
 class OpenAiCompatibleClientTest {
 
     @Test
+    fun `a required tool name must be one of the supplied tools`() {
+        assertFailsWith<IllegalArgumentException> {
+            LlmRequest(
+                messages = listOf(LlmMessage("user", "Call ping.")),
+                tools = listOf(ToolDefinition("ping", "Nothing but a reply.")),
+                requiredToolName = "other",
+            )
+        }
+    }
+
+    @Test
+    fun `optional tools do not emit a tool choice`() = runBlocking {
+        withServer(
+            listOf(FakeOpenAiResponse(stream = true, body = sse(listOf("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}""")))),
+        ) { server, _, llm ->
+            llm.stream(
+                LlmRequest(
+                    messages = listOf(LlmMessage("user", "You may call ping.")),
+                    tools = listOf(ToolDefinition("ping", "Nothing but a reply.")),
+                ),
+            ).toList()
+            assertFalse(LlmJson.parseToJsonElement(server.requestBody!!).jsonObject.containsKey("tool_choice"))
+        }
+    }
+
+    @Test
     fun `a required tool choice names the requested function on the wire`() = runBlocking {
         withServer(
             listOf(

@@ -25,6 +25,33 @@ import kotlin.time.Duration.Companion.seconds
 class AnthropicClientTest {
 
     @Test
+    fun `optional tools do not emit a tool choice`() = runBlocking {
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    body = anthropicStream(
+                        listOf(
+                            AnthropicWireEvent(
+                                "content_block_delta",
+                                """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}""",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ) { server, _, llm ->
+            llm.stream(
+                LlmRequest(
+                    messages = listOf(LlmMessage("user", "You may call ping.")),
+                    tools = listOf(ToolDefinition("ping", "Nothing but a reply.")),
+                ),
+            ).toList()
+            assertFalse(LlmJson.parseToJsonElement(server.requestBody!!).jsonObject.containsKey("tool_choice"))
+        }
+    }
+
+    @Test
     fun `a required tool choice names the requested tool on the wire`() = runBlocking {
         withServer(
             listOf(
