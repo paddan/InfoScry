@@ -1,5 +1,10 @@
 package infoscry.llm
 
+import infoscry.ask.CitationValidation
+import infoscry.ask.CorrectionSnapshot
+import infoscry.ask.Evidence
+import infoscry.domain.CollectionId
+import infoscry.domain.SourceLocation
 import infoscry.storage.Database
 import infoscry.storage.DuplicateLlmProfileNameException
 import infoscry.storage.LlmStore
@@ -134,5 +139,82 @@ class LlmStoreTest {
 
         store.resetPromptBody(LlmPromptRole.ASK)
         assertEquals(shipped, store.effectiveBody(LlmPromptRole.ASK), "resetting restores the shipped default")
+    }
+
+    @Test
+    fun `Ask call audit keeps initial and correction usage cost and citation ownership separate`() {
+        val priced = profile("priced").copy(
+            inputPricePerMillion = 2.0,
+            outputPricePerMillion = 3.0,
+            cacheReadPricePerMillion = 4.0,
+        )
+        store.create(priced)
+        val collectionId = database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT id FROM collections WHERE name = 'Default'").use { rows ->
+                    rows.next(); CollectionId(rows.getString(1))
+                }
+            }
+        }
+        val evidence = Evidence(
+            id = "S1", collectionId = collectionId.value, documentId = "document", unitId = "unit",
+            locator = SourceLocation.TextLines(1, 1), locatorLabel = "lines 1", text = "evidence",
+        )
+
+        store.persistAsk(
+            collectionId, priced, "question", "initial [S999]", listOf(evidence),
+            initialUsage = TokenUsage(11, 13, 17),
+            initialCitations = CitationValidation(emptyList(), listOf("S999")),
+            correction = CorrectionSnapshot(
+                answer = "corrected [S1]",
+                usage = TokenUsage(19, 23, 29),
+                citations = CitationValidation(listOf("S1"), emptyList()),
+            ),
+        )
+
+        val calls = database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT id, input_tokens, output_tokens, cache_read_tokens, cost_usd, correction_of FROM model_calls ORDER BY correction_of IS NULL DESC").use { rows ->
+                    buildList {
+                        while (rows.next()) add(listOf(rows.getString(1), rows.getLong(2), rows.getLong(3), rows.getLong(4), rows.getDouble(5), rows.getString(6)))
+                    }
+                }
+            }
+        }
+        assertEquals(2, calls.size)
+        assertEquals(listOf(11L, 13L, 17L, 0.000129, null), calls[0].drop(1))
+        assertEquals(listOf(19L, 23L, 29L, 0.000223, calls[0][0]), calls[1].drop(1))
+        assertEquals("corrected [S1]", database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT content FROM messages WHERE role = 'assistant'").use { rows -> rows.next(); rows.getString(1) }
+            }
+        })
+        val correctionAudit = database.read { connection ->
+            connection.prepareStatement("SELECT model_call_id, evidence_id, returned_id, supplied, invalid_marker FROM citations WHERE model_call_id = ? ORDER BY supplied DESC").use { statement ->
+                statement.setString(1, calls[1][0] as String)
+                statement.executeQuery().use { rows ->
+                    buildList { while (rows.next()) add(listOf(rows.getString(1), rows.getString(2), rows.getString(3), rows.getInt(4), rows.getInt(5))) }
+                }
+            }
+        }
+        assertEquals(listOf(
+            listOf(calls[1][0], "S1", null, 1, 0),
+            listOf(calls[1][0], "S1", "S1", 0, 0),
+        ), correctionAudit)
+        assertEquals(listOf("invalid:S999", "S999", 0, 0, 1), database.read { connection ->
+            connection.prepareStatement("SELECT source_unit_id, returned_id, validated, supplied, invalid_marker FROM citations WHERE model_call_id = ? AND invalid_marker = 1").use { statement ->
+                statement.setString(1, calls[0][0] as String)
+                statement.executeQuery().use { rows ->
+                    rows.next(); listOf(rows.getString(1), rows.getString(2), rows.getInt(3), rows.getInt(4), rows.getInt(5))
+                }
+            }
+        })
+        assertEquals(listOf(2L, 30L, 36L, 46L, 0.000352), database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT calls, input_tokens, output_tokens, cache_read_tokens, cost_usd FROM usage_totals WHERE profile_id = '${priced.id}'").use { rows ->
+                    rows.next(); listOf(rows.getLong(1), rows.getLong(2), rows.getLong(3), rows.getLong(4), rows.getDouble(5))
+                }
+            }
+        })
     }
 }

@@ -12,6 +12,7 @@ import infoscry.llm.PromptService
 import infoscry.llm.RequestBudget
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
+import infoscry.search.SearchOutcome
 import infoscry.search.SearchService
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -27,16 +28,43 @@ sealed interface AskEvent {
 }
 
 /** Minimal persistence seam; production wiring can store the immutable evidence/citation snapshot. */
-data class CorrectionSnapshot(val answer: String, val usage: infoscry.llm.TokenUsage)
-fun interface AskPersistence { fun save(request: AskRequest, answer: String, evidence: List<Evidence>, citations: CitationValidation, inputTokens: Long, outputTokens: Long, correction: CorrectionSnapshot?) }
+data class CorrectionSnapshot(
+    val answer: String,
+    val usage: infoscry.llm.TokenUsage,
+    val citations: CitationValidation,
+)
+
+/** The Ask-specific retrieval boundary keeps the orchestration independently testable. */
+fun interface AskSearch {
+    fun search(question: String, mode: SearchMode, filters: SearchFilters): SearchOutcome
+}
+
+fun interface AskPersistence {
+    fun save(
+        request: AskRequest,
+        answer: String,
+        evidence: List<Evidence>,
+        initialUsage: infoscry.llm.TokenUsage,
+        initialCitations: CitationValidation,
+        correction: CorrectionSnapshot?,
+    )
+}
 
 class AskService(
-    private val search: SearchService,
+    private val search: AskSearch,
     private val prompt: PromptService,
     private val client: (LlmProfile) -> LlmStreamingClient,
     private val persistence: AskPersistence,
     private val collectionInstructions: (CollectionId) -> String? = { null },
 ) {
+    constructor(
+        search: SearchService,
+        prompt: PromptService,
+        client: (LlmProfile) -> LlmStreamingClient,
+        persistence: AskPersistence,
+        collectionInstructions: (CollectionId) -> String? = { null },
+    ) : this(AskSearch(search::search), prompt, client, persistence, collectionInstructions)
+
     fun ask(request: AskRequest): Flow<AskEvent> = flow {
         if (request.question.isBlank()) {
             emit(AskEvent.Error("INVALID_REQUEST", "question must not be blank")); return@flow
@@ -55,21 +83,21 @@ class AskService(
             // requireFits is deliberately immediately before stream: an irreducible failure makes zero calls.
             if (!budget.measure(request.profile, packed.request).fits) throw ContextBudgetExceeded()
             val answer = StringBuilder()
-            var usageInput = 0L
-            var usageOutput = 0L
+            var initialUsage = infoscry.llm.TokenUsage(0, 0)
             val modelClient = client(request.profile)
             modelClient.stream(packed.request).collect { event ->
                 when (event) {
                     is LlmEvent.TextDelta -> { answer.append(event.text); emit(AskEvent.Delta(event.text)) }
                     is LlmEvent.Usage -> {
-                        usageInput += event.usage.inputTokens; usageOutput += event.usage.outputTokens
+                        initialUsage = initialUsage + event.usage
                         emit(AskEvent.Usage(event.usage.inputTokens, event.usage.outputTokens))
                     }
                     is LlmEvent.Completed, is LlmEvent.ToolCallReady -> Unit
                 }
             }
             var finalAnswer = answer.toString()
-            var validation = CitationValidator().validate(finalAnswer, packed.evidences)
+            val initialCitations = CitationValidator().validate(finalAnswer, packed.evidences)
+            var validation = initialCitations
             var correctionSnapshot: CorrectionSnapshot? = null
             if (validation.invalid.isNotEmpty()) {
                 val correction = LlmRequest(
@@ -81,15 +109,17 @@ class AskService(
                 if (!budget.measure(request.profile, correction, stream = false).fits) throw ContextBudgetExceeded()
                 if (modelClient !is LlmCompletionClient) throw IllegalStateException("the configured provider cannot perform citation correction")
                 val correctionResult = modelClient.complete(correction)
-                usageInput += correctionResult.usage.inputTokens
-                usageOutput += correctionResult.usage.outputTokens
                 finalAnswer = correctionResult.text
-                correctionSnapshot = CorrectionSnapshot(finalAnswer, correctionResult.usage)
-                validation = CitationValidator().validate(finalAnswer, packed.evidences)
+                correctionSnapshot = CorrectionSnapshot(
+                    answer = finalAnswer,
+                    usage = correctionResult.usage,
+                    citations = CitationValidator().validate(finalAnswer, packed.evidences),
+                )
+                validation = correctionSnapshot.citations
             }
             validation.valid.forEach { emit(AskEvent.Citation(it, true)) }
             validation.invalid.forEach { emit(AskEvent.Citation(it, false)) }
-            persistence.save(request, finalAnswer, packed.evidences, validation, usageInput, usageOutput, correctionSnapshot)
+            persistence.save(request, finalAnswer, packed.evidences, initialUsage, initialCitations, correctionSnapshot)
             emit(AskEvent.Done(finalAnswer, packed.evidences))
         } catch (budgetFailure: ContextBudgetExceeded) {
             emit(AskEvent.Error("CONTEXT_BUDGET_EXCEEDED", "the request is too large for the configured model"))
@@ -100,3 +130,10 @@ class AskService(
         }
     }
 }
+
+private operator fun infoscry.llm.TokenUsage.plus(other: infoscry.llm.TokenUsage) =
+    infoscry.llm.TokenUsage(
+        inputTokens + other.inputTokens,
+        outputTokens + other.outputTokens,
+        cacheReadTokens + other.cacheReadTokens,
+    )

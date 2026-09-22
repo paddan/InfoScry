@@ -51,3 +51,15 @@ RED/GREEN: fokustesterna kördes efter ändringen och blev gröna: `JAVA_HOME="$
 ## Changed files
 
 `src/main/kotlin/infoscry/ask/ContextPacker.kt`, `CitationValidator.kt`, `AskService.kt`; `src/main/kotlin/infoscry/llm/RequestBudget.kt`; `src/main/kotlin/infoscry/server/AskRoutes.kt`; `src/main/kotlin/infoscry/cli/AskCommand.kt`; `src/main/kotlin/infoscry/cli/RootCommand.kt`; `src/main/kotlin/infoscry/server/Routes.kt`; mirrored Ask/request-budget tests.
+
+## Fixrunda 4/5
+
+`AskService` har nu en liten `AskSearch`-port, medan produktionskonstruktorn fortsatt adaptrar den verkliga `SearchService`. Den nya service-testen kör därmed ett captured sökresultat mot riktig promptkomposition samt en scripted streaming-/completion-provider. Den bevisar en initial stream, exakt en completion-baserad correction efter `[S999]`, correctionens tillåtna evidence, separata initial/correction-usage-snapshots och att initial respektive correction-budgetfel gör noll otillåtna provideranrop och ingen persistence.
+
+Usage överförs inte längre som en sammanlagd initial-siffra. Initiala och korrigerande `TokenUsage` (inklusive cache reads) persisteras var för sig i `model_calls`; varje kostnad beräknas med input-, output- och cache-read-priset i profilen. `usage_totals` summerar exakt dessa två calls en gång vardera.
+
+Audit-rader skrivs per faktiskt call. Initialt supplied evidence och initiala returnerade markers ligger på initialt call; correctionens supplied evidence samt dess valid/invalid markers ligger på correctionens `model_call_id`, som länkar med `correction_of`. En valid marker behåller source unit, locator och snippet för reopen; en invalid marker har bara `invalid:<id>` och blir inte en länk. `CorrectionSnapshot.answer` prioriteras som det persisterade assistantsvaret när en correction finns.
+
+RED/GREEN: en kontrollerad mutation som tog bort cache-read-priset gav avsiktligt röd `LlmStoreTest` på kostnadsassertionen. Efter återställning blev `JAVA_HOME="$(asdf where java)" ./gradlew test --tests 'infoscry.ask.*' --tests infoscry.llm.RequestBudgetTest --tests infoscry.llm.LlmStoreTest --tests infoscry.storage.SchemaMigratorTest` grön. `git diff --check` var grön.
+
+Full `JAVA_HOME="$(asdf where java)" ./gradlew --no-daemon check` kunde inte slutföras: tråddumpen visade att den hängde i orelaterade `infoscry.jobs.JobRunnerTest.a stage waits for exclusive maintenance instead of being refused` (`JobRunnerTest.kt:189`), varefter endast den egna testprocessen stoppades. Frontenddelen hann verifiera 5/5 Vitest-test gröna före hängningen.
