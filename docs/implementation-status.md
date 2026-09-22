@@ -19,6 +19,10 @@ Planning documents:
 | 18 | **Recovery in progress under `docs/superpowers/plans/2026-09-21-infoscry-task-18-recovery.md`.** Stages 1–3 of 6 done (`5122893`, `0d11bcc`, `294ff2c`) plus a controller compile repair (`8dacd3d`); Stages 4–6 remain. The recovery plan's Stage 6 owns the gate run and the task review, so Task 18 is **not yet reviewed**. Verified state of the tree: `compileTestKotlin` green, and `ReindexRecoveryTest` is 12 tests with **2 failures** — the two maintenance tests, both 60-second timeouts, class time 2 m 6 s. |
 | 19–28 | Not started. |
 
+**Paused 2026-09-21 at Task 18 Stage 3.** Stages 1–3 are done, pushed and verified by the controller; Stages 4–6
+remain and are listed below with their diagnostics. The tree compiles and `ReindexRecoveryTest` is 12 tests with
+2 failures (the two maintenance tests, both 60-second timeouts, class time 2 m 6 s).
+
 ### Task 18 recovery progress
 
 | Stage | State |
