@@ -4,6 +4,7 @@ import infoscry.domain.SourceLocation
 import infoscry.llm.LlmMessage
 import infoscry.llm.LlmRequest
 import infoscry.llm.RequestBudget
+import infoscry.llm.LlmProfile
 import infoscry.search.SearchHit
 
 data class Evidence(
@@ -28,6 +29,7 @@ class ContextPacker(private val maxEvidence: Int = 12) {
         hits: List<SearchHit>,
         budget: RequestBudget,
         maxOutputTokens: Int,
+        profile: LlmProfile? = null,
     ): PackedContext {
         val unique = hits.asSequence()
             .filter { it.text.isNotBlank() }
@@ -41,7 +43,7 @@ class ContextPacker(private val maxEvidence: Int = 12) {
             if (hit.documentId.value in documents && unique.any { it.documentId.value !in documents }) continue
             val candidate = selected + hit
             val request = request(question, systemPrompt, candidate, maxOutputTokens)
-            if (budget.fit(request)) {
+            if ((profile == null && budget.fit(request)) || (profile != null && budget.measure(profile, request).fits)) {
                 selected += hit
                 documents += hit.documentId.value
             }
@@ -50,7 +52,7 @@ class ContextPacker(private val maxEvidence: Int = 12) {
             Evidence("S${index + 1}", hit.collectionId.value, hit.documentId.value, hit.unitId.value, hit.locator, hit.locatorLabel, hit.text)
         }
         val finalRequest = request(question, systemPrompt, selected, maxOutputTokens)
-        budget.requireFits(finalRequest)
+        if (profile == null) budget.requireFits(finalRequest) else if (!budget.measure(profile, finalRequest).fits) error("request exceeds context")
         return PackedContext(evidences, finalRequest)
     }
 
