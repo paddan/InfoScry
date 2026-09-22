@@ -304,6 +304,9 @@ class AnthropicClient(
                 input_schema = tool.parametersJson?.let { raw -> jsonParameters(raw) },
             )
         },
+        tool_choice = request.requiredToolName?.let { required ->
+            AnthropicToolChoice(name = required)
+        },
     )
 
     private fun jsonParameters(raw: String): JsonElement = try {
@@ -353,6 +356,13 @@ data class AnthropicMessagesRequest(
     val stream: Boolean = true,
     val messages: List<AnthropicMessage>,
     val tools: List<AnthropicTool>? = null,
+    val tool_choice: AnthropicToolChoice? = null,
+)
+
+@Serializable
+data class AnthropicToolChoice(
+    val type: String = "tool",
+    val name: String,
 )
 
 @Serializable

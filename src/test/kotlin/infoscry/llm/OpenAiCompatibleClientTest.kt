@@ -7,6 +7,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -19,6 +21,31 @@ import kotlin.time.Duration.Companion.seconds
  * provider errors that must never leak, malformed streams, cancellation, and the retry budget.
  */
 class OpenAiCompatibleClientTest {
+
+    @Test
+    fun `a required tool choice names the requested function on the wire`() = runBlocking {
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    body = sse(listOf("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}""")),
+                ),
+            ),
+        ) { server, _, llm ->
+            llm.stream(
+                LlmRequest(
+                    messages = listOf(LlmMessage("user", "Call ping.")),
+                    tools = listOf(ToolDefinition("ping", "Nothing but a reply.")),
+                    requiredToolName = "ping",
+                ),
+            ).toList()
+
+            val request = LlmJson.parseToJsonElement(server.requestBody!!).jsonObject
+            val choice = request.getValue("tool_choice").jsonObject
+            assertEquals("function", choice.getValue("type").jsonPrimitive.content)
+            assertEquals("ping", choice.getValue("function").jsonObject.getValue("name").jsonPrimitive.content)
+        }
+    }
 
     @Test
     fun `a text answer reassembles from fragments and reports usage`() = runBlocking {

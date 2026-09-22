@@ -45,11 +45,17 @@ data class TokenUsage(val inputTokens: Long, val outputTokens: Long, val cacheRe
 data class LlmRequest(
     val messages: List<LlmMessage>,
     val tools: List<ToolDefinition> = emptyList(),
+    val requiredToolName: String? = null,
     val maxOutputTokens: Int = 4096,
 ) {
     init {
         require(messages.isNotEmpty()) { "LlmRequest.messages must not be empty" }
         require(maxOutputTokens > 0) { "LlmRequest.maxOutputTokens must be positive, was $maxOutputTokens" }
+        requiredToolName?.let { required ->
+            require(tools.any { it.name == required }) {
+                "LlmRequest.requiredToolName must name one of the supplied tools"
+            }
+        }
     }
 }
 

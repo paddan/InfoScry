@@ -110,7 +110,13 @@ class ListLlmProfilesCommand : CliktCommand(name = "list") {
         append("  [").append(profile.provider.name.lowercase()).append("]  ")
         append(profile.model)
         append("  context=").append(profile.contextWindow)
-        append("  tool=").append(if (profile.toolCallingSupported) "measured" else "not-measured")
+        append("  tool=").append(
+            when {
+                profile.capabilityCheckedAt == null -> "unknown"
+                profile.toolCallingMeasured == true -> "supported"
+                else -> "unsupported"
+            },
+        )
         append("  enabled=").append(profile.enabled)
         if (profile.name == ask) append("  (ask)")
         if (profile.name == investigate) append("  (investigate)")
@@ -255,6 +261,7 @@ class TestLlmProfileCommand : CliktCommand(name = "test") {
                 LlmRequest(
                     messages = listOf(LlmMessage("user", "Call the ping tool.")),
                     tools = listOf(ToolDefinition(name = "ping", description = "Nothing but a reply.")),
+                    requiredToolName = "ping",
                 ),
             ).toList()
         }.any { event -> event is LlmEvent.ToolCallReady }

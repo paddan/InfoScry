@@ -3,6 +3,10 @@ package infoscry.cli
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
 import infoscry.server.ApiJson
+import infoscry.AppContext
+import infoscry.config.AppPaths
+import infoscry.llm.LlmCapabilityProbe
+import infoscry.storage.Instants
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -99,6 +103,26 @@ class LlmCommandTest {
         assertTrue(none.profiles.isEmpty(), "no profile exists, so nothing was persisted")
     }
 
+    @Test
+    fun `list renders unknown unsupported and supported capability states distinctly`() {
+        addNamedProfile("unknown")
+        addNamedProfile("unsupported")
+        addNamedProfile("supported")
+        AppContext.open(AppPaths.of(dataDir)).use { context ->
+            context.llm.recordCapability("unsupported", LlmCapabilityProbe(false, Instants.now()))
+            context.llm.recordCapability("supported", LlmCapabilityProbe(true, Instants.now()))
+        }
+
+        val result = CliProcess.run("llm", "list", "--data-dir", dataDir.toString())
+        assertEquals(0, result.exitCode, "llm list failed: ${result.stderr}")
+        assertTrue(result.stdout.contains("unknown  [openai_compatible]"))
+        assertTrue(result.stdout.contains("unsupported  [openai_compatible]"))
+        assertTrue(result.stdout.contains("supported  [openai_compatible]"))
+        assertTrue(result.stdout.contains("tool=unknown"), result.stdout)
+        assertTrue(result.stdout.contains("tool=unsupported"), result.stdout)
+        assertTrue(result.stdout.contains("tool=supported"), result.stdout)
+    }
+
     // ---- helpers ----
 
     private fun addProfile(endpoint: String) {
@@ -111,6 +135,18 @@ class LlmCommandTest {
             "--data-dir", dataDir.toString(),
         )
         assertEquals(0, added.exitCode, "adding the probe failed: stderr=${added.stderr}")
+    }
+
+    private fun addNamedProfile(name: String) {
+        val added = CliProcess.run(
+            "llm", "add",
+            "--name", name,
+            "--provider", "openai-compatible",
+            "--model", "test-model",
+            "--endpoint", "http://127.0.0.1:1",
+            "--data-dir", dataDir.toString(),
+        )
+        assertEquals(0, added.exitCode, "adding $name failed: stderr=${added.stderr}")
     }
 
     private fun runTest(profile: String): LlmTestJson {

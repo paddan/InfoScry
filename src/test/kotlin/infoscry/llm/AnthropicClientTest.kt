@@ -7,6 +7,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -21,6 +23,38 @@ import kotlin.time.Duration.Companion.seconds
  * cancellation, the "never retry after a delta" rule, and the retry budget.
  */
 class AnthropicClientTest {
+
+    @Test
+    fun `a required tool choice names the requested tool on the wire`() = runBlocking {
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    body = anthropicStream(
+                        listOf(
+                            AnthropicWireEvent(
+                                "content_block_delta",
+                                """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}""",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ) { server, _, llm ->
+            llm.stream(
+                LlmRequest(
+                    messages = listOf(LlmMessage("user", "Call ping.")),
+                    tools = listOf(ToolDefinition("ping", "Nothing but a reply.")),
+                    requiredToolName = "ping",
+                ),
+            ).toList()
+
+            val request = LlmJson.parseToJsonElement(server.requestBody!!).jsonObject
+            val choice = request.getValue("tool_choice").jsonObject
+            assertEquals("tool", choice.getValue("type").jsonPrimitive.content)
+            assertEquals("ping", choice.getValue("name").jsonPrimitive.content)
+        }
+    }
 
     @Test
     fun `a text answer reassembles from fragments and reports usage including cache reads`() = runBlocking {

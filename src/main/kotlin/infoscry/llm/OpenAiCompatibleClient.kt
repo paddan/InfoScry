@@ -280,6 +280,9 @@ class OpenAiCompatibleClient(
                 ),
             )
         },
+        tool_choice = request.requiredToolName?.let { required ->
+            OpenAiToolChoice(function = OpenAiToolChoiceFunction(name = required))
+        },
     )
 
     private fun jsonParameters(raw: String): JsonElement = try {
@@ -329,8 +332,18 @@ data class ChatCompletionRequest(
     val stream: Boolean = true,
     val max_tokens: Int,
     val tools: List<ChatTool>? = null,
+    val tool_choice: OpenAiToolChoice? = null,
     val stream_options: StreamOptions = StreamOptions(),
 )
+
+@Serializable
+data class OpenAiToolChoice(
+    val type: String = "function",
+    val function: OpenAiToolChoiceFunction,
+)
+
+@Serializable
+data class OpenAiToolChoiceFunction(val name: String)
 
 /**
  * Asks the provider to include usage in the final chunk so cost accounting can use real numbers.
