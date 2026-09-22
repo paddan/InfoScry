@@ -25,7 +25,7 @@ Planning documents:
 |---|---|
 | 1. Make the test source compile | **Done** `5122893` — test-only change; the 61 compiler errors reduced to three real ones (manual `componentN` members on a data-class fixture, a missing `AppPaths` import, a `suspend` fixture), the rest were cascades. Product code untouched, and the product was right in both test/product disagreements it surfaced. |
 | 2. Make the generation content exact | **Done** `0d11bcc` — a rebuilt generation now publishes only the live document set: the copy-based path prunes documents that are no longer in SQLite, `validate` checks every collection's live-ID set rather than row counts, and new stale-row tests fail through **production validation** when the pruning is disabled. |
-| 3. Prove the marker and crash protocol | Not started. The kill tests already pass from the WIP (real child-process death at `GENERATION_BUILT`, `BEFORE_MARKER_SWAP`, `AFTER_MARKER_SWAP` behaves correctly), but Stages 3's fuller sweep/lease assertions are not written. |
+| 3. Prove the marker and crash protocol | **Done** `294ff2c` — three properties pinned: startup sweeps an unpublished `lucene-next-*`, a retired generation and the temporary `current.tmp` while never removing the generation the marker names (even when that name still spells `next`); kill-before/after-swap restart selects exactly the generation the marker names; and the swapped-in generation holds **exactly the database's live document set** (`liveDocumentIds == storedDocumentIds`), which is Review Focus 10's core claim. **Recorded gap:** the lease property — a reader that leased the old generation finishing before it is retired — is **implemented but unproven**: `LuceneIndex.drainLeases` exists (kotlin:303, with `openLeases`) and `ReindexService` calls it (kotlin:246, `RETIRE_TIMEOUT_MILLIS`), but no test exercises it, and writing one needs a way to hold a reader inside the old generation while the swap publishes. Stage 6's protocol verifier owns proving it or escalating a small Stage 3 addendum. Also deferred: the new sweep test's reliance on the seeded documents' ordinal order (`list[0]`/`list[1]`) is a fixture artefact worth pinning. |
 | 4. Prove exclusive maintenance and job restart | Not started. **Seeded diagnostic:** the two maintenance tests time out after 60 s because a fully-copied document never reaches the embedder; Stage 4 must seed a document with an **outdated chunking marker** (a different `tokenizerId`) so `needsChunking` is true and the blocking embedder is reached. Stage 2 also made `validate` check every collection, so the seeded document needs agreed rows for a narrowed rebuild. |
 | 5. HTTP and CLI boundary tests | Not started — no `SearchRoutesTest`, `SearchCommandTest` or `ReindexCommandTest` exists. |
 | 6. Gate, review, commit | Not started. `ReindexResult` gained `staleDocuments: Int = 0` (the `--json` shape is unchanged; Stage 5 may surface it). The test class takes ~2 m 4 s dominated by the two 60 s timeouts, so it should drop well under a minute once Stage 4's seed is fixed. |
@@ -46,23 +46,22 @@ authoritative (marker + row counts) and otherwise delete and rebuild that docume
 
 ## Resume checklist, in order
 
-1. **Stage 3** — prove the marker and crash protocol: stop the child at each `ReindexStep`, restart, and assert
-   `index/current` selects exactly the named generation; unpublised `lucene-next-*`, old generations and the
-   temporary marker are swept at startup while the marked generation is never removed; and a reader holding a
-   lease on the old generation can finish before it is closed.
-2. **Stage 4** — prove exclusive maintenance and job restart: with a blocking fake embedder (seeded as above),
+1. **Stage 4** — prove exclusive maintenance and job restart: with a blocking fake embedder (seeded as above),
    an import and a collection deletion during the build must be refused (423 / `MaintenanceInProgressException`)
    and accepted afterwards; then prove the `REINDEX` migration from an older schema version, claim, process
    death, `resetInterrupted`, resume with the payload's collection ID, and that a stale publisher refuses to
    replace a newer current generation.
-3. **Stage 5** — add the HTTP and CLI boundary tests: GET/POST search, reindex and content-unit; mandatory
+2. **Stage 5** — add the HTTP and CLI boundary tests: GET/POST search, reindex and content-unit; mandatory
    collection; cross-collection 404; no full documents in a search response; stable empty JSON; **4xx for
    caller-fixable input and 503 for model/GPU/index environment failures**, with no sensitive text in logs or
    errors; and CLI behaviour in both server and foreground mode, including `--wait --json` reporting a terminal
    job result while holding process ownership.
-4. **Stage 6** — run the gate (`compileTestKotlin`, the focused reindex and jobs tests, `./gradlew check`, the
+3. **Stage 6** — run the gate (`compileTestKotlin`, the focused reindex and jobs tests, `./gradlew check`, the
    CLI smoke `search --collection Default --json test`, `git diff --check`), verify the diff against Task 18's
-   six protocol points, task-review Task 18 over `534fad3..HEAD`, update this file with the real gate status,
+   six protocol points — including the **lease property**, which is implemented (`LuceneIndex.drainLeases`,
+   called by `ReindexService`) but has no test: proving it needs a way to hold a reader inside the old
+   generation while the swap publishes, and if no such seam exists the verifier escalates it as a small Stage 3
+   addendum — task-review Task 18 over `534fad3..HEAD`, update this file with the real gate status,
    and only then continue to Task 19.
 
 
