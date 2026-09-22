@@ -56,8 +56,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
-            assertEquals(3, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(4, database.userVersion())
+            assertEquals(4, SchemaMigrator.SUPPORTED_VERSION)
         }
     }
 
@@ -81,12 +81,20 @@ class SchemaMigratorTest {
                         "extraction_checkpoints",
                         "document_extractions",
                         "document_chunking",
+                        "llm_profiles",
+                        "app_defaults",
+                        "prompt_overrides",
+                        "conversations",
+                        "messages",
+                        "model_calls",
+                        "citations",
+                        "usage_totals",
                     ),
                 ),
                 "missing tables, found $tables",
             )
 
-            assertEquals(3, count(database, "schema_version"))
+            assertEquals(4, count(database, "schema_version"))
             assertEquals(1, count(database, "collections"))
             assertEquals(listOf("Default", "eng", "ACTIVE"), database.read { connection ->
                 connection.createStatement().use { statement ->
@@ -105,16 +113,16 @@ class SchemaMigratorTest {
     fun `migration refuses a database written by newer code`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
-            database.setUserVersion(4)
+            database.setUserVersion(5)
 
             val failure = assertFailsWith<SchemaVersionTooNewException> {
                 SchemaMigrator(database).migrate()
             }
 
-            assertEquals(4, failure.found)
-            assertEquals(3, failure.supported)
+            assertEquals(5, failure.found)
+            assertEquals(4, failure.supported)
             assertTrue(
-                failure.message!!.contains("4") && failure.message!!.contains("3"),
+                failure.message!!.contains("5") && failure.message!!.contains("4"),
                 "message should name both versions, was ${failure.message}",
             )
         }

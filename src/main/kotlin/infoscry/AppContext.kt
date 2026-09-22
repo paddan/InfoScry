@@ -22,6 +22,7 @@ import infoscry.storage.Database
 import infoscry.storage.DeletionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.JobStore
+import infoscry.storage.LlmStore
 import infoscry.storage.ImportItemStore
 import infoscry.storage.MutationCoordinator
 import infoscry.storage.SchemaMigrator
@@ -55,6 +56,7 @@ class AppContext private constructor(
     val library: ManagedLibrary,
     val mutations: MutationCoordinator,
     val jobs: JobStore,
+    val llm: LlmStore,
     private val injectedIndexRemover: CollectionIndexRemover,
     initialIndex: LuceneIndex,
     private val lock: ProcessLock,
@@ -219,6 +221,7 @@ class AppContext private constructor(
                     val jobs = JobStore(database)
                     val importItems = ImportItemStore(database)
                     val mutations = MutationCoordinator()
+                    val llm = LlmStore(database)
 
                     // The search index is part of the data directory, so every open has exactly one. It is
                     // created before recovery so an unfinished deletion can finish its index phase, and it
@@ -236,6 +239,7 @@ class AppContext private constructor(
                             library = ManagedLibrary(paths, documents),
                             mutations = mutations,
                             jobs = jobs,
+                            llm = llm,
                             injectedIndexRemover = index,
                             initialIndex = searchIndex,
                             lock = lock,

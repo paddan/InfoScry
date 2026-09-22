@@ -89,6 +89,7 @@ class RootCommand(
             ImportCommand(pipeline, importEmbedder),
             SearchCommand(),
             ReindexCommand(),
+            LlmCommand(),
         )
     }
 
