@@ -307,6 +307,71 @@ class ReindexRecoveryTest {
         }
     }
 
+    // ---- What startup keeps and sweeps ----
+
+    /**
+     * Startup removes what no marker names, whatever state it is in: a half-written successor, a
+     * generation a previous process retired without draining its readers, and the temporary marker a
+     * crash between write and rename leaves behind. The generation the marker names is never a
+     * candidate — including a successor that keeps the `next` spelling, because the marker names it.
+     */
+    @Test
+    fun `startup sweeps leftovers and keeps only the generation the marker names`() {
+        val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
+        val serving = context.index().name
+        val indexDir = AppPaths.from(dataDir).indexDir
+        context.close()
+
+        // A leftover for every shape a crashed rebuild leaves: a half-built successor, a retired
+        // generation whose readers never drained, and the temporary marker from a crash between
+        // write and rename.
+        val orphanGeneration = "$GENERATION_PREFIX" + "abandoned-" + java.util.UUID.randomUUID()
+        Files.createDirectory(indexDir.resolve(orphanGeneration))
+        val orphanSuccessor = "$GENERATION_PREFIX" + "next-" + java.util.UUID.randomUUID()
+        Files.createDirectory(indexDir.resolve(orphanSuccessor))
+        Files.writeString(indexDir.resolve("current.tmp"), orphanSuccessor)
+
+        AppContext.open(dataDir).use { reopened ->
+            assertEquals(serving, reopened.index().name, "the marker still names the serving generation")
+            assertEquals(
+                listOf(serving),
+                generationDirectories(),
+                "only the generation the marker names is left, kept: ${generationDirectories()}",
+            )
+            val outcome = runBlocking {
+                searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
+            }
+            assertEquals(2, outcome.hits.size, "the kept generation still serves its citations")
+        }
+    }
+
+    /**
+     * A published successor keeps the `next` spelling, and a directory that still carries it is the
+     * one the marker names — so a sweep keyed on the name would delete the index the caller just
+     * chose. The removal path refuses that name; this test pins that refusal from the filesystem.
+     */
+    @Test
+    fun `the generation the marker names survives startup even when its name still says next`() {
+        val successor = assertSwapSelectedReturnsNamed(ReindexStep.AFTER_MARKER_SWAP)
+        assertTrue(
+            successor.startsWith(GENERATION_PREFIX) && "next-" in successor,
+            "the published successor keeps the next spelling, was $successor",
+        )
+
+        AppContext.open(dataDir).use { reopened ->
+            assertEquals(successor, reopened.index().name)
+            assertEquals(
+                listOf(successor),
+                generationDirectories(),
+                "the marked generation is kept whatever its name spells, kept: ${generationDirectories()}",
+            )
+            val outcome = runBlocking {
+                searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
+            }
+            assertEquals(2, outcome.hits.size, "the marked generation serves its citations")
+        }
+    }
+
     // ---- What a kill at one instant leaves behind ----
 
     /**
@@ -344,19 +409,28 @@ class ReindexRecoveryTest {
 
     /**
      * Kills the rebuild at [step] after it published the marker, then asserts the successor is the one
-     * the next startup selects — the durable swap is the truth, not the process's memory of it.
+     * the next startup selects — the durable swap is the truth, not the process's memory of it. Returns
+     * the name the marker published.
      */
-    private fun assertSwapSelected(step: ReindexStep) {
+    private fun assertSwapSelectedReturnsNamed(step: ReindexStep): String {
         val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
         val beforeName = context.index().name
         context.close()
 
         terminateReindexAt(step)
         val named = LuceneIndex.currentGenerationName(AppPaths.from(dataDir).indexDir)
+        requireNotNull(named) { "the marker is unreadable after a kill at $step" }
         assertTrue(named != beforeName, "the marker names the successor once it was published, was $named")
 
         AppContext.open(dataDir).use { reopened ->
             assertEquals(named, reopened.index().name, "the next startup selects the generation the marker names")
+            // Identity is more than a name: the rows the successor published are the rows the database
+            // holds, so the citations a caller follows are the same ones the archive can prove.
+            assertEquals(
+                liveDocumentIds(reopened),
+                reopened.index().storedDocumentIds(),
+                "the selected generation holds exactly the database's live document set",
+            )
             val outcome = runBlocking {
                 searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
             }
@@ -367,6 +441,15 @@ class ReindexRecoveryTest {
                 "the generation the marker replaced is swept",
             )
         }
+        return named
+    }
+
+    /**
+     * Kills the rebuild at [step] after it published the marker, then asserts the successor is the one
+     * the next startup selects — the durable swap is the truth, not the process's memory of it.
+     */
+    private fun assertSwapSelected(step: ReindexStep) {
+        assertSwapSelectedReturnsNamed(step)
     }
 
     // ---- Fixtures ----
