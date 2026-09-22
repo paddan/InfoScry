@@ -41,6 +41,16 @@ class RequestBudget(
         return RequestMeasurement(inputUnits, request.maxOutputTokens + safetyMargin, contextWindow, tokenizer == null)
     }
 
+    /** Measures the exact OpenAI or Anthropic request envelope, including model and provider framing. */
+    fun measure(profile: LlmProfile, request: LlmRequest): RequestMeasurement {
+        val serialized = when (profile.provider) {
+            LlmProvider.OPENAI_COMPATIBLE -> LlmJson.encodeToString(ChatCompletionRequest(profile.model, request.messages.map { ChatMessage(it.role, it.content) }, true, request.maxOutputTokens, request.tools.takeIf { it.isNotEmpty() }?.map { ChatTool(function = ChatFunction(it.name, it.description, it.parametersJson?.let(LlmJson::parseToJsonElement))) }, request.requiredToolName?.let { OpenAiToolChoice(function = OpenAiToolChoiceFunction(it)) }))
+            LlmProvider.ANTHROPIC -> LlmJson.encodeToString(AnthropicMessagesRequest(profile.model, request.maxOutputTokens, true, request.messages.map { AnthropicMessage(it.role, it.content) }, request.tools.takeIf { it.isNotEmpty() }?.map { AnthropicTool(it.name, it.description, it.parametersJson?.let(LlmJson::parseToJsonElement)) }, request.requiredToolName?.let { AnthropicToolChoice(name = it) }))
+        }
+        val units = tokenizer?.invoke(serialized) ?: serialized.toByteArray(StandardCharsets.UTF_8).size
+        return RequestMeasurement(units, request.maxOutputTokens + safetyMargin, contextWindow, tokenizer == null)
+    }
+
     fun fit(request: LlmRequest): Boolean = measure(request).fits
 
     fun requireFits(request: LlmRequest): RequestMeasurement = measure(request).also {

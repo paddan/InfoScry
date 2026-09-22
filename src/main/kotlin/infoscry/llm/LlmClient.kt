@@ -85,6 +85,11 @@ interface LlmStreamingClient {
     fun stream(request: LlmRequest): Flow<LlmEvent>
 }
 
+/** Optional non-streaming completion boundary used for one-shot citation correction. */
+interface LlmCompletionClient {
+    suspend fun complete(request: LlmRequest): String
+}
+
 /**
  * A provider call failed.
  *

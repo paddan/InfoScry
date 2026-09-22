@@ -35,16 +35,20 @@ class AskCommand : CliktCommand(name = "ask") {
                     LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(p, System::getenv)
                     LlmProvider.ANTHROPIC -> AnthropicClient(p, System::getenv)
                 }
+            }, persistence = infoscry.ask.AskPersistence { ask, answer, evidence, citations, input, output ->
+                open.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, citations, input, output)
             })
             runBlocking {
+                val events = mutableListOf<AskEvent>()
                 service.ask(AskRequest(CollectionId(open.collectionService.requireActiveByNameOrId(collection).id.value), question, selected)).collect { event ->
-                    if (options.json) echo(jsonEvent(event)) else when (event) {
+                    if (options.json) events += event else when (event) {
                         is AskEvent.Delta -> echo(event.text, trailingNewline = false)
                         is AskEvent.Citation -> echo(" [${event.evidenceId}]")
                         is AskEvent.Error -> throw CliFailure("${event.code}: ${event.message}")
                         else -> Unit
                     }
                 }
+                if (options.json) echo(jsonResult(events))
             }
         }
     }
@@ -55,5 +59,11 @@ class AskCommand : CliktCommand(name = "ask") {
         is AskEvent.Citation -> "{\"type\":\"citation\",\"id\":${ApiJson.encodeToString(event.evidenceId)},\"valid\":${event.valid}}"
         is AskEvent.Done -> "{\"type\":\"done\",\"text\":${ApiJson.encodeToString(event.answer)}}"
         is AskEvent.Error -> "{\"type\":\"error\",\"code\":${ApiJson.encodeToString(event.code)}}"
+    }
+
+    private fun jsonResult(events: List<AskEvent>): String {
+        val answer = events.filterIsInstance<AskEvent.Done>().lastOrNull()?.answer.orEmpty()
+        val errors = events.filterIsInstance<AskEvent.Error>().map { it.code }
+        return "{\"answer\":${ApiJson.encodeToString(answer)},\"errors\":${ApiJson.encodeToString(errors)}}"
     }
 }

@@ -12,7 +12,8 @@ import infoscry.llm.PromptService
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
-import io.ktor.server.response.respondText
+import io.ktor.server.response.respondOutputStream
+import java.nio.charset.StandardCharsets
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.post
 import kotlinx.coroutines.flow.collect
@@ -36,11 +37,15 @@ fun Routing.configureAskRoutes(context: AppContext) {
                         infoscry.llm.LlmProvider.ANTHROPIC -> AnthropicClient(selected, System::getenv)
                     }
                 },
+                persistence = infoscry.ask.AskPersistence { ask, answer, evidence, citations, input, output ->
+                    context.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, citations, input, output)
+                },
             )
-            val events = mutableListOf<AskEvent>()
-            service.ask(AskRequest(CollectionId(collection.id.value), body.question, profile)).collect { events += it }
-            val payload = events.joinToString("") { event -> "data: ${ApiJson.encodeToString(event.toWire())}\n\n" }
-            call.respondText(payload, ContentType.Text.EventStream, HttpStatusCode.OK)
+            call.respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {
+                service.ask(AskRequest(CollectionId(collection.id.value), body.question, profile)).collect { event ->
+                    write("data: ${ApiJson.encodeToString(event.toWire())}\n\n".toByteArray(StandardCharsets.UTF_8)); flush()
+                }
+            }
         }
     }
 }

@@ -24,6 +24,16 @@ Implemented only the Ask boundary: conservative full-request budgeting, diverse 
 
 The existing Task 1–20 persistence layer exposes no answer/evidence tables, so this commit uses the `AskPersistence` seam and does not alter schema-owned files. The route currently buffers the service flow before emitting SSE chunks; the service itself remains streaming and the boundary event contract is stable. A later task may provide durable persistence wiring without changing the Ask core contract.
 
+## Fixrunda 1/5
+
+Reviewfynden om produktmässig no-op-persistence och buffrad SSE åtgärdades. `LlmStore.persistAsk` använder nu de befintliga Task 19-tabellerna `conversations`, `messages`, `model_calls` och `citations`; fråga, svar, locator/snippet, valideringsstatus, profilmodell och faktisk usage sparas lokalt utan nycklar. Ask-routen använder `respondOutputStream` och flushar varje SSE-event medan flowet körs. CLI `--json` samlar ett enda stabilt resultatobjekt.
+
+`RequestBudget.measure(profile, request)` serialiserar providerens faktiska OpenAI- eller Anthropic-envelope med modell, stream, max output, tools/tool choice och respektive wrapper. Invalid citations utlöser högst en budgeterad correction-request med tillåtna evidens-ID:n; därefter sparas valideringen utan att ogiltiga ID:n blir länkar.
+
+RED/GREEN: provider-envelope-testet och fokustesterna kördes efter implementation; kompileringsfelet för den otillgängliga Ktor-writer-API:n korrigerades till `respondOutputStream`, varefter testerna blev gröna.
+
+Fixrunda-verifiering: `JAVA_HOME="$(asdf where java)" ./gradlew test --tests 'infoscry.ask.*' --tests infoscry.llm.RequestBudgetTest` — PASS. Full `check` återstår efter denna fixrunda.
+
 ## Changed files
 
 `src/main/kotlin/infoscry/ask/ContextPacker.kt`, `CitationValidator.kt`, `AskService.kt`; `src/main/kotlin/infoscry/llm/RequestBudget.kt`; `src/main/kotlin/infoscry/server/AskRoutes.kt`; `src/main/kotlin/infoscry/cli/AskCommand.kt`; `src/main/kotlin/infoscry/cli/RootCommand.kt`; `src/main/kotlin/infoscry/server/Routes.kt`; mirrored Ask/request-budget tests.

@@ -7,6 +7,7 @@ import infoscry.llm.LlmEvent
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmRequest
 import infoscry.llm.LlmStreamingClient
+import infoscry.llm.LlmCompletionClient
 import infoscry.llm.PromptService
 import infoscry.llm.RequestBudget
 import infoscry.search.SearchFilters
@@ -26,13 +27,13 @@ sealed interface AskEvent {
 }
 
 /** Minimal persistence seam; production wiring can store the immutable evidence/citation snapshot. */
-fun interface AskPersistence { fun save(request: AskRequest, answer: String, evidence: List<Evidence>, citations: CitationValidation) }
+fun interface AskPersistence { fun save(request: AskRequest, answer: String, evidence: List<Evidence>, citations: CitationValidation, inputTokens: Long, outputTokens: Long) }
 
 class AskService(
     private val search: SearchService,
     private val prompt: PromptService,
     private val client: (LlmProfile) -> LlmStreamingClient,
-    private val persistence: AskPersistence = AskPersistence { _, _, _, _ -> },
+    private val persistence: AskPersistence,
     private val collectionInstructions: (CollectionId) -> String? = { null },
 ) {
     fun ask(request: AskRequest): Flow<AskEvent> = flow {
@@ -48,13 +49,15 @@ class AskService(
                 outcome.hits.take(30),
                 budget,
                 request.profile.maxOutputTokens,
+                request.profile,
             )
             // requireFits is deliberately immediately before stream: an irreducible failure makes zero calls.
-            budget.requireFits(packed.request)
+            if (!budget.measure(request.profile, packed.request).fits) throw ContextBudgetExceeded()
             val answer = StringBuilder()
             var usageInput = 0L
             var usageOutput = 0L
-            client(request.profile).stream(packed.request).collect { event ->
+            val modelClient = client(request.profile)
+            modelClient.stream(packed.request).collect { event ->
                 when (event) {
                     is LlmEvent.TextDelta -> { answer.append(event.text); emit(AskEvent.Delta(event.text)) }
                     is LlmEvent.Usage -> {
@@ -64,11 +67,29 @@ class AskService(
                     is LlmEvent.Completed, is LlmEvent.ToolCallReady -> Unit
                 }
             }
-            val validation = CitationValidator().validate(answer.toString(), packed.evidences)
+            var finalAnswer = answer.toString()
+            var validation = CitationValidator().validate(finalAnswer, packed.evidences)
+            if (validation.invalid.isNotEmpty()) {
+                val correction = LlmRequest(
+                    messages = listOf(
+                        infoscry.llm.LlmMessage("system", "Return the answer with citations only from these allowed IDs: ${packed.evidences.joinToString { it.id }}. Do not add any other citation."),
+                        infoscry.llm.LlmMessage("user", finalAnswer),
+                    ), maxOutputTokens = request.profile.maxOutputTokens,
+                )
+                if (!budget.measure(request.profile, correction).fits) throw ContextBudgetExceeded()
+                finalAnswer = if (modelClient is LlmCompletionClient) {
+                    modelClient.complete(correction)
+                } else {
+                    val corrected = StringBuilder()
+                    modelClient.stream(correction).collect { if (it is LlmEvent.TextDelta) corrected.append(it.text) }
+                    corrected.toString()
+                }
+                validation = CitationValidator().validate(finalAnswer, packed.evidences)
+            }
             validation.valid.forEach { emit(AskEvent.Citation(it, true)) }
             validation.invalid.forEach { emit(AskEvent.Citation(it, false)) }
-            persistence.save(request, answer.toString(), packed.evidences, validation)
-            emit(AskEvent.Done(answer.toString(), packed.evidences))
+            persistence.save(request, finalAnswer, packed.evidences, validation, usageInput, usageOutput)
+            emit(AskEvent.Done(finalAnswer, packed.evidences))
         } catch (budgetFailure: ContextBudgetExceeded) {
             emit(AskEvent.Error("CONTEXT_BUDGET_EXCEEDED", "the request is too large for the configured model"))
         } catch (failure: LlmError) {

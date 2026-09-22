@@ -25,4 +25,13 @@ class RequestBudgetTest {
         val request = LlmRequest(listOf(LlmMessage("user", "this is far too long")), maxOutputTokens = 1)
         assertFailsWith<ContextBudgetExceeded> { budget.requireFits(request) }
     }
+
+    @Test
+    fun providerMeasurementIncludesModelAndAnthropicEnvelope() {
+        val profile = LlmProfile("id", "cheap", LlmProvider.ANTHROPIC, "model-x", 10_000, 20, 0.0, 0.0, 0.0, true, "http://localhost")
+        val request = LlmRequest(listOf(LlmMessage("user", "å")), maxOutputTokens = 20)
+        val measured = RequestBudget(profile.contextWindow, safetyMargin = 10).measure(profile, request)
+        assert(measured.serializedBytes > request.messages.single().content.toByteArray().size)
+        assertEquals(30, measured.reservedTokens)
+    }
 }

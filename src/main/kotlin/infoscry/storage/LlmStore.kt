@@ -11,6 +11,11 @@ import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.SQLException
 import java.util.UUID
+import infoscry.ask.Evidence
+import infoscry.ask.CitationValidation
+import infoscry.domain.CollectionId
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 /** A profile name is already used (compared case-insensitively). */
 class DuplicateLlmProfileNameException(val name: String) :
@@ -31,6 +36,27 @@ private val PROMPT_ROLE_COLUMN = "role"
  * checkbox can never masquerade as a measurement.
  */
 class LlmStore(private val database: Database) {
+
+    /** Durable Ask snapshot; payloads contain source snippets but never credentials. */
+    fun persistAsk(collectionId: CollectionId, profile: LlmProfile, question: String, answer: String,
+                   evidence: List<Evidence>, citations: CitationValidation, inputTokens: Long, outputTokens: Long) {
+        val conversationId = UUID.randomUUID().toString()
+        val callId = UUID.randomUUID().toString()
+        database.transaction { connection ->
+            connection.prepareStatement("INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,retrieval_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)").use { s ->
+                listOf(conversationId, collectionId.value, "ASK", profile.provider.name, profile.endpoint, profile.model, profile.name, 1, "{}", Instants.now()).forEachIndexed { i, v -> s.setString(i + 1, v.toString()) }; s.executeUpdate()
+            }
+            connection.prepareStatement("INSERT INTO messages (id,conversation_id,seq,role,content,created_at) VALUES (?,?,?,?,?,?)").use { s ->
+                listOf(UUID.randomUUID().toString() to question, UUID.randomUUID().toString() to answer).forEachIndexed { i, pair -> s.setString(1,pair.first); s.setString(2,conversationId); s.setInt(3,i); s.setString(4,if(i==0) "user" else "assistant"); s.setString(5,pair.second); s.setString(6,Instants.now()); s.addBatch() }; s.executeBatch()
+            }
+            connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)").use { s ->
+                listOf(callId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,"1",Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,inputTokens); s.setLong(12,outputTokens); s.setLong(13,0); s.executeUpdate()
+            }
+            connection.prepareStatement("INSERT INTO citations (id,model_call_id,conversation_id,source_unit_id,locator_json,snippet,validated) VALUES (?,?,?,?,?,?,?)").use { s ->
+                evidence.forEach { e -> s.setString(1,UUID.randomUUID().toString()); s.setString(2,callId); s.setString(3,conversationId); s.setString(4,e.unitId); s.setString(5,Json.encodeToString(e.locator)); s.setString(6,e.text); s.setInt(7,if(e.id in citations.valid) 1 else 0); s.addBatch() }; s.executeBatch()
+            }
+        }
+    }
 
     // ---- Profiles ----
 
