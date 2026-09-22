@@ -120,6 +120,59 @@ class OpenAiCompatibleClientTest {
     }
 
     @Test
+    fun `a malformed payload is a typed error that leaks neither the body nor the key, and prints nothing`() = runBlocking {
+        val secret = "super-secret-key-abc"
+        val captured = java.io.ByteArrayOutputStream()
+        val original = System.err
+        System.setErr(java.io.PrintStream(captured))
+        try {
+            withServer(
+                listOf(
+                    // A broken-JSON payload that *carries the key*: the old decode printed it to stderr
+                    // and interpolated it into the error message. New code must keep it out of both.
+                    FakeOpenAiResponse(stream = true, body = "data: echoed-$secret\n\n"),
+                ),
+                secret = secret,
+            ) { server, _, llm ->
+                val failure = assertFailsWith<LlmError.MalformedResponseError> {
+                    llm.stream(request()).toList()
+                }
+                assertFalse((failure.message ?: "").contains(secret), "the message must not echo the key")
+                assertFalse(failure.toString().contains(secret), "the full error text must not echo the key")
+                assertTrue(server.authorization == "Bearer $secret", "the key must have reached the header")
+                assertEquals(1, server.handledRequests, "a malformed stream is not retried")
+            }
+        } finally {
+            System.setErr(original)
+        }
+        val stderr = captured.toString()
+        assertFalse(stderr.contains(secret), "no payload on stderr")
+    }
+
+    @Test
+    fun `a stream that emitted a delta and then fails is not retried`() = runBlocking {
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    body =
+                        """data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n""" +
+                        "data: not-json\n\n",
+                ),
+            ),
+        ) { server, _, llm ->
+            assertFailsWith<LlmError.MalformedResponseError> {
+                llm.stream(request()).toList()
+            }
+            assertEquals(
+                1,
+                server.handledRequests,
+                "a stream that already emitted a delta is never replayed",
+            )
+        }
+    }
+
+    @Test
     fun `a stream that ends before a started tool call is complete is a malformed response`() = runBlocking {
         withServer(
             listOf(

@@ -252,9 +252,11 @@ class OpenAiCompatibleClient(
     private fun decode(payload: String): ChatChunk = try {
         LlmJson.decodeFromString<ChatChunk>(payload)
     } catch (failure: Throwable) {
-        System.err.println("DECODE_FAIL=" + payload)
+        // The payload is never printed or interpolated into the error: a response body crossing the
+        // logging/API boundary unredacted violates Review Focus 5 (a body can echo a key, a prompt or
+        // document text). The typed error carries a fixed reason and the cause only.
         throw LlmError.MalformedResponseError(
-            "DECODE_FAIL=" + payload + " CAUSE=" + (failure.message ?: "") ,
+            "the provider sent an event that is not its protocol",
             cause = failure,
         )
     }
