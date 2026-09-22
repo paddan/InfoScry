@@ -40,10 +40,12 @@ internal class FakeOpenAiServer(
     private val server: HttpServer = HttpServer.create(InetSocketAddress(LOOPBACK_HOST, 0), 0)
     private val handled: AtomicInteger = AtomicInteger(0)
     private val lastAuthorization: AtomicReference<String?> = AtomicReference(null)
+    private val lastApiKey: AtomicReference<String?> = AtomicReference(null)
 
     val url: String get() = "http://$LOOPBACK_HOST:${server.address.port}"
     val handledRequests: Int get() = handled.get()
     val authorization: String? get() = lastAuthorization.get()
+    val xApiKey: String? get() = lastApiKey.get()
 
     init {
         server.createContext("/") { exchange -> serve(exchange) }
@@ -58,6 +60,7 @@ internal class FakeOpenAiServer(
         try {
             val index = handled.getAndIncrement()
             lastAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"))
+            lastApiKey.set(exchange.getRequestHeaders().getFirst("x-api-key"))
             val response = script[min(index, script.size - 1)]
             if (response.stream) {
                 streamResponse(exchange, response)
