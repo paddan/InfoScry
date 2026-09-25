@@ -92,7 +92,7 @@ class OpenAiCompatibleClient(
         val response = client.post(url) {
             profile.apiKeyEnvironmentVariable?.let { variable -> lookup(variable)?.let { key -> header(HttpHeaders.Authorization, "Bearer $key") } }
             contentType(ContentType.Application.Json)
-            setBody(LlmJson.encodeToString(chatRequest(request, stream = false)))
+            setBody(LlmJson.encodeToString(buildChatCompletionRequest(profile.model, request, stream = false)))
         }
         if (!response.status.isSuccess()) throw mapFailure(response.status.value)
         return try { val result = LlmJson.decodeFromString<ChatCompletionResponse>(response.bodyAsText()); LlmCompletion(result.choices.firstOrNull()?.message?.content.orEmpty(), result.usage?.let { TokenUsage(it.prompt_tokens ?: 0, it.completion_tokens ?: 0, it.cache_read_input_tokens ?: 0) } ?: TokenUsage(0, 0)) }
@@ -107,7 +107,7 @@ class OpenAiCompatibleClient(
                     lookup(variable)?.let { key -> header(HttpHeaders.Authorization, "Bearer $key") }
                 }
                 contentType(ContentType.Application.Json)
-                setBody(LlmJson.encodeToString(chatRequest(request)))
+                setBody(LlmJson.encodeToString(buildChatCompletionRequest(profile.model, request)))
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -279,34 +279,6 @@ class OpenAiCompatibleClient(
         cacheReadTokens = nonNegative(usage.cache_read_input_tokens),
     )
 
-    private fun chatRequest(request: LlmRequest, stream: Boolean = true): ChatCompletionRequest = ChatCompletionRequest(
-        model = profile.model,
-        messages = request.messages.map { ChatMessage(role = it.role, content = it.content) },
-        max_tokens = request.maxOutputTokens,
-        tools = request.tools.takeIf { it.isNotEmpty() }?.map { tool ->
-            ChatTool(
-                function = ChatFunction(
-                    name = tool.name,
-                    description = tool.description,
-                    parameters = tool.parametersJson?.let { raw -> jsonParameters(raw) },
-                ),
-            )
-        },
-        tool_choice = request.requiredToolName?.let { required ->
-            OpenAiToolChoice(function = OpenAiToolChoiceFunction(name = required))
-        },
-        stream = stream,
-    )
-
-    private fun jsonParameters(raw: String): JsonElement = try {
-        LlmJson.parseToJsonElement(raw)
-    } catch (failure: Throwable) {
-        throw LlmError.MalformedResponseError(
-            "a tool definition carried invalid parameters JSON",
-            cause = failure,
-        )
-    }
-
     private fun mapFailure(statusCode: Int): LlmError {
         if (statusCode == 400) {
             return LlmError.UnsupportedToolsError(
@@ -366,7 +338,29 @@ data class OpenAiToolChoiceFunction(val name: String)
 data class StreamOptions(val include_usage: Boolean = true)
 
 @Serializable
-data class ChatMessage(val role: String, val content: String)
+data class ChatMessage(
+    val role: String,
+    val content: String,
+    /** Present only on an assistant message that calls tools; null is omitted from the wire. */
+    val tool_calls: List<ChatToolCall>? = null,
+    /** Present only on a tool result message; null is omitted from the wire. */
+    val tool_call_id: String? = null,
+)
+
+/** One completed tool call on a request message; [ChatMessage.tool_calls] entries. */
+@Serializable
+data class ChatToolCall(
+    val id: String,
+    val type: String = "function",
+    val function: ChatToolFunction,
+)
+
+/** The request-shape function of a tool call: unlike [ChatFunctionDelta], name and arguments are complete. */
+@Serializable
+data class ChatToolFunction(
+    val name: String,
+    val arguments: String,
+)
 
 @Serializable
 data class ChatTool(val type: String = "function", val function: ChatFunction)
@@ -420,4 +414,43 @@ data class ChatUsage(
     val prompt_tokens: Long? = null,
     val completion_tokens: Long? = null,
     val cache_read_input_tokens: Long? = null,
+)
+
+/**
+ * The one place a request becomes an OpenAI chat-completions envelope. The adapter sends exactly what
+ * [RequestBudget.measure] measures, so tool encoding exists in one copy only.
+ */
+internal fun buildChatCompletionRequest(
+    model: String,
+    request: LlmRequest,
+    stream: Boolean = true,
+): ChatCompletionRequest = ChatCompletionRequest(
+    model = model,
+    messages = request.messages.map { message ->
+        ChatMessage(
+            role = message.role,
+            content = message.content,
+            tool_calls = message.toolCalls.takeIf { it.isNotEmpty() }?.map { call ->
+                ChatToolCall(
+                    id = call.id,
+                    function = ChatToolFunction(name = call.name, arguments = call.arguments),
+                )
+            },
+            tool_call_id = message.toolCallId,
+        )
+    },
+    max_tokens = request.maxOutputTokens,
+    tools = request.tools.takeIf { it.isNotEmpty() }?.map { tool ->
+        ChatTool(
+            function = ChatFunction(
+                name = tool.name,
+                description = tool.description,
+                parameters = tool.parametersJson?.let { raw -> toolParametersJson(raw) },
+            ),
+        )
+    },
+    tool_choice = request.requiredToolName?.let { required ->
+        OpenAiToolChoice(function = OpenAiToolChoiceFunction(name = required))
+    },
+    stream = stream,
 )

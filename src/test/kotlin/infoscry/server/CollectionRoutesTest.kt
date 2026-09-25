@@ -1,6 +1,10 @@
 package infoscry.server
 
 import infoscry.collection.CollectionIndexRemover
+import infoscry.domain.CollectionId
+import infoscry.domain.JobType
+import infoscry.extract.ExtractionSettings
+import infoscry.jobs.ImportJobPayload
 import infoscry.storage.CollectionStore
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
@@ -114,6 +118,87 @@ class CollectionRoutesTest {
         assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
         assertContains(response.bodyAsText(), "Acme acquisition")
         assertFalse(listed().any { it.name == "Acme" })
+    }
+
+    @Test
+    fun `OCR languages can be updated through the guarded collection route`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+
+        val response = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrLanguages":"eng+ swe "}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        assertContains(response.bodyAsText(), "eng+ swe")
+        assertEquals("eng+ swe", harness.context.collectionService.get(infoscry.domain.CollectionId(id))!!.ocrLanguages)
+    }
+
+    @Test
+    fun `changing collection OCR languages does not change an already queued import snapshot`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = CollectionId(harness.collectionIdOf("OCR settings"))
+        val queued = harness.context.jobs.enqueue(
+            type = JobType.IMPORT,
+            collectionId = id,
+            payload = ImportJobPayload.of(
+                id,
+                listOf(dataDir.resolve("queued.txt").toString()),
+                ExtractionSettings(ocrLanguages = "eng"),
+            ).encode(),
+        )
+
+        val response = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/${id.value}/ocr-languages",
+            body = """{"ocrLanguages":"swe"}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        assertEquals("eng", ImportJobPayload.decode(harness.context.jobs.get(queued.id)!!.payload).settings.ocrLanguages)
+        assertEquals("swe", harness.context.collectionService.get(id)!!.ocrLanguages)
+    }
+
+    @Test
+    fun `blank OCR languages are rejected and leave settings unchanged`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+
+        val response = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrLanguages":"   "}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+        assertEquals("eng", harness.context.collectionService.get(infoscry.domain.CollectionId(id))!!.ocrLanguages)
+    }
+
+    @Test
+    fun `OCR language update for an unknown or deleting collection is not found`() = runBlocking {
+        val missing = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/missing/ocr-languages",
+            body = """{"ocrLanguages":"swe"}""",
+            credential = Credential.CSRF,
+        )
+        assertEquals(HttpStatusCode.NotFound, missing.status)
+
+        harness.createCollection("Deleting", Credential.BEARER)
+        val id = harness.collectionIdOf("Deleting")
+        harness.context.collectionService.beginDeletion(infoscry.domain.CollectionId(id), "Deleting")
+        val deleting = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrLanguages":"swe"}""",
+            credential = Credential.CSRF,
+        )
+        assertEquals(HttpStatusCode.NotFound, deleting.status)
     }
 
     @Test
@@ -249,6 +334,12 @@ class CollectionRoutesTest {
             "/_app/",
             message = "the root has to serve the real application bundle, not a placeholder",
         )
+        val scriptPath = Regex("/_app/immutable/entry/start\\.[A-Za-z0-9_-]+\\.js")
+            .find(root.bodyAsText())?.value ?: error("frontend shell lacks its start script")
+        val script = harness.get(scriptPath)
+        assertEquals(HttpStatusCode.OK, script.status)
+        assertContains(script.headers["Content-Type"].orEmpty(), "javascript")
+        assertContains(script.bodyAsText(), "import")
 
         // The frontend is rendered in the browser, so a deep link has to reach the shell too.
         assertEquals(HttpStatusCode.OK, harness.get("/collections/anything").status)

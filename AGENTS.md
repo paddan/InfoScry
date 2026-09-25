@@ -2,14 +2,15 @@
 
 ## Current repository
 
-This repository is in the planning stage. Application code, build scripts, and
-tests do not exist yet. Do not present planned paths or commands as implemented.
+The backend, CLI, and reader-focused web UI exist. Browser acceptance for Ask
+and Investigate and the source-viewer finish line remain open; do not describe
+them as complete.
 
 - Read [README.md](README.md) for current status.
 - Read the [design specification](docs/superpowers/specs/2026-09-20-infoscry-design.md)
   for product requirements.
-- Before implementation, read the [plan](docs/superpowers/plans/2026-09-20-infoscry-implementation.md):
-  Global Constraints, Review Focus, the assigned task, and its prerequisites.
+- Before implementation, read [current status](docs/implementation-status.md)
+  and the [active plan](docs/superpowers/plans/2026-09-23-infoscry-next-work.md).
 
 ## Workflow
 
@@ -20,8 +21,8 @@ tests do not exist yet. Do not present planned paths or commands as implemented.
   together when a change is authorized.
 - Preserve unrelated working-tree changes. Keep commits scoped and follow the
   user's requested Git workflow.
-- Use the plan's pinned dependencies. Verify a concrete incompatibility before
-  changing the baseline and record the reason.
+- Preserve the build's pinned dependencies unless a concrete incompatibility
+  is verified; record the reason for any change.
 - For code changes, run the task's meaningful failing tests first, then focused
   passing tests and the applicable accumulated phase gate. Documentation-only
   changes need link, consistency, and diff checks rather than application tests.
@@ -51,8 +52,8 @@ tests do not exist yet. Do not present planned paths or commands as implemented.
 
 ## Embeddings, LLMs, and local boundaries
 
-- Require GPU embeddings: CUDA/O4 on Linux x86_64 and CoreML/standard ONNX on
-  macOS arm64. Never silently substitute CPU-only inference. Preserve diagnostic,
+- Require GPU embeddings through CoreML on macOS arm64 in v1. Linux/CUDA is
+  outside the v1 runtime. Never silently substitute CPU-only inference. Preserve diagnostic,
   keyword-search, and source-viewing access when GPU initialization fails.
 - Fit each complete embedding input within 512 tokens using the exact tokenizer,
   including prefix, special tokens, and repeated headers. Never truncate passages.
@@ -66,4 +67,5 @@ tests do not exist yet. Do not present planned paths or commands as implemented.
   document text, and provider authorization headers out of logs and errors.
 - Normal tests use redistributable fixtures, temporary data directories, and
   fake providers/tools. Do not send private documents to external services as
-  test data. Real GPU tests on both target platforms must pass before release.
+  test data. Run a real CoreML test on the local Mac before claiming GPU-dependent
+  functionality works. CI, packaging, and release work are outside scope.

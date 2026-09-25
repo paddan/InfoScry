@@ -7,8 +7,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -320,6 +322,96 @@ class AnthropicClientTest {
                 llm.stream(request()).toList(),
             )
             assertEquals(2, server.handledRequests, "one 429 then one 200")
+        }
+    }
+
+    @Test
+    fun `an assistant tool-call message encodes tool_use blocks and its results encode tool_result blocks`() = runBlocking {
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    body = anthropicStream(
+                        listOf(
+                            AnthropicWireEvent(
+                                "content_block_delta",
+                                """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}""",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ) { server, _, llm ->
+            llm.stream(
+                LlmRequest(
+                    messages = listOf(
+                        LlmMessage("user", "Run both."),
+                        LlmMessage(
+                            role = "assistant",
+                            content = "",
+                            toolCalls = listOf(
+                                ToolCall("call_1", "find", """{"query":"nightfall"}"""),
+                                ToolCall("call_2", "count", """{"year":2020}"""),
+                            ),
+                        ),
+                        LlmMessage("tool", """[{"title":"x"}]""", toolCallId = "call_1"),
+                        LlmMessage("tool", "42", toolCallId = "call_2"),
+                    ),
+                ),
+            ).toList()
+
+            val messages = LlmJson.parseToJsonElement(server.requestBody!!).jsonObject.getValue("messages").jsonArray
+            val assistant = messages[1].jsonObject
+            assertEquals("assistant", assistant.getValue("role").jsonPrimitive.content)
+            val blocks = assistant.getValue("content").jsonArray
+            assertEquals(2, blocks.size)
+            val first = blocks[0].jsonObject
+            assertEquals("tool_use", first.getValue("type").jsonPrimitive.content)
+            assertEquals("call_1", first.getValue("id").jsonPrimitive.content)
+            assertEquals("find", first.getValue("name").jsonPrimitive.content)
+            assertEquals(LlmJson.parseToJsonElement("""{"query":"nightfall"}"""), first.getValue("input"))
+            assertTrue(first.getValue("input") is JsonObject, "the tool input must be the parsed object, not a string")
+            val second = blocks[1].jsonObject
+            assertEquals("tool_use", second.getValue("type").jsonPrimitive.content)
+            assertEquals("call_2", second.getValue("id").jsonPrimitive.content)
+            assertEquals("count", second.getValue("name").jsonPrimitive.content)
+            assertEquals(LlmJson.parseToJsonElement("""{"year":2020}"""), second.getValue("input"))
+
+            val firstResult = messages[2].jsonObject
+            assertEquals("user", firstResult.getValue("role").jsonPrimitive.content, "a tool result is sent as the user role")
+            val firstResultBlocks = firstResult.getValue("content").jsonArray
+            assertEquals(1, firstResultBlocks.size)
+            assertEquals("tool_result", firstResultBlocks[0].jsonObject.getValue("type").jsonPrimitive.content)
+            assertEquals("call_1", firstResultBlocks[0].jsonObject.getValue("tool_use_id").jsonPrimitive.content)
+            assertEquals("""[{"title":"x"}]""", firstResultBlocks[0].jsonObject.getValue("content").jsonPrimitive.content)
+            val secondResult = messages[3].jsonObject
+            assertEquals("user", secondResult.getValue("role").jsonPrimitive.content)
+            assertEquals("call_2", secondResult.getValue("content").jsonArray[0].jsonObject.getValue("tool_use_id").jsonPrimitive.content)
+            assertEquals("42", secondResult.getValue("content").jsonArray[0].jsonObject.getValue("content").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `a plain text request body is unchanged`() = runBlocking {
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    body = anthropicStream(
+                        listOf(
+                            AnthropicWireEvent(
+                                "content_block_delta",
+                                """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}""",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ) { server, _, llm ->
+            llm.stream(request()).toList()
+            val message = LlmJson.parseToJsonElement(server.requestBody!!).jsonObject.getValue("messages").jsonArray[0].jsonObject
+            assertEquals("user", message.getValue("role").jsonPrimitive.content)
+            assertEquals("q", message.getValue("content").jsonPrimitive.content)
         }
     }
 

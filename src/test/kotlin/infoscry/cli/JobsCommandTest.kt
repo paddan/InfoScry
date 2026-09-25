@@ -145,6 +145,22 @@ class JobsCommandTest {
     }
 
     @Test
+    fun `the server-attached CLI reports safe error codes and points to logs`() {
+        ApiTestServer(dataDir).use { server ->
+            val job = server.context.jobs.enqueue(JobType.IMPORT)
+            server.context.jobs.claim(job.id)
+            server.context.jobs.fail(job.id, "JOB_FAILED", "Tesseract is missing from /private/tools/tesseract")
+
+            val listed = CliProcess.run(*args("jobs"))
+
+            assertEquals(0, listed.exitCode, listed.stderr)
+            assertContains(listed.stdout, "JOB_FAILED")
+            assertContains(listed.stdout, "Details are intentionally omitted")
+            assertFalse(listed.stdout.contains("/private/tools/tesseract"))
+        }
+    }
+
+    @Test
     fun `cancelling a queued job persists before the command returns`() {
         val jobId = withJobs { jobs -> jobs.enqueue(JobType.IMPORT).id }
 

@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.post
 import kotlinx.coroutines.flow.collect
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 
@@ -37,8 +38,8 @@ fun Routing.configureAskRoutes(context: AppContext) {
                         infoscry.llm.LlmProvider.ANTHROPIC -> AnthropicClient(selected, System::getenv)
                     }
                 },
-                persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, correction ->
-                    context.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, correction)
+                persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
+                    context.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
                 },
             )
             call.respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {
@@ -50,11 +51,34 @@ fun Routing.configureAskRoutes(context: AppContext) {
     }
 }
 
-@Serializable private data class AskWire(val type: String, val text: String? = null, val id: String? = null, val valid: Boolean? = null, val code: String? = null, val message: String? = null)
-private fun AskEvent.toWire() = when (this) {
+@Serializable
+internal data class AskWire(
+    val type: String,
+    val text: String? = null,
+    val id: String? = null,
+    val valid: Boolean? = null,
+    val inputTokens: Long? = null,
+    val outputTokens: Long? = null,
+    val code: String? = null,
+    val message: String? = null,
+    // Optional and empty by default so delta/usage/citation/error keep their exact shapes; NEVER
+    // keeps even `done` unchanged while no evidence exists.
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val evidence: List<EvidenceWire> = emptyList(),
+)
+
+internal fun AskEvent.toWire() = when (this) {
     is AskEvent.Delta -> AskWire("delta", text = text)
-    is AskEvent.Usage -> AskWire("usage", text = "$inputTokens/$outputTokens")
+    is AskEvent.Usage -> AskWire("usage", inputTokens = inputTokens, outputTokens = outputTokens)
     is AskEvent.Citation -> AskWire("citation", id = evidenceId, valid = valid)
-    is AskEvent.Done -> AskWire("done", text = answer)
+    is AskEvent.Done -> AskWire("done", text = answer, evidence = evidence.map {
+        EvidenceWire(
+            id = it.id,
+            documentId = it.documentId,
+            unitId = it.unitId,
+            locator = it.locator,
+            locatorLabel = it.locatorLabel,
+        )
+    })
     is AskEvent.Error -> AskWire("error", code = code, message = message)
 }

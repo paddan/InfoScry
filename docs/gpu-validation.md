@@ -39,7 +39,7 @@ a graph the CPU carries is refused even when CoreML ran something; a CPU-only pr
 or empty profile is refused rather than read as "no evidence") and exercised against the real model by
 `GpuModelIntegrationTest`, which reads the bound from the same constant.
 
-## The run this task passed on
+## The local run verified on 2026-09-24
 
 `./gradlew gpuIntegrationTest` on the machine below, with the model installed by `./gradlew embeddingModel`.
 
@@ -57,12 +57,12 @@ Measured, and written by the run to `build/gpu-validation/coreml-profile-summary
 
 | Measurement | Value |
 |---|---|
-| First session creation, including CoreML's compilation of the MLProgram | 6,243 ms |
-| Steady-state inference, one 8-token passage | **15 ms** |
+| First session creation, including CoreML's compilation of the MLProgram | 6,622 ms |
+| Steady-state inference, one 8-token passage | **17 ms** |
 | CoreML kernel events in the profile | 38 |
-| CoreML kernel time | 628.0 ms (99.90% of measured kernel time) |
+| CoreML kernel time | 856.2 ms (99.92% of measured kernel time) |
 | CPU kernel events | 80 |
-| CPU kernel time | 0.60 ms (0.10%) |
+| CPU kernel time | 0.66 ms (0.08%) |
 | Largest CoreML activation buffer reported | 129,080 bytes |
 
 ONNX Runtime's own partition report, from the same run:
@@ -119,13 +119,13 @@ hardware.
 Use `-PdataDir=/path/to/dir` for both `embeddingModel` and `gpuIntegrationTest` to work against a data
 directory other than `~/.infoscry`.
 
-## Release gate
+## Local acceptance check
 
-Before a release, this run is repeated from the **packaged runtime** (Task 28): unpack the archive into a
-clean path, run the GPU validation with the bundled Java, native provider and model, then import and search
-the fixture through the packaged launcher. A missing GPU run or a CPU-only execution blocks the release even
-when every mock test passes, and a Linux CI job — which v1 keeps only as a portability signal — can never
-authorise one.
+The real CoreML/model test passed from the current local build on 2026-09-24.
+A redistributable text fixture also imported into a disposable archive and
+appeared in semantic and hybrid browser search. These checks validate this
+Mac's embedding path, not Ask/Investigate provider behavior. No
+packaged-runtime or CI check is planned.
 
 ## Known limits
 

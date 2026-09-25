@@ -10,10 +10,8 @@ import infoscry.server.CollectionResponse
 import infoscry.server.CollectionsResponse
 import infoscry.server.CreateCollectionRequest
 import infoscry.server.ImportAcceptedResponse
-import infoscry.server.ImportItemsResponse
 import infoscry.server.ImportRequest
 import infoscry.server.JobResponse
-import infoscry.server.JobsResponse
 import infoscry.server.LOOPBACK_HOST
 import infoscry.server.ReindexAcceptedResponse
 import infoscry.server.SearchResponse
@@ -71,9 +69,9 @@ class LoopbackApi(
     }
 
     suspend fun listJobs(limit: Int): List<Job> =
-        ApiJson.decodeFromString<JobsResponse>(
+        ApiJson.decodeFromString<infoscry.server.JobsResponse>(
             expect(client.get("$base/api/jobs?limit=$limit")),
-        ).jobs
+        ).jobs.map { it.toDomain() }
 
     /** Hands one import to the server that owns the data directory. */
     suspend fun enqueueImport(collection: String, paths: List<String>): ImportAcceptedResponse {
@@ -148,19 +146,19 @@ class LoopbackApi(
 
     /** One job's current state, which is what `import --wait` polls. */
     suspend fun getJob(id: JobId): Job =
-        ApiJson.decodeFromString<JobResponse>(expect(client.get("$base/api/jobs/${id.value}"))).job
+        ApiJson.decodeFromString<JobResponse>(expect(client.get("$base/api/jobs/${id.value}"))).job.toDomain()
 
     /** One job's per-document results. */
     suspend fun importItems(id: JobId): List<infoscry.storage.ImportItem> =
-        ApiJson.decodeFromString<ImportItemsResponse>(
+        ApiJson.decodeFromString<infoscry.server.ImportItemsResponse>(
             expect(client.get("$base/api/jobs/${id.value}/items")),
-        ).items
+        ).items.map { it.toDomain() }
 
     suspend fun cancelJob(id: JobId): Job {
         val response = client.post("$base/api/jobs/${id.value}/cancel") {
             header()
         }
-        return ApiJson.decodeFromString<JobResponse>(expect(response)).job
+        return ApiJson.decodeFromString<JobResponse>(expect(response)).job.toDomain()
     }
 
     override fun close() {
@@ -170,6 +168,34 @@ class LoopbackApi(
     private fun io.ktor.client.request.HttpRequestBuilder.header() {
         headers.append(HttpHeaders.Authorization, "Bearer ${runtime.bearerToken.value}")
     }
+
+    private fun infoscry.server.JobApiView.toDomain() = Job(
+        id = id,
+        type = type,
+        state = state,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+        collectionId = collectionId,
+        stage = stage,
+        completed = completed,
+        total = total,
+        errorCode = errorCode,
+        cancelRequested = cancelRequested,
+    )
+
+    private fun infoscry.server.ImportItemApiView.toDomain() = infoscry.storage.ImportItem(
+        id = id,
+        jobId = jobId,
+        itemKey = "",
+        documentId = documentId,
+        sourcePath = "",
+        sourceName = sourceName,
+        outcome = outcome,
+        errorCode = errorCode,
+        errorMessage = null,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+    )
 
     private suspend fun expect(response: HttpResponse): String {
         val body = response.bodyAsText()

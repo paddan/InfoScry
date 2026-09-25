@@ -4,9 +4,22 @@ InfoScry is a planned local, single-user application for importing documents,
 searching their contents, and asking questions with citations to exact source
 locations.
 
-**Status: design and implementation planning.** The repository does not yet
-contain application code, a build wrapper, tests, or an installable release.
-The capabilities and requirements below describe the intended first release.
+**Status: implementation in progress.** The local backend, CLI, import/extraction
+pipeline, CoreML embedding path, hybrid search, crash-aware reindexing, LLM
+profiles, streaming OpenAI-compatible/Anthropic adapters, cited Ask, and
+bounded Investigate exist.
+The reader-focused web UI now has collection search, a bounded extracted-source
+view with a managed-original link, Ask, and an Investigate conversation panel.
+Local end-to-end acceptance is still open, as are the format-specific source
+views described in the design. Import and administration belong in the CLI.
+This project is built and run locally; CI and distributable packaging are not
+planned.
+
+The web reader uses a dark theme with a sidebar and separate Search, Ask, and
+Investigate views. Search settings include retrieval mode, file type, path,
+metadata, import dates, document status, and OCR-only filtering. Ask and
+Investigate select from configured LLM profiles; Search filters apply only to
+Search. Switching views preserves their current content.
 
 ## Planned capabilities
 
@@ -20,8 +33,8 @@ The capabilities and requirements below describe the intended first release.
 - Open citations at a page, section, slide, cell range, line range, or e-book
   chapter. Citation validation checks source identifiers; it does not by itself
   prove that an answer's claims are supported.
-- Inspect jobs, failures, source material, model usage, and logs through an
-  English web interface and a CLI.
+- Inspect sources, search results, answers, and citations in an English web
+  interface; handle import, jobs, profiles, and logs in the CLI.
 
 The design targets roughly 10,000 documents or one million pages. This is a
 sizing target, not a measured capacity claim.
@@ -54,19 +67,14 @@ GPU acceleration is required for embeddings. The initial runtime targets are:
 | Platform | GPU and execution provider | Model export |
 |---|---|---|
 | macOS arm64 | Apple GPU through CoreML | Standard E5 ONNX export |
-| Linux x86_64 | NVIDIA GPU through CUDA | E5 O4 ONNX export |
 
-The CUDA-optimized O4 export is not the Mac model. Exact OS, driver, native
-runtime, and device compatibility must be validated on real hardware before
-release. Intel Macs and non-CUDA Linux GPUs are outside the initial matrix.
-Diagnostics, source viewing, and existing keyword search are designed to remain
+Linux/CUDA is outside this local project: no CUDA runtime or O4 model path is
+included. Intel Macs and other GPU configurations are also outside the target.
+Diagnostics, source viewing, and existing keyword search remain
 available if GPU readiness fails.
 
 Tesseract is a mandatory runtime dependency; Calibre is optional for formats
-that require conversion. Releases will bundle Java 25, static web assets, and
-the matching model and native runtime. Development will require JDK 25 and
-Node.js/npm; Node.js will not be needed to run a release. Pinned dependency
-versions are maintained in the implementation plan.
+that require conversion. Local builds require JDK 25 and Node.js/npm.
 
 ## Privacy and boundaries
 
@@ -78,24 +86,252 @@ and are not stored in profiles or exposed to the browser.
 
 The server binds only to `127.0.0.1`. Imported documents are untrusted evidence;
 LLM tools cannot access arbitrary paths, switch collections, or browse the web.
-The first release excludes multi-user/public hosting, Windows, a knowledge
+The local-use scope excludes multi-user/public hosting, Windows, a knowledge
 graph, DRM bypass, and an external MCP server.
 
-## Development
+## Build locally
 
-Start with these documents:
+From the repository root on macOS arm64, with JDK 25, Node.js/npm, and
+Tesseract installed:
 
-1. [Design specification](docs/superpowers/specs/2026-09-20-infoscry-design.md)
-   — product behavior, architecture, security boundaries, and acceptance criteria.
-2. [Implementation plan](docs/superpowers/plans/2026-09-20-infoscry-implementation.md)
-   — 28 tasks, dependency baseline, interfaces, tests, and phase gates.
-3. [Agent instructions](AGENTS.md) — repository workflow and implementation invariants.
+```bash
+cd /Users/patrik/projects/infoscry
+export JAVA_HOME="$(asdf where java)"
+./gradlew installDist
+./gradlew embeddingModel # First time only; downloads about 1.1 GB
+```
 
-Build and CLI commands in the plan are instructions for future implementation,
-not commands that work in the current checkout. Once bootstrap is implemented,
-this README will document verified setup and development commands. Normal CI
-will use fakes; real GPU execution on both platforms is a separate mandatory
-validation gate.
+`installDist` compiles the backend, builds the web UI, and writes the runnable
+app and its dependencies to `build/install/infoscry/`. Rebuild after code
+changes. Gradle is not needed to run the built app; JDK 25 still is. The model
+download is separate from the build and installs into `~/.infoscry` by default.
+
+## Use the built app
+
+From the same repository directory, add the built launcher to `PATH` for this
+terminal session, then use `infoscry` directly:
+
+```bash
+export PATH="$PWD/build/install/infoscry/bin:$PATH"
+infoscry --help
+infoscry import --collection Default --wait /absolute/path/to/document.pdf
+infoscry --serve
+```
+
+Without changing `PATH`, run `build/install/infoscry/bin/infoscry` instead of
+`infoscry`. To use the short command in future terminal sessions, add the
+build's absolute `bin` directory to your shell's `PATH`. The executable stays
+inside the local build; no installer or system-wide installation is required.
+
+Replace the example document path with a real absolute path. Import finishes
+before the server starts and does not change the source file; InfoScry stores a
+managed copy. `infoscry --serve` (or `infoscry serve`) opens the local web UI
+in your default browser after the server starts. If that fails, open the URL
+printed in the terminal (normally <http://127.0.0.1:8765>) yourself. `--json`
+mode does not open a browser. The server uses `~/.infoscry` by default and runs
+until you press Ctrl-C. A disposable sample is
+`src/test/resources/fixtures/sample.txt` if you prefer not to start
+with a personal document; importing it still adds it to the selected archive.
+
+For an isolated archive, use the same `--data-dir /absolute/path/to/test-data`
+with both `import` and `--serve` (put the data-dir option after `--serve`),
+and install the model there with
+`./gradlew embeddingModel -PdataDir=/absolute/path/to/test-data`. That downloads
+a separate model copy. Do not run profile-management CLI commands while the
+server owns that data directory.
+
+Ask and Investigate require a configured LLM profile to be selected in the
+UI; a default profile for each mode is optional and only preselects a
+convenient choice. InfoScry does **not** start or host an LLM: it calls the
+endpoint you configure. Use `llm add` and `llm test <name>` from the CLI
+before starting the server. Optionally set a default with
+`llm set-default --ask <name>` or `llm set-default --investigate <name>`;
+`llm test` makes real probe requests to that endpoint. Ask and Investigate
+send selected document evidence to the configured endpoint, which may be
+external. Their browser flows have not yet had the final manual fake-provider
+acceptance check.
+
+## CLI reference
+
+Every command accepts `--json` for stable machine-readable output and
+`--data-dir /path` to work against a specific data directory (default
+`~/.infoscry`). Both options work before or after the subcommand name, so
+`infoscry --json collection list` and `infoscry collection list --json` are
+equivalent. `infoscry --help` and `infoscry <command> --help` print usage.
+
+### serve
+
+Start the local API and web UI in the foreground (Ctrl-C stops it). `--serve`
+is accepted as a top-level alias for `serve`.
+
+```bash
+infoscry serve
+infoscry serve --port 9000
+infoscry serve --json            # print the URL/port/pid as JSON, no browser
+infoscry serve --data-dir /path/to/test-data
+```
+
+Options: `--port` (default `8765`; `0` asks the OS for a free port),
+`--json`, `--data-dir`.
+
+### collection
+
+```bash
+infoscry collection list
+infoscry collection create Notes --description "Meeting notes"
+infoscry collection create Notes --json
+```
+
+Subcommands: `list` (shows name, id, OCR languages, description) and
+`create <name>` with `--description`. Options: `--json`, `--data-dir`.
+
+### import
+
+Import files or directories into a collection as immutable managed copies.
+Requires `--collection` and at least one path. With `--wait`, the command
+blocks until the import finishes and reports every document (and exits
+nonzero if any failed). Without a running server, the import runs in this
+process regardless of `--wait`.
+
+```bash
+infoscry import --collection Default /path/to/document.pdf
+infoscry import --collection Default --wait /path/to/dir /path/to/another.pdf
+infoscry import --collection Default --wait --json /path/to/document.pdf
+```
+
+Options: `--collection`, `--wait`, `--json`, `--data-dir`.
+
+### search
+
+Search one collection. `--collection` is required; the query is the
+positional argument. Default mode is hybrid.
+
+```bash
+infoscry search --collection Default "quarterly report"
+infoscry search --collection Default --mode keyword "invoice"
+infoscry search --collection Default --mode semantic "revenue trend"
+infoscry search --collection Default --limit 10 --media-type application/pdf "budget"
+infoscry search --collection Default --path reports/ --text "smith" --ocr-only "scan"
+infoscry search --collection Default --from 2026-01-01 --until 2026-03-01 "note"
+infoscry search --collection Default --status COMPLETE --json "summary"
+```
+
+Options: `--collection`, `--mode` (`keyword`, `semantic`, `hybrid`),
+`--media-type` (repeatable), `--path`, `--text`, `--from`, `--until`,
+`--status` (repeatable; `QUEUED`, `COPYING`, `EXTRACTING`, `OCR`, `CHUNKING`,
+`EMBEDDING`, `INDEXING`, `COMPLETE`, `COMPLETE_WITH_WARNINGS`, `FAILED`,
+`CANCELLED`, `NEEDS_TOOL`), `--ocr-only`, `--limit` (default `30`), `--json`,
+`--data-dir`.
+
+### ask
+
+Ask one question answered from a single retrieval pass, streaming the answer
+with citation markers. Requires a configured LLM profile; see `llm` below.
+
+```bash
+infoscry ask --collection Default --profile my-profile "What does the contract say about renewal?"
+infoscry ask --collection Default --profile my-profile --json "Summarize this document"
+```
+
+Options: `--collection`, `--profile`, `--json`, `--data-dir`.
+
+### jobs
+
+List jobs newest-first, or record a cancellation request for one job.
+
+```bash
+infoscry jobs
+infoscry jobs --limit 25
+infoscry jobs cancel <job-id>
+infoscry jobs --json
+```
+
+Options: `--limit` (default `100`), `--json`, `--data-dir`.
+
+### reindex
+
+Rebuild the search index from persisted text. Rebuilds every collection by
+default; `--collection` limits it to one. `--wait` blocks until finished.
+
+```bash
+infoscry reindex
+infoscry reindex --collection Default
+infoscry reindex --wait --json
+```
+
+Options: `--collection`, `--wait`, `--json`, `--data-dir`.
+
+### llm
+
+Configure LLM profiles and the per-role defaults. Profiles store only the
+endpoint, model, and the name of the environment variable holding the API
+key — the key itself never enters the profile.
+
+```bash
+infoscry llm add --name my-profile --provider openai-compatible \
+  --endpoint http://127.0.0.1:11434/v1 --model llama3.2 --api-key-env MY_API_KEY
+infoscry llm add --name anthropic-profile --provider anthropic \
+  --model claude-sonnet-4-5 --api-key-env ANTHROPIC_API_KEY
+infoscry llm list
+infoscry llm test my-profile        # makes real probe requests to the endpoint
+infoscry llm set-default --ask my-profile
+infoscry llm set-default --investigate my-profile
+```
+
+Subcommands: `list`, `add`, `set-default`, `test <name>`. `add` options:
+`--name`, `--provider` (`openai-compatible` or `anthropic`), `--model`,
+`--endpoint`, `--api-key-env`, `--context-window` (default `128000`),
+`--max-output-tokens` (default `4096`), `--input-price`,
+`--output-price`, `--cache-read-price`, `--tool-calling`, `--json`,
+`--data-dir`. `set-default` takes exactly one of `--ask <name>` or
+`--investigate <name>`.
+
+Note: profile-management commands cannot run while a server owns the same
+data directory.
+
+### logs
+
+Read the structured log stream, filtered and rendered for a terminal. Never
+takes the process lock, so it works while the server is running.
+
+```bash
+infoscry logs
+infoscry logs --follow
+infoscry logs --level WARN --since 30m
+infoscry logs --job <job-id> --component ingest
+```
+
+Options: `--follow`, `--level` (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`;
+default `INFO`), `--job`, `--component`, `--since` (e.g. `30m`, `12h`, `7d`),
+`--data-dir`.
+
+## Tests and development
+
+Run the normal offline suite first. It installs frontend dependencies, builds
+the web UI, and runs the JVM and Vitest tests with fake providers and temporary
+data directories:
+
+```bash
+JAVA_HOME="$(asdf where java)" ./gradlew check
+```
+
+The separate local dependency checks use real Tesseract and the installed
+CoreML model respectively; they fail rather than silently skip when required
+dependencies are unavailable:
+
+```bash
+JAVA_HOME="$(asdf where java)" ./gradlew externalTest
+JAVA_HOME="$(asdf where java)" ./gradlew gpuIntegrationTest
+cd web && npm run check # Svelte/TypeScript diagnostics after Gradle installed dependencies
+```
+
+These Gradle checks passed on this Mac on 2026-09-24. The browser was also
+used to find a CLI-imported sample through keyword, semantic, and hybrid
+search and open its source. See [implementation status](docs/implementation-status.md)
+for what remains unverified. For implementation work, read the
+[design specification](docs/superpowers/specs/2026-09-20-infoscry-design.md),
+[current work plan](docs/superpowers/plans/2026-09-23-infoscry-next-work.md),
+and [agent instructions](AGENTS.md).
 
 ## License
 

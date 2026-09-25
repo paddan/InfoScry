@@ -19,6 +19,7 @@ import infoscry.server.DEFAULT_PORT
 import infoscry.server.PRODUCT_NAME
 import infoscry.server.startLoopbackServer
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 
@@ -92,6 +93,24 @@ class ServeCommand(
             echo("$PRODUCT_NAME is listening on ${server.url}")
         }
         echo("Press Ctrl-C to stop.", err = true)
+
+        if (!options.json) {
+            val opened = try {
+                val opener = ProcessBuilder("open", server.url)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start()
+                if (opener.waitFor(5, TimeUnit.SECONDS)) {
+                    opener.exitValue() == 0
+                } else {
+                    opener.destroy()
+                    false
+                }
+            } catch (_: Exception) {
+                false
+            }
+            if (!opened) echo("Could not open the browser; use ${server.url} instead.", err = true)
+        }
 
         // The shutdown hook above closes everything; this thread only keeps the process alive.
         CountDownLatch(1).await()

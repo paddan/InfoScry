@@ -9,6 +9,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -290,6 +291,71 @@ class OpenAiCompatibleClientTest {
                 llm.stream(request()).toList(),
             )
             assertEquals(2, server.handledRequests, "one 429 then one 200")
+        }
+    }
+
+    @Test
+    fun `an assistant tool-call message encodes tool_calls and its results encode tool_call_id`() = runBlocking {
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    body = sse(listOf("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}""")),
+                ),
+            ),
+        ) { server, _, llm ->
+            llm.stream(
+                LlmRequest(
+                    messages = listOf(
+                        LlmMessage("user", "Run both."),
+                        LlmMessage(
+                            role = "assistant",
+                            content = "",
+                            toolCalls = listOf(
+                                ToolCall("call_1", "find", """{"query":"nightfall"}"""),
+                                ToolCall("call_2", "count", """{"year":2020}"""),
+                            ),
+                        ),
+                        LlmMessage("tool", """[{"title":"x"}]""", toolCallId = "call_1"),
+                        LlmMessage("tool", "42", toolCallId = "call_2"),
+                    ),
+                ),
+            ).toList()
+
+            val messages = LlmJson.parseToJsonElement(server.requestBody!!).jsonObject.getValue("messages").jsonArray
+            val assistant = messages[1].jsonObject
+            val calls = assistant.getValue("tool_calls").jsonArray
+            assertEquals(2, calls.size)
+            val first = calls[0].jsonObject
+            assertEquals("call_1", first.getValue("id").jsonPrimitive.content)
+            assertEquals("function", first.getValue("type").jsonPrimitive.content)
+            assertEquals("find", first.getValue("function").jsonObject.getValue("name").jsonPrimitive.content)
+            assertEquals("""{"query":"nightfall"}""", first.getValue("function").jsonObject.getValue("arguments").jsonPrimitive.content)
+            val second = calls[1].jsonObject
+            assertEquals("call_2", second.getValue("id").jsonPrimitive.content)
+            assertEquals("count", second.getValue("function").jsonObject.getValue("name").jsonPrimitive.content)
+            assertEquals("""{"year":2020}""", second.getValue("function").jsonObject.getValue("arguments").jsonPrimitive.content)
+            assertEquals("call_1", messages[2].jsonObject.getValue("tool_call_id").jsonPrimitive.content)
+            assertEquals("call_2", messages[3].jsonObject.getValue("tool_call_id").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `a plain text request body is unchanged`() = runBlocking {
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    body = sse(listOf("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}""")),
+                ),
+            ),
+        ) { server, _, llm ->
+            llm.stream(request()).toList()
+            val message = LlmJson.parseToJsonElement(server.requestBody!!).jsonObject.getValue("messages").jsonArray[0].jsonObject
+            assertEquals("user", message.getValue("role").jsonPrimitive.content)
+            assertEquals("q", message.getValue("content").jsonPrimitive.content)
+            assertFalse(message.containsKey("tool_calls"))
+            assertFalse(message.containsKey("tool_call_id"))
         }
     }
 

@@ -1,9 +1,10 @@
 # InfoScry Design Specification
 
 **Date:** 2026-09-20  
-**Status:** Revised after design/plan review; seven findings addressed, with GPU requirement approved
-**Amendment 2026-09-21 (v1 scope reduction):** the first release targets macOS arm64 with an Apple GPU only. The Linux x86_64/NVIDIA CUDA target is deferred because no NVIDIA hardware is currently available to validate it, and untested GPU code is worse than absent GPU code: v1 therefore implements no CUDA path at all. Linux remains an unvalidated portability target for the non-GPU test suites and is not a supported runtime. Everything below that says "both platforms", "CUDA", or "macOS/Linux" is superseded by this amendment.
+**Status:** Current local-use product contract
 **Product language:** English
+
+**Scope:** InfoScry is built and used locally by one person on macOS arm64 with an Apple GPU. CLI handles import/administration; the web UI handles collection selection, search, exact source viewing, Ask, and Investigate. Web import, job, Settings, prompt, diagnostic, and log pages are out of scope. CI, Linux/CUDA portability work, distributable packaging, signing, and release gates are out of scope. Existing administrative HTTP routes need not be removed.
 
 ## 1. Purpose
 
@@ -11,7 +12,7 @@ InfoScry is a local, single-user application for importing heterogeneous,
 unstructured documents, making them searchable, and asking LLM-assisted
 questions against them with verifiable citations.
 
-The first release must:
+The first local version must:
 
 - import documents into an immutable managed library;
 - extract text and structure from common document, image, Office, web, and
@@ -29,12 +30,11 @@ The first release must:
 - expose both an English-language web interface and a CLI.
 
 The design target is a local archive of up to roughly 10,000 documents or one
-million pages. This is a sizing target, not a requirement to include a
-million-page corpus in CI.
+million pages. This is a sizing target, not a required test-corpus size.
 
-## 2. Non-goals for the first release
+## 2. Non-goals for the first local version
 
-The first release will not include:
+The first local version will not include:
 
 - multiple users, authentication, roles, or tenant isolation;
 - Windows support;
@@ -66,10 +66,10 @@ exists, but they do not own application state or business logic.
 ### 3.2 Frontend
 
 The frontend uses SvelteKit with TypeScript. It is built as static assets and
-served by Ktor. Node.js is required for development and frontend builds, not at
-runtime in a release distribution.
+served by Ktor. Node.js is required for local frontend builds, not when
+running an already built application.
 
-The frontend uses normal CSS and accessible HTML. The first release will not
+The frontend uses normal CSS and accessible HTML. The first local version will not
 introduce Tailwind, a design-system framework, or a large component library.
 
 ### 3.3 Persistence and search
@@ -389,12 +389,12 @@ The default local embedding model is `intfloat/multilingual-e5-base` at revision
   enabled. There is one platform entry because there is one validated platform;
   the CUDA-optimized O4 export is not used and no CUDA dependency is declared.
 
-The release manifest pins artifact checksums, matching tokenizer files,
+The local model installation pins artifact checksums, matching tokenizer files,
 provider/native-runtime build, and provider options. GPU presence alone is not
 sufficient: the real model must load and execute accelerated transformer
 compute on the supported platform. CPU support for shape/control operators is
 allowed; CPU-only embedding inference is not. CoreML provider registration
-alone is not proof of GPU execution. The hardware release gate records device
+alone is not proof of GPU execution. The local hardware check records device
 traces, tested OS/driver/runtime versions, latency, and memory in
 `docs/gpu-validation.md`; exact compatibility is established by those tests,
 not asserted by this design. Intel Macs, Linux x86_64, and non-Apple GPUs are
@@ -467,7 +467,7 @@ RRF score = 1 / (60 + lexical rank) + 1 / (60 + vector rank)
 ```
 
 Missing ranks contribute zero. The top 30 fused chunks proceed to result
-presentation or Ask context selection. The first release does not include a
+presentation or Ask context selection. The first local version does not include a
 cross-encoder reranker.
 
 ### 8.2 Filters and results
@@ -567,7 +567,7 @@ inside tool results is evidence, not instruction. Active HTML content is never
 executed.
 
 OpenAI-compatible and Anthropic provider adapters invoke the Kotlin tool
-implementations directly. The first release does not start an MCP subprocess.
+implementations directly. The first local version does not start an MCP subprocess.
 The tools remain reusable application services so an `infoscry mcp` transport
 may be added as a later project if an external client needs it.
 
@@ -645,30 +645,19 @@ All UI copy is English.
 
 ```text
 InfoScry
-├── Collections
-├── Jobs
-└── Settings
+└── Collection selector
 
 Selected collection
-├── Documents
 ├── Search
 ├── Ask
 └── Investigate
 ```
 
-Collections display document count, content-unit count, storage size, recent
-imports, and failed or running jobs.
+The collection selector shows existing collections. Creating collections,
+importing documents, inspecting jobs, and configuring the application remain
+CLI administration tasks.
 
-### 12.2 Documents and import
-
-The Documents view shows filename, type, size, original path, metadata,
-language, content-unit count, status, OCR usage, quality, and warnings.
-
-The web UI supports drag-and-drop, multiple files, and a pasted local path for
-small imports. Large directory trees use the CLI. Job progress streams via SSE
-and can be cancelled.
-
-### 12.3 Search and source viewer
+### 12.2 Search and source viewer
 
 Search uses a result pane and source-viewer pane. Citation clicks open the exact
 source location.
@@ -682,7 +671,7 @@ Viewer behavior:
 - PowerPoint: slide preview plus extracted text;
 - fallback: extracted text and an **Open original** action.
 
-### 12.4 Ask and Investigate
+### 12.3 Ask and Investigate
 
 Ask displays one answer with inline citations and source cards. Investigate
 displays chat plus a collapsed activity timeline of searches and source reads.
@@ -692,21 +681,9 @@ view.
 Questions, answers, conversations, citations, model snapshots, token usage, and
 cost remain associated with the collection and may be deleted by the user.
 
-### 12.5 Settings
-
-Settings provides:
-
-- LLM profile management and tests;
-- separate Ask and Investigate defaults;
-- OCR languages per collection;
-- Tesseract and Calibre diagnostics;
-- embedding-model and index status;
-- data-directory information;
-- diagnostic logs;
-- prompt editing and reset;
-- collection instructions.
-
-API-key values are never rendered or accepted by the frontend.
+The web UI does not accept API-key values or provide an administration Settings
+page. CLI commands remain the operator interface; add a missing command only
+when a concrete local workflow needs it.
 
 ## 13. CLI
 
@@ -714,8 +691,6 @@ Required commands include:
 
 ```bash
 infoscry serve
-infoscry doctor
-
 infoscry collection create "Project Nightfall"
 infoscry collection list
 
@@ -753,22 +728,12 @@ Each entry contains timestamp, level, component, optional job and document IDs,
 message, and exception details.
 
 Logs rotate and have a bounded total size. They do not contain document text,
-questions, answers, source excerpts, or API keys by default. The web live log
-and CLI follow mode consume the same event stream.
-
-`infoscry doctor` reports:
-
-- data-directory access and process lock;
-- SQLite and Lucene health;
-- Java runtime;
-- Tesseract executable, version, and installed languages;
-- optional Calibre executable and version;
-- embedding model presence/checksum, required GPU/provider readiness, and native-runtime compatibility;
-- configured LLM profiles and environment-variable availability without values.
+questions, answers, source excerpts, or API keys by default. The CLI can read
+and follow the logs; a web log viewer is not part of the local-use scope.
 
 ## 15. Security
 
-- Ktor binds only to `127.0.0.1` in the first release.
+- Ktor binds only to `127.0.0.1` in the first local version.
 - CORS is disabled.
 - Mutating browser requests require a per-launch session/CSRF token.
 - The private `runtime.json` bearer token authenticates CLI loopback requests
@@ -788,8 +753,7 @@ and CLI follow mode consume the same event stream.
 ## 16. Error handling and consistency
 
 A failure in one document does not stop the remaining import job. Errors are
-persisted with actionable messages and visible in Documents, Jobs, logs, and
-CLI output.
+persisted with actionable messages and visible in logs and CLI output.
 
 SQLite is authoritative. Lucene changes are idempotent by `document_id`: all
 chunks for that ID are atomically replaced and committed before SQLite marks
@@ -855,53 +819,42 @@ Test layers:
    and generation swaps; concurrent import/delete attempts during rebuild;
    standalone and server-owned CLI process-lifetime/exit-code tests;
 5. provider-adapter tests against local mock HTTP servers, never paid APIs;
-6. one Playwright flow covering import, search, and opening a citation;
-7. CI on macOS with fakes, plus a mandatory real-GPU test on that hardware
-   target before release, and a non-GPU Linux job as a portability check that
-   cannot authorize a release. Real-model tests include 512-token
-   boundary coverage and must fail, not skip, when required hardware is absent;
+6. one local browser flow after CLI import, covering search and opening a citation;
+7. local macOS tests with fakes, plus a real CoreML run on this Mac before
+   claiming GPU-dependent functionality works. Real-model tests include
+   512-token boundary coverage and must fail, not skip, when required hardware
+   is absent;
 8. complete-request budget tests with long histories, small contexts, Unicode,
    tool schemas/results, whole-group eviction, and stable citation mappings.
 
 Large performance runs are manual and use generated or separately obtained
 corpora. They are not committed to the repository.
 
-## 18. Distribution
+## 18. Local build and operation
 
-A release archive contains:
-
-- InfoScry and a minimal Java 25 LTS runtime;
-- compiled SvelteKit assets;
-- the pinned ONNX model, tokenizer files, and the matching CoreML native GPU execution provider;
-- the `infoscry` launcher.
-
-Tesseract is installed separately and is mandatory. Calibre is installed
-separately and is optional. `infoscry doctor` provides platform-appropriate
-installation guidance when either is absent.
-
-The initial release format is a signed tar/zip archive for macOS arm64 with an
-Apple GPU. GPU/runtime prerequisites and validated versions are documented for
-that archive. Unpack and test the archive using its bundled Java/native runtime
-and model on that GPU; hosted fake-only CI does not satisfy this release gate. A
-native installer, Homebrew formula, system package, Docker image, Linux archive,
-and automatic updater are outside the first release.
+Build from the local checkout with JDK 25 and Node.js/npm. Ktor serves the
+compiled SvelteKit assets; Tesseract is installed separately and is mandatory,
+while Calibre is optional. Run the real CoreML/model and Tesseract checks on
+the local Mac. No archive, bundled Java runtime, installer, signing, CI, or
+release workflow is required.
 
 ## 19. Acceptance criteria
 
-The first release is complete when a user on the supported macOS arm64 GPU target can:
+The first locally usable version is complete when its user on the macOS arm64
+GPU target can:
 
 1. start InfoScry and open the local English web UI;
 2. create or use a collection;
 3. import a mixed directory of supported documents into managed storage;
 4. stop and restart an import without duplication, loss, or repeated OCR of committed pages;
-5. inspect failures without stopping successful documents;
+5. inspect failures through the CLI without stopping successful documents;
 6. run keyword, semantic, and hybrid searches with verified GPU embeddings and complete token coverage;
 7. open each result at its exact source location;
-8. configure an OpenAI-compatible or Anthropic profile without storing its key;
+8. configure an OpenAI-compatible or Anthropic profile through the CLI without storing its key;
 9. ask a RAG question and receive validated clickable citations;
 10. run an Investigate conversation with bounded search/read calls, complete-request budgets, and stable citations after context eviction;
-11. see token use, estimated cost, tool activity, and live logs;
+11. see token use, estimated cost, and tool activity in the web UI, and live logs in the CLI;
 12. run `infoscry logs --follow` while processing continues;
 13. rebuild Lucene and embeddings without repeating extraction/OCR or losing concurrent work, and recover interrupted collection deletion consistently;
-14. verify through tests that no paid provider call occurs in CI;
+14. verify through local automated tests that no paid provider call occurs;
 15. confirm original source files were never modified or deleted.

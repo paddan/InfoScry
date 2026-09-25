@@ -1,132 +1,68 @@
 # InfoScry implementation status
 
-**Last updated:** 2026-09-21 — paused mid-Phase 3 (`Task 18` is a partial commit).
-**Purpose:** a durable, versioned summary so a fresh session can resume without the SDD scratch directory.
-The working record — per-task reports, review packages, and every controller ruling — lives in the
-git-ignored `.superpowers/sdd/2026-09-20-infoscry-implementation/progress.md`; this file is the durable
-condensation of it. Keep it current as tasks land.
+**Updated:** 2026-09-25, branch `codex-task21-ask`.
 
-Planning documents:
+The backend and CLI implement local import/extraction/OCR, collections and jobs,
+CoreML embeddings, hybrid search, recoverable Lucene reindexing, LLM profiles,
+cited Ask, and bounded Investigate. The reader frontend now includes collection
+search, bounded extracted-source pages and managed originals, Ask, and an
+Investigate conversation panel with persisted history. A focused static-asset
+route fix lets the built JavaScript load in the browser.
 
-- Design spec: `docs/superpowers/specs/2026-09-20-infoscry-design.md`
-- Implementation plan (28 tasks, phases, gates, Review Focus): `docs/superpowers/plans/2026-09-20-infoscry-implementation.md`
+The remaining scope is in the [active local-use plan](superpowers/plans/2026-09-23-infoscry-next-work.md):
+exercise Ask and Investigate through the browser with a disposable fake LLM,
+decide whether the foundational source pane is sufficient or the design's
+format-specific previews are still required, and write a short tested run guide.
+Import, jobs, profiles, logs, and other administration stay in the CLI. There
+is no CI, package, or release milestone.
 
-## Where the work stands
+## Current code state
 
-| Tasks | State |
-|---|---|
-| 1–17 | **Complete, each independently reviewed, pushed.** Phase 1 and Phase 2 gates passed. |
-| 18 | **Complete, reviewed, with three recorded debts.** Phases: stages 1–3 and 5 of the recovery plan, plus a product fix from the review. The task review returned *Needs fixes* with one Important defect — the rebuild retired the old generation under an in-flight reader instead of respecting `drainLeases`' timeout contract — which is fixed and verified. **Phase 3 search gate passed:** `./gradlew check` green with **602 tests, 0 failures, 2 skipped**, and `search --collection Default --json test` prints `{"hits":[],"staleFiltered":0}` with CoreML loaded (557/637 nodes). Debts: (a) exclusive maintenance has **no live test** — its two tests are `@Disabled` because `BlockingDocumentEmbedder` blocks inside the reindex coroutine; (b) the drain-timeout branch is contract-correct but unprovable without a public lease seam; (c) minor review items (ceiling checked after embedding, exact-JSON assertion, no non-empty rebuild CLI test). |
-| 19 | **Complete, reviewed, approved** (`00db34a`) — LLM profiles that store only the environment-variable *name*, the three prompt layers with an un-replaceable core, migration `004_llm.sql` with the tables Tasks 20-22 need, real validation, and the `infoscry llm` CLI. The review found no Critical or Important defects and carried three obligations into Task 20. |
-| 20 | **Implemented and pushed; review not yet obtained** (`a3f2ee0`). Part A (`863095f`) — the provider-neutral contract, retry policy and SSE scanner, 16 tests. Part B (`1784ba5`) — the OpenAI-compatible adapter, seven tests; **saved by the controller** after three runs died at the commit step, so its report is controller-written. Part C1 (`b0a6436`) — the Anthropic Messages adapter, eight tests, and it found a **real Review Focus 5 leak in part B** (`decode` printed the payload to stderr and interpolated it into the error message). Part C2 (`559ea56`, `24dc75e`, `a3f2ee0`) — the leak fix plus the malformed-payload and retry-after-delta tests, the real two-request capability probe behind `llm test` (measured result persisted, nonexistent profile is an error), and the endpoint-sanitisation helper. `./gradlew check` green (5 m 42 s); `infoscry.llm.*` 45 tests. **One review attempt returned no report and must be re-dispatched before Task 20 is called done.** |
-| 21–28 | Not started. |
+The optional HTTP profile-probe refactor was removed with the user's approval.
+The existing CLI `llm test` command remains. Reader endpoints and the static
+asset fix are in `75771c0`; the reader UI and Investigate history/duplicate-turn
+guard are in `21ac4b0`. These are local branch commits, not a release. The
+browser/provider acceptance described below is still open.
 
-**Two flags for the Task 20 review when it runs:** (a) `LlmTestJson` lost its `notWiredReason` field, changing the CLI's
-JSON contract — adjudicate whether anything consumes it; (b) `LlmCommand`'s `describe()` still labels the declared
-checkbox as "measured" while `toolCallingMeasured` holds the real value — a one-line Task 19 leftover that
-contradicts the plan's "the measured result decides".
+## Verified so far
 
-**Task 18 is complete and Phase 3 is closed.** Next up is Task 19 (LLM profiles, prompts, capability
-persistence) under the partner's full-per-task-review decision for Tasks 18–22. Two debts travel with Task 18 and
-are listed in its row: the disabled maintenance tests, and the unprovable drain-timeout branch. **One trap for
-whoever adds the next migration:** `003` is taken by the job-types migration, so the LLM tables are `004_llm.sql`,
-and `SchemaMigrator.SUPPORTED_VERSION` plus `SchemaMigratorTest`'s expectations must move to 4 in the same change
-— forgetting that is exactly the defect the gate caught in the recovery.
+- The last accepted backend slices cover safe job/item API responses, collection
+  OCR settings and job paging, and LLM profile CRUD/defaults. Their focused
+  tests and accumulated `./gradlew check` passed; independent review found no
+  outstanding major issue.
+- Focused source-route tests passed, including cross-collection 404, original
+  byte ranges, and an emoji at the source-page boundary. The focused
+  Investigate-route suite passed all 11 tests, including collection-scoped
+  history. Frontend Vitest passed 22 tests, `npm run check` had zero diagnostics,
+  and `npm run build` succeeded. After the Investigate duplicate-turn guard,
+  the accumulated `./gradlew check` passed in 7m46s.
+- `./gradlew externalTest` passed against local Tesseract, and
+  `./gradlew gpuIntegrationTest` passed against the installed E5 model on this
+  Mac. The latest GPU profile recorded 38 CoreML kernel events and 99.92% of
+  measured kernel time in CoreML; see `docs/gpu-validation.md`.
+- In a disposable data directory, CLI import completed for
+  `src/test/resources/fixtures/sample.txt`. The built browser UI found it via
+  keyword, semantic, and hybrid modes, opened its extracted source at lines
+  1–6, and the original endpoint returned HTTP 206 for a byte range. The
+  fixture's SHA-256 remained unchanged. This is not a browser proof of Ask or
+  Investigate against a provider; their normal tests use fakes.
 
-### Task 18 recovery progress
+No branch integration or local acceptance is implied by this status.
 
-| Stage | State |
-|---|---|
-| 1. Make the test source compile | **Done** `5122893` — test-only change; the 61 compiler errors reduced to three real ones (manual `componentN` members on a data-class fixture, a missing `AppPaths` import, a `suspend` fixture), the rest were cascades. Product code untouched, and the product was right in both test/product disagreements it surfaced. |
-| 2. Make the generation content exact | **Done** `0d11bcc` — a rebuilt generation now publishes only the live document set: the copy-based path prunes documents that are no longer in SQLite, `validate` checks every collection's live-ID set rather than row counts, and new stale-row tests fail through **production validation** when the pruning is disabled. |
-| 3. Prove the marker and crash protocol | **Done** `294ff2c` — three properties pinned: startup sweeps an unpublished `lucene-next-*`, a retired generation and the temporary `current.tmp` while never removing the generation the marker names (even when that name still spells `next`); kill-before/after-swap restart selects exactly the generation the marker names; and the swapped-in generation holds **exactly the database's live document set** (`liveDocumentIds == storedDocumentIds`), which is Review Focus 10's core claim. **Recorded gap:** the lease property — a reader that leased the old generation finishing before it is retired — is **implemented but unproven**: `LuceneIndex.drainLeases` exists (kotlin:303, with `openLeases`) and `ReindexService` calls it (kotlin:246, `RETIRE_TIMEOUT_MILLIS`), but no test exercises it, and writing one needs a way to hold a reader inside the old generation while the swap publishes. Stage 6's protocol verifier owns proving it or escalating a small Stage 3 addendum. Also deferred: the new sweep test's reliance on the seeded documents' ordinal order (`list[0]`/`list[1]`) is a fixture artefact worth pinning. **Record correction:** this stage's report claimed three green commands, but the committed test file did not compile (an undefined `collectionA` in the marked-generation test). The controller found that when Stage 4 was dispatched, repaired it in `8dacd3d` by dropping the redundant search assertion the helper already makes, and verified `compileTestKotlin` plus the class run. Treat the stage reports on this task as claims to verify, not as evidence. |
-| 4. Prove exclusive maintenance and job restart | **Blocked and its two tests are `@Disabled` by operator decision.** Attempt 1 finished chunking twice in the *shared* seeding helper, which throws during seeding and regressed another test — reverted. Attempt 2 used a single `finishChunking` with a deliberately stale `tokenizerId` **only for these two tests**, which worked: the rebuild now reaches the blocking embedder (that fix is not committed; re-derive it from the ledger entry "Task 18: Stage 4 attempt 2"). It then exposed the real blocker: **`BlockingDocumentEmbedder` blocks inside the reindex coroutine**, so the rebuild never yields and neither test can ever observe maintenance being held. Fixing the harness — block off the reindex dispatcher, or drive the rebuild from a separate coroutine and release it from the test thread — is the prerequisite for re-enabling them. **Consequence to remember: exclusive maintenance currently has no test.** |
-| 5. HTTP and CLI boundary tests | **Done** `f4fc518` — `SearchRoutesTest` (11 tests: mandatory collection 400, unknown-collection 404, cross-collection unit 404, no full document text in a response, stable empty JSON, over-long query 400 `QUERY_TOO_LONG`, hybrid-without-model 503 `MODEL_NOT_INSTALLED` with the remedy, reindex 202) plus `SearchCommandTest` and `ReindexCommandTest` driving real child processes in both modes, including `--wait --json` reporting a terminal job result while keeping ownership. It also fixed a product defect: `SearchCommand` printed a raw stack trace for a refused search and now prints the code and remedy. |
-| 6. Gate, review, commit | **Done.** Gate green (602 tests, 0 failures, 2 skipped), CLI smoke valid, and the task review over `534fad3..f4fc518` completed: it adjudicated all six protocol points (1–4 and 6 implemented *and* proven; 5 implemented but with no live test) and found the retire-under-reader defect, fixed in `bb04243` and verified by a scoped re-review. |
+## Dark reader interface
 
-### Task 18 WIP contents
+The reader now uses a dark sidebar layout inspired by Palmemordsarkivet, with
+separate Search, Ask, and Investigate views. Switching views preserves mounted
+panels and their current state. The Search sidebar exposes the existing API's
+mode, file type, path, metadata, import-date, document-status, and OCR filters.
+Ask and Investigate have separate configured-profile selectors; Search filters
+do not apply to those modes. Sources open beside the active view on desktop and
+below it on narrow screens, with a close action.
 
-Present in the WIP and partially exercised: `search/ReindexService`, `jobs/ReindexJobHandler`,
-`server/SearchRoutes`, `cli/SearchCommand`, `cli/ReindexCommand`, `cli/JobWaiting`, migration
-`db/migration/003_job_types.sql` (a second job type — the migration Task 3's review predicted), plus edits in
-`search/LuceneIndex`, `search/SearchService`, `AppContext`, `server/Routes`, `jobs/ImportJobHandler`,
-`jobs/JobHandler`, `storage/SchemaMigrator`, `domain/Models` and three test files. No part of it is reviewed
-or gated yet.
-
-The design direction the WIP chose: Lucene 10.4 cannot read vectors back, so instead of an API that reuses
-vectors between index generations, decide **per document** whether the carried-forward content is already
-authoritative (marker + row counts) and otherwise delete and rebuild that document's entries. The plan permits
-"carry forward **or reconstruct**".
-
-## Resume checklist, in order
-
-1. **Stage 4** — prove exclusive maintenance and job restart: with a blocking fake embedder (seeded as above),
-   an import and a collection deletion during the build must be refused (423 / `MaintenanceInProgressException`)
-   and accepted afterwards; then prove the `REINDEX` migration from an older schema version, claim, process
-   death, `resetInterrupted`, resume with the payload's collection ID, and that a stale publisher refuses to
-   replace a newer current generation.
-2. **Stage 5** — add the HTTP and CLI boundary tests: GET/POST search, reindex and content-unit; mandatory
-   collection; cross-collection 404; no full documents in a search response; stable empty JSON; **4xx for
-   caller-fixable input and 503 for model/GPU/index environment failures**, with no sensitive text in logs or
-   errors; and CLI behaviour in both server and foreground mode, including `--wait --json` reporting a terminal
-   job result while holding process ownership.
-3. **Stage 6** — run the gate (`compileTestKotlin`, the focused reindex and jobs tests, `./gradlew check`, the
-   CLI smoke `search --collection Default --json test`, `git diff --check`), verify the diff against Task 18's
-   six protocol points — including the **lease property**, which is implemented (`LuceneIndex.drainLeases`,
-   called by `ReindexService`) but has no test: proving it needs a way to hold a reader inside the old
-   generation while the swap publishes, and if no such seam exists the verifier escalates it as a small Stage 3
-   addendum — task-review Task 18 over `534fad3..HEAD`, update this file with the real gate status,
-   and only then continue to Task 19.
-
-
-Review depth from here, per the partner's split: **full per-task review for Tasks 19–22** (the LLM chain:
-profiles, streaming clients, Ask's budget and citation validation, Investigate's bounded tool loop) and
-**lighter review for Tasks 23–28** (UI, docs, CI, packaging) — implementer plus the task's own gate, with the
-single broad whole-branch review after Task 28.
-
-## Rulings that bind the remaining work
-
-- **v1 runs on macOS arm64 with CoreML only.** The Linux x86_64/NVIDIA CUDA target was dropped on 2026-09-21
-  because no NVIDIA hardware exists to validate it, so **no CUDA path is implemented at all** — no
-  `onnxruntime_gpu` dependency, no `model_O4.onnx`, no CUDA registration. Linux remains a non-GPU portability
-  job in CI that cannot authorize a release.
-- **Chunk character offsets address the unit's search text**, the single offset space. `extractedText` is
-  byte-faithful evidence; **Task 24 must locate a highlighted span inside the stored `searchText`** and never
-  carry an offset into `extractedText`.
-- **A flow that completes with no `Finished` event is a terminal `FAILED`** with a persisted warning — never
-  `COMPLETE_WITH_WARNINGS` — and no unit count is required. Two refusal keys exist
-  (`HtmlExtractor.OVERSIZED_KEY = "document-too-large"`, `DocumentExtractor.DOCUMENT_REFUSED_KEY = "document"`).
-- **The extraction fingerprint covers** the document hash, extractor schema version, OCR languages, the probed
-  OCR tool version, the render DPI and the probed e-book tool version — so a tool upgrade forces a new
-  fingerprint rather than silently reusing checkpoints.
-- **An absent model is `MODEL_NOT_INSTALLED`** (remedy: `./gradlew embeddingModel`); a model present without a
-  usable GPU is `GPU_UNAVAILABLE`. Embedding never falls back to CPU-only inference. Chunking may use the
-  self-naming provisional counter when the model is absent, because chunk metadata records which tokenizer built
-  the chunks and `needsChunking` keys on it.
-- **Client-input refusals are 4xx, never 500**: `QUERY_TOO_LONG`, `FILTER_TOO_BROAD`, and the wildcard/fuzzy
-  rewrite residual. The mandatory collection belongs at the route/CLI boundary, not in `SearchService`.
-- **Logging convention:** redaction is by named field only, so never interpolate a document excerpt, question,
-  path, filename or credential into a log message — pass it as a named field.
-- **No model weights are committed.** `models/embedding-model.json` pins the revision, artifacts and expected
-  SHA-256 values; `ModelManager` installs into the data directory's `models/`.
-
-## Working environment
-
-- Java 25 comes from asdf (`temurin-25.0.4+101.0.LTS`, pinned in `.tool-versions`). The asdf layout has no
-  `Contents/Home`, so **run every Gradle command as** `JAVA_HOME=$(asdf where java) ./gradlew …`.
-- The embedding model (~1.1 GB) is installed in the default data directory (`~/.infoscry`). Redirect both the
-  `embeddingModel` task and `gpuIntegrationTest` with `-PdataDir=<dir>`.
-- Test tags: `external` (real Tesseract), `model`/`gpu` (real CoreML). The default suite excludes them; run them
-  with `./gradlew externalTest` and `./gradlew gpuIntegrationTest`. The GPU test **fails rather than skips**
-  when the hardware or provider is unavailable.
-- The suite is ~586 `@Test` methods and the gate takes a few minutes; one archive-scale search test alone costs
-  ~30 s because Task 16's per-document idempotent writer has no batch entry point.
-
-## Known deferred items
-
-Each task's review recorded deferred minors in the ledger; the whole-branch review after Task 28 must triage
-them. The recurring ones: test-only seams left in production code; a handful of files missing trailing
-newlines; `doctor` and the operator docs still to name several surfaces (`embeddingModel`, `ModelInstaller`,
-`-PdataDir`, the profiling directory, the DOCTYPE refusal for EPUB 2 books, the 15-minute Calibre permit hold);
-and calibration-style judgement calls (the 50 000-chunk per-document index ceiling, the 1 000-token query bound,
-the 8-pictures-per-e-book-chapter bound).
+The frontend suite passed 24 tests, Svelte/TypeScript checks passed with zero
+diagnostics, and the static build passed. A local browser check at 1440px and
+390px verified dark rendering even with a light OS preference, filter request
+parameters, profile selection, cost retention, keyboard tabs, retained answers,
+and source links for Ask and Investigate. These browser checks used intercepted
+fixture API responses, not a running backend/provider; the end-to-end acceptance
+and format-specific source-viewer gates above remain open.

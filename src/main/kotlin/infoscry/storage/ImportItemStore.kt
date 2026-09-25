@@ -28,6 +28,7 @@ data class ImportItem(
     val jobId: JobId,
     val itemKey: String,
     val sourcePath: String,
+    val sourceName: String? = null,
     val documentId: DocumentId?,
     val outcome: ImportItemOutcome,
     val errorCode: String?,

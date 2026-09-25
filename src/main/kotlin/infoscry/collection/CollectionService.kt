@@ -147,15 +147,23 @@ class CollectionService(
         description: String? = null,
         ocrLanguages: String = CollectionStore.DEFAULT_OCR_LANGUAGES,
     ): Collection = coordinator.withMutation {
-        assertMutationsAllowed()
+        requireMutationsAllowed()
         collections.create(name, description, ocrLanguages)
     }
 
     suspend fun rename(id: CollectionId, newName: String): Collection = coordinator.withMutation {
-        assertMutationsAllowed()
+        requireMutationsAllowed()
         requireActive(id)
         collections.rename(id, newName)
     }
+
+    /** Updates the settings future import jobs snapshot; already queued payloads remain unchanged. */
+    suspend fun updateOcrLanguages(id: CollectionId, ocrLanguages: String): Collection =
+        coordinator.withMutation {
+            requireMutationsAllowed()
+            requireActive(id)
+            collections.updateOcrLanguages(id, ocrLanguages)
+        }
 
     // ---- Deletion ----
 
@@ -181,7 +189,7 @@ class CollectionService(
         observe: suspend (DeletionStep) -> Unit,
     ): DeletionOperation =
         coordinator.withExclusiveMaintenance("delete collection ${collectionId.value}") {
-            assertMutationsAllowed()
+            requireMutationsAllowed()
             rollForward(beginDeletion(collectionId, confirmName), observe)
         }
 
@@ -383,7 +391,8 @@ class CollectionService(
         }
     }
 
-    private fun assertMutationsAllowed() {
+    /** Refuses unrelated settings writes too when startup deletion recovery is blocked. */
+    fun requireMutationsAllowed() {
         if (blocked.isNotEmpty()) throw DeletionRecoveryBlockedException(blocked)
     }
 

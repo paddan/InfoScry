@@ -18,6 +18,10 @@ import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * A client for Anthropic's Messages API.
@@ -100,7 +104,7 @@ class AnthropicClient(
             profile.apiKeyEnvironmentVariable?.let { variable -> lookup(variable)?.let { key -> header("x-api-key", key) } }
             header("anthropic-version", "2023-06-01")
             contentType(ContentType.Application.Json)
-            setBody(LlmJson.encodeToString(messagesRequest(request, stream = false)))
+            setBody(LlmJson.encodeToString(buildAnthropicMessagesRequest(profile.model, request, stream = false)))
         }
         if (!response.status.isSuccess()) throw mapFailure(response.status.value)
         return try { val result = LlmJson.decodeFromString<AnthropicCompletionResponse>(response.bodyAsText()); LlmCompletion(result.content.firstOrNull()?.text.orEmpty(), result.usage?.let { TokenUsage(it.input_tokens ?: 0, it.output_tokens ?: 0, it.cache_read_input_tokens ?: 0) } ?: TokenUsage(0, 0)) }
@@ -116,7 +120,7 @@ class AnthropicClient(
                 }
                 header("anthropic-version", "2023-06-01")
                 contentType(ContentType.Application.Json)
-                setBody(LlmJson.encodeToString(messagesRequest(request)))
+                setBody(LlmJson.encodeToString(buildAnthropicMessagesRequest(profile.model, request)))
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -306,32 +310,6 @@ class AnthropicClient(
 
     // ---- Request encoding ----
 
-    private fun messagesRequest(request: LlmRequest, stream: Boolean = true): AnthropicMessagesRequest = AnthropicMessagesRequest(
-        model = profile.model,
-        max_tokens = request.maxOutputTokens,
-        stream = stream,
-        messages = request.messages.map { AnthropicMessage(role = it.role, content = it.content) },
-        tools = request.tools.takeIf { it.isNotEmpty() }?.map { tool ->
-            AnthropicTool(
-                name = tool.name,
-                description = tool.description,
-                input_schema = tool.parametersJson?.let { raw -> jsonParameters(raw) },
-            )
-        },
-        tool_choice = request.requiredToolName?.let { required ->
-            AnthropicToolChoice(name = required)
-        },
-    )
-
-    private fun jsonParameters(raw: String): JsonElement = try {
-        LlmJson.parseToJsonElement(raw)
-    } catch (failure: Throwable) {
-        throw LlmError.MalformedResponseError(
-            "a tool definition carried invalid parameters JSON",
-            cause = failure,
-        )
-    }
-
     private fun mapFailure(statusCode: Int): LlmError {
         if (statusCode == 400) {
             return LlmError.UnsupportedToolsError(
@@ -380,7 +358,10 @@ data class AnthropicToolChoice(
 )
 
 @Serializable
-data class AnthropicMessage(val role: String, val content: String)
+data class AnthropicMessage(
+    val role: String,
+    val content: JsonElement,
+)
 
 @Serializable
 data class AnthropicTool(
@@ -423,3 +404,69 @@ data class AnthropicUsage(
     val cache_read_input_tokens: Long? = null,
 )
 @Serializable data class AnthropicCompletionResponse(val content: List<AnthropicContentBlock> = emptyList(), val usage: AnthropicUsage? = null)
+
+/**
+ * The one place a request becomes an Anthropic Messages envelope. The adapter sends exactly what
+ * [RequestBudget.measure] measures, so tool encoding exists in one copy only.
+ */
+internal fun buildAnthropicMessagesRequest(
+    model: String,
+    request: LlmRequest,
+    stream: Boolean = true,
+): AnthropicMessagesRequest = AnthropicMessagesRequest(
+    model = model,
+    max_tokens = request.maxOutputTokens,
+    stream = stream,
+    messages = request.messages.map { message ->
+        when {
+            message.toolCalls.isNotEmpty() -> AnthropicMessage(
+                role = message.role, // the contract invariant guarantees "assistant"
+                content = buildJsonArray {
+                    message.toolCalls.forEach { call ->
+                        add(
+                            buildJsonObject {
+                                put("type", "tool_use")
+                                put("id", call.id)
+                                put("name", call.name)
+                                put("input", toolParametersJson(call.arguments))
+                            },
+                        )
+                    }
+                },
+            )
+            message.toolCallId != null -> AnthropicMessage(
+                role = "user", // Anthropic sends tool results as user-role content blocks
+                content = buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("type", "tool_result")
+                            put("tool_use_id", message.toolCallId)
+                            put("content", message.content)
+                        },
+                    )
+                },
+            )
+            else -> AnthropicMessage(role = message.role, content = JsonPrimitive(message.content))
+        }
+    },
+    tools = request.tools.takeIf { it.isNotEmpty() }?.map { tool ->
+        AnthropicTool(
+            name = tool.name,
+            description = tool.description,
+            input_schema = tool.parametersJson?.let { raw -> toolParametersJson(raw) },
+        )
+    },
+    tool_choice = request.requiredToolName?.let { required ->
+        AnthropicToolChoice(name = required)
+    },
+)
+
+/** Parses one tool parameters/arguments JSON document; the shared gate for both providers and the budget. */
+internal fun toolParametersJson(raw: String): JsonElement = try {
+    LlmJson.parseToJsonElement(raw)
+} catch (failure: Throwable) {
+    throw LlmError.MalformedResponseError(
+        "a tool carried invalid parameters JSON",
+        cause = failure,
+    )
+}

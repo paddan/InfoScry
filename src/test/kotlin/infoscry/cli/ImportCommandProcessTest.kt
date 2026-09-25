@@ -90,8 +90,24 @@ class ImportCommandProcessTest {
         val report = ApiJson.decodeFromString<ImportResult>(result.stdout.lines().last { it.isNotBlank() })
         assertEquals(1, report.imported)
         assertEquals(1, report.failed)
-        assertTrue(report.items.any { it.sourcePath.endsWith("blob.bin") && it.errorCode == "UNSUPPORTED_MEDIA_TYPE" })
+        assertTrue(report.items.any { it.sourcePath?.endsWith("blob.bin") == true && it.errorCode == "UNSUPPORTED_MEDIA_TYPE" })
         assertContains(result.stderr, "1 of 2 document(s) could not be imported")
+    }
+
+    @Test
+    fun `standalone text import keeps its local per-file diagnostic`() {
+        val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
+
+        val result = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default", blob.toString(),
+        )
+        val output = result.stdout + result.stderr
+
+        assertNotEquals(0, result.exitCode)
+        assertContains(output, "UNSUPPORTED_MEDIA_TYPE")
+        assertContains(output.lowercase(), "no extractor")
+        assertFalse(output.contains("omitted by the local API"), output)
+        assertFalse(output.contains("server log"), output)
     }
 
     @Test
@@ -146,6 +162,49 @@ class ImportCommandProcessTest {
             val report = ApiJson.decodeFromString<ImportResult>(lastJsonLine(waiting))
             assertEquals(1, report.imported)
             assertEquals("COMPLETE", report.state)
+        } finally {
+            server.terminate()
+        }
+    }
+
+    @Test
+    fun `server-attached wait reports safe per-file codes without leaking paths or exception text`() {
+        val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
+        val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
+        try {
+            server.awaitStdoutLine("{")
+
+            val result = runHarness(
+                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "--wait", blob.toString(),
+            )
+
+            assertNotEquals(0, result.exitCode, "a failed server-owned item must still make --wait fail")
+            assertContains(result.stdout, "UNSUPPORTED_MEDIA_TYPE")
+            assertContains(result.stdout, "blob.bin")
+            assertTrue(!result.stdout.contains("no extractor"), result.stdout)
+            assertTrue(!result.stdout.contains(dataDir.toString()), result.stdout)
+        } finally {
+            server.terminate()
+        }
+    }
+
+    @Test
+    fun `server-attached text wait explains where omitted per-file details went`() {
+        val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
+        val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
+        try {
+            server.awaitStdoutLine("{")
+
+            val result = runHarness(
+                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--wait", blob.toString(),
+            )
+            val output = result.stdout + result.stderr
+
+            assertNotEquals(0, result.exitCode)
+            assertContains(output, "UNSUPPORTED_MEDIA_TYPE")
+            assertContains(output, "Detailed failure text is omitted by the local API; see the server log.")
+            assertFalse(output.contains(dataDir.toString()), output)
+            assertFalse(output.lowercase().contains("no extractor"), output)
         } finally {
             server.terminate()
         }

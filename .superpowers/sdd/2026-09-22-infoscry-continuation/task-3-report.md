@@ -63,3 +63,23 @@ Audit-rader skrivs per faktiskt call. Initialt supplied evidence och initiala re
 RED/GREEN: en kontrollerad mutation som tog bort cache-read-priset gav avsiktligt röd `LlmStoreTest` på kostnadsassertionen. Efter återställning blev `JAVA_HOME="$(asdf where java)" ./gradlew test --tests 'infoscry.ask.*' --tests infoscry.llm.RequestBudgetTest --tests infoscry.llm.LlmStoreTest --tests infoscry.storage.SchemaMigratorTest` grön. `git diff --check` var grön.
 
 Full `JAVA_HOME="$(asdf where java)" ./gradlew --no-daemon check` kunde inte slutföras: tråddumpen visade att den hängde i orelaterade `infoscry.jobs.JobRunnerTest.a stage waits for exclusive maintenance instead of being refused` (`JobRunnerTest.kt:189`), varefter endast den egna testprocessen stoppades. Frontenddelen hann verifiera 5/5 Vitest-test gröna före hängningen.
+
+## Fixrunda 5/5
+
+Stabiliserade CLI-/SSE-kontrakten: `AskEvent.Usage` bär nu numeriska `inputTokens`/`outputTokens`, routen skickar stabila wire-typer och CLI:t har ett enda `--json`-resultatobjekt. Fokusprov gröna.
+
+## Fixrunda 6/6 — oberoende task review
+
+Full `JAVA_HOME="$(asdf where java)" ./gradlew check` vid `b932dfb`: BUILD SUCCESSFUL 5m54s, 680 JVM-test, 0 failures/errors/skipped, Vitest 5/5.
+
+En fristående reviewer granskade hela Task 21-spannet `80e011c..HEAD` mot Task 21, Review Focus 4 och Global Constraints. Åtgärdade fynd:
+
+- Critical: CLI visade detostreamade (okorrigerade) svaret även när en correction bytt ut det. `correctedTail` surfar nu det korrigerade svaret i icke-JSON-läget.
+- Important: evidens-texten kunde bryta sig ur `<evidence>`-ramen, och correction-requesten lade rå evidens i en `system`-roll. Evidens escapas nu (`&`, `<`, `>`) och all oväntad dokumenttext ligger kvar i user-rollen; system-rollen innehåller bara tillåtna ID:n.
+- Important: `ContextPacker` kunde hoppa över samma-dokument-träffar permanent när ett nytt dokument inte rymdes. En andra backfill-pass fyller kvarvarande budget; near-duplicate-kollapsen är nu en konservativ 90 %-regel i stället för enbart exakt text.
+- Important: `conversations.prompt_version` var hårdkodad `1` och `retrieval_snapshot` var `"{}"`. Promptversionen kommer nu från `prompt_overrides` (shipped default = 1, första override = 2) och `AskService` skickar en riktig retrieval-snapshot (`mode`/`topHits`/`maxEvidence`).
+- Minor: tog bort den döda `jsonEvent`-mappningen.
+
+Nya/utökade tester: delimiter-injektion, near-duplicate, 12-taket, budget-backfill, blank fråga, flera invalid-ID:n -> exakt en correction, providerfel, correction-rendering i CLI, SSE-typsekvens, snapshot/reopen via `locator_json`.
+
+Verifiering efter fixrundan: fokustester för Ask/budget/store/routes/CLI 29/29 gröna; full `JAVA_HOME="$(asdf where java)" ./gradlew check` — BUILD SUCCESSFUL, 690 JVM-test, 0 failures/errors/skipped, Vitest 5/5; `git diff --check` ren.

@@ -36,18 +36,23 @@ internal object CliProcess {
     }
 
     /** Starts the CLI and keeps a handle on its output, for commands that run until told to stop. */
-    fun startRunning(vararg args: String): RunningCli = RunningCli(start(*args))
+    fun startRunning(vararg args: String, environment: Map<String, String> = emptyMap()): RunningCli =
+        RunningCli(start(*args, environment = environment))
 
     /** Starts the CLI without waiting. */
-    fun start(vararg args: String): Process = ProcessBuilder(
-        javaExecutable(),
-        // The SQLite driver loads a native library; without this the JDK warns on every run.
-        "--enable-native-access=ALL-UNNAMED",
-        "-cp",
-        System.getProperty("java.class.path"),
-        "infoscry.MainKt",
-        *args,
-    ).start()
+    fun start(vararg args: String, environment: Map<String, String> = emptyMap()): Process {
+        val builder = ProcessBuilder(
+            javaExecutable(),
+            // The SQLite driver loads a native library; without this the JDK warns on every run.
+            "--enable-native-access=ALL-UNNAMED",
+            "-cp",
+            System.getProperty("java.class.path"),
+            "infoscry.MainKt",
+            *args,
+        )
+        builder.environment().putAll(environment)
+        return builder.start()
+    }
 
     private fun pump(stream: java.io.InputStream, into: MutableList<String>) {
         val thread = Thread {

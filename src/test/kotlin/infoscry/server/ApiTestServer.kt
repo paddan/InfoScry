@@ -16,6 +16,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import java.nio.file.Path
+import infoscry.server.DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -43,13 +44,16 @@ internal enum class Credential {
 internal class ApiTestServer(
     val dataDir: Path,
     index: CollectionIndexRemover = CollectionIndexRemover.NONE,
+    jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
 ) : AutoCloseable {
 
     val context: AppContext = AppContext.open(dataDir, index)
 
     // Port 0 lets the operating system choose, so a test never collides with another server — including
     // a second server started inside the same test to observe how maintenance excludes it.
-    val server: RunningServer = runBlocking { startLoopbackServer(context, port = 0) }
+    val server: RunningServer = runBlocking {
+        startLoopbackServer(context, port = 0, jobEventIdleDeadlineMillis = jobEventIdleDeadlineMillis)
+    }
     val client: HttpClient = HttpClient(CIO)
 
     val url: String get() = server.url

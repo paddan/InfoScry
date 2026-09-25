@@ -104,6 +104,26 @@ class CollectionStore(private val database: Database) {
         }
     }
 
+    /** Updates the OCR languages used when future import jobs snapshot this collection's settings. */
+    fun updateOcrLanguages(id: CollectionId, ocrLanguages: String): Collection {
+        val trimmedLanguages = ocrLanguages.trim()
+        require(trimmedLanguages.isNotEmpty()) { "collection ocr languages must not be blank" }
+        return database.transaction { connection ->
+            val existing = selectById(connection, id)
+                ?: throw NoSuchElementException("no collection with id ${id.value}")
+            val updatedAt = Instants.now()
+            connection.prepareStatement(
+                "UPDATE collections SET ocr_languages = ?, updated_at = ? WHERE id = ?",
+            ).use { statement ->
+                statement.setString(1, trimmedLanguages)
+                statement.setString(2, updatedAt)
+                statement.setString(3, id.value)
+                statement.executeUpdate()
+            }
+            existing.copy(ocrLanguages = trimmedLanguages, updatedAt = updatedAt)
+        }
+    }
+
     /**
      * Deletes a collection row and cascades to its documents and jobs. Returns whether the
      * collection existed, and refuses to act unless [confirmName] is the collection's own name.

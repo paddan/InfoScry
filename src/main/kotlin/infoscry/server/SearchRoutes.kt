@@ -1,16 +1,12 @@
 package infoscry.server
 
 import infoscry.AppContext
-import infoscry.domain.CollectionId
-import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.JobType
-import infoscry.domain.ContentUnit
 import infoscry.domain.SourceLocation
 import infoscry.jobs.ReindexJobPayload
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
-import infoscry.search.SearchOutcome
 import infoscry.search.SearchService
 import infoscry.search.LuceneIndex
 import infoscry.search.SearchUnavailableException
@@ -28,6 +24,7 @@ import kotlinx.serialization.Serializable
 data class SearchHitResponse(
     val collectionId: String,
     val documentId: String,
+    val title: String,
     val unitId: String,
     val chunkOrdinal: Int,
     val text: String,
@@ -40,26 +37,6 @@ data class SearchHitResponse(
 /** What one search returned, plus how many index rows pointed at database rows that no longer exist. */
 @Serializable
 data class SearchResponse(val hits: List<SearchHitResponse>, val staleFiltered: Int)
-
-/**
- * A unit a citation opened: the text the citation renders, the text as it was read, and the evidence
- * that backs it.
- *
- * `searchText` is the form a highlighted span is located in (the offset space the chunks address);
- * `extractedText` is the reading itself. Both are one unit's worth, not a document's.
- */
-@Serializable
-data class ContentUnitResponse(
-    val id: String,
-    val documentId: String,
-    val ordinal: Int,
-    val locator: SourceLocation,
-    val extractedText: String,
-    val searchText: String,
-    val artifactRelativePath: String?,
-    val artifactSha256: String?,
-    val meanConfidence: Double?,
-)
 
 /** What `POST /api/reindex` answers: the request was accepted, and a job carries it. */
 @Serializable
@@ -107,15 +84,6 @@ fun Route.configureSearchRoutes(context: AppContext, coordinator: MutationCoordi
             call.handle {
                 val body = call.receiveJson<SearchRequestBody>()
                 call.respondJson(HttpStatusCode.OK, call.runSearch(context, body.filters, body.query))
-            }
-        }
-    }
-
-    route("/api/content-units/{id}") {
-        get {
-            call.handle {
-                val unit = call.unitOrNotFound(context)
-                call.respondJson(HttpStatusCode.OK, unit.response())
             }
         }
     }
@@ -171,9 +139,11 @@ private suspend fun ApplicationCall.runSearch(
     )
     return SearchResponse(
         hits = outcome.hits.map { hit ->
+            val document = context.documents.get(hit.documentId)
             SearchHitResponse(
                 collectionId = hit.collectionId.value,
                 documentId = hit.documentId.value,
+                title = document?.title?.takeIf(String::isNotBlank) ?: document?.originalFilename ?: hit.documentId.value,
                 unitId = hit.unitId.value,
                 chunkOrdinal = hit.chunkOrdinal,
                 text = hit.text,
@@ -185,35 +155,6 @@ private suspend fun ApplicationCall.runSearch(
         },
         staleFiltered = outcome.staleFiltered,
     )
-}
-
-private fun ContentUnit.response(): ContentUnitResponse = ContentUnitResponse(
-    id = id.value,
-    documentId = documentId.value,
-    ordinal = ordinal,
-    locator = locator,
-    extractedText = extractedText,
-    searchText = searchText,
-    artifactRelativePath = artifactRelativePath,
-    artifactSha256 = artifactSha256,
-    meanConfidence = meanConfidence,
-)
-
-private suspend fun ApplicationCall.unitOrNotFound(context: AppContext): ContentUnit {
-    val id = parameters["id"]?.let(::ContentUnitId) ?: throw BadRequestException("a unit needs an id")
-    val unit = context.content.readUnit(id)
-        ?: throw NoSuchElementException("no content unit with id ${id.value}")
-    // A citation must not open a unit whose collection has been tombstoned or deleted, whatever the
-    // index still says about it: the database is the authority, and a deleted collection's evidence is
-    // not evidence this archive serves.
-    val document = context.documents.get(unit.documentId)
-        ?: throw NoSuchElementException("no document with id ${unit.documentId.value} exists")
-    val collection = context.collections.get(document.collectionId)
-        ?: throw NoSuchElementException("no collection with id ${document.collectionId.value} exists")
-    if (collection.lifecycle != infoscry.domain.CollectionLifecycle.ACTIVE) {
-        throw NoSuchElementException("no content unit with id ${id.value} exists")
-    }
-    return unit
 }
 
 /** The filters and query one search request names, from the query string or the POST body. */

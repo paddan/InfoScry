@@ -8,4 +8,11 @@ object AppInfo {
     const val dataFormatVersion = 1
 }
 
-fun main(args: Array<String>) = RootCommand().main(args)
+fun main(args: Array<String>) {
+    val commandArgs = if (args.firstOrNull() == "--serve") {
+        arrayOf("serve", *args.copyOfRange(1, args.size))
+    } else {
+        args
+    }
+    RootCommand().main(commandArgs)
+}

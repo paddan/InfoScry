@@ -61,6 +61,63 @@ class ServeCommandTest {
     }
 
     @Test
+    fun `serve flag starts the same local server from the compiled CLI entry point`() {
+        val cli = CliProcess.startRunning("--serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
+        try {
+            val published = ApiJson.decodeFromString<ServeResponse>(cli.awaitStdoutLine("{"))
+            assertEquals(HttpStatusCode.OK, runBlocking { get("${published.url}/api/collections").status })
+        } finally {
+            cli.kill()
+        }
+    }
+
+    @Test
+    fun `interactive serve opens the listening URL in the default browser`() {
+        val browserRecord = dataDir.resolve("opened-url")
+        val fakeOpen = Files.createDirectories(dataDir.resolve("browser-bin")).resolve("open")
+        Files.writeString(fakeOpen, "#!/bin/sh\nprintf '%s' \"\$1\" > \"\$INFOSCRY_BROWSER_RECORD\"\n")
+        assertTrue(fakeOpen.toFile().setExecutable(true))
+        val environment = mapOf(
+            "PATH" to "${fakeOpen.parent}:${System.getenv("PATH")}",
+            "INFOSCRY_BROWSER_RECORD" to browserRecord.toString(),
+        )
+
+        val cli = CliProcess.startRunning("--serve", "--data-dir", dataDir.toString(), "--port", "0", environment = environment)
+        try {
+            val line = cli.awaitStdoutLine("InfoScry is listening on ")
+            val url = line.removePrefix("InfoScry is listening on ")
+            val deadline = System.nanoTime() + 3_000_000_000L
+            while (!Files.exists(browserRecord) && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue(Files.exists(browserRecord), "the server did not ask the OS to open a browser")
+            assertEquals(url, Files.readString(browserRecord))
+            assertEquals(HttpStatusCode.OK, runBlocking { get("$url/api/collections").status })
+        } finally {
+            cli.kill()
+        }
+    }
+
+    @Test
+    fun `browser launch failure leaves the server available and prints its URL`() {
+        val fakeOpen = Files.createDirectories(dataDir.resolve("browser-bin")).resolve("open")
+        Files.writeString(fakeOpen, "#!/bin/sh\nexit 1\n")
+        assertTrue(fakeOpen.toFile().setExecutable(true))
+        val environment = mapOf("PATH" to "${fakeOpen.parent}:${System.getenv("PATH")}")
+
+        val cli = CliProcess.startRunning("serve", "--data-dir", dataDir.toString(), "--port", "0", environment = environment)
+        try {
+            val url = cli.awaitStdoutLine("InfoScry is listening on ").removePrefix("InfoScry is listening on ")
+            val deadline = System.nanoTime() + 3_000_000_000L
+            while (cli.stderr().none { it.contains("Could not open the browser") } && System.nanoTime() < deadline) {
+                Thread.sleep(10)
+            }
+            assertTrue(cli.stderr().any { it.contains("Could not open the browser; use $url instead.") })
+            assertEquals(HttpStatusCode.OK, runBlocking { get("$url/api/collections").status })
+        } finally {
+            cli.kill()
+        }
+    }
+
+    @Test
     fun `a second serve on the same data directory fails with an actionable message`() {
         val first = CliProcess.startRunning(*serveArgs("--json", "serve", "--port", "0"))
         try {

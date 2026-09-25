@@ -7,11 +7,15 @@ import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.domain.JobState
 import infoscry.domain.JobType
 import infoscry.jobs.ImportJobPayload
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
+import infoscry.storage.DuplicateLlmProfileNameException
 import infoscry.storage.MaintenanceInProgressException
+import infoscry.storage.ImportItem
+import infoscry.storage.ImportItemOutcome
 import io.ktor.http.ContentType
 import infoscry.search.SearchUnavailableException
 import io.ktor.http.HttpStatusCode
@@ -62,16 +66,47 @@ data class CreateCollectionRequest(
 data class RenameCollectionRequest(val name: String)
 
 @Serializable
+data class UpdateOcrLanguagesRequest(val ocrLanguages: String)
+
+@Serializable
 data class DeleteCollectionRequest(val confirmName: String)
 
 @Serializable
 data class DeleteCollectionResponse(val collectionId: String, val phase: String)
 
 @Serializable
-data class JobsResponse(val jobs: List<Job>)
+data class JobApiView(
+    val id: JobId,
+    val type: JobType,
+    val state: JobState,
+    val createdAt: String,
+    val updatedAt: String,
+    val collectionId: CollectionId? = null,
+    val stage: String? = null,
+    val completed: Int = 0,
+    val total: Int = 0,
+    val errorCode: String? = null,
+    val cancelRequested: Boolean = false,
+)
 
 @Serializable
-data class JobResponse(val job: Job)
+data class JobsResponse(val jobs: List<JobApiView>)
+
+@Serializable
+data class JobResponse(val job: JobApiView)
+
+/** A safe browser row: no selected source path, item key, or untrusted failure text. */
+@Serializable
+data class ImportItemApiView(
+    val id: String,
+    val jobId: JobId,
+    val documentId: infoscry.domain.DocumentId?,
+    val sourceName: String?,
+    val outcome: ImportItemOutcome,
+    val errorCode: String?,
+    val createdAt: String,
+    val updatedAt: String,
+)
 
 /** What a caller asks for: the collection by name or id, and the files or directories it selected. */
 @Serializable
@@ -84,11 +119,11 @@ data class ImportRequest(val collection: String, val paths: List<String>)
  * same as the import being finished. A caller that needs the outcome asks for the job, or passes `--wait`.
  */
 @Serializable
-data class ImportAcceptedResponse(val accepted: Boolean, val job: Job)
+data class ImportAcceptedResponse(val accepted: Boolean, val job: JobApiView)
 
 /** One file's result, so a caller can report which documents failed and why. */
 @Serializable
-data class ImportItemsResponse(val items: List<infoscry.storage.ImportItem>)
+data class ImportItemsResponse(val items: List<ImportItemApiView>)
 
 /**
  * The wire format, in one place.
@@ -110,7 +145,11 @@ val ApiJson = Json {
  * 409 for "that deletion cannot be finished or that name is taken", 404 for "no such collection",
  * 400 for a request that is malformed or not confirmed.
  */
-fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials) {
+fun Application.configureRoutes(
+    context: AppContext,
+    credentials: ApiCredentials,
+    jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
+) {
     installRequestGuard(credentials)
 
     routing {
@@ -160,6 +199,17 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
                     )
                 }
             }
+
+            patch("/ocr-languages") {
+                call.handle {
+                    val id = call.collectionId()
+                    val request = call.receiveJson<UpdateOcrLanguagesRequest>()
+                    call.respondJson(
+                        HttpStatusCode.OK,
+                        CollectionResponse(context.collectionService.updateOcrLanguages(id, request.ocrLanguages)),
+                    )
+                }
+            }
         }
 
         route("/api/imports") {
@@ -184,7 +234,7 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
                         )
                         call.respondJson(
                             HttpStatusCode.Accepted,
-                            ImportAcceptedResponse(accepted = true, job = job),
+                            ImportAcceptedResponse(accepted = true, job = job.toApiView()),
                         )
                     }
                 }
@@ -194,9 +244,15 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
         route("/api/jobs") {
             get {
                 call.handle {
-                    val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: DEFAULT_JOB_PAGE
-                    val offset = call.request.queryParameters["offset"]?.toIntOrNull() ?: 0
-                    call.respondJson(HttpStatusCode.OK, JobsResponse(context.jobs.list(limit, offset)))
+                    val limit = call.request.queryParameters["limit"]?.let { parameter ->
+                        parameter.toIntOrNull()?.takeIf { it > 0 }
+                            ?: throw BadRequestException("limit must be a whole number greater than zero, was '$parameter'")
+                    } ?: DEFAULT_JOB_PAGE
+                    val offset = call.request.queryParameters["offset"]?.let { parameter ->
+                        parameter.toIntOrNull()?.takeIf { it >= 0 }
+                            ?: throw BadRequestException("offset must be a whole number, zero or greater, was '$parameter'")
+                    } ?: 0
+                    call.respondJson(HttpStatusCode.OK, JobsResponse(context.jobs.list(limit, offset).map(Job::toApiView)))
                 }
             }
 
@@ -205,7 +261,7 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
                     val jobId = call.jobId()
                     val job = context.jobs.get(jobId)
                         ?: throw NoSuchElementException("no job with id ${jobId.value}")
-                    call.respondJson(HttpStatusCode.OK, JobResponse(job))
+                    call.respondJson(HttpStatusCode.OK, JobResponse(job.toApiView()))
                 }
             }
 
@@ -219,7 +275,7 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
                     }
                     call.respondJson(
                         HttpStatusCode.OK,
-                        ImportItemsResponse(context.importItems.listForJob(jobId)),
+                        ImportItemsResponse(context.importItems.listForJob(jobId).map(ImportItem::toApiView)),
                     )
                 }
             }
@@ -229,15 +285,23 @@ fun Application.configureRoutes(context: AppContext, credentials: ApiCredentials
             post("/{id}/cancel") {
                 call.handle {
                     val jobId = call.jobId()
-                    call.respondJson(HttpStatusCode.OK, JobResponse(context.cancelJob(jobId)))
+                    call.respondJson(HttpStatusCode.OK, JobResponse(context.cancelJob(jobId).toApiView()))
                 }
             }
         }
 
         configureSearchRoutes(context, context.mutations)
+        configureSourceRoutes(context)
+        configureLlmProfileRoutes(context)
         configureAskRoutes(context)
+        configureInvestigationRoutes(context)
+        configureDocumentRoutes(context)
+        configureJobEventRoutes(context, jobEventIdleDeadlineMillis)
 
         // The compiled SvelteKit application. Its client-side routes all fall back to this file.
+        // Give generated assets their own specific route. The generic client-side fallback below
+        // otherwise wins for nested asset paths and serves HTML where the browser expects JS/CSS.
+        staticResources("/_app", "$STATIC_RESOURCES/_app", index = null)
         staticResources("/", STATIC_RESOURCES, index = "index.html")
 
         // The frontend routes in the browser, so reloading a deep link has to reach the shell instead of
@@ -312,6 +376,31 @@ fun ApplicationCall.collectionId(): CollectionId {
     return CollectionId(raw)
 }
 
+private fun Job.toApiView() = JobApiView(
+    id = id,
+    type = type,
+    state = state,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+    collectionId = collectionId,
+    stage = stage,
+    completed = completed,
+    total = total,
+    errorCode = errorCode,
+    cancelRequested = cancelRequested,
+)
+
+private fun ImportItem.toApiView() = ImportItemApiView(
+    id = id,
+    jobId = jobId,
+    documentId = documentId,
+    sourceName = sourcePath.substringAfterLast('/').substringAfterLast('\\').takeIf(String::isNotEmpty),
+    outcome = outcome,
+    errorCode = errorCode,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+)
+
 /** A request the caller can fix. */
 class BadRequestException(message: String) : IllegalArgumentException(message)
 
@@ -347,6 +436,11 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
         respondJson(
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = "DUPLICATE_COLLECTION_NAME", message = duplicate.message.orEmpty())),
+        )
+    } catch (duplicate: DuplicateLlmProfileNameException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "DUPLICATE_LLM_PROFILE_NAME", message = "an LLM profile with that name already exists")),
         )
     } catch (mismatch: CollectionConfirmationMismatchException) {
         respondJson(

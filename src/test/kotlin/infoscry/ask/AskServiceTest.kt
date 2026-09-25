@@ -13,6 +13,7 @@ import infoscry.llm.LlmRequest
 import infoscry.llm.LlmStreamingClient
 import infoscry.llm.PromptService
 import infoscry.llm.TokenUsage
+import infoscry.llm.LlmError
 import infoscry.search.SearchFilters
 import infoscry.search.SearchHit
 import infoscry.search.SearchMode
@@ -52,8 +53,8 @@ class AskServiceTest {
             completion = LlmCompletion("corrected [S1]", TokenUsage(19, 23, 29)),
         )
         val saved = mutableListOf<SavedAsk>()
-        val service = service(search, provider) { request, answer, evidence, initialUsage, initialCitations, correction ->
-            saved += SavedAsk(request, answer, evidence, initialUsage, initialCitations, correction)
+        val service = service(search, provider) { request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
+            saved += SavedAsk(request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
         }
 
         val events = service.ask(request()).toList()
@@ -61,11 +62,13 @@ class AskServiceTest {
         assertEquals(listOf("question"), search.questions)
         assertEquals(1, provider.streamRequests.size)
         assertEquals(1, provider.completionRequests.size)
-        assertEquals("initial [S999]", provider.completionRequests.single().messages.last().content)
+        assertEquals("initial [S999]", provider.completionRequests.single().messages.last().content.substringAfterLast("Answer to correct:\n"))
         assertTrue(provider.completionRequests.single().messages.first().content.contains("S1"))
+        assertEquals("user", provider.completionRequests.single().messages.last().role)
         assertEquals("corrected [S1]", assertIs<AskEvent.Done>(events.last()).answer)
         assertEquals(listOf(AskEvent.Citation("S1", true)), events.filterIsInstance<AskEvent.Citation>())
         assertEquals(1, saved.size)
+        assertEquals("{\"mode\":\"HYBRID\",\"topHits\":30,\"maxEvidence\":12}", saved.single().retrievalSnapshot)
         assertEquals(TokenUsage(11, 13, 17), saved.single().initialUsage)
         assertEquals(listOf("S999"), saved.single().initialCitations.invalid)
         assertEquals("corrected [S1]", saved.single().correction?.answer)
@@ -74,9 +77,52 @@ class AskServiceTest {
     }
 
     @Test
+    fun `blank question makes no search provider or persistence call`() = runBlocking {
+        val provider = ScriptedProvider(listOf(LlmEvent.TextDelta("unused")), LlmCompletion("unused"))
+        val service = service(CapturedSearch(listOf(hit())), provider) { _, _, _, _, _, _, _ -> error("must not persist") }
+
+        val events = service.ask(AskRequest(CollectionId("collection"), "   ", profile())).toList()
+
+        assertEquals("INVALID_REQUEST", assertIs<AskEvent.Error>(events.single()).code)
+        assertTrue(provider.streamRequests.isEmpty())
+    }
+
+    @Test
+    fun `multiple invalid ids trigger exactly one correction and unknown markers are reported invalid`() = runBlocking {
+        val provider = ScriptedProvider(
+            streamed = listOf(LlmEvent.TextDelta("first [S998] second [S999]")),
+            completion = LlmCompletion("corrected [S1] still [S777]", TokenUsage(1, 2, 0)),
+        )
+        var saved: SavedAsk? = null
+        val service = service(CapturedSearch(listOf(hit())), provider) { request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
+            saved = SavedAsk(request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+        }
+
+        val events = service.ask(request()).toList()
+
+        assertEquals(1, provider.completionRequests.size)
+        assertEquals("corrected [S1] still [S777]", assertIs<AskEvent.Done>(events.last()).answer)
+        val snapshot = requireNotNull(saved)
+        assertEquals(listOf("S1"), snapshot.correction?.citations?.valid)
+        assertEquals(listOf("S777"), snapshot.correction?.citations?.invalid)
+        assertEquals(
+            listOf(AskEvent.Citation("S1", true), AskEvent.Citation("S777", false)),
+            events.filterIsInstance<AskEvent.Citation>(),
+        )
+    }
+
+    @Test
+    fun `a provider failure maps to a typed error and is not persisted`() = runBlocking {
+        val service = service(CapturedSearch(listOf(hit())), FailingProvider) { _, _, _, _, _, _, _ -> error("must not persist") }
+
+        val events = service.ask(request()).toList()
+
+        assertEquals("LLM_REQUEST_FAILED", assertIs<AskEvent.Error>(events.single()).code)    }
+
+    @Test
     fun `initial budget overflow makes no streaming or correction calls`() = runBlocking {
         val provider = ScriptedProvider(listOf(LlmEvent.TextDelta("unused")), LlmCompletion("unused"))
-        val service = service(CapturedSearch(listOf(hit())), provider) { _, _, _, _, _, _ -> error("must not persist") }
+        val service = service(CapturedSearch(listOf(hit())), provider) { _, _, _, _, _, _, _ -> error("must not persist") }
 
         val events = service.ask(request(profile = profile(contextWindow = 1))).toList()
 
@@ -91,7 +137,7 @@ class AskServiceTest {
             streamed = listOf(LlmEvent.TextDelta("x".repeat(8_000) + " [S999]"), LlmEvent.Usage(TokenUsage(1, 1))),
             completion = LlmCompletion("unused"),
         )
-        val service = service(CapturedSearch(listOf(hit())), provider) { _, _, _, _, _, _ -> error("must not persist") }
+        val service = service(CapturedSearch(listOf(hit())), provider) { _, _, _, _, _, _, _ -> error("must not persist") }
 
         val events = service.ask(request(profile = profile(contextWindow = 3_000))).toList()
 
@@ -100,7 +146,7 @@ class AskServiceTest {
         assertEquals("CONTEXT_BUDGET_EXCEEDED", assertIs<AskEvent.Error>(events.last()).code)
     }
 
-    private fun service(search: AskSearch, provider: ScriptedProvider, persistence: AskPersistence): AskService =
+    private fun service(search: AskSearch, provider: AskProvider, persistence: AskPersistence): AskService =
         AskService(search, PromptService(store), client = { provider }, persistence = persistence)
 
     private fun request(profile: LlmProfile = profile()) = AskRequest(CollectionId("collection"), "question", profile)
@@ -120,7 +166,7 @@ class AskServiceTest {
 
     private data class SavedAsk(
         val request: AskRequest, val answer: String, val evidence: List<Evidence>, val initialUsage: TokenUsage,
-        val initialCitations: CitationValidation, val correction: CorrectionSnapshot?,
+        val initialCitations: CitationValidation, val retrievalSnapshot: String, val correction: CorrectionSnapshot?,
     )
 
     private class CapturedSearch(private val hits: List<SearchHit>) : AskSearch {
@@ -133,9 +179,11 @@ class AskServiceTest {
         }
     }
 
+    private interface AskProvider : LlmStreamingClient, LlmCompletionClient
+
     private class ScriptedProvider(
         private val streamed: List<LlmEvent>, private val completion: LlmCompletion,
-    ) : LlmStreamingClient, LlmCompletionClient {
+    ) : AskProvider {
         val streamRequests = mutableListOf<LlmRequest>()
         val completionRequests = mutableListOf<LlmRequest>()
 
@@ -148,5 +196,12 @@ class AskServiceTest {
             completionRequests += request
             return completion
         }
+    }
+
+    private object FailingProvider : AskProvider {
+        override fun stream(request: LlmRequest): Flow<LlmEvent> =
+            kotlinx.coroutines.flow.flow { throw infoscry.llm.LlmError.ProviderUnavailableError("down") }
+
+        override suspend fun complete(request: LlmRequest): LlmCompletion = error("must not correct")
     }
 }

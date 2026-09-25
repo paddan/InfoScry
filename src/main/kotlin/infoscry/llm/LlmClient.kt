@@ -1,6 +1,7 @@
 package infoscry.llm
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.Serializable
 
 /**
  * Provider-neutral request and stream types for LLM calls.
@@ -11,9 +12,23 @@ import kotlinx.coroutines.flow.Flow
  */
 
 /** A chat message in provider-neutral form. The role is a provider string ("system", "user", ...). */
-data class LlmMessage(val role: String, val content: String) {
+data class LlmMessage(
+    val role: String,
+    val content: String,
+    val toolCalls: List<ToolCall> = emptyList(),
+    val toolCallId: String? = null,
+) {
     init {
         require(role.isNotBlank()) { "LlmMessage.role must not be blank" }
+        require(toolCalls.isEmpty() || role == "assistant") {
+            "LlmMessage.toolCalls requires an assistant message"
+        }
+        require(toolCallId == null || role == "tool") {
+            "LlmMessage.toolCallId requires a tool message"
+        }
+        require(toolCalls.isEmpty() || toolCallId == null) {
+            "a message cannot carry both tool calls and a tool call id"
+        }
     }
 }
 
@@ -25,6 +40,7 @@ data class ToolDefinition(val name: String, val description: String, val paramet
 }
 
 /** A call the model requested: provider-neutral [id], [name] and [arguments] JSON. */
+@Serializable
 data class ToolCall(val id: String, val name: String, val arguments: String) {
     init {
         require(id.isNotBlank()) { "ToolCall.id must not be blank" }

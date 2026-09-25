@@ -67,11 +67,11 @@ class JobsCommand : CliktCommand(name = "jobs") {
             CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
                 val jobs = runBlocking { session.listJobs(limit) }
                 if (options.json) {
-                    echo(ApiJson.encodeToString(JobsResponse(jobs)))
+                    echo(ApiJson.encodeToString(JobsResponse(jobs.map { it.toApiView() })))
                 } else if (jobs.isEmpty()) {
                     echo("No jobs.")
                 } else {
-                    jobs.forEach { echo(describe(it)) }
+                    jobs.forEach { echo(describe(it, redactDetails = session.isRemote)) }
                     if (jobs.size == limit) {
                         echo("Showing the $limit most recent jobs; pass --limit for more.", err = true)
                     }
@@ -87,7 +87,7 @@ class JobsCommand : CliktCommand(name = "jobs") {
             CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
                 val job = runBlocking { session.cancelJob(JobId(id)) }
                 if (options.json) {
-                    echo(ApiJson.encodeToString(JobResponse(job)))
+                    echo(ApiJson.encodeToString(JobResponse(job.toApiView())))
                 } else {
                     echo(describeCancellation(job))
                 }
@@ -104,7 +104,7 @@ class JobsCommand : CliktCommand(name = "jobs") {
         else -> "Job ${job.id.value} is ${job.state}; there is nothing left to cancel."
     }
 
-    private fun describe(job: Job): String = buildString {
+    private fun describe(job: Job, redactDetails: Boolean = false): String = buildString {
         append(job.id.value)
         append("  ")
         append(job.type)
@@ -119,7 +119,25 @@ class JobsCommand : CliktCommand(name = "jobs") {
         job.errorCode?.let { code ->
             append("  ")
             append(code)
-            job.errorMessage?.let { append(": ").append(it) }
+            if (redactDetails) {
+                append("  Details are intentionally omitted from the local API; see the server log.")
+            } else {
+                job.errorMessage?.let { append(": ").append(it) }
+            }
         }
     }
+
+    private fun Job.toApiView() = infoscry.server.JobApiView(
+        id = id,
+        type = type,
+        state = state,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+        collectionId = collectionId,
+        stage = stage,
+        completed = completed,
+        total = total,
+        errorCode = errorCode,
+        cancelRequested = cancelRequested,
+    )
 }

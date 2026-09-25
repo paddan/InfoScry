@@ -17,8 +17,14 @@ import infoscry.search.vectorFor
 import infoscry.storage.CollectionStore
 import infoscry.storage.Instants
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpHeaders.ContentRange
+import io.ktor.http.HttpHeaders.ContentDisposition
+import io.ktor.http.HttpHeaders.Range
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -29,6 +35,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * The search and citation boundary over a real socket: what each search answers, and which status each
@@ -94,6 +102,7 @@ class SearchRoutesTest {
         assertFalse(body.contains("\"extractedText\""), "the search response exposes extracted document text")
         assertContains(body, "\"locator\":")
         assertContains(body, "\"unitId\":")
+        assertContains(body, "\"title\":\"evidence.txt\"")
         assertContains(body, documentId.value)
     }
 
@@ -169,7 +178,8 @@ class SearchRoutesTest {
     fun `a content unit from a live collection is served and one a collection no longer has is not found`() =
         runBlocking {
             val (_, unitId) = seedUnit(document = "notes.txt", text = "notes about the harbour")
-            val response = harness.get("/api/content-units/${unitId.value}")
+            val collectionId = harness.collectionIdOf("Default")
+            val response = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
 
             assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
             assertContains(response.bodyAsText(), "notes about the harbour")
@@ -181,15 +191,153 @@ class SearchRoutesTest {
                 credential = Credential.BEARER,
             )
 
-            val afterDelete = harness.get("/api/content-units/${unitId.value}")
+            val afterDelete = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
             assertEquals(HttpStatusCode.NotFound, afterDelete.status, afterDelete.bodyAsText())
         }
 
     @Test
-    fun `an unknown content unit is not found`() = runBlocking {
-        val response = harness.get("/api/content-units/does-not-exist")
+    fun `a source unit cannot be read through another collection`() = runBlocking {
+        val (_, unitId) = seedUnit(document = "private.txt", text = "private evidence")
+        harness.createCollection("Other")
+
+        val response = harness.get(
+            "/api/collections/${harness.collectionIdOf("Other")}/sources/${unitId.value}",
+        )
 
         assertEquals(HttpStatusCode.NotFound, response.status, response.bodyAsText())
+    }
+
+    @Test
+    fun `an unknown content unit is not found`() = runBlocking {
+        val response = harness.get(
+            "/api/collections/${harness.collectionIdOf("Default")}/sources/does-not-exist",
+        )
+
+        assertEquals(HttpStatusCode.NotFound, response.status, response.bodyAsText())
+    }
+
+    @Test
+    fun `source text is returned in bounded pages without exposing artifact paths`() = runBlocking {
+        val (_, unitId) = seedUnit(document = "long.txt", text = "x".repeat(70_000))
+        val collectionId = harness.collectionIdOf("Default")
+
+        val firstPage = harness.get("/api/collections/$collectionId/sources/${unitId.value}?limit=1000")
+        val nextPage = harness.get("/api/collections/$collectionId/sources/${unitId.value}?offset=1000&limit=1000")
+
+        assertEquals(HttpStatusCode.OK, firstPage.status, firstPage.bodyAsText())
+        assertContains(firstPage.bodyAsText(), "\"totalChars\":70000")
+        assertContains(firstPage.bodyAsText(), "\"offset\":0")
+        assertContains(firstPage.bodyAsText(), "\"truncated\":true")
+        assertFalse(firstPage.bodyAsText().contains("artifactRelativePath"))
+        assertEquals(HttpStatusCode.OK, nextPage.status, nextPage.bodyAsText())
+        assertContains(nextPage.bodyAsText(), "\"offset\":1000")
+        assertEquals(1000, ApiJson.parseToJsonElement(nextPage.bodyAsText()).jsonObject["text"]!!.jsonPrimitive.content.length)
+    }
+
+    @Test
+    fun `default source pages never split a surrogate pair`() = runBlocking {
+        val original = "a".repeat(16_383) + "😀" + "tail"
+        val (_, unitId) = seedUnit(document = "unicode.txt", text = original)
+        val collectionId = harness.collectionIdOf("Default")
+
+        val firstResponse = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
+        assertEquals(HttpStatusCode.OK, firstResponse.status, firstResponse.bodyAsText())
+        val first = ApiJson.decodeFromString<SourceContentResponse>(firstResponse.bodyAsText())
+        val nextOffset = first.offset + first.text.length
+        val secondResponse = harness.get("/api/collections/$collectionId/sources/${unitId.value}?offset=$nextOffset")
+        assertEquals(HttpStatusCode.OK, secondResponse.status, secondResponse.bodyAsText())
+        val second = ApiJson.decodeFromString<SourceContentResponse>(secondResponse.bodyAsText())
+
+        assertTrue(first.text.length <= 16_384)
+        assertFalse(Character.isHighSurrogate(first.text.last()))
+        assertFalse(Character.isLowSurrogate(second.text.first()))
+        assertEquals(original, first.text + second.text)
+    }
+
+    @Test
+    fun `invalid source ranges are rejected as bad requests`() = runBlocking {
+        val (_, unitId) = seedUnit(document = "notes.txt", text = "notes")
+        val collectionId = harness.collectionIdOf("Default")
+
+        val negativeOffset = harness.get("/api/collections/$collectionId/sources/${unitId.value}?offset=-1")
+        val excessiveLimit = harness.get("/api/collections/$collectionId/sources/${unitId.value}?limit=65537")
+        val malformedRange = harness.get("/api/collections/$collectionId/sources/${unitId.value}?offset=abc")
+        val beyondSource = harness.get("/api/collections/$collectionId/sources/${unitId.value}?offset=6")
+
+        assertEquals(HttpStatusCode.BadRequest, negativeOffset.status, negativeOffset.bodyAsText())
+        assertEquals(HttpStatusCode.BadRequest, excessiveLimit.status, excessiveLimit.bodyAsText())
+        assertEquals(HttpStatusCode.BadRequest, malformedRange.status, malformedRange.bodyAsText())
+        assertEquals(HttpStatusCode.BadRequest, beyondSource.status, beyondSource.bodyAsText())
+    }
+
+    @Test
+    fun `managed original is served only through its collection and opaque document id`() = runBlocking {
+        val (documentId, _) = seedUnit(document = "source.txt", text = "managed source")
+        val collectionId = harness.collectionIdOf("Default")
+        harness.createCollection("Other")
+        val original = harness.context.paths.originalFile(CollectionStore.DEFAULT_ID, documentId, "txt")
+        Files.createDirectories(original.parent)
+        Files.writeString(original, "original bytes")
+
+        val response = harness.get("/api/collections/$collectionId/documents/${documentId.value}/original")
+        val crossCollection = harness.get(
+            "/api/collections/${harness.collectionIdOf("Other")}/documents/${documentId.value}/original",
+        )
+
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        assertEquals("application/octet-stream", response.headers[HttpHeaders.ContentType]?.substringBefore(';'))
+        assertContains(response.headers[ContentDisposition].orEmpty(), "attachment")
+        assertEquals("original bytes", response.bodyAsText())
+        assertEquals(HttpStatusCode.NotFound, crossCollection.status, crossCollection.bodyAsText())
+
+        val ranged = harness.client.get(
+            harness.url + "/api/collections/$collectionId/documents/${documentId.value}/original",
+        ) { header(Range, "bytes=2-5") }
+        assertEquals(HttpStatusCode.PartialContent, ranged.status, ranged.bodyAsText())
+        assertEquals("igin", ranged.bodyAsText())
+        assertEquals("bytes 2-5/14", ranged.headers[ContentRange])
+
+        val outOfBounds = harness.client.get(
+            harness.url + "/api/collections/$collectionId/documents/${documentId.value}/original",
+        ) { header(Range, "bytes=99-") }
+        assertEquals(HttpStatusCode.RequestedRangeNotSatisfiable, outOfBounds.status, outOfBounds.bodyAsText())
+        assertEquals("bytes */14", outOfBounds.headers[ContentRange])
+
+        val emptySuffix = harness.client.get(
+            harness.url + "/api/collections/$collectionId/documents/${documentId.value}/original",
+        ) { header(Range, "bytes=-") }
+        assertEquals(HttpStatusCode.RequestedRangeNotSatisfiable, emptySuffix.status, emptySuffix.bodyAsText())
+    }
+
+    @Test
+    fun `active browser document originals download while PDF and raster images stay inline`() = runBlocking {
+        val collectionId = harness.collectionIdOf("Default")
+        val cases = listOf(
+            Triple("untrusted.html", "text/html", "attachment"),
+            Triple("untrusted.svg", "image/svg+xml", "attachment"),
+            Triple("untrusted.å", "text/html", "attachment"),
+            Triple("document.pdf", "application/pdf", "inline"),
+            Triple("picture.png", "image/png", "inline"),
+        )
+
+        for ((filename, mediaType, disposition) in cases) {
+            val (documentId, _) = seedUnit(document = filename, text = "source", mediaType = mediaType)
+            val extension = filename.substringAfterLast('.')
+            val original = harness.context.paths.originalFile(CollectionStore.DEFAULT_ID, documentId, extension)
+            Files.createDirectories(original.parent)
+            Files.writeString(original, "source bytes")
+
+            val response = harness.get("/api/collections/$collectionId/documents/${documentId.value}/original")
+
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            assertContains(response.headers[ContentDisposition].orEmpty(), disposition)
+            assertTrue(response.headers[ContentDisposition].orEmpty().all { it.code < 128 })
+            assertEquals(
+                if (disposition == "inline") mediaType else "application/octet-stream",
+                response.headers[HttpHeaders.ContentType]?.substringBefore(';'),
+            )
+            assertEquals("nosniff", response.headers["X-Content-Type-Options"])
+        }
     }
 
     // ---- A nominal reindex accept: 202 with a job ----
@@ -210,7 +358,11 @@ class SearchRoutesTest {
     }
 
     /** Seeds one unit in the Default collection and indexes it, returning the document and unit ids. */
-    private suspend fun seedUnit(document: String, text: String): Pair<DocumentId, ContentUnitId> {
+    private suspend fun seedUnit(
+        document: String,
+        text: String,
+        mediaType: String = "text/plain",
+    ): Pair<DocumentId, ContentUnitId> {
         val context = harness.context
         val collection = CollectionStore.DEFAULT_ID
         val now = Instants.now()
@@ -220,7 +372,7 @@ class SearchRoutesTest {
                 id = documentId,
                 collectionId = collection,
                 sha256 = "sha-$document:$text",
-                mediaType = "text/plain",
+                mediaType = mediaType,
                 originalFilename = document,
                 sourcePath = "tmp/original/$document",
                 sizeBytes = 1L,

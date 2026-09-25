@@ -50,7 +50,19 @@ data class ImportResult(
     val imported: Int,
     val duplicates: Int,
     val failed: Int,
-    val items: List<ImportItem>,
+    val items: List<ImportItemResult>,
+)
+
+@Serializable
+data class ImportItemResult(
+    val id: String,
+    val jobId: infoscry.domain.JobId,
+    val documentId: infoscry.domain.DocumentId?,
+    val sourcePath: String?,
+    val sourceName: String?,
+    val outcome: ImportItemOutcome,
+    val errorCode: String?,
+    val errorMessage: String?,
 )
 
 /**
@@ -240,15 +252,28 @@ class ImportCommand(
                         imported = imported,
                         duplicates = duplicates,
                         failed = failed,
-                        items = items,
+                        items = items.map { item ->
+                            ImportItemResult(
+                                id = item.id,
+                                jobId = item.jobId,
+                                documentId = item.documentId,
+                                sourcePath = item.sourcePath.takeIf(String::isNotEmpty),
+                                sourceName = item.sourceName,
+                                outcome = item.outcome,
+                                errorCode = item.errorCode,
+                                errorMessage = item.errorMessage,
+                            )
+                        },
                     ),
                 ),
             )
         } else {
-            items.forEach { item -> echo(describe(item)) }
+            items.forEach { item -> echo(describe(item, detailsOmitted = !executedHere)) }
             echo("Imported $imported, duplicate $duplicates, failed $failed of ${items.size}.")
             if (job.state == JobState.FAILED) {
-                echo("The job failed: ${job.errorCode} ${job.errorMessage.orEmpty()}".trim(), err = true)
+                val detail = if (executedHere) " ${job.errorMessage.orEmpty()}" else
+                    ". Detailed failure text is omitted by the local API; see the server log."
+                echo("The job failed: ${job.errorCode ?: "JOB_FAILED"}$detail".trim(), err = true)
             }
         }
 
@@ -256,8 +281,10 @@ class ImportCommand(
             throw CliFailure("the import was cancelled; ${items.size - failed} document(s) had been processed")
         }
         if (job.state == JobState.FAILED) {
+            val detail = if (executedHere) " ${job.errorMessage.orEmpty()}" else
+                ". Detailed failure text is omitted by the local API; see the server log."
             throw CliFailure(
-                "the import failed: ${job.errorCode ?: "JOB_FAILED"} ${job.errorMessage.orEmpty()}".trim(),
+                "the import failed: ${job.errorCode ?: "JOB_FAILED"}$detail".trim(),
             )
         }
         if (failed > 0) {
@@ -268,10 +295,10 @@ class ImportCommand(
         }
     }
 
-    private fun describe(item: ImportItem): String = buildString {
+    private fun describe(item: ImportItem, detailsOmitted: Boolean): String = buildString {
         append(item.outcome)
         append("  ")
-        append(item.sourcePath)
+        append(item.sourcePath.ifEmpty { item.sourceName ?: "selected source (details omitted)" })
         item.documentId?.let { document ->
             append("  -> document ")
             append(document.value)
@@ -279,7 +306,11 @@ class ImportCommand(
         item.errorCode?.let { code ->
             append("  ")
             append(code)
-            item.errorMessage?.let { message -> append(": ").append(message) }
+            if (item.errorMessage != null) {
+                append(": ").append(item.errorMessage)
+            } else if (detailsOmitted) {
+                append("  Detailed failure text is omitted by the local API; see the server log.")
+            }
         }
     }
 

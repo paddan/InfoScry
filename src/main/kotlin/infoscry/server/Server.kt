@@ -51,12 +51,16 @@ class RunningServer internal constructor(
  * Port `0` binds any free port and is reported through [RunningServer.port]; the CLI uses it in tests,
  * where a fixed port could collide with another test or another InfoScry.
  */
-suspend fun startLoopbackServer(context: AppContext, port: Int = DEFAULT_PORT): RunningServer {
+suspend fun startLoopbackServer(
+    context: AppContext,
+    port: Int = DEFAULT_PORT,
+    jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
+): RunningServer {
     require(port in 0..MAX_PORT) { "port must be between 0 and $MAX_PORT, was $port" }
 
     val credentials = ApiCredentials.new()
     val engine = embeddedServer(Netty, port = port, host = LOOPBACK_HOST) {
-        configureRoutes(context, credentials)
+        configureRoutes(context, credentials, jobEventIdleDeadlineMillis)
     }
     engine.start(wait = false)
 
