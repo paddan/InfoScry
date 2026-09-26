@@ -2,7 +2,13 @@ package infoscry.server
 
 import infoscry.ask.Evidence
 import infoscry.ask.RetrievalSnapshot
+import infoscry.domain.Document
+import infoscry.domain.DocumentId
+import infoscry.domain.DocumentStatus
 import infoscry.domain.SourceLocation
+import infoscry.extract.ContentUnitDraft
+import infoscry.extract.ExtractionFingerprint
+import infoscry.extract.ExtractionSettings
 import infoscry.investigate.InvestigateEvent
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
@@ -10,6 +16,7 @@ import infoscry.llm.LlmCapabilityProbe
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
+import infoscry.storage.Instants
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -68,6 +75,7 @@ class InvestigationRoutesTest {
         name: String = "investigator",
         toolCallingSupported: Boolean = true,
         endpoint: String = "",
+        model: String = "model",
         inputPricePerMillion: Double = 0.0,
         outputPricePerMillion: Double = 0.0,
     ) {
@@ -76,7 +84,7 @@ class InvestigationRoutesTest {
                 id = UUID.randomUUID().toString(),
                 name = name,
                 provider = LlmProvider.OPENAI_COMPATIBLE,
-                model = "model",
+                model = model,
                 contextWindow = 10_000,
                 maxOutputTokens = 64,
                 inputPricePerMillion = inputPricePerMillion,
@@ -91,8 +99,13 @@ class InvestigationRoutesTest {
         }
     }
 
-    private fun createBody(question: String = "what happened", profile: String = "investigator", collection: String = "Default") =
-        """{"collection":"$collection","question":"$question","profile":"$profile"}"""
+    private fun createBody(
+        question: String = "what happened",
+        profile: String = "investigator",
+        collection: String = "Default",
+        limits: String? = null,
+    ) =
+        """{"collection":"$collection","question":"$question","profile":"$profile"${limits?.let { ",\"limits\":$it" } ?: ""}}"""
 
     // ---- Wire unit contract ----
 
@@ -124,6 +137,183 @@ class InvestigationRoutesTest {
         assertEquals("""{"type":"tool","callId":"c1","name":"read_content_unit","resultCode":"SUCCESS","durationMs":42}""", result)
     }
 
+    @Test
+    fun `the limit and answer-start wire events carry the new nonfatal shapes`() {
+        assertEquals(
+            """{"type":"limit","code":"MAX_ROUNDS","message":"Tool round limit reached."}""",
+            ApiJson.encodeToString(InvestigateEvent.Limit("MAX_ROUNDS", "Tool round limit reached.").toWire()),
+        )
+        assertEquals(
+            """{"type":"answer-start"}""",
+            ApiJson.encodeToString(InvestigateEvent.AnswerStart.toWire()),
+        )
+    }
+
+    @Test
+    fun `ten research rounds stream a limit and cited synthesis over SSE`() = runBlocking {
+        val sourceText = "Mira signed the note."
+        val contentUnitId = addEvidenceUnit(sourceText)
+        val researchResponses = (1..10).map { round ->
+            val toolName = if (round == 1) "read_content_unit" else "get_document_metadata"
+            val arguments = if (round == 1) {
+                """{"contentUnitId":"$contentUnitId"}"""
+            } else {
+                """{"documentId":"missing-$round"}"""
+            }.replace("\"", "\\\"")
+            val call = """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-$round","type":"function","function":{"name":"$toolName","arguments":"$arguments"}}]},"finish_reason":null}]}"""
+            val finish = """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"""
+            val usage = """{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}"""
+            FakeOpenAiResponse(stream = true, body = sse(listOf(call, finish, usage)))
+        }
+        val synthesis = sse(listOf(
+            """{"choices":[{"delta":{"content":"Mira signed the note [S1]."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}""",
+        ))
+
+        FakeOpenAiServer(
+            researchResponses + listOf(
+                FakeOpenAiResponse(stream = true, body = synthesis),
+                FakeOpenAiResponse(body = titleCompletion("The signed note")),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+            val response = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                // Explicit limits: the shipped default round cap is larger than the ten scripted
+                // research responses this test serves.
+                body = createBody(question = "Who signed the note?", limits = """{"maxToolRounds":10}"""),
+                credential = Credential.BEARER,
+            )
+
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            val events = response.bodyAsText().lineSequence()
+                .filter { it.startsWith("data: ") }
+                .map { Json.parseToJsonElement(it.removePrefix("data: ")).jsonObject }
+                .toList()
+            val types = events.map { it.getValue("type").jsonPrimitive.content }
+            val limitIndex = types.indexOf("limit")
+            assertTrue(limitIndex > types.lastIndexOf("tool"), types.toString())
+            assertEquals("MAX_ROUNDS", events[limitIndex].getValue("code").jsonPrimitive.content)
+            assertEquals("answer-start", types[limitIndex + 1])
+            assertEquals("done", types.last())
+            assertEquals(1, types.count { it == "done" })
+            assertFalse("error" in types, types.toString())
+            val citation = events.single { it.getValue("type").jsonPrimitive.content == "citation" }
+            assertEquals("S1", citation.getValue("id").jsonPrimitive.content)
+            assertEquals("true", citation.getValue("valid").jsonPrimitive.content)
+            val usage = events.single { it.getValue("type").jsonPrimitive.content == "usage" }
+            assertEquals(30, usage.getValue("inputTokens").jsonPrimitive.content.toInt())
+            assertEquals(18, usage.getValue("outputTokens").jsonPrimitive.content.toInt())
+
+            assertEquals(12, fake.requestBodies.size, "ten research rounds, one synthesis request, and one title request")
+            val synthesisRequest = Json.parseToJsonElement(fake.requestBodies[10]).jsonObject
+            assertFalse("tools" in synthesisRequest, "the final-answer request must not expose tools")
+            val synthesisMessages = synthesisRequest.getValue("messages").jsonArray
+            val synthesisContext = synthesisMessages.joinToString(" ") { it.jsonObject.getValue("content").jsonPrimitive.content }
+            assertContains(synthesisContext, sourceText)
+            assertContains(synthesisContext, "evidenceId")
+            assertContains(synthesisContext, "S1")
+
+            val conversationId = events.first().getValue("id").jsonPrimitive.content
+            val history = harness.request(
+                HttpMethod.Get,
+                "/api/collections/Default/investigations/$conversationId",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, history.status, history.bodyAsText())
+            assertContains(history.bodyAsText(), "Mira signed the note [S1].")
+            val persistedLimit = harness.context.database.read { connection ->
+                connection.prepareStatement("SELECT event_type FROM limit_events WHERE conversation_id = ?").use { statement ->
+                    statement.setString(1, conversationId)
+                    statement.executeQuery().use { rows ->
+                        assertTrue(rows.next(), "the MAX_ROUNDS event must be durable")
+                        rows.getString("event_type")
+                    }
+                }
+            }
+            assertEquals("MAX_ROUNDS", persistedLimit)
+        }
+    }
+
+    @Test
+    fun `the tool-call cap closes a provider batch and streams cited synthesis over SSE`() = runBlocking {
+        val sourceText = "Mira signed the note."
+        val contentUnitId = addEvidenceUnit(sourceText)
+        val researchFrames = (1..21).map { callNumber ->
+            val toolName = if (callNumber == 1) "read_content_unit" else "get_document_metadata"
+            val rawArguments = if (callNumber == 1) {
+                """{"contentUnitId":"$contentUnitId"}"""
+            } else {
+                """{"documentId":"missing-$callNumber"}"""
+            }
+            val arguments = rawArguments.replace("\"", "\\\"")
+            """{"choices":[{"delta":{"tool_calls":[{"index":${callNumber - 1},"id":"call-$callNumber","type":"function","function":{"name":"$toolName","arguments":"$arguments"}}]},"finish_reason":null}]}"""
+        } + listOf(
+            """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""",
+            """{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}""",
+        )
+        val research = FakeOpenAiResponse(stream = true, body = sse(researchFrames))
+        val synthesis = sse(listOf(
+            """{"choices":[{"delta":{"content":"Mira signed the note [S1]."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}""",
+        ))
+
+        FakeOpenAiServer(
+            listOf(
+                research,
+                FakeOpenAiResponse(stream = true, body = synthesis),
+                FakeOpenAiResponse(body = titleCompletion("The signed note")),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+            val response = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = createBody(question = "Who signed the note?", limits = """{"maxToolCalls":20}"""),
+                credential = Credential.BEARER,
+            )
+
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            val events = response.bodyAsText().lineSequence()
+                .filter { it.startsWith("data: ") }
+                .map { Json.parseToJsonElement(it.removePrefix("data: ")).jsonObject }
+                .toList()
+            val types = events.map { it.getValue("type").jsonPrimitive.content }
+            val limitIndex = types.indexOf("limit")
+            assertTrue(limitIndex > types.lastIndexOf("tool"), types.toString())
+            assertEquals("MAX_TOOL_CALLS", events[limitIndex].getValue("code").jsonPrimitive.content)
+            assertEquals("answer-start", types[limitIndex + 1])
+            assertEquals("done", types.last())
+            assertEquals(1, types.count { it == "done" })
+            assertFalse("error" in types, types.toString())
+            val calls = events.filter { it.getValue("type").jsonPrimitive.content == "tool" && "arguments" in it }
+            val results = events.filter { it.getValue("type").jsonPrimitive.content == "tool" && "resultCode" in it }
+            assertEquals(21, calls.size)
+            assertEquals(21, results.size, "the refused provider call must still receive a tool result")
+            assertEquals("LIMIT_REACHED", results.last().getValue("resultCode").jsonPrimitive.content)
+            val citation = events.single { it.getValue("type").jsonPrimitive.content == "citation" }
+            assertEquals("S1", citation.getValue("id").jsonPrimitive.content)
+            assertEquals("true", citation.getValue("valid").jsonPrimitive.content)
+
+            assertEquals(3, fake.requestBodies.size, "one research batch, one synthesis request, and one title request")
+            val synthesisRequest = Json.parseToJsonElement(fake.requestBodies[1]).jsonObject
+            assertFalse("tools" in synthesisRequest, "synthesis must not expose tools")
+            val synthesisContext = synthesisRequest.getValue("messages").jsonArray
+                .joinToString(" ") { it.jsonObject.getValue("content").jsonPrimitive.content }
+            assertContains(synthesisContext, sourceText)
+            assertContains(synthesisContext, "S1")
+
+            val conversationId = events.first().getValue("id").jsonPrimitive.content
+            val history = harness.request(
+                HttpMethod.Get,
+                "/api/collections/Default/investigations/$conversationId",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, history.status, history.bodyAsText())
+            assertContains(history.bodyAsText(), "Mira signed the note [S1].")
+            assertContains(history.bodyAsText(), "LIMIT_REACHED", message = "the refused call must be visible in history activity")
+        }
+    }
+
     // ---- The 422 capability gate ----
 
     @Test
@@ -150,6 +340,159 @@ class InvestigationRoutesTest {
         assertEquals(0, conversationCount, "the 422 gate must run before any conversation is created")
     }
 
+    @Test
+    fun `invalid per-turn limits are rejected before a conversation is created`() = runBlocking {
+        createProfile()
+        val response = harness.request(
+            HttpMethod.Post,
+            "/api/investigations",
+            body = """{"collection":"Default","question":"question","profile":"investigator","limits":{"maxToolRounds":0}}""",
+            credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
+        assertContains(response.bodyAsText(), "INVALID_REQUEST")
+        assertFalse(response.bodyAsText().contains("data: "), "invalid limits must be rejected before the SSE stream")
+        val conversationCount = harness.context.database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT COUNT(*) FROM conversations").use { rows ->
+                    rows.next(); rows.getInt(1)
+                }
+            }
+        }
+        assertEquals(0, conversationCount, "invalid limits must not create a conversation")
+    }
+
+    @Test
+    fun `out-of-range and malformed per-turn limits are rejected before any side effect`() = runBlocking {
+        createProfile()
+        val bodies = listOf(
+            """{"collection":"Default","question":"q","profile":"investigator","limits":{"maxToolRounds":51}}""",
+            """{"collection":"Default","question":"q","profile":"investigator","limits":{"maxToolCalls":0}}""",
+            """{"collection":"Default","question":"q","profile":"investigator","limits":{"maxToolCalls":101}}""",
+            """{"collection":"Default","question":"q","profile":"investigator","limits":{"maxTurnSeconds":9}}""",
+            """{"collection":"Default","question":"q","profile":"investigator","limits":{"maxTurnSeconds":1801}}""",
+            """{"collection":"Default","question":"q","profile":"investigator","limits":{"maxToolRounds":1.5}}""",
+            """{"collection":"Default","question":"q","profile":"investigator","limits":{"maxToolRounds":"ten"}}""",
+        )
+
+        for (body in bodies) {
+            val response = harness.request(HttpMethod.Post, "/api/investigations", body = body, credential = Credential.BEARER)
+            assertEquals(HttpStatusCode.BadRequest, response.status, "$body -> ${response.bodyAsText()}")
+            assertContains(response.bodyAsText(), "INVALID_REQUEST")
+            assertFalse(response.bodyAsText().contains("data: "), "invalid limits must be rejected before the SSE stream: $body")
+        }
+        // The continue endpoint validates before it reserves the conversation for a running turn.
+        val continued = harness.request(
+            HttpMethod.Post,
+            "/api/investigations/unknown/continue",
+            body = """{"collection":"Default","question":"q","profile":"investigator","limits":{"maxToolRounds":51}}""",
+            credential = Credential.BEARER,
+        )
+        assertEquals(HttpStatusCode.BadRequest, continued.status, continued.bodyAsText())
+        assertFalse(continued.bodyAsText().contains("data: "), "invalid continue limits must not open an SSE stream")
+
+        val conversationCount = harness.context.database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT COUNT(*) FROM conversations").use { rows ->
+                    rows.next(); rows.getInt(1)
+                }
+            }
+        }
+        assertEquals(0, conversationCount, "invalid limits must create no conversation")
+    }
+
+    @Test
+    fun `a partial limits object defaults the remaining fields and caps rounds on create`() = runBlocking {
+        val sourceText = "Mira signed the note."
+        val contentUnitId = addEvidenceUnit(sourceText)
+        val arguments = """{"contentUnitId":"$contentUnitId"}""".replace("\"", "\\\"")
+        val research = sse(
+            listOf(
+                """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_content_unit","arguments":"$arguments"}}]},"finish_reason":null}]}""",
+                """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""",
+            ),
+        )
+        val synthesis = sse(
+            listOf(
+                """{"choices":[{"delta":{"content":"Mira signed the note [S1]."},"finish_reason":"stop"}]}""",
+            ),
+        )
+
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = research),
+                FakeOpenAiResponse(stream = true, body = synthesis),
+                FakeOpenAiResponse(body = titleCompletion("The signed note")),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+            val response = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = """{"collection":"Default","question":"Who signed the note?","profile":"investigator","limits":{"maxToolRounds":1}}""",
+                credential = Credential.BEARER,
+            )
+
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            assertContains(response.bodyAsText(), "\"code\":\"MAX_ROUNDS\"")
+            assertContains(response.bodyAsText(), "\"type\":\"done\"")
+            assertEquals(3, fake.requestBodies.size, "one configured round, one synthesis request, and one title request")
+            val synthesisRequest = Json.parseToJsonElement(fake.requestBodies[1]).jsonObject
+            assertFalse("tools" in synthesisRequest, "the final-answer request must not expose tools")
+        }
+    }
+
+    @Test
+    fun `a continue uses the submitted limits while keeping the locked conversation`() = runBlocking {
+        val sourceText = "Mira signed the note."
+        val contentUnitId = addEvidenceUnit(sourceText)
+        val arguments = """{"contentUnitId":"$contentUnitId"}""".replace("\"", "\\\"")
+        val research = sse(
+            listOf(
+                """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_content_unit","arguments":"$arguments"}}]},"finish_reason":null}]}""",
+                """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""",
+            ),
+        )
+        val synthesis = sse(
+            listOf(
+                """{"choices":[{"delta":{"content":"Mira signed the note [S1]."},"finish_reason":"stop"}]}""",
+            ),
+        )
+
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = turnSse()),
+                FakeOpenAiResponse(body = titleCompletion("The signed note")),
+                FakeOpenAiResponse(stream = true, body = research),
+                FakeOpenAiResponse(stream = true, body = synthesis),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+            // A second collection exists, so a request naming it would be accepted if the continue did
+            // not keep the conversation's locked collection; the tool must still resolve Default's unit.
+            harness.context.collectionService.create("Other")
+            val created = harness.request(HttpMethod.Post, "/api/investigations", body = createBody(), credential = Credential.BEARER)
+            assertContains(created.bodyAsText(), "\"type\":\"done\"")
+            val conversationId = created.bodyAsText().substringAfter("\"type\":\"started\"").substringAfter("\"id\":\"").substringBefore('"')
+
+            val continued = harness.request(
+                HttpMethod.Post,
+                "/api/investigations/$conversationId/continue",
+                body = """{"collection":"Other","question":"and then?","profile":"investigator","limits":{"maxToolRounds":1,"maxToolCalls":5,"maxTurnSeconds":120}}""",
+                credential = Credential.BEARER,
+            )
+
+            assertEquals(HttpStatusCode.OK, continued.status, continued.bodyAsText())
+            assertContains(continued.bodyAsText(), "\"code\":\"MAX_ROUNDS\"")
+            assertContains(continued.bodyAsText(), "\"id\":\"S1\"")
+            assertContains(continued.bodyAsText(), "\"type\":\"done\"")
+            assertEquals(4, fake.requestBodies.size, "opening turn, its title, one configured round, and synthesis")
+            assertTrue("tools" in Json.parseToJsonElement(fake.requestBodies[2]).jsonObject, "the continue's research round must expose tools")
+            assertFalse("tools" in Json.parseToJsonElement(fake.requestBodies[3]).jsonObject, "the continue's synthesis must not expose tools")
+        }
+    }
+
     // ---- Create / continue ----
 
     @Test
@@ -163,6 +506,8 @@ class InvestigationRoutesTest {
         FakeOpenAiServer(listOf(
             FakeOpenAiResponse(stream = true, body = sse(listOf(toolCall, toolFinish))),
             FakeOpenAiResponse(stream = true, body = answer),
+            // The first turn's titling completion lands between the two turns.
+            FakeOpenAiResponse(statusCode = 200, body = titleCompletion("The missing document")),
             FakeOpenAiResponse(stream = true, body = answer),
         )).use { fake ->
             createProfile(endpoint = fake.url)
@@ -175,7 +520,7 @@ class InvestigationRoutesTest {
                 body = createBody(question = "and then?"), credential = Credential.BEARER,
             )
             assertContains(continued.bodyAsText(), "\"type\":\"done\"")
-            val messages = Json.parseToJsonElement(fake.requestBodies[2]).jsonObject.getValue("messages").jsonArray
+            val messages = Json.parseToJsonElement(fake.requestBodies[3]).jsonObject.getValue("messages").jsonArray
             val assistant = messages.first { it.jsonObject["role"]?.jsonPrimitive?.content == "assistant" && "tool_calls" in it.jsonObject }
             val tool = messages.first { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }
             assertEquals("call_1", assistant.jsonObject.getValue("tool_calls").jsonArray.single().jsonObject.getValue("id").jsonPrimitive.content)
@@ -328,6 +673,174 @@ class InvestigationRoutesTest {
         )
         assertEquals(HttpStatusCode.OK, list.status, list.bodyAsText())
         assertFalse(list.bodyAsText().contains(conversationId), "collection history must not list another collection's conversation")
+    }
+
+    // ---- Titles ----
+
+    @Test
+    fun `a new investigation is titled from its opening question by its own profile`() = runBlocking {
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = turnSse()),
+                FakeOpenAiResponse(statusCode = 200, body = titleCompletion("The fire")),
+            ),
+        ).use { fake ->
+            createProfile(name = "title-investigator", endpoint = fake.url, model = "title-model")
+
+            val created = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = createBody(question = "What happened in the fire?", profile = "title-investigator"),
+                credential = Credential.BEARER,
+            )
+
+            assertEquals(HttpStatusCode.OK, created.status, created.bodyAsText())
+            val createdBody = created.bodyAsText()
+            val conversationId = createdBody.substringAfter("\"type\":\"started\"").substringAfter("\"id\":\"").substringBefore('"')
+            assertContains(createdBody, "\"type\":\"done\"", message = "the turn must complete, got $createdBody")
+            assertEquals(2, fake.handledRequests, "the turn stream plus one title completion")
+            assertContains(fake.requestBodies[1], "\"model\":\"title-model\"", message = "the title call must use the conversation's locked model")
+            assertContains(fake.requestBodies[1], "\"stream\":false", message = "the title call must be the non-streaming completion boundary")
+
+            val defaultCollectionId = harness.context.collectionService.requireActiveByNameOrId("Default").id.value
+            val list = harness.request(
+                HttpMethod.Get,
+                "/api/collections/$defaultCollectionId/investigations",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, list.status, list.bodyAsText())
+            assertContains(list.bodyAsText(), "\"title\":\"The fire\"", message = "the list must return the stored title")
+
+            val profileId = harness.context.llm.findByName("title-investigator")!!.id
+            harness.context.database.read { connection ->
+                val storedTitle = connection.prepareStatement("SELECT title FROM conversations WHERE id = ?").use { statement ->
+                    statement.setString(1, conversationId)
+                    statement.executeQuery().use { rows -> rows.next(); rows.getString("title") }
+                }
+                assertEquals("The fire", storedTitle, "the title must be written to the conversation row")
+                val modelCalls = connection.prepareStatement("SELECT COUNT(*) FROM model_calls WHERE conversation_id = ?").use { statement ->
+                    statement.setString(1, conversationId)
+                    statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+                }
+                assertEquals(1, modelCalls, "the title call must not be recorded as a conversation model call")
+                val totals = connection.prepareStatement("SELECT calls FROM usage_totals WHERE profile_id = ?").use { statement ->
+                    statement.setString(1, profileId)
+                    statement.executeQuery().use { rows -> rows.next(); rows.getInt("calls") }
+                }
+                assertEquals(1, totals, "the title tokens must not touch usage_totals")
+            }
+        }
+    }
+
+    @Test
+    fun `continuing an investigation never rewrites its title`() = runBlocking {
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = turnSse()),
+                FakeOpenAiResponse(statusCode = 200, body = titleCompletion("Original title")),
+                FakeOpenAiResponse(stream = true, body = turnSse()),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+
+            val created = harness.request(HttpMethod.Post, "/api/investigations", body = createBody(), credential = Credential.BEARER)
+            val conversationId = created.bodyAsText().substringAfter("\"type\":\"started\"").substringAfter("\"id\":\"").substringBefore('"')
+            assertContains(created.bodyAsText(), "\"type\":\"done\"")
+
+            val continued = harness.request(
+                HttpMethod.Post,
+                "/api/investigations/$conversationId/continue",
+                body = createBody(question = "and then?"),
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, continued.status, continued.bodyAsText())
+            assertContains(continued.bodyAsText(), "\"type\":\"done\"")
+
+            assertEquals(3, fake.handledRequests, "a continued turn must never consume a title completion")
+            val storedTitle = harness.context.database.read { connection ->
+                connection.prepareStatement("SELECT title FROM conversations WHERE id = ?").use { statement ->
+                    statement.setString(1, conversationId)
+                    statement.executeQuery().use { rows -> rows.next(); rows.getString("title") }
+                }
+            }
+            assertEquals("Original title", storedTitle, "a continued conversation must keep its first title")
+        }
+    }
+
+    @Test
+    fun `a failing title call leaves the investigation without a title and does not fail the turn`() = runBlocking {
+        val failures = listOf(
+            "a provider error" to FakeOpenAiResponse(statusCode = 500, body = "{}"),
+            "a malformed completion" to FakeOpenAiResponse(statusCode = 200, body = "not-a-response"),
+            "an empty completion" to FakeOpenAiResponse(statusCode = 200, body = """{"choices":[{"message":{"role":"assistant","content":""}}]}"""),
+        )
+        failures.forEachIndexed { index, (label, titleFailure) ->
+            FakeOpenAiServer(
+                listOf(FakeOpenAiResponse(stream = true, body = turnSse()), titleFailure),
+            ).use { fake ->
+                createProfile(name = "failure-investigator-$index", endpoint = fake.url)
+
+                val created = harness.request(
+                    HttpMethod.Post,
+                    "/api/investigations",
+                    body = createBody(profile = "failure-investigator-$index"),
+                    credential = Credential.BEARER,
+                )
+                assertEquals(HttpStatusCode.OK, created.status, "$label: ${created.bodyAsText()}")
+                val createdBody = created.bodyAsText()
+                val conversationId = createdBody.substringAfter("\"type\":\"started\"").substringAfter("\"id\":\"").substringBefore('"')
+                assertContains(createdBody, "\"type\":\"done\"", message = "$label: the turn must still complete")
+                assertEquals(2, fake.handledRequests, "$label: the title call must still happen exactly once")
+
+                harness.context.database.read { connection ->
+                    val storedTitle = connection.prepareStatement("SELECT title FROM conversations WHERE id = ?").use { statement ->
+                        statement.setString(1, conversationId)
+                        statement.executeQuery().use { rows -> rows.next(); rows.getString("title") }
+                    }
+                    assertEquals(null, storedTitle, "$label: no title may be stored")
+                    val modelCalls = connection.prepareStatement("SELECT COUNT(*) FROM model_calls WHERE conversation_id = ?").use { statement ->
+                        statement.setString(1, conversationId)
+                        statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+                    }
+                    assertEquals(1, modelCalls, "$label: the title call must not be recorded as a conversation model call")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `the investigation list returns the title and falls back to the opening question`() = runBlocking {
+        createProfile(endpoint = "https://provider.invalid/v1")
+        val defaultCollection = harness.context.collectionService.requireActiveByNameOrId("Default")
+        val profile = harness.context.llm.findByName("investigator")!!
+        val conversationId = harness.context.llm.persistInvestigateConversation(
+            collectionId = defaultCollection.id,
+            profile = profile,
+            promptVersion = 1,
+            retrievalSnapshot = RetrievalSnapshot.value(),
+        )
+        harness.context.llm.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
+        harness.context.llm.persistInvestigateMessage(conversationId, 1, "assistant", "Mira signed it.")
+        val titledId = harness.context.llm.persistInvestigateConversation(
+            collectionId = defaultCollection.id,
+            profile = profile,
+            promptVersion = 1,
+            retrievalSnapshot = RetrievalSnapshot.value(),
+        )
+        harness.context.llm.persistInvestigateMessage(titledId, 0, "user", "What day was it?")
+        harness.context.llm.persistInvestigateMessage(titledId, 1, "assistant", "Sunday.")
+        harness.context.llm.setConversationTitle(titledId, "The signing")
+
+        val list = harness.request(
+            HttpMethod.Get,
+            "/api/collections/${defaultCollection.id.value}/investigations",
+            credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.OK, list.status, list.bodyAsText())
+        val body = list.bodyAsText()
+        assertContains(body, "\"title\":\"The signing\"", message = "a titled row must show its title")
+        assertContains(body, "\"title\":\"Who signed it?\"", message = "a row without a title must fall back to its question")
     }
 
     // ---- Cancel ----
@@ -539,6 +1052,54 @@ class InvestigationRoutesTest {
 
     private fun sse(dataLines: List<String>): String =
         dataLines.map { "data: $it\n\n" }.joinToString("") + "data: [DONE]\n\n"
+
+    private fun turnSse(): String = sse(
+        listOf(
+            """{"choices":[{"delta":{"content":"no sources"},"finish_reason":null}]}""",
+            """{"choices":[{"delta":{"finish_reason":"stop"}}],"usage":{"prompt_tokens":7,"completion_tokens":2}}""",
+        ),
+    )
+
+    private fun titleCompletion(title: String): String =
+        """{"choices":[{"message":{"role":"assistant","content":"$title"}}],"usage":{"prompt_tokens":9,"completion_tokens":3}}"""
+
+    private fun addEvidenceUnit(text: String): String {
+        val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+        val documentId = DocumentId.new()
+        val now = Instants.now()
+        harness.context.documents.insert(
+            Document(
+                id = documentId,
+                collectionId = collection.id,
+                sha256 = "f".repeat(64),
+                mediaType = "text/plain",
+                originalFilename = "round-limit.txt",
+                sourcePath = "tests/round-limit.txt",
+                sizeBytes = text.length.toLong(),
+                status = DocumentStatus.COMPLETE,
+                createdAt = now,
+                updatedAt = now,
+                title = "round limit source",
+                author = null,
+                language = "en",
+            ),
+        )
+        return harness.context.content.commitExtractedUnit(
+            documentId = documentId,
+            fingerprint = ExtractionFingerprint.of(
+                "f".repeat(64),
+                ExtractionSettings(ocrLanguages = "eng", extractorSchemaVersion = "round-limit-test"),
+            ),
+            key = "round-limit-unit",
+            ordinal = 0,
+            draft = ContentUnitDraft(
+                locator = SourceLocation.TextLines(1, 1),
+                extractedText = text,
+                searchText = text,
+            ),
+            artifactRoot = harness.context.paths.libraryDir,
+        ).unit.id.value
+    }
 
     private data class ConversationRow(
         val collectionId: String,

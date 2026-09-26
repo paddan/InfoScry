@@ -7,9 +7,11 @@ import infoscry.investigate.InvestigateEvent
 import infoscry.investigate.InvestigatePersistence
 import infoscry.investigate.InvestigateRequest
 import infoscry.investigate.InvestigateTurnSnapshot
+import infoscry.investigate.InvestigationLimits
 import infoscry.investigate.InvestigationService
 import infoscry.investigate.InvestigationTools
 import infoscry.llm.AnthropicClient
+import infoscry.llm.ConversationTitler
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
@@ -32,15 +34,38 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 
+/**
+ * Wire form of [InvestigationLimits]. Its defaults come from the domain type, so an omitted `limits`
+ * object — or an omitted field inside one — falls back to the same values everywhere.
+ */
+@Serializable
+data class InvestigationLimitsRequest(
+    val maxToolRounds: Int = InvestigationLimits.DEFAULT_MAX_TOOL_ROUNDS,
+    val maxToolCalls: Int = InvestigationLimits.DEFAULT_MAX_TOOL_CALLS,
+    val maxTurnSeconds: Int = InvestigationLimits.DEFAULT_MAX_TURN_SECONDS,
+) {
+    /**
+     * Maps to the domain limits and validates them. A failure throws [IllegalArgumentException],
+     * which the route renders as a 400 INVALID_REQUEST before any side effect.
+     */
+    fun toLimits(): InvestigationLimits =
+        InvestigationLimits(maxToolRounds, maxToolCalls, maxTurnSeconds).also { it.validate() }
+}
+
 /** The request both create and continue accept; continue ignores collection/profile in favour of the locked snapshot. */
 @Serializable
-data class InvestigationApiRequest(val collection: String, val question: String, val profile: String)
+data class InvestigationApiRequest(
+    val collection: String,
+    val question: String,
+    val profile: String,
+    val limits: InvestigationLimitsRequest = InvestigationLimitsRequest(),
+)
 
 @Serializable
 data class CancelInvestigationResponse(val cancelled: Boolean = true)
 
 @Serializable
-data class InvestigationSummaryResponse(val id: String, val createdAt: String, val question: String)
+data class InvestigationSummaryResponse(val id: String, val createdAt: String, val question: String, val title: String)
 
 @Serializable
 data class InvestigationMessageResponse(val role: String, val text: String)
@@ -70,19 +95,24 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             val collection = context.collectionService.requireActiveByNameOrId(call.collectionId().value)
             val investigations = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT c.id, c.created_at, COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '') AS question " +
+                    "SELECT c.id, c.created_at, c.title, COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '') AS question " +
                         "FROM conversations c WHERE c.collection_id = ? AND c.mode = 'INVESTIGATE' ORDER BY c.created_at DESC LIMIT 50",
                 ).use { statement ->
                     statement.setString(1, collection.id.value)
                     statement.executeQuery().use { rows ->
                         buildList {
-                            while (rows.next()) add(
-                                InvestigationSummaryResponse(
-                                    id = rows.getString("id"),
-                                    createdAt = rows.getString("created_at"),
-                                    question = rows.getString("question").take(180),
-                                ),
-                            )
+                            while (rows.next()) {
+                                val question = rows.getString("question").take(180)
+                                add(
+                                    InvestigationSummaryResponse(
+                                        id = rows.getString("id"),
+                                        createdAt = rows.getString("created_at"),
+                                        question = question,
+                                        // The title falls back server-side, so the reader never handles an empty value.
+                                        title = rows.getString("title")?.takeIf { it.isNotBlank() } ?: question,
+                                    ),
+                                )
+                            }
                         }
                     }
                 }
@@ -187,6 +217,8 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
     post("/api/investigations") {
         call.handle {
             val body = call.receiveJson<InvestigationApiRequest>()
+            // Validated before lookup, reservation or SSE so invalid limits can never create a conversation.
+            val limits = body.limits.toLimits()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             if (!profile.toolCallingSupported) {
@@ -203,11 +235,18 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                 )
             } else {
                 val collectionId = CollectionId(collection.id.value)
+                val titler = ConversationTitler(
+                    prompt = PromptService(context.llm),
+                    persist = context.llm::setConversationTitle,
+                )
                 call.streamInvestigation(
                     investigationService(context, collectionId, profile),
-                    InvestigateRequest(collectionId, body.question, profile),
+                    InvestigateRequest(collectionId, body.question, profile, limits = limits),
                     runningTurns,
                     activeTurnIds,
+                    // Titled once, from the opening question, when the first turn has finished and
+                    // been persisted. Continue never re-titles, and a failed title call is silent.
+                    onFinished = { conversationId -> titler.title(conversationId, body.question, profile) },
                 )
             }
         }
@@ -217,6 +256,8 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
         call.handle {
             val conversationId = call.conversationId()
             val body = call.receiveJson<InvestigationApiRequest>()
+            // Validated before reservation or SSE, exactly like create.
+            val limits = body.limits.toLimits()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             // Tools stay scoped to the conversation's locked collection even when the request names a
@@ -233,7 +274,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             try {
                 call.streamInvestigation(
                     investigationService(context, lockedCollectionId, profile),
-                    InvestigateRequest(CollectionId(collection.id.value), body.question, profile, conversationId = conversationId),
+                    InvestigateRequest(CollectionId(collection.id.value), body.question, profile, conversationId = conversationId, limits = limits),
                     runningTurns,
                     activeTurnIds,
                     reservedId = conversationId,
@@ -358,6 +399,8 @@ private suspend fun ApplicationCall.streamInvestigation(
     runningTurns: ConcurrentHashMap<String, Job>,
     activeTurnIds: MutableSet<String>,
     reservedId: String? = null,
+    /** Runs once the stream has ended and been persisted, with the conversation id, for new conversations only. */
+    onFinished: (suspend (conversationId: String) -> Unit)? = null,
 ) {
     respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {
         val job = coroutineContext[Job]
@@ -380,6 +423,10 @@ private suspend fun ApplicationCall.streamInvestigation(
                 activeTurnIds.remove(it)
             }
         }
+        // The turn's events are already flushed, so the reader never waits on the title; the stream
+        // stays open until the title exists, which is what makes it appear on the next list read.
+        val finishedId = registeredId
+        if (finishedId != null) onFinished?.invoke(finishedId)
     }
 }
 
@@ -434,4 +481,6 @@ internal fun InvestigateEvent.toWire() = when (this) {
         )
     })
     is InvestigateEvent.Error -> InvestigateWire("error", code = code, message = message)
+    is InvestigateEvent.Limit -> InvestigateWire("limit", code = code, message = message)
+    is InvestigateEvent.AnswerStart -> InvestigateWire("answer-start")
 }

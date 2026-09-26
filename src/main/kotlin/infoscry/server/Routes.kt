@@ -399,6 +399,7 @@ fun Application.configureRoutes(
         configureLlmCatalogRoutes(credentials)
         configureAskRoutes(context)
         configureInvestigationRoutes(context)
+        configureConversationRoutes(context)
         configureDocumentRoutes(context)
         configureJobEventRoutes(context, jobEventIdleDeadlineMillis)
 

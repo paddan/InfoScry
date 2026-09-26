@@ -7,16 +7,14 @@ and Investigate and the source-viewer finish line remain open; do not describe
 them as complete.
 
 - Read [README.md](README.md) for current status.
-- Read the [design specification](docs/superpowers/specs/2026-09-20-infoscry-design.md)
-  for product requirements.
-- Before implementation, read [current status](docs/implementation-status.md)
-  and the [active plan](docs/superpowers/plans/2026-09-23-infoscry-next-work.md).
+- Design specs live in `docs/specs/` and implementation tickets in
+  `docs/tickets/`; read the relevant one before implementing.
 
 ## Workflow
 
 - Implement the requested task and its dependencies; do not expand into later
   phases without authorization. Resolve routine choices within the approved scope.
-- If the design and plan conflict, report the exact contradiction rather than
+- If the spec and ticket conflict, report the exact contradiction rather than
   silently changing product behavior. Update affected contracts and consumers
   together when a change is authorized.
 - Preserve unrelated working-tree changes. Keep commits scoped and follow the
@@ -29,7 +27,7 @@ them as complete.
 - Report what was actually verified and what remains unverified. Never mark a
   task or hardware gate complete from mock results alone.
 - Keep README status and commands current as implementation lands. Keep this
-  file concise; put detailed procedures and version tables in the plan.
+  file concise; put detailed procedures and version tables in the spec or ticket.
 
 ## Architecture and product rules
 

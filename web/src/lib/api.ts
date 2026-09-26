@@ -7,6 +7,8 @@
  * CLI's credential and never reaches a browser.
  */
 
+import type { InvestigationLimits } from './investigationLimits';
+
 export type Collection = {
   id: string;
   name: string;
@@ -94,17 +96,19 @@ export type AskEvent =
   | { type: 'delta'; text: string }
   | { type: 'usage'; inputTokens: number; outputTokens: number }
   | { type: 'citation'; id: string; valid: boolean }
-  | { type: 'done'; text: string; evidence: AskEvidence[] }
+  | { type: 'done'; text: string; evidence: AskEvidence[]; conversationId?: string }
   | { type: 'error'; code: string; message: string };
 
 /**
  * One answer the server kept: the question asked, the answer it produced, the sources it cited, and
- * what it cost.
+ * what it cost. The title was written from the opening question and always carries a value the
+ * server fell back to, so a row never has to handle an empty label.
  */
 export type AskHistoryEntry = {
   id: string;
   createdAt: string;
   question: string;
+  title: string;
   answer: string;
   evidence: AskEvidence[];
   inputTokens: number;
@@ -115,7 +119,7 @@ export type AskHistoryEntry = {
 export type InvestigateEvidence = AskEvidence & { locatorLabel: string };
 export type InvestigateMessage = { role: 'user' | 'assistant'; text: string };
 export type InvestigateActivity = { name: string; resultCode: string; durationMs: number };
-export type InvestigationSummary = { id: string; createdAt: string; question: string };
+export type InvestigationSummary = { id: string; createdAt: string; question: string; title: string };
 export type InvestigationHistory = {
   id: string;
   messages: InvestigateMessage[];
@@ -131,7 +135,9 @@ export type InvestigateEvent =
   | { type: 'tool'; callId: string; name: string; arguments?: string; resultCode?: string; durationMs?: number }
   | { type: 'usage'; inputTokens: number; outputTokens: number }
   | { type: 'citation'; id: string; valid: boolean }
-  | { type: 'done'; text: string; evidence: InvestigateEvidence[] }
+  | { type: 'limit'; code: string; message: string }
+  | { type: 'answer-start' }
+  | { type: 'done'; text: string; evidence?: InvestigateEvidence[] }
   | { type: 'error'; code: string; message: string };
 
 export type LlmProfilePrice = {
@@ -313,6 +319,14 @@ export async function deleteLlmProfile(id: string): Promise<void> {
   await mutate(`/api/llm/profiles/${encodeURIComponent(id)}`, 'DELETE');
 }
 
+/** Delete one stored conversation (a kept Ask answer or an Investigate conversation) from its collection. */
+export async function deleteConversation(collectionId: string, conversationId: string): Promise<void> {
+  await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/conversations/${encodeURIComponent(conversationId)}`,
+    'DELETE',
+  );
+}
+
 export async function setLlmDefault(role: 'ASK' | 'INVESTIGATE', profileId: string): Promise<void> {
   await mutate(`/api/llm/defaults/${role}`, 'PUT', { profileId });
 }
@@ -411,23 +425,31 @@ export async function getInvestigation(collectionId: string, conversationId: str
   return body.investigation;
 }
 
+/**
+ * Start an Investigate turn. `limits` carries the reader's per-question settings; a caller that
+ * omits it keeps the server defaults, so `limits` reaches the wire only when it is provided.
+ */
 export async function startInvestigation(
   collection: string,
   question: string,
   profile: string,
   signal?: AbortSignal,
+  limits?: InvestigationLimits,
 ): Promise<Response> {
-  return investigateRequest('/api/investigations', { collection, question, profile }, signal);
+  return investigateRequest('/api/investigations', { collection, question, profile, ...(limits === undefined ? {} : { limits }) }, signal);
 }
 
+/** Continue an existing conversation; the collection and profile are re-validated against its locked snapshot. */
 export async function continueInvestigation(
   conversationId: string,
   collection: string,
   question: string,
   profile: string,
   signal?: AbortSignal,
+  limits?: InvestigationLimits,
 ): Promise<Response> {
-  return investigateRequest(`/api/investigations/${encodeURIComponent(conversationId)}/continue`, { collection, question, profile }, signal);
+  const path = `/api/investigations/${encodeURIComponent(conversationId)}/continue`;
+  return investigateRequest(path, { collection, question, profile, ...(limits === undefined ? {} : { limits }) }, signal);
 }
 
 export async function cancelInvestigation(conversationId: string): Promise<void> {
@@ -497,7 +519,7 @@ function parseInvestigationFrame(frame: string): InvestigateEvent | null {
   if (data === undefined || data.slice(5).trim() === '[DONE]') return null;
   try {
     const event = JSON.parse(data.slice(5).trim()) as InvestigateEvent;
-    return ['started', 'delta', 'tool', 'usage', 'citation', 'done', 'error'].includes(event.type) ? event : null;
+    return ['started', 'delta', 'tool', 'usage', 'citation', 'limit', 'answer-start', 'done', 'error'].includes(event.type) ? event : null;
   } catch {
     return null;
   }

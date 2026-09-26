@@ -6,7 +6,6 @@
     continueInvestigation,
     getInvestigation,
     investigateDefaultProfile,
-    listInvestigations,
     listLlmProfilePrices,
     readInvestigationEvents,
     startInvestigation,
@@ -14,20 +13,31 @@
     type InvestigateEvidence,
     type InvestigateEvent,
     type InvestigateMessage,
-    type InvestigationSummary,
     type LlmProfilePrice,
   } from './api';
+  import {
+    DEFAULT_INVESTIGATION_LIMITS,
+    validInvestigationLimits,
+    type InvestigationLimitsInput,
+  } from './investigationLimits';
 
   export let collectionId: string;
+  /** The page owns the open conversation for this view; a row click or a new conversation moves it once. */
+  export let conversationId: string | null = null;
+  export let onConversationStarted: (id: string) => void = () => {};
+  /** The stream closed, so the server has finished titling; the page refreshes that collection's list. */
+  export let onConversationFinished: (collectionId: string) => void = () => {};
+  /** A live turn started or ended; the page locks the history column until the turn's done event. */
+  export let onWorkingChanged: (working: boolean) => void = () => {};
   export let onOpenSource: (evidence: InvestigateEvidence) => void | Promise<void>;
   export let profile = '';
   export let availableProfiles: LlmProfilePrice[] = [];
   export let profileStatus = 'Loading profiles…';
+  /** The sidebar's per-question limits; each turn sends the snapshot this prop holds at submit. */
+  export let limits: InvestigationLimitsInput = { ...DEFAULT_INVESTIGATION_LIMITS };
 
   let question = '';
   let prices: LlmProfilePrice[] = [];
-  let conversations: InvestigationSummary[] = [];
-  let conversationId: string | null = null;
   let messages: InvestigateMessage[] = [];
   let evidence: InvestigateEvidence[] = [];
   let activity: InvestigateActivity[] = [];
@@ -38,8 +48,18 @@
   let loadingHistory = false;
   let error: string | null = null;
   let status: string | null = null;
+  /** A nonfatal research-limit notice for the newest turn; it stays beside the final answer. */
+  let limitNotice: string | null = null;
+  /** The newest turn's controller, which Cancel stops; drains of older turns stay tracked separately. */
   let controller: AbortController | null = null;
+  /** Every in-flight stream's controller; a destroyed panel aborts them all so no drain leaks. */
+  let activeControllers = new Set<AbortController>();
   let generation = 0;
+  /** Bumped for every selection change so an obsolete history load can never land late. */
+  let historyGeneration = 0;
+  let handledConversationId: string | null = null;
+  /** An out-of-contract setting blocks the turn here as well as in the sidebar's own error state. */
+  $: limitsProblem = validInvestigationLimits(limits) === null;
 
   async function loadPanel(): Promise<void> {
     try { if (profile === '') profile = await investigateDefaultProfile(); }
@@ -49,57 +69,81 @@
       availableProfiles = prices;
       if (availableProfiles.length === 0) profileStatus = 'No LLM profiles are available.';
     } catch { profileStatus = 'Could not load LLM profiles.'; }
-    await refreshConversations();
-    const savedId = window.localStorage.getItem(`infoscry-investigate:${collectionId}`);
-    if (savedId !== null) await loadConversation(savedId);
-    else if (conversations.length > 0) await loadConversation(conversations[0].id);
   }
 
-  async function refreshConversations(): Promise<void> {
-    try { conversations = await listInvestigations(collectionId); }
-    catch { conversations = []; }
-  }
-
-  async function loadConversation(id: string): Promise<void> {
-    if (id === '') {
-      conversationId = null;
+  /**
+   * Show the conversation the page selected. A fresh stream owns the panel while it runs, and a
+   * null id means the empty compose state the `New conversation` button returns to.
+   *
+   * Every call claims a higher generation, so a response that lands after the selection moved on
+   * is dropped and can neither replace the panel content nor rewrite the page-selected id.
+   */
+  async function openConversation(id: string | null): Promise<void> {
+    const attempt = ++historyGeneration;
+    if (working) return;
+    if (id === null) {
+      loadingHistory = false;
       messages = [];
       evidence = [];
       activity = [];
       inputTokens = 0;
       outputTokens = 0;
       costUsd = null;
-      window.localStorage.removeItem(`infoscry-investigate:${collectionId}`);
+      error = null;
+      limitNotice = null;
       return;
     }
+    const panelCollection = collectionId;
     loadingHistory = true;
+    messages = [];
+    evidence = [];
+    activity = [];
+    inputTokens = 0;
+    outputTokens = 0;
+    costUsd = null;
     error = null;
+    limitNotice = null;
     try {
-      const history = await getInvestigation(collectionId, id);
-      conversationId = history.id;
+      const history = await getInvestigation(panelCollection, id);
+      // The page owns the selection; a response for an obsolete id or collection never lands here.
+      if (attempt !== historyGeneration || id !== conversationId || panelCollection !== collectionId) return;
       messages = history.messages;
       evidence = history.evidence;
       activity = history.activity;
       inputTokens = history.inputTokens;
       outputTokens = history.outputTokens;
       costUsd = history.costUsd;
-      window.localStorage.setItem(`infoscry-investigate:${collectionId}`, history.id);
     } catch (failure) {
-      window.localStorage.removeItem(`infoscry-investigate:${collectionId}`);
-      error = describe(failure);
-    } finally { loadingHistory = false; }
+      if (attempt === historyGeneration) error = describe(failure);
+    } finally {
+      if (attempt === historyGeneration) loadingHistory = false;
+    }
+  }
+
+  $: if (conversationId !== handledConversationId) {
+    handledConversationId = conversationId;
+    void openConversation(conversationId);
   }
 
   async function ask(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     const text = question.trim();
-    if (text === '' || collectionId === '' || profile === '' || working) return;
+    if (text === '' || collectionId === '' || profile === '' || working || loadingHistory) return;
+    const turnLimits = validInvestigationLimits(limits);
+    if (turnLimits === null) return;
+    // No in-flight history read may land over this turn's streamed messages.
+    historyGeneration += 1;
+    loadingHistory = false;
     const turn = ++generation;
+    const streamCollection = collectionId;
     const turnProfile = profile;
     const signalController = new AbortController();
+    activeControllers.add(signalController);
     controller = signalController;
     working = true;
+    onWorkingChanged?.(true);
     error = null;
+    limitNotice = null;
     status = 'Starting investigation…';
     messages = [...messages, { role: 'user', text }, { role: 'assistant', text: '' }];
     const answerIndex = messages.length - 1;
@@ -109,17 +153,25 @@
     const liveActivity = new Map<string, InvestigateActivity>();
     try {
       const response = conversationId === null
-        ? await startInvestigation(collectionId, text, turnProfile, signalController.signal)
-        : await continueInvestigation(conversationId, collectionId, text, turnProfile, signalController.signal);
+        ? await startInvestigation(collectionId, text, turnProfile, signalController.signal, turnLimits)
+        : await continueInvestigation(conversationId, collectionId, text, turnProfile, signalController.signal, turnLimits);
       for await (const event of readInvestigationEvents(response, signalController.signal)) {
         if (turn !== generation) return;
         if (event.type === 'started') {
           conversationId = event.id;
-          window.localStorage.setItem(`infoscry-investigate:${collectionId}`, event.id);
+          onConversationStarted(event.id);
         } else if (event.type === 'delta') {
           messages[answerIndex] = { role: 'assistant', text: messages[answerIndex].text + event.text };
           messages = [...messages];
           status = 'Investigating…';
+        } else if (event.type === 'limit') {
+          // Nonfatal: the turn keeps running into synthesis, so the notice never sets `error`
+          // and never touches the working lock.
+          limitNotice = event.message;
+        } else if (event.type === 'answer-start') {
+          // Synthesis replaces the provisional streamed text rather than appending to it.
+          messages[answerIndex] = { role: 'assistant', text: '' };
+          messages = [...messages];
         } else if (event.type === 'tool') {
           if (event.resultCode !== undefined) {
             liveActivity.set(event.callId, { name: event.name, resultCode: event.resultCode, durationMs: event.durationMs ?? 0 });
@@ -132,7 +184,7 @@
         } else if (event.type === 'done') {
           messages[answerIndex] = { role: 'assistant', text: event.text };
           messages = [...messages];
-          evidence = mergeEvidence(evidence, event.evidence.filter((item) => validCitationIds.has(item.id)));
+          evidence = mergeEvidence(evidence, (event.evidence ?? []).filter((item) => validCitationIds.has(item.id)));
           if (usage !== null) {
             inputTokens += usage.inputTokens;
             outputTokens += usage.outputTokens;
@@ -142,7 +194,10 @@
             }
           }
           status = null;
-          await refreshConversations();
+          // The completion event is the user-visible end of the turn: a follow-up may start and the
+          // selection locks release while the reader keeps draining until the title call finishes.
+          working = false;
+          onWorkingChanged?.(false);
         } else if (event.type === 'error') {
           status = null;
           error = event.message;
@@ -152,10 +207,16 @@
     } catch (failure) {
       if (turn === generation && !signalController.signal.aborted) error = describe(failure);
     } finally {
+      activeControllers.delete(signalController);
       if (turn === generation) {
         working = false;
         controller = null;
+        onWorkingChanged?.(false);
       }
+      // The stream closing is what makes the title exist server-side, so the history refresh the
+      // page runs now shows the stored conversation with the title it was written. An older stream
+      // refreshes the collection it asked in, never the panel state of a newer turn.
+      onConversationFinished(streamCollection);
     }
   }
 
@@ -169,6 +230,7 @@
     controller?.abort();
     status = 'Investigation cancelled.';
     working = false;
+    onWorkingChanged?.(false);
   }
 
   function mergeEvidence(previous: InvestigateEvidence[], incoming: InvestigateEvidence[]): InvestigateEvidence[] {
@@ -206,18 +268,11 @@
   }
 
   onMount(loadPanel);
-  onDestroy(() => controller?.abort());
+  onDestroy(() => activeControllers.forEach((streamController) => streamController.abort()));
 </script>
 
 <section aria-labelledby="investigate-heading">
   <h2 id="investigate-heading">Investigate</h2>
-  {#if conversations.length > 0}
-    <label for="conversation">Conversation history</label>
-    <select id="conversation" value={conversationId ?? ''} onchange={(event) => loadConversation(event.currentTarget.value)}>
-      <option value="">New conversation</option>
-      {#each conversations as item (item.id)}<option value={item.id}>{item.question || 'Untitled conversation'}</option>{/each}
-    </select>
-  {/if}
   {#if loadingHistory}<p role="status">Loading conversation…</p>{/if}
   <ol class="messages" aria-label="Conversation">
     {#each messages as message, index (`${index}-${message.role}`)}
@@ -229,6 +284,7 @@
       </li>
     {/each}
   </ol>
+  {#if limitNotice !== null}<p class="notice" role="note">{limitNotice}</p>{/if}
   {#if activity.length > 0}
     <details>
       <summary>{activity.length} tool call{activity.length === 1 ? '' : 's'}</summary>
@@ -248,7 +304,7 @@
   <form onsubmit={ask}>
     <label for="investigate-question">Investigate question</label>
     <textarea id="investigate-question" bind:value={question} rows="3" required></textarea>
-    <button type="submit" disabled={working || profile === '' || question.trim() === ''}>{conversationId === null ? 'Investigate' : 'Send follow-up'}</button>
+    <button type="submit" disabled={working || loadingHistory || limitsProblem || profile === '' || question.trim() === ''}>{conversationId === null ? 'Investigate' : 'Send follow-up'}</button>
     {#if working}<button type="button" onclick={cancel}>Cancel</button>{/if}
   </form>
   {#if status !== null}<p role="status">{status}</p>{/if}
@@ -264,8 +320,9 @@
   .citation { background: transparent; border: 0; color: #1558a6; cursor: pointer; font: inherit; padding: 0; text-decoration: underline; }
   form { display: grid; gap: 0.5rem; grid-template-columns: minmax(0, 1fr) auto auto; margin-top: 0.75rem; }
   label, textarea { grid-column: 1 / -1; }
-  textarea, button, select { font: inherit; padding: 0.45rem; }
+  textarea, button { font: inherit; padding: 0.45rem; }
   .meta { color: #555; font-size: 0.9rem; }
+  .notice { background: #2b261d; border-left: 3px solid #c98a10; color: #f0d49f; margin: 0.75rem 0 0; padding: 0.4rem 0.6rem; }
   [role='alert'] { color: #a4232b; }
   @media (max-width: 38rem) { form { grid-template-columns: 1fr; } }
 </style>

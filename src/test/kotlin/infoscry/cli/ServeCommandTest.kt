@@ -2,6 +2,8 @@ package infoscry.cli
 
 import infoscry.server.ApiJson
 import infoscry.server.CollectionsResponse
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -114,6 +116,18 @@ class ServeCommandTest {
             assertEquals(HttpStatusCode.OK, runBlocking { get("$url/api/collections").status })
         } finally {
             cli.kill()
+        }
+    }
+
+    @Test
+    fun `serve reports an occupied port without a stack trace`() {
+        ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { occupiedPort ->
+            val result = CliProcess.run(*serveArgs("serve", "--port", occupiedPort.localPort.toString()))
+
+            assertNotEquals(0, result.exitCode)
+            assertContains(result.stderr, "InfoScry could not bind 127.0.0.1:${occupiedPort.localPort}")
+            assertContains(result.stderr, "Address already in use")
+            assertTrue(!result.stderr.contains("Exception in thread"), result.stderr)
         }
     }
 

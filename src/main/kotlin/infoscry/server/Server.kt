@@ -10,7 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** The loopback port InfoScry uses unless another is asked for. */
-const val DEFAULT_PORT = 8765
+const val DEFAULT_PORT = 8080
 
 /** The only interface the server binds. There is deliberately no option to change it. */
 const val LOOPBACK_HOST = "127.0.0.1"
@@ -63,9 +63,8 @@ suspend fun startLoopbackServer(
     val engine = embeddedServer(Netty, port = port, host = LOOPBACK_HOST) {
         configureRoutes(context, credentials, jobEventIdleDeadlineMillis, picker)
     }
-    engine.start(wait = false)
-
     val boundPort = try {
+        engine.start(wait = false)
         withContext(Dispatchers.IO) { engine.engine.resolvedConnectors().first().port }
     } catch (failure: Exception) {
         engine.stop(GRACE_PERIOD_MILLIS, TIMEOUT_MILLIS)

@@ -3,6 +3,7 @@ package infoscry.server
 import infoscry.AppContext
 import infoscry.collection.CollectionIndexRemover
 import infoscry.config.RuntimeInfo
+import infoscry.embedding.QueryEmbedder
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.get
@@ -46,9 +47,11 @@ internal class ApiTestServer(
     index: CollectionIndexRemover = CollectionIndexRemover.NONE,
     jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
     picker: suspend (Boolean) -> List<String> = ::pickWithOsascript,
+    /** A deterministic retrieval vector for tests that drive a whole search-backed route without a model. */
+    queryEmbedder: (() -> QueryEmbedder?)? = null,
 ) : AutoCloseable {
 
-    val context: AppContext = AppContext.open(dataDir, index)
+    val context: AppContext = AppContext.open(dataDir, index, queryEmbedder)
 
     // Port 0 lets the operating system choose, so a test never collides with another server — including
     // a second server started inside the same test to observe how maintenance excludes it.

@@ -1,17 +1,32 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import AskPanel from '../lib/AskPanel.svelte';
+  import HistoryColumn from '../lib/HistoryColumn.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
   import ImportPanel from '../lib/ImportPanel.svelte';
   import {
+    DEFAULT_INVESTIGATION_LIMITS,
+    INVESTIGATION_LIMIT_FIELDS,
+    investigationLimitErrors,
+    loadInvestigationLimits,
+    saveInvestigationLimits,
+    validInvestigationLimits,
+    type InvestigationLimitKey,
+    type InvestigationLimitsInput,
+  } from '../lib/investigationLimits';
+  import {
     ApiError,
+    deleteConversation,
+    listAsks,
     listCollections,
+    listInvestigations,
     readSource,
     searchCollection,
-    type AskEvidence,
+    type AskHistoryEntry,
     type Collection,
     type InvestigateEvidence,
+    type InvestigationSummary,
     type LlmProfilePrice,
     type SearchHit,
     type SearchFilters,
@@ -51,6 +66,238 @@
   let loadingSource = false;
   let sourceError: string | null = null;
   let sourceGeneration = 0;
+  let sourceSheet: HTMLElement | null = null;
+  let sourceOpener: HTMLElement | null = null;
+  let investigateConversations: InvestigationSummary[] = [];
+  let investigateConversationId: string | null = null;
+  let loadingInvestigationList = true;
+  let investigateListGeneration = 0;
+  let askEntries: AskHistoryEntry[] = [];
+  let askConversationId: string | null = null;
+  let loadingAskHistory = true;
+  let askListGeneration = 0;
+  /** An Investigate turn is live; the history column waits until its done event before changing it. */
+  let investigateWorking = false;
+  /** The per-question Investigate limits, restored from this browser and applied to the next turn. */
+  let investigateLimits: InvestigationLimitsInput = { ...loadInvestigationLimits() };
+  let limitErrors: Partial<Record<InvestigationLimitKey, string>> = {};
+  // One field-associated message per out-of-contract value; the panel refuses to send while any exists.
+  $: limitErrors = investigationLimitErrors(investigateLimits);
+  // Only a complete, in-range set is stored, so a half-typed value leaves the last good preference.
+  $: {
+    const storedLimits = validInvestigationLimits(investigateLimits);
+    if (storedLimits !== null) saveInvestigationLimits(storedLimits);
+  }
+  /** A row delete that failed; shows the server's reason without any conversation content. */
+  let deleteError: string | null = null;
+
+  /** The open conversation is remembered per collection and per view in browser storage. */
+  function historyStorageKey(view: 'ask' | 'investigate', collectionId: string): string {
+    return `infoscry-history:${view}:${collectionId}`;
+  }
+
+  function readStoredConversation(view: 'ask' | 'investigate', collectionId: string): string | null {
+    try { return window.localStorage.getItem(historyStorageKey(view, collectionId)); }
+    catch { return null; }
+  }
+
+  function storeConversationSelection(view: 'ask' | 'investigate', id: string | null): void {
+    const key = historyStorageKey(view, selectedCollectionId);
+    try {
+      if (id === null) window.localStorage.removeItem(key);
+      else window.localStorage.setItem(key, id);
+    } catch { /* Browser storage is optional; the current selection still works in memory. */ }
+  }
+
+  function storeInvestigateSelection(): void {
+    storeConversationSelection('investigate', investigateConversationId);
+  }
+
+  function storeAskSelection(): void {
+    storeConversationSelection('ask', askConversationId);
+  }
+
+  async function readInvestigateConversations(collectionId: string): Promise<InvestigationSummary[]> {
+    try { return await listInvestigations(collectionId); }
+    catch { return []; } // A list read that fails stays silent, as the panels behave today.
+  }
+
+  async function refreshInvestigateConversations(collectionId: string): Promise<void> {
+    if (collectionId !== selectedCollectionId) return;
+    const generation = ++investigateListGeneration;
+    const conversations = await readInvestigateConversations(collectionId);
+    if (generation !== investigateListGeneration || collectionId !== selectedCollectionId) return;
+    investigateConversations = conversations;
+    loadingInvestigationList = false;
+  }
+
+  /**
+   * Load the selected collection's Investigate conversations and its remembered open one. With
+   * nothing remembered, or an id the collection no longer holds, the view starts empty.
+   */
+  async function loadInvestigate(): Promise<void> {
+    const generation = ++investigateListGeneration;
+    const collectionId = selectedCollectionId;
+    if (collectionId === '') {
+      investigateConversations = [];
+      investigateConversationId = null;
+      loadingInvestigationList = false;
+      return;
+    }
+    loadingInvestigationList = true;
+    investigateConversationId = null;
+    const conversations = await readInvestigateConversations(collectionId);
+    if (generation !== investigateListGeneration || collectionId !== selectedCollectionId) return;
+    investigateConversations = conversations;
+    const saved = readStoredConversation('investigate', collectionId);
+    investigateConversationId = saved !== null && conversations.some((item) => item.id === saved)
+      ? saved
+      : null;
+    loadingInvestigationList = false;
+  }
+
+  /** Restore all three settings to the defaults; the reactive store writes them as the preference. */
+  function resetInvestigateLimits(): void {
+    investigateLimits = { ...DEFAULT_INVESTIGATION_LIMITS };
+  }
+
+  function openInvestigationConversation(id: string): void {
+    investigateConversationId = id;
+    storeInvestigateSelection();
+  }
+
+  function newInvestigationConversation(): void {
+    investigateConversationId = null;
+    storeInvestigateSelection();
+  }
+
+  /** A fresh conversation just started streaming; persist its id and show its row. */
+  function handleInvestigationStarted(id: string): void {
+    investigateConversationId = id;
+    storeInvestigateSelection();
+    void refreshInvestigateConversations(selectedCollectionId);
+  }
+
+  /** The stream finished, so the server has written its title; refresh that collection's list. */
+  function handleInvestigationFinished(collectionId: string): void {
+    void refreshInvestigateConversations(collectionId);
+  }
+
+  /** An Investigate turn started (or its done event arrived); the column lock follows it. */
+  function handleInvestigateWorking(working: boolean): void {
+    investigateWorking = working;
+  }
+
+  async function readAskHistory(collectionId: string): Promise<AskHistoryEntry[]> {
+    try { return await listAsks(collectionId); }
+    catch { return []; } // A list read that fails stays silent, as the panels behave today.
+  }
+
+  async function refreshAskHistory(collectionId: string): Promise<void> {
+    if (collectionId !== selectedCollectionId) return;
+    const generation = ++askListGeneration;
+    const conversations = await readAskHistory(collectionId);
+    if (generation !== askListGeneration || collectionId !== selectedCollectionId) return;
+    askEntries = conversations;
+    loadingAskHistory = false;
+  }
+
+  /**
+   * Load the selected collection's stored Ask answers and the one the reader last had open. With
+   * nothing remembered, or an id the collection no longer holds, the view starts empty.
+   */
+  async function loadAsk(): Promise<void> {
+    const generation = ++askListGeneration;
+    const collectionId = selectedCollectionId;
+    if (collectionId === '') {
+      askEntries = [];
+      askConversationId = null;
+      loadingAskHistory = false;
+      return;
+    }
+    loadingAskHistory = true;
+    askConversationId = null;
+    const conversations = await readAskHistory(collectionId);
+    if (generation !== askListGeneration || collectionId !== selectedCollectionId) return;
+    askEntries = conversations;
+    const saved = readStoredConversation('ask', collectionId);
+    askConversationId = saved !== null && conversations.some((item) => item.id === saved)
+      ? saved
+      : null;
+    loadingAskHistory = false;
+  }
+
+  function openAskConversation(id: string): void {
+    askConversationId = id;
+    storeAskSelection();
+  }
+
+  function newAskConversation(): void {
+    askConversationId = null;
+    storeAskSelection();
+  }
+
+  /** The completion event named the conversation the server just stored; select and mark its row. */
+  function handleAskStored(id: string): void {
+    // An initial list response started before this Ask cannot contain the new row and must not
+    // replace the page-owned selection when it eventually arrives.
+    askListGeneration += 1;
+    askConversationId = id;
+    storeAskSelection();
+  }
+
+  /** A new Ask began, so no previously selected row may stay marked under an answer never stored. */
+  function handleAskStarted(): void {
+    askConversationId = null;
+    storeAskSelection();
+  }
+
+  /** The stream closed, so the server has written its title; refresh that collection's list. */
+  function handleAskFinished(collectionId: string): void {
+    void refreshAskHistory(collectionId);
+  }
+
+  /**
+   * Delete one stored Ask answer after the platform's native confirmation; the list refreshes from
+   * the server on success, and the request is sent only when the reader confirms.
+   */
+  async function deleteAskConversation(id: string): Promise<void> {
+    const entry = askEntries.find((item) => item.id === id);
+    if (entry === undefined) return;
+    if (!window.confirm(`Delete conversation "${entry.title}"? This cannot be undone.`)) return;
+    deleteError = null;
+    try {
+      await deleteConversation(selectedCollectionId, id);
+      if (askConversationId === id) {
+        askConversationId = null;
+        storeAskSelection();
+      }
+      await refreshAskHistory(selectedCollectionId);
+    } catch (failure) {
+      deleteError = describe(failure);
+    }
+  }
+
+  /**
+   * Delete one Investigate conversation after the platform's native confirmation, exactly like an
+   * Ask answer: the request is sent only when confirmed, and the list refreshes on success.
+   */
+  async function deleteInvestigateConversation(id: string): Promise<void> {
+    const entry = investigateConversations.find((item) => item.id === id);
+    if (entry === undefined) return;
+    if (!window.confirm(`Delete conversation "${entry.title}"? This cannot be undone.`)) return;
+    deleteError = null;
+    try {
+      await deleteConversation(selectedCollectionId, id);
+      if (investigateConversationId === id) {
+        investigateConversationId = null;
+        storeInvestigateSelection();
+      }
+      await refreshInvestigateConversations(selectedCollectionId);
+    } catch (failure) {
+      deleteError = describe(failure);
+    }
+  }
 
   async function refresh(): Promise<void> {
     loadingCollections = true;
@@ -65,6 +312,8 @@
     } finally {
       loadingCollections = false;
     }
+    await loadInvestigate();
+    await loadAsk();
   }
 
   async function search(event: SubmitEvent): Promise<void> {
@@ -92,15 +341,19 @@
     }
   }
 
-  async function openSource(hit: SearchHit): Promise<void> {
+  async function openSource(hit: SearchHit, opener: HTMLElement | null = null): Promise<void> {
     const generation = ++sourceGeneration;
+    sourceOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     selectedHit = hit;
     source = null;
     sourceText = '';
     sourceError = null;
     loadingSource = true;
     try {
-      const page = await readSource(selectedCollectionId, hit.unitId);
+      const pagePromise = readSource(selectedCollectionId, hit.unitId);
+      await tick();
+      sourceSheet?.focus();
+      const page = await pagePromise;
       if (generation !== sourceGeneration || hit.collectionId !== selectedCollectionId) return;
       source = page;
       sourceText = page.text;
@@ -140,9 +393,12 @@
 
   function changeCollection(): void {
     invalidateSearch();
+    void loadInvestigate();
+    void loadAsk();
   }
 
   function selectMode(modeName: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN'): void {
+    if (activeMode !== modeName) closeSourceSheetWithoutFocus();
     activeMode = modeName;
   }
 
@@ -156,7 +412,7 @@
     else if (event.key === 'End') next = tabs.length - 1;
     else return;
     event.preventDefault();
-    activeMode = tabs[next];
+    selectMode(tabs[next]);
     document.getElementById(`tab-${activeMode.toLowerCase()}`)?.focus();
   }
 
@@ -181,6 +437,54 @@
     sourceText = '';
     loadingSource = false;
     sourceError = null;
+    sourceOpener = null;
+  }
+
+  function handleSourceKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSourceSheet();
+    } else if (event.key === 'Tab') {
+      containSourceFocus(event);
+    }
+  }
+
+  /**
+   * Keep keyboard focus inside the sheet while it is open. The sheet is announced as modal, so focus
+   * must not reach the controls behind the backdrop; the sidebar stays visible, but keyboard and
+   * screen-reader navigation wait until the sheet is closed.
+   */
+  function containSourceFocus(event: KeyboardEvent): void {
+    if (sourceSheet === null) return;
+    const focusable = Array.from(sourceSheet.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (active === first && event.shiftKey) {
+      event.preventDefault();
+      last.focus();
+    } else if (active === last && !event.shiftKey) {
+      event.preventDefault();
+      first.focus();
+    } else if (active === sourceSheet || !sourceSheet.contains(active)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  }
+
+  function closeSourceSheet(): void {
+    const opener = sourceOpener;
+    clearSelectedSource();
+    if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+  }
+
+  /**
+   * Close the sheet without restoring focus to the opening citation: the reader is navigating, so
+   * the workspace tab they chose keeps the focus instead.
+   */
+  function closeSourceSheetWithoutFocus(): void {
+    clearSelectedSource();
   }
 
   function originalHref(hit: SearchHit): string {
@@ -211,6 +515,8 @@
     await refresh();
     if (selectedId !== undefined && collections.some((collection) => collection.id === selectedId)) {
       selectedCollectionId = selectedId;
+      await loadInvestigate();
+      await loadAsk();
     }
   }
 
@@ -321,6 +627,28 @@
             </select>
             {#if investigateProfiles.length === 0}<p>{investigateProfileStatus}</p>{/if}
             <p>Investigate can search the selected collection as needed. Search filters apply to Search only.</p>
+            <fieldset class="limit-settings">
+              <legend>Question limits</legend>
+              <p>A round may contain several tool calls. Time includes preparing the final answer.</p>
+              {#each INVESTIGATION_LIMIT_FIELDS as field (field.key)}
+                <label for={`limit-${field.key}`}>{field.label}</label>
+                <input
+                  id={`limit-${field.key}`}
+                  type="number"
+                  min={field.min}
+                  max={field.max}
+                  step="1"
+                  disabled={investigateWorking}
+                  bind:value={investigateLimits[field.key]}
+                  aria-invalid={limitErrors[field.key] !== undefined}
+                  aria-describedby={limitErrors[field.key] === undefined ? undefined : `limit-error-${field.key}`}
+                />
+                {#if limitErrors[field.key] !== undefined}
+                  <p class="limit-error" id={`limit-error-${field.key}`} role="alert">{limitErrors[field.key]}</p>
+                {/if}
+              {/each}
+              <button type="button" disabled={investigateWorking} onclick={resetInvestigateLimits}>Reset defaults</button>
+            </fieldset>
           {/if}
         </div>
       {/if}
@@ -336,7 +664,7 @@
     {/if}
 
   {#if !loadingCollections}
-    <div class:with-source={selectedHit !== null} class="content-layout">
+    <div class="content-layout" class:with-history={activeMode === 'INVESTIGATE' || activeMode === 'ASK'}>
     <div class="mode-panels">
       <div id="panel-search" role="tabpanel" aria-labelledby="tab-search" hidden={activeMode !== 'SEARCH'}>
       <div class="search-input-row">
@@ -360,7 +688,7 @@
                 type="button"
                 class="result"
                 aria-pressed={selectedHit?.unitId === hit.unitId}
-                onclick={() => openSource(hit)}
+                onclick={(event) => openSource(hit, event.currentTarget as HTMLElement)}
               >
                 <span class="result-title">{hit.title || hit.locatorLabel}</span>
                 <span class="meta">{hit.locatorLabel}</span>
@@ -399,7 +727,7 @@
       </div>
 
     {#key selectedCollectionId}
-      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}><AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} onOpenSource={(evidence) => openSource({
+      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onOpenSource={(evidence) => openSource({
         collectionId: selectedCollectionId,
         documentId: evidence.documentId,
         title: evidence.locatorLabel,
@@ -411,13 +739,45 @@
         locatorLabel: evidence.locatorLabel,
         matchedBy: [],
       })} /></div>
-      <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}><InvestigatePanel collectionId={selectedCollectionId} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
+      <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} limits={investigateLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
     {/key}
+    </div>
+    {#if activeMode === 'INVESTIGATE'}
+      <HistoryColumn
+        label="Conversation history"
+        entries={investigateConversations.map((item) => ({ id: item.id, title: item.title || item.question || 'Untitled conversation' }))}
+        openId={investigateConversationId}
+        loading={loadingInvestigationList}
+        disabled={investigateWorking}
+        onSelect={openInvestigationConversation}
+        onNew={newInvestigationConversation}
+        onDelete={deleteInvestigateConversation}
+      />
+    {:else if activeMode === 'ASK'}
+      <HistoryColumn
+        label="Ask history"
+        entries={askEntries.map((item) => ({ id: item.id, title: item.title }))}
+        openId={askConversationId}
+        loading={loadingAskHistory}
+        onSelect={openAskConversation}
+        onNew={newAskConversation}
+        onDelete={deleteAskConversation}
+      />
+    {/if}
     </div>
 
   {#if selectedHit !== null}
-    <section aria-labelledby="source-heading" aria-live="polite">
-      <div class="source-heading-row"><h2 id="source-heading">Source</h2><button type="button" aria-label="Close source viewer" onclick={clearSelectedSource}>×</button></div>
+    <div class="source-backdrop" aria-hidden="true" onclick={closeSourceSheet}></div>
+    <div
+      bind:this={sourceSheet}
+      class="source-sheet"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="source-heading"
+      tabindex="-1"
+      onkeydown={handleSourceKeydown}
+    >
+      <div class="source-heading-row"><h2 id="source-heading">Source</h2><button type="button" aria-label="Close source viewer" onclick={closeSourceSheet}>×</button></div>
       <p class="meta">{selectedHit.locatorLabel}</p>
       <p><a href={originalHref(selectedHit)}>Open original</a></p>
       {#if loadingSource && source === null}
@@ -433,9 +793,8 @@
           </button>
         {/if}
       {/if}
-    </section>
-  {/if}
     </div>
+  {/if}
   {/if}
 </main>
 </div>
@@ -455,7 +814,7 @@
   :global(.meta) { color: #929997 !important; }
   :global([role="alert"]) { color: #f0a4a0 !important; }
   :global(#panel-ask section), :global(#panel-investigate section) { margin-top: 0; }
-  .app-shell { min-height: 100vh; display: grid; grid-template-columns: 258px minmax(0, 1fr); }
+  .app-shell { min-height: 100vh; display: grid; grid-template-columns: 258px minmax(0, 1fr); --history-column-width: 20rem; }
   .sidebar { min-height: 100vh; display: flex; flex-direction: column; gap: 1.8rem; padding: 1.35rem 1rem 1rem; background: #181a1b; border-right: 1px solid #2a2d2e; }
   .brand { display: flex; align-items: center; gap: 0.7rem; color: #f1f0ed; text-decoration: none; font-size: 1.04rem; font-weight: 650; letter-spacing: -0.02em; padding: 0 0.3rem; }
   .brand-mark { display: grid; place-items: center; width: 1.85rem; height: 1.85rem; border-radius: 0.55rem; background: #c4a77d; color: #171817; font-family: Georgia, serif; font-size: 1.15rem; }
@@ -481,13 +840,17 @@
   .check-label input { accent-color: #c4a77d; }
   .sidebar-note { padding: 0.85rem; border: 1px solid #303535; border-radius: 0.55rem; background: #1d2021; }
   .sidebar-note p { margin: 0; color: #b0b5b3; font-size: 0.8rem; }
+  .limit-settings { display: grid; gap: 0.45rem; margin: 0; border: 0; border-top: 1px solid #2d3131; padding: 0.85rem 0 0; }
+  .limit-settings legend { padding: 0; color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+  .limit-settings input { font-size: 0.82rem; padding: 0.5rem; }
+  .sidebar-note .limit-error { color: #e08c8c; }
   .sidebar-footer { display: flex; align-items: center; gap: 0.5rem; margin-top: auto; border-top: 1px solid #2d3131; padding: 1rem 0.35rem 0; color: #89908e; font-size: 0.76rem; }
   .status-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: #85ad87; box-shadow: 0 0 0 3px #85ad8720; }
   .workspace { width: 100%; min-width: 0; padding: 2.1rem clamp(1.25rem, 4vw, 4.5rem); }
   .workspace-header { display: flex; align-items: end; justify-content: space-between; gap: 1rem; max-width: 78rem; margin: 0 auto 2rem; padding-bottom: 1.25rem; border-bottom: 1px solid #292d2d; }
   .workspace-header h1 { margin: 0.35rem 0 0; color: #f0efec; font-size: clamp(1.45rem, 2vw, 1.9rem); font-weight: 570; letter-spacing: -0.035em; }
   .content-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; max-width: 78rem; margin: 0 auto; align-items: start; }
-  .content-layout.with-source { grid-template-columns: minmax(0, 1.1fr) minmax(18rem, 0.9fr); }
+  .content-layout.with-history { padding-right: calc(var(--history-column-width) + 1.5rem); }
   .mode-panels { min-width: 0; }
   .mode-panels > div[role="tabpanel"] { margin: 0; min-width: 0; }
   .mode-panels [hidden] { display: none !important; }
@@ -510,13 +873,14 @@
   .result[aria-pressed="true"] { background: #242827; box-shadow: inset 2px 0 #c4a77d; }
   .result-title { color: #e6e6e2; font-weight: 650; }
   .meta { color: #929997; font-size: 0.82rem; }
-  .content-layout > section[aria-labelledby="source-heading"] { min-width: 0; margin: 0; padding: 1rem; border: 1px solid #303535; border-radius: 0.65rem; background: #191c1d; }
+  .source-backdrop { position: fixed; inset: 0 0 0 258px; background: rgba(16, 19, 21, 0.55); }
+  .source-sheet { position: fixed; top: 0; right: 0; bottom: 0; width: var(--history-column-width); overflow-y: auto; border-left: 1px solid #303535; background: #191c1d; padding: 1.25rem 1.35rem; box-shadow: -1.2rem 0 2.5rem rgba(0, 0, 0, 0.4); }
   .source-heading-row { display: flex; align-items: center; justify-content: space-between; }
   .source-heading-row h2 { margin-top: 0; }
   #source-heading { margin-top: 0; }
   .source-text { max-height: calc(100vh - 14rem); overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; border: 1px solid #343939; border-radius: 0.45rem; background: #121515; padding: 0.9rem; font: 0.86rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
   [role="alert"] { color: #f0a4a0; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 54rem) { .app-shell { grid-template-columns: 1fr; } .sidebar { min-height: auto; gap: 1rem; padding: 0.8rem 1rem; border-right: 0; border-bottom: 1px solid #2a2d2e; } .sidebar-footer { display: none; } .sidebar-note, .search-settings { max-width: 38rem; } .mode-nav [role="tablist"] { display: flex; } .mode-nav [role="tab"] { flex: 1; justify-content: center; } .content-layout.with-source { grid-template-columns: minmax(0, 1fr); } .content-layout > section[aria-labelledby="source-heading"] { order: 2; } }
+  @media (max-width: 54rem) { .app-shell { grid-template-columns: 1fr; } .sidebar { min-height: auto; gap: 1rem; padding: 0.8rem 1rem; border-right: 0; border-bottom: 1px solid #2a2d2e; } .sidebar-footer { display: none; } .sidebar-note, .search-settings { max-width: 38rem; } .mode-nav [role="tablist"] { display: flex; } .mode-nav [role="tab"] { flex: 1; justify-content: center; } .content-layout.with-history { padding-right: 0; } .source-backdrop { left: 0; } .source-sheet { width: 100%; } }
   @media (max-width: 36rem) { .workspace { padding: 1.3rem 1rem; } .workspace-header { align-items: start; margin-bottom: 1.2rem; } .search-input-row form { align-items: stretch; flex-direction: column; } .mode-nav [role="tab"] { gap: 0.35rem; padding: 0.55rem 0.35rem; font-size: 0.83rem; } }
 </style>

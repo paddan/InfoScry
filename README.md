@@ -148,7 +148,7 @@ Replace the example document path with a real absolute path. Import finishes
 before the server starts and does not change the source file; InfoScry stores a
 managed copy. `infoscry --serve` (or `infoscry serve`) opens the local web UI
 in your default browser after the server starts. If that fails, open the URL
-printed in the terminal (normally <http://127.0.0.1:8765>) yourself. `--json`
+printed in the terminal (normally <http://127.0.0.1:8080>) yourself. `--json`
 mode does not open a browser. The server uses `~/.infoscry` by default and runs
 until you press Ctrl-C. A disposable sample is
 `src/test/resources/fixtures/sample.txt` if you prefer not to start
@@ -196,6 +196,19 @@ send selected document evidence to the configured endpoint, which may be
 external. Their browser flows have not yet had the final manual fake-provider
 acceptance check.
 
+Investigate's sidebar settings apply to the next question or follow-up: tool
+rounds and tool calls both default to 50 (ranges 1–50 and 1–100), and time per
+question defaults to 600 seconds (range 10–1800). The first limit reached stops research.
+InfoScry then prepares one tool-free final answer from the evidence sent to the
+model and validates its citations against that evidence. The time budget includes
+request preparation, provider work, synthesis, and citation correction, but not
+the optional conversation title. Up to 120 seconds or 20% of the total budget,
+whichever is smaller, is reserved for synthesis. Settings are stored as numeric
+preferences in this browser under `infoscry-investigate-limits:v1`; a change
+applies to future turns, not a running one. Synchronous native work cannot be
+hard-cancelled and may overshoot the research deadline by one in-flight tool
+call, so the setting is not a strict wall-clock cutoff.
+
 ## CLI reference
 
 Every command accepts `--json` for stable machine-readable output and
@@ -216,7 +229,7 @@ infoscry serve --json            # print the URL/port/pid as JSON, no browser
 infoscry serve --data-dir /path/to/test-data
 ```
 
-Options: `--port` (default `8765`; `0` asks the OS for a free port),
+Options: `--port` (default `8080`; `0` asks the OS for a free port),
 `--json`, `--data-dir`.
 
 ### collection
@@ -374,11 +387,9 @@ cd web && npm run check # Svelte/TypeScript diagnostics after Gradle installed d
 
 These Gradle checks passed on this Mac on 2026-09-24. The browser was also
 used to find a CLI-imported sample through keyword, semantic, and hybrid
-search and open its source. See [implementation status](docs/implementation-status.md)
-for what remains unverified. For implementation work, read the
-[design specification](docs/superpowers/specs/2026-09-20-infoscry-design.md),
-[current work plan](docs/superpowers/plans/2026-09-23-infoscry-next-work.md),
-and [agent instructions](AGENTS.md).
+search and open its source. For implementation work, read the spec in
+`docs/specs/` or ticket in `docs/tickets/` for the change at hand, and the
+[agent instructions](AGENTS.md).
 
 ## License
 

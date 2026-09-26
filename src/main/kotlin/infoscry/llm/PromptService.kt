@@ -30,6 +30,23 @@ class PromptService(private val store: LlmStore) {
         appendLine("6. Answer in the language of the user's question.")
     }
 
+    /**
+     * The one-shot title completion's system prompt: a code constant like [CORE_RULES], never a
+     * stored prompt override, never a new prompt role, and never part of a default profile.
+     */
+    private val TITLE_RULES: String = buildString {
+        appendLine("Write a short title for a conversation, from its opening question.")
+        appendLine()
+        appendLine("Rules:")
+        appendLine("1. Use only the user's opening question, never any earlier material.")
+        appendLine("2. A phrase of a few words, not a sentence; no quotes, no leading article, no trailing punctuation.")
+        appendLine("3. Answer with the title text only.")
+        appendLine("4. Write in the language of the user's question.")
+    }
+
+    /** The title completion's system prompt; [ConversationTitler] is its only caller. */
+    fun titlePrompt(): String = TITLE_RULES
+
     fun composeAsk(collectionInstructions: String? = null): String =
         compose(ASK, collectionInstructions)
 

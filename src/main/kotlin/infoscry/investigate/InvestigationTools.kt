@@ -199,9 +199,9 @@ class InvestigationTools(
     private fun filtersOf(arg: SearchFiltersArg?): SearchFilters = SearchFilters(
         collectionId = collectionId,
         mediaTypes = arg?.mediaTypes.orEmpty(),
-        titleAuthorOrLanguageContains = arg?.titleAuthorOrLanguageContains,
-        importedFrom = arg?.importedFrom,
-        importedUntil = arg?.importedUntil,
+        titleAuthorOrLanguageContains = arg?.titleAuthorOrLanguageContains?.takeUnless(String::isBlank),
+        importedFrom = arg?.importedFrom?.takeUnless(String::isBlank),
+        importedUntil = arg?.importedUntil?.takeUnless(String::isBlank),
         statuses = arg?.statuses.orEmpty().mapTo(HashSet()) { DocumentStatus.valueOf(it) },
         ocrOnly = arg?.ocrOnly ?: false,
     )

@@ -47,7 +47,10 @@ private const val SHIPPED_PROMPT_VERSION = 1
  */
 class LlmStore(private val database: Database) {
 
-    /** Durable Ask snapshot; payloads contain source snippets but never credentials. */
+    /**
+     * Durable Ask snapshot; payloads contain source snippets but never credentials. Returns the
+     * conversation id it generates, so the request path can act on the conversation it just created.
+     */
     fun persistAsk(
         collectionId: CollectionId,
         profile: LlmProfile,
@@ -58,7 +61,7 @@ class LlmStore(private val database: Database) {
         initialCitations: CitationValidation,
         retrievalSnapshot: String = "{}",
         correction: CorrectionSnapshot? = null,
-    ) {
+    ): String {
         val conversationId = UUID.randomUUID().toString()
         val callId = UUID.randomUUID().toString()
         val persistedAnswer = correction?.answer ?: answer
@@ -86,7 +89,41 @@ class LlmStore(private val database: Database) {
             val totalUsage = initialUsage + (correctionUsage ?: infoscry.llm.TokenUsage(0, 0))
             connection.prepareStatement("INSERT INTO usage_totals (profile_id,calls,input_tokens,output_tokens,cache_read_tokens,cost_usd) VALUES (?,?,?,?,?,?) ON CONFLICT(profile_id) DO UPDATE SET calls=usage_totals.calls+excluded.calls,input_tokens=usage_totals.input_tokens+excluded.input_tokens,output_tokens=usage_totals.output_tokens+excluded.output_tokens,cache_read_tokens=usage_totals.cache_read_tokens+excluded.cache_read_tokens,cost_usd=usage_totals.cost_usd+excluded.cost_usd").use { s -> s.setString(1,profile.id); s.setInt(2,if(correction == null) 1 else 2); s.setLong(3,totalUsage.inputTokens); s.setLong(4,totalUsage.outputTokens); s.setLong(5,totalUsage.cacheReadTokens); s.setDouble(6,initialCost + (correctionUsage?.let { cost(profile, it) } ?: 0.0)); s.executeUpdate() }
         }
+        return conversationId
     }
+
+    /**
+     * Writes the one title field of a conversation whose first turn already completed. Best-effort
+     * by design: it records no model call and touches no usage counter, so what the panel reports
+     * stays the cost of the answer.
+     */
+    fun setConversationTitle(conversationId: String, title: String) {
+        require(title.isNotBlank()) { "a conversation title must not be blank" }
+        database.transaction { connection ->
+            connection.prepareStatement("UPDATE conversations SET title = ? WHERE id = ?").use { statement ->
+                statement.setString(1, title)
+                statement.setString(2, conversationId)
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    /**
+     * Deletes one conversation, scoped by its collection. False when the id is unknown or belongs to
+     * another collection, so the route can answer not-found without touching anything else.
+     *
+     * The schema's existing `ON DELETE CASCADE` removes the conversation's messages, model calls,
+     * citations, tool calls, evidence ledger entries, request eligibility and omission rows, and
+     * limit events with the conversation row.
+     */
+    fun deleteConversation(collectionId: CollectionId, conversationId: String): Boolean =
+        database.transaction { connection ->
+            connection.prepareStatement("DELETE FROM conversations WHERE id = ? AND collection_id = ?").use { statement ->
+                statement.setString(1, conversationId)
+                statement.setString(2, collectionId.value)
+                statement.executeUpdate() > 0
+            }
+        }
 
     private fun persistCitationAudit(
         connection: Connection,

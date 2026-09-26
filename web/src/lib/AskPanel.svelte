@@ -3,7 +3,6 @@
   import {
     ApiError,
     askDefaultProfile,
-    listAsks,
     listLlmProfilePrices,
     readAskEvents,
     startAsk,
@@ -18,6 +17,16 @@
   export let askProfile = '';
   export let availableProfiles: LlmProfilePrice[] = [];
   export let profileStatus = 'Loading profiles…';
+  /** The page owns the open conversation for this view; a row click or a new conversation moves it once. */
+  export let conversationId: string | null = null;
+  /** The stored answers the page loaded; the panel replays the selected row from this same list. */
+  export let entries: AskHistoryEntry[] = [];
+  /** The completion event named the conversation the server just stored; the page marks its row. */
+  export let onAnswerStored: (id: string) => void = () => {};
+  /** A new Ask began, so the page clears the old selection before an answer may never be stored. */
+  export let onAskStarted: () => void = () => {};
+  /** The stream closed, so the server has finished titling; the page refreshes that collection's list. */
+  export let onAnswerFinished: (collectionId: string) => void = () => {};
 
   let question = '';
   let asking = false;
@@ -30,11 +39,15 @@
   let answerEvidence: AskEvidence[] = [];
   let renderedAnswerParts: { text: string; evidence: AskEvidence | null }[] = [];
   let askGeneration = 0;
-  let abortController: AbortController | null = null;
-  let asks: AskHistoryEntry[] = [];
-  let selectedAskId = '';
+  /** Every in-flight stream's controller; a destroyed panel aborts them all so no drain leaks. */
+  let activeControllers = new Set<AbortController>();
   let storedQuestion = '';
   let costUsd: number | null = null;
+  /** A stream produced an answer after the page's selection stopped matching the view. */
+  let liveAnswerVisible = false;
+  /** The selection the current stream started from; a fresh answer must not be yanked back to it. */
+  let streamStartedFrom: string | null = null;
+  let previousConversationId: string | null = null;
 
   async function loadConfiguration(): Promise<void> {
     try {
@@ -50,28 +63,55 @@
       // Pricing is optional; Ask remains usable when profile listing is unavailable.
       profileStatus = 'Could not load LLM profiles.';
     }
-    await refreshHistory();
   }
 
-  /** Reload the answers the server kept. A history that cannot be read never blocks asking. */
-  async function refreshHistory(): Promise<void> {
-    try { asks = await listAsks(collectionId); }
-    catch { asks = []; }
+  /** Show one stored answer, exactly as the history column selected it. */
+  function showStored(stored: AskHistoryEntry): void {
+    liveAnswerVisible = false;
+    storedQuestion = stored.question;
+    answerText = stored.answer;
+    answerEvidence = stored.evidence;
+    renderedAnswerParts = splitAnswer(stored.answer, stored.evidence);
+    usage = { inputTokens: stored.inputTokens, outputTokens: stored.outputTokens };
+    costUsd = stored.costUsd;
+  }
+
+  /** Return the panel to the compose state: no stored question, no answer, no usage. */
+  function clearView(): void {
+    liveAnswerVisible = false;
+    storedQuestion = '';
+    answerText = '';
+    answerEvidence = [];
+    renderedAnswerParts = [];
+    usage = null;
+    costUsd = null;
   }
 
   /**
-   * Show one stored answer in the same view a fresh answer uses, so its citations keep working.
-   * The empty id is the fresh question: it clears the view and leaves the form ready.
+   * Follow the page's selection. A live stream owns the view while it runs; once it ends, a row the
+   * refreshed list carries takes over, `New conversation` (null) clears the panel, and an answer the
+   * stream just produced stays visible until the page's selection or the list catches up with it.
    */
-  function showStored(id: string): void {
-    selectedAskId = id;
-    const stored = asks.find((item) => item.id === id);
-    storedQuestion = stored?.question ?? '';
-    answerText = stored?.answer ?? '';
-    answerEvidence = stored?.evidence ?? [];
-    renderedAnswerParts = stored === undefined ? [] : splitAnswer(stored.answer, stored.evidence);
-    usage = stored === undefined ? null : { inputTokens: stored.inputTokens, outputTokens: stored.outputTokens };
-    costUsd = stored?.costUsd ?? null;
+  $: {
+    if (!asking) {
+      const stored = conversationId === null ? undefined : entries.find((item) => item.id === conversationId);
+      if (stored !== undefined) {
+        // Do not yank a freshly streamed answer back to the selection the ask started from; only a
+        // selection that moved (to the stored row the completion event named) replaces the live view.
+        if (!(liveAnswerVisible && stored.id === streamStartedFrom)) showStored(stored);
+      } else if (conversationId === null) {
+        // Only a transition to null (the New conversation button) clears the view; an id that stays
+        // null leaves whatever is on screen, including a partial answer from a failed stream. The
+        // page also moves the selection to null when a new Ask begins, and that move must not wipe
+        // the live partial answer either, so the previous id is tracked through the asking phase.
+        if (conversationId !== previousConversationId) clearView();
+      } else if (!liveAnswerVisible) {
+        // A row the refreshed list does not hold yet: show the compose state, but keep a
+        // just-streamed answer until the refreshed list carries the row.
+        clearView();
+      }
+    }
+    previousConversationId = conversationId;
   }
 
   async function ask(event: SubmitEvent): Promise<void> {
@@ -79,11 +119,13 @@
     const text = question.trim();
     if (text === '' || collectionId === '' || askProfile === '' || asking) return;
     const generation = ++askGeneration;
+    const streamCollection = collectionId;
     requestProfile = askProfile;
+    streamStartedFrom = conversationId;
     const controller = new AbortController();
-    abortController = controller;
+    activeControllers.add(controller);
     asking = true;
-    selectedAskId = '';
+    liveAnswerVisible = false;
     storedQuestion = '';
     costUsd = null;
     answerText = '';
@@ -92,6 +134,8 @@
     usage = null;
     askError = null;
     askStatus = 'Preparing answer…';
+    // The old selection must not stay marked under an answer this stream may never store.
+    onAskStarted();
     try {
       const response = await startAsk(collectionId, text, askProfile, controller.signal);
       for await (const event of readAskEvents(response, controller.signal)) {
@@ -101,21 +145,24 @@
       if (askStatus === 'Preparing answer…' || askStatus === 'Generating answer…') {
         askStatus = 'The Ask stream ended before a final answer arrived.';
       }
-      // The answer the server just stored belongs in the history it was written to.
-      if (generation === askGeneration) await refreshHistory();
     } catch (failure) {
       if (generation === askGeneration) askError = describe(failure);
     } finally {
+      activeControllers.delete(controller);
       if (generation === askGeneration) {
         asking = false;
-        abortController = null;
       }
+      // The stream closing is what makes the title exist server-side, so the history refresh the
+      // page runs now shows the just-stored row with the title it was written. An older stream
+      // refreshes the collection it asked in, never the panel state of a newer turn.
+      onAnswerFinished(streamCollection);
     }
   }
 
   function applyAskEvent(event: AskEvent): void {
     switch (event.type) {
       case 'delta':
+        liveAnswerVisible = true;
         answerText += event.text;
         renderedAnswerParts = splitAnswer(answerText, answerEvidence);
         askStatus = 'Generating answer…';
@@ -126,10 +173,15 @@
       case 'citation':
         break;
       case 'done':
+        liveAnswerVisible = true;
         answerText = event.text;
         answerEvidence = event.evidence;
         renderedAnswerParts = splitAnswer(answerText, answerEvidence);
         askStatus = null;
+        if (event.conversationId !== undefined) onAnswerStored(event.conversationId);
+        // The completion event is the user-visible end of the turn: the Ask action may start again
+        // while the reader keeps draining the stream until the server's title call finishes.
+        asking = false;
         break;
       case 'error':
         askStatus = null;
@@ -169,20 +221,11 @@
   }
 
   onMount(loadConfiguration);
-  onDestroy(() => abortController?.abort());
+  onDestroy(() => activeControllers.forEach((controller) => controller.abort()));
 </script>
 
 <section aria-labelledby="ask-heading">
   <h2 id="ask-heading">Ask</h2>
-  {#if asks.length > 0}
-    <div class="history">
-      <label for="ask-history">Question history</label>
-      <select id="ask-history" value={selectedAskId} onchange={(event) => showStored(event.currentTarget.value)}>
-        <option value="">New question</option>
-        {#each asks as item (item.id)}<option value={item.id}>{item.question || 'Untitled question'}</option>{/each}
-      </select>
-    </div>
-  {/if}
   {#if storedQuestion !== ''}<p class="stored-question" aria-label="Stored question">{storedQuestion}</p>{/if}
   <form class="ask-form" onsubmit={ask}>
     <label for="question">Question</label>
@@ -218,10 +261,8 @@
   .ask-form label,
   .ask-form textarea { grid-column: 1 / -1; }
   textarea,
-  select,
   button { font: inherit; padding: 0.45rem; }
   textarea { padding: 0.5rem; resize: vertical; }
-  .history { display: grid; gap: 0.35rem; margin: 0.75rem 0 0; }
   .stored-question { font-weight: 600; margin: 1rem 0 0; }
   .answer {
     line-height: 1.6;

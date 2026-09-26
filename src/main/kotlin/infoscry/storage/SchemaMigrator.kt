@@ -92,7 +92,7 @@ class SchemaMigrator(private val database: Database) {
 
     companion object {
         /** The schema version this build writes and understands. */
-        const val SUPPORTED_VERSION = 7
+        const val SUPPORTED_VERSION = 8
 
         private const val PRAGMA_FOREIGN_KEYS_OFF = "PRAGMA foreign_keys = OFF"
 
@@ -106,6 +106,7 @@ class SchemaMigrator(private val database: Database) {
             Migration(version = 5, resource = "db/migration/005_ask_audit.sql"),
             Migration(version = 6, resource = "db/migration/006_investigate_activity.sql"),
             Migration(version = 7, resource = "db/migration/007_investigate_tool_messages.sql"),
+            Migration(version = 8, resource = "db/migration/008_conversation_titles.sql"),
         )
     }
 }

@@ -138,6 +138,29 @@ class InvestigationToolsTest {
     }
 
     @Test
+    fun `blank optional search filters are ignored`() {
+        val docA = document(collectionA)
+        val unit = addUnit(docA, 0, "token")
+        val search = FakeSearch()
+        search.hits = listOf(hit(collectionA, docA, unit, 0))
+        val tools = tools(collectionA, search)
+
+        val success = assertIs<ToolResult.Success>(
+            tools.execute(
+                "search_collection",
+                """{"query":"query","filters":{
+                    "titleAuthorOrLanguageContains":"  ",
+                    "importedFrom":"",
+                    "importedUntil":""
+                }}""",
+            ),
+        )
+
+        assertEquals(listOf(SearchFilters(collectionId = collectionA)), search.receivedFilters)
+        assertEquals(listOf(unit.value), success.evidence.map { it.sourceUnitId })
+    }
+
+    @Test
     fun `search rejects a caller collection override and path filters`() {
         val tools = tools(collectionA, FakeSearch())
 

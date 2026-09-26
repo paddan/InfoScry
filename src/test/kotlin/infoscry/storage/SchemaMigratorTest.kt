@@ -56,8 +56,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(7, database.userVersion())
-            assertEquals(7, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(8, database.userVersion())
+            assertEquals(8, SchemaMigrator.SUPPORTED_VERSION)
         }
     }
 
@@ -99,7 +99,7 @@ class SchemaMigratorTest {
                 "missing tables, found $tables",
             )
 
-            assertEquals(7, count(database, "schema_version"))
+            assertEquals(8, count(database, "schema_version"))
             assertEquals(1, count(database, "collections"))
             assertEquals(listOf("Default", "eng", "ACTIVE"), database.read { connection ->
                 connection.createStatement().use { statement ->
@@ -118,16 +118,16 @@ class SchemaMigratorTest {
     fun `migration refuses a database written by newer code`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
-            database.setUserVersion(8)
+            database.setUserVersion(9)
 
             val failure = assertFailsWith<SchemaVersionTooNewException> {
                 SchemaMigrator(database).migrate()
             }
 
-            assertEquals(8, failure.found)
-            assertEquals(7, failure.supported)
+            assertEquals(9, failure.found)
+            assertEquals(8, failure.supported)
             assertTrue(
-                failure.message!!.contains("8") && failure.message!!.contains("7"),
+                failure.message!!.contains("9") && failure.message!!.contains("8"),
                 "message should name both versions, was ${failure.message}",
             )
         }

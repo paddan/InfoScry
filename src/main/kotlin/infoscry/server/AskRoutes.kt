@@ -7,6 +7,7 @@ import infoscry.ask.AskService
 import infoscry.domain.CollectionId
 import infoscry.domain.SourceLocation
 import infoscry.llm.AnthropicClient
+import infoscry.llm.ConversationTitler
 import infoscry.llm.LlmProfile
 import infoscry.llm.OpenAiCompatibleClient
 import infoscry.llm.PromptService
@@ -32,9 +33,15 @@ fun Routing.configureAskRoutes(context: AppContext) {
             val body = call.receiveJson<AskApiRequest>()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
+            val prompt = PromptService(context.llm)
+            val titler = ConversationTitler(
+                prompt = prompt,
+                persist = context.llm::setConversationTitle,
+            )
+            var conversationId: String? = null
             val service = AskService(
                 context.search,
-                PromptService(context.llm),
+                prompt,
                 client = { selected ->
                     when (selected.provider) {
                         infoscry.llm.LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(selected, System::getenv)
@@ -43,12 +50,20 @@ fun Routing.configureAskRoutes(context: AppContext) {
                 },
                 persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
                     context.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+                        .also { conversationId = it }
                 },
             )
             call.respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {
                 service.ask(AskRequest(CollectionId(collection.id.value), body.question, profile)).collect { event ->
-                    write("data: ${ApiJson.encodeToString(event.toWire())}\n\n".toByteArray(StandardCharsets.UTF_8)); flush()
+                    // [conversationId] is only ever set by the persistence seam above, and persistence
+                    // runs before the done event, so the reader can mark the row it just streamed.
+                    write("data: ${ApiJson.encodeToString(event.toWire(conversationId))}\n\n".toByteArray(StandardCharsets.UTF_8)); flush()
                 }
+                // The answer's events are already flushed, so the reader never waits on the title;
+                // the stream stays open until the title exists, which is what makes the title appear
+                // on the reader's next list read. A failed title call is silent and leaves the title
+                // unset, so it can never fail the answer or reach the reader.
+                conversationId?.let { titled -> titler.title(titled, body.question, profile) }
             }
         }
     }
@@ -76,6 +91,8 @@ internal data class AskSummaryWire(
     val id: String,
     val createdAt: String,
     val question: String,
+    /** The title written from the opening question; a conversation without one shows the question. */
+    val title: String,
     val answer: String,
     val evidence: List<EvidenceWire>,
     val inputTokens: Long,
@@ -90,6 +107,7 @@ private class AskHistoryRow(
     val id: String,
     val createdAt: String,
     val question: String,
+    val title: String,
     val answer: String,
 )
 
@@ -106,7 +124,7 @@ private class AskHistoryRow(
  */
 private fun loadAskHistory(connection: Connection, collectionId: String): List<AskSummaryWire> {
     val conversations = connection.prepareStatement(
-        "SELECT c.id, c.created_at, " +
+        "SELECT c.id, c.created_at, c.title, " +
             "COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '') AS question, " +
             "COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'assistant' ORDER BY m.seq DESC LIMIT 1), '') AS answer " +
             "FROM conversations c WHERE c.collection_id = ? AND c.mode = 'ASK' ORDER BY c.created_at DESC LIMIT 50",
@@ -115,11 +133,14 @@ private fun loadAskHistory(connection: Connection, collectionId: String): List<A
         statement.executeQuery().use { rows ->
             buildList {
                 while (rows.next()) {
+                    val question = rows.getString("question").take(QUESTION_LABEL_CHARS)
                     add(
                         AskHistoryRow(
                             id = rows.getString("id"),
                             createdAt = rows.getString("created_at"),
-                            question = rows.getString("question").take(QUESTION_LABEL_CHARS),
+                            question = question,
+                            // The title falls back server-side, so the reader never handles an empty value.
+                            title = rows.getString("title")?.takeIf { it.isNotBlank() } ?: question,
                             answer = rows.getString("answer"),
                         ),
                     )
@@ -136,6 +157,7 @@ private fun loadAskHistory(connection: Connection, collectionId: String): List<A
             id = conversation.id,
             createdAt = conversation.createdAt,
             question = conversation.question,
+            title = conversation.title,
             answer = conversation.answer,
             evidence = evidence[conversation.id].orEmpty(),
             inputTokens = usage[conversation.id]?.first ?: 0L,
@@ -212,17 +234,19 @@ internal data class AskWire(
     val outputTokens: Long? = null,
     val code: String? = null,
     val message: String? = null,
+    /** The conversation the request path stored, carried on the done event for the reader to mark. */
+    val conversationId: String? = null,
     // Optional and empty by default so delta/usage/citation/error keep their exact shapes; NEVER
     // keeps even `done` unchanged while no evidence exists.
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val evidence: List<EvidenceWire> = emptyList(),
 )
 
-internal fun AskEvent.toWire() = when (this) {
+internal fun AskEvent.toWire(conversationId: String? = null) = when (this) {
     is AskEvent.Delta -> AskWire("delta", text = text)
     is AskEvent.Usage -> AskWire("usage", inputTokens = inputTokens, outputTokens = outputTokens)
     is AskEvent.Citation -> AskWire("citation", id = evidenceId, valid = valid)
-    is AskEvent.Done -> AskWire("done", text = answer, evidence = evidence.map {
+    is AskEvent.Done -> AskWire("done", text = answer, conversationId = conversationId, evidence = evidence.map {
         EvidenceWire(
             id = it.id,
             documentId = it.documentId,

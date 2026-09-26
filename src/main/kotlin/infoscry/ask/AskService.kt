@@ -40,6 +40,7 @@ fun interface AskSearch {
 }
 
 fun interface AskPersistence {
+    /** Persists the whole Ask and returns the conversation id it just stored. */
     fun save(
         request: AskRequest,
         answer: String,
@@ -48,7 +49,7 @@ fun interface AskPersistence {
         initialCitations: CitationValidation,
         retrievalSnapshot: String,
         correction: CorrectionSnapshot?,
-    )
+    ): String
 }
 
 class AskService(

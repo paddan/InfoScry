@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Page from './+page.svelte';
 import type { Collection } from '../lib/api';
@@ -16,6 +16,7 @@ describe('app shell', () => {
   // The DOM is shared between tests in this environment, so each one starts from an empty document.
   afterEach(() => {
     cleanup();
+    window.localStorage.clear();
   });
 
   it('renders the InfoScry heading', () => {
@@ -30,6 +31,25 @@ describe('app shell', () => {
 
     expect(await screen.findByText('No collections yet.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /create collection/i })).toBeNull();
+  });
+
+  it('keeps the reader usable when browser storage is blocked', async () => {
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+    const storageDescriptor = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    if (!storageDescriptor) throw new Error('localStorage descriptor unavailable in test DOM');
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      get: () => { throw new DOMException('Storage denied', 'SecurityError'); },
+    });
+
+    try {
+      render(Page);
+      await screen.findByText('Default');
+      await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+      expect(await screen.findByLabelText('Investigate question')).toBeTruthy();
+    } finally {
+      Object.defineProperty(window, 'localStorage', storageDescriptor);
+    }
   });
 
   it('keeps the Admin view reachable before any collection exists', async () => {
@@ -323,6 +343,395 @@ describe('app shell', () => {
     expect(document.querySelector('script')).toBeNull();
   });
 
+  it('announces the open source viewer as a modal dialog without changing the content layout', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Source' });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(dialog.getAttribute('aria-labelledby')).toBe('source-heading');
+    expect(dialog.getAttribute('tabindex')).toBe('-1');
+    // The sheet overlays the columns instead of reflowing the grid, and the results stay on screen.
+    expect(document.querySelector('.content-layout')?.classList.contains('with-source')).toBe(false);
+    expect(screen.getByRole('list', { name: 'Search results' })).toBeTruthy();
+    expect(await screen.findByText('Extracted page text')).toBeTruthy();
+  });
+
+  it('moves focus into the source sheet when it opens', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
+    result.focus();
+    await fireEvent.click(result);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Source' });
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+  });
+
+  it('closes the source sheet on Escape and returns focus to the opening citation', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
+    result.focus();
+    await fireEvent.click(result);
+    const dialog = await screen.findByRole('dialog', { name: 'Source' });
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+
+    await fireEvent.keyDown(dialog, { key: 'Escape' });
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    expect(screen.getByRole('list', { name: 'Search results' })).toBeTruthy();
+    expect(document.activeElement).toBe(result);
+  });
+
+  it('closes the source sheet from its close button and returns focus to the opening citation', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
+    result.focus();
+    await fireEvent.click(result);
+    await screen.findByRole('dialog', { name: 'Source' });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Close source viewer' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    expect(document.activeElement).toBe(result);
+  });
+
+  it('closes the source sheet when clicking outside it on the backdrop', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
+    await screen.findByRole('dialog', { name: 'Source' });
+
+    const backdrop = document.querySelector('.source-backdrop') as HTMLElement | null;
+    expect(backdrop).not.toBeNull();
+    await fireEvent.click(backdrop as HTMLElement);
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    expect(screen.getByRole('list', { name: 'Search results' })).toBeTruthy();
+  });
+
+  it('keeps keyboard focus inside the open source sheet', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 400, true)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
+    const dialog = await screen.findByRole('dialog', { name: 'Source' });
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+    const closeButton = screen.getByRole('button', { name: 'Close source viewer' });
+
+    // Tab from the sheet itself enters its first control rather than the page behind the backdrop.
+    await fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(document.activeElement).toBe(closeButton);
+
+    const loadMore = await screen.findByRole('button', { name: 'Load more' });
+    loadMore.focus();
+    await fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(document.activeElement).toBe(closeButton);
+
+    await fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(loadMore);
+  });
+
+  it('closes the source sheet without returning focus when the workspace mode changes by mouse', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
+    result.focus();
+    const focusSpy = vi.spyOn(result, 'focus');
+    await fireEvent.click(result);
+    await screen.findByRole('dialog', { name: 'Source' });
+    focusSpy.mockClear();
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    // The reader chose to navigate; the sheet must not move focus back to the opening citation.
+    expect(focusSpy).not.toHaveBeenCalled();
+    expect(screen.getByRole('tab', { name: 'Ask' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('closes the source sheet on keyboard workspace navigation and keeps focus on the tab', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
+    result.focus();
+    await fireEvent.click(result);
+    await screen.findByRole('dialog', { name: 'Source' });
+
+    await fireEvent.keyDown(screen.getByRole('tablist', { name: 'Workspace mode' }), { key: 'ArrowRight' });
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    expect(document.activeElement).not.toBe(result);
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Ask' }));
+    expect(screen.getByRole('tab', { name: 'Ask' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('clears the remembered Ask selection when a new Ask begins', async () => {
+    window.localStorage.setItem('infoscry-history:ask:default', 'ask-1');
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] }),
+      ask: () => eventResponse([
+        { type: 'delta', text: 'Partial answer' },
+        { type: 'error', code: 'PROVIDER_FAILED', message: 'provider unavailable' },
+      ]),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    const column = await screen.findByRole('navigation', { name: 'Ask history' });
+    expect(await within(column).findByRole('button', { name: 'The signer', current: true })).toBeTruthy();
+
+    await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+
+    // A fresh Ask must not leave the old row marked under a partial answer that was never stored.
+    await waitFor(() => expect(window.localStorage.getItem('infoscry-history:ask:default')).toBeNull());
+    expect(within(column).queryByRole('button', { name: 'The signer', current: true })).toBeNull();
+    expect(await screen.findByText('Partial answer')).toBeTruthy();
+  });
+
+  it('locks the history column while an Investigate turn runs and unlocks it at done', async () => {
+    let releaseDone!: () => void;
+    const doneGate = new Promise<void>((resolve) => { releaseDone = resolve; });
+    const encoder = new TextEncoder();
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({ investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it.') }),
+      investigateStart: () => ({
+        ok: true,
+        status: 200,
+        statusText: '',
+        body: new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'started', id: 'conv-2' })}\n\n`));
+            await doneGate;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'done', text: 'First answer', evidence: [] })}\n\n`));
+            controller.close();
+          },
+        }),
+      } as Response),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    const column = await screen.findByRole('navigation', { name: 'Conversation history' });
+    await within(column).findByRole('button', { name: 'The treaty' });
+    const row = () => within(column).getByRole('button', { name: 'The treaty' });
+
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    // A live turn locks selection, New and delete; they unlock once done arrives, even while the
+    // title call keeps the stream open.
+    await waitFor(() => expect(row().getAttribute('disabled')).not.toBeNull());
+    expect(within(column).getByRole('button', { name: 'New conversation' }).getAttribute('disabled')).not.toBeNull();
+    expect(within(column).getByRole('button', { name: 'Delete conversation The treaty' }).getAttribute('disabled')).not.toBeNull();
+
+    releaseDone();
+    await waitFor(() => expect(row().getAttribute('disabled')).toBeNull());
+    expect(within(column).getByRole('button', { name: 'New conversation' }).getAttribute('disabled')).toBeNull();
+    expect(within(column).getByRole('button', { name: 'Delete conversation The treaty' }).getAttribute('disabled')).toBeNull();
+  });
+
+  it('sends the sidebar question limits with the question and remembers them', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigateStart: () => eventResponse([{ type: 'done', text: 'Answer', evidence: [] }]),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    // The three native controls sit below the profile, inside one named group, at their defaults.
+    expect(screen.getByRole('group', { name: 'Question limits' })).toBeTruthy();
+    const rounds = screen.getByLabelText('Max tool rounds') as HTMLInputElement;
+    const toolCalls = screen.getByLabelText('Max tool calls') as HTMLInputElement;
+    const seconds = screen.getByLabelText('Max time per question (seconds)') as HTMLInputElement;
+    expect([rounds.value, toolCalls.value, seconds.value]).toEqual(['50', '50', '600']);
+    expect(screen.getByText('A round may contain several tool calls. Time includes preparing the final answer.')).toBeTruthy();
+
+    await fireEvent.input(rounds, { target: { value: '4' } });
+    await fireEvent.input(toolCalls, { target: { value: '7' } });
+    await fireEvent.input(seconds, { target: { value: '90' } });
+    expect(JSON.parse(window.localStorage.getItem('infoscry-investigate-limits:v1') ?? 'null')).toEqual({
+      maxToolRounds: 4,
+      maxToolCalls: 7,
+      maxTurnSeconds: 90,
+    });
+
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    await waitFor(() => expect(calls.some((entry) => entry.url === '/api/investigations')).toBe(true));
+    const start = calls.find((entry) => entry.url === '/api/investigations');
+    expect(JSON.parse(String(start?.init?.body))).toEqual({
+      collection: 'default',
+      question: 'What happened?',
+      profile: 'Local',
+      limits: { maxToolRounds: 4, maxToolCalls: 7, maxTurnSeconds: 90 },
+    });
+  });
+
+  it('restores the defaults from unreadable stored limits', async () => {
+    window.localStorage.setItem('infoscry-investigate-limits:v1', JSON.stringify({
+      maxToolRounds: 4.5,
+      maxToolCalls: 7,
+      maxTurnSeconds: 99999,
+    }));
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    expect((screen.getByLabelText('Max tool rounds') as HTMLInputElement).value).toBe('50');
+    expect((screen.getByLabelText('Max tool calls') as HTMLInputElement).value).toBe('7');
+    expect((screen.getByLabelText('Max time per question (seconds)') as HTMLInputElement).value).toBe('600');
+  });
+
+  it('shows a field-associated error and sends no request for an invalid limit', async () => {
+    const { calls } = stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    await fireEvent.input(screen.getByLabelText('Max tool rounds'), { target: { value: '51' } });
+    const rounds = screen.getByLabelText('Max tool rounds');
+    const message = screen.getByText('Max tool rounds must be a whole number between 1 and 50.');
+    expect(rounds.getAttribute('aria-describedby')).toBe(message.id);
+    expect(rounds.getAttribute('aria-invalid')).toBe('true');
+
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    expect(calls.some((entry) => entry.url === '/api/investigations')).toBe(false);
+    expect(window.localStorage.getItem('infoscry-investigate-limits:v1')).not.toContain('51');
+  });
+
+  it('restores all three defaults on Reset defaults', async () => {
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    await fireEvent.input(screen.getByLabelText('Max tool rounds'), { target: { value: '2' } });
+    await fireEvent.input(screen.getByLabelText('Max tool calls'), { target: { value: '3' } });
+    await fireEvent.input(screen.getByLabelText('Max time per question (seconds)'), { target: { value: '30' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset defaults' }));
+
+    expect((screen.getByLabelText('Max tool rounds') as HTMLInputElement).value).toBe('50');
+    expect((screen.getByLabelText('Max tool calls') as HTMLInputElement).value).toBe('50');
+    expect((screen.getByLabelText('Max time per question (seconds)') as HTMLInputElement).value).toBe('600');
+    expect(JSON.parse(window.localStorage.getItem('infoscry-investigate-limits:v1') ?? 'null')).toEqual({
+      maxToolRounds: 50,
+      maxToolCalls: 50,
+      maxTurnSeconds: 600,
+    });
+  });
+
+  it('disables the question limits while an Investigate turn runs', async () => {
+    let releaseDone!: () => void;
+    const doneGate = new Promise<void>((resolve) => { releaseDone = resolve; });
+    const encoder = new TextEncoder();
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigateStart: () => ({
+        ok: true,
+        status: 200,
+        statusText: '',
+        body: new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'started', id: 'conv-2' })}\n\n`));
+            await doneGate;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'done', text: 'First answer', evidence: [] })}\n\n`));
+            controller.close();
+          },
+        }),
+      } as Response),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    const rounds = () => screen.getByLabelText('Max tool rounds');
+    await waitFor(() => expect(rounds().getAttribute('disabled')).not.toBeNull());
+    expect(screen.getByLabelText('Max tool calls').getAttribute('disabled')).not.toBeNull();
+    expect(screen.getByLabelText('Max time per question (seconds)').getAttribute('disabled')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Reset defaults' }).getAttribute('disabled')).not.toBeNull();
+
+    releaseDone();
+    await waitFor(() => expect(rounds().getAttribute('disabled')).toBeNull());
+  });
+
   it('streams Ask events, shows usage and links only citations from completed evidence', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
@@ -443,6 +852,561 @@ describe('app shell', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('provider unavailable');
     expect(calls.filter((call) => call.url === '/api/ask')).toHaveLength(1);
   });
+
+  it('lists investigate conversations newest first with the open row marked', async () => {
+    window.localStorage.setItem('infoscry-history:investigate:default', 'conv-2');
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({
+        investigations: [
+          investigationSummary('conv-3', 'Third conversation'),
+          investigationSummary('conv-2', 'Second conversation'),
+          investigationSummary('conv-1', 'First conversation'),
+        ],
+      }),
+      investigation: () => jsonResponse({ investigation: investigationHistory('conv-2', 'Who signed it?', 'Mira signed it [S2]') }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    const column = await screen.findByRole('navigation', { name: 'Conversation history' });
+    expect(within(column).getAllByRole('listitem').map((row) => row.querySelector('.history-row')?.textContent))
+      .toEqual(['Third conversation', 'Second conversation', 'First conversation']);
+    expect(within(column).getByRole('button', { name: 'Second conversation', current: true })).toBeTruthy();
+    expect(within(column).getByRole('button', { name: 'Third conversation', current: false })).toBeTruthy();
+    expect(within(column).getByRole('button', { name: 'Delete conversation Third conversation' })).toBeTruthy();
+  });
+
+  it('falls back to the opening question when a conversation has no title', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', '', 'Who signed it?')] }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    expect(await screen.findByRole('button', { name: 'Who signed it?' })).toBeTruthy();
+  });
+
+  it('opens a clicked conversation row in the panel with its evidence, activity, tokens and cost', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({ investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it [S2]') }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
+
+    expect(await screen.findByText('Who signed it?')).toBeTruthy();
+    expect(document.querySelector('.answer')?.textContent).toContain('Mira signed it [S2]');
+    expect(screen.getByRole('button', { name: 'Open source S2, Page 8' })).toBeTruthy();
+    expect(screen.getByText(/1 tool call/)).toBeTruthy();
+    expect(screen.getByText(/20 input tokens/)).toBeTruthy();
+    expect(screen.getByText(/Estimated cost/).textContent).toContain('$0.0001');
+    expect(calls.some((call) => call.url === '/api/collections/default/investigations/conv-1')).toBe(true);
+    expect(screen.getByRole('button', { name: 'The treaty', current: true })).toBeTruthy();
+  });
+
+  it('clears the panel to its empty compose state with the New conversation button', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({ investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it.') }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
+    expect(await screen.findByText('Who signed it?')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+
+    expect(screen.queryByText('Who signed it?')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Investigate' })).toBeTruthy();
+    expect((screen.getByLabelText('Investigate question') as HTMLTextAreaElement).value).toBe('');
+    expect(window.localStorage.getItem('infoscry-history:investigate:default')).toBeNull();
+  });
+
+  it('shows the column empty state, distinct from a loading state', async () => {
+    let finishList!: (response: Response) => void;
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => new Promise<Response>((resolve) => { finishList = resolve; }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    expect(await screen.findByText('Loading conversations…')).toBeTruthy();
+    expect(screen.queryByText('No conversations yet.')).toBeNull();
+    finishList(jsonResponse({ investigations: [] }));
+    expect(await screen.findByText('No conversations yet.')).toBeTruthy();
+    expect(screen.queryByText('Loading conversations…')).toBeNull();
+  });
+
+  it('renders the history column only in the Ask and Investigate views', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      presets: () => jsonResponse({ presets: [] }),
+      asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer')] }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    expect(screen.queryByRole('navigation', { name: 'Conversation history' })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'Ask history' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    expect(screen.queryByRole('navigation', { name: 'Conversation history' })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'Ask history' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    expect(await screen.findByRole('navigation', { name: 'Conversation history' })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    expect(await screen.findByRole('navigation', { name: 'Ask history' })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Conversation history' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Search' }));
+    expect(screen.queryByRole('navigation', { name: 'Conversation history' })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'Ask history' })).toBeNull();
+  });
+
+  it('restores the remembered open conversation across a reload', async () => {
+    window.localStorage.setItem('infoscry-history:investigate:default', 'saved-1');
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('saved-1', 'The treaty')] }),
+      investigation: () => jsonResponse({ investigation: investigationHistory('saved-1', 'Who signed it?', 'Mira signed it [S2]') }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    expect(await screen.findByText('Who signed it?')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'The treaty', current: true })).toBeTruthy();
+  });
+
+  it('switching collections shows that collection remembered conversation and never another', async () => {
+    window.localStorage.setItem('infoscry-history:investigate:default', 'conv-default');
+    window.localStorage.setItem('infoscry-history:investigate:nightfall', 'conv-nightfall');
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall')] }),
+      investigations: (url) => url.endsWith('/default/investigations')
+        ? jsonResponse({ investigations: [investigationSummary('conv-default', 'The treaty')] })
+        : jsonResponse({ investigations: [investigationSummary('conv-nightfall', 'Night watch')] }),
+      investigation: (url) => url.includes('/investigations/conv-nightfall')
+        ? jsonResponse({ investigation: investigationHistory('conv-nightfall', 'What happens at night?', 'The guard patrols.') })
+        : jsonResponse({ investigation: investigationHistory('conv-default', 'Who signed it?', 'Mira signed it.') }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    expect(await screen.findByText('Mira signed it.')).toBeTruthy();
+    expect(screen.queryByText('The guard patrols.')).toBeNull();
+
+    await fireEvent.change(screen.getByLabelText('Collection'), { target: { value: 'nightfall' } });
+
+    expect(await screen.findByText('The guard patrols.')).toBeTruthy();
+    expect(screen.queryByText('Mira signed it.')).toBeNull();
+    const column = await screen.findByRole('navigation', { name: 'Conversation history' });
+    expect(within(column).getByRole('button', { name: 'Night watch', current: true })).toBeTruthy();
+    expect(within(column).queryByRole('button', { name: 'The treaty' })).toBeNull();
+  });
+
+  it('lists Ask answers newest first with the remembered open row marked', async () => {
+    window.localStorage.setItem('infoscry-history:ask:default', 'ask-2');
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({ asks: [
+        askHistoryEntry('ask-3', 'Third question'),
+        askHistoryEntry('ask-2', 'Second question'),
+        askHistoryEntry('ask-1', 'First question'),
+      ] }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+
+    const column = await screen.findByRole('navigation', { name: 'Ask history' });
+    expect((await within(column).findAllByRole('listitem')).map((row) => row.querySelector('.history-row')?.textContent))
+      .toEqual(['Third question', 'Second question', 'First question']);
+    expect(within(column).getByRole('button', { name: 'Second question', current: true })).toBeTruthy();
+    expect(within(column).getByRole('button', { name: 'Third question', current: false })).toBeTruthy();
+    expect(await screen.findByText(/Mira signed it/)).toBeTruthy();
+  });
+
+  it('opens a clicked Ask row with its citations, tokens and cost', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+
+    expect((await screen.findByLabelText('Stored question')).textContent).toBe('Who signed it?');
+    expect(screen.getByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
+    expect(screen.getByText(/20 input tokens/)).toBeTruthy();
+    expect(screen.getByText(/Estimated cost/).textContent).toContain('$0.0001');
+    expect(screen.getByRole('button', { name: 'The signer', current: true })).toBeTruthy();
+  });
+
+  it('clears the Ask panel to its compose state with the New conversation button', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+    expect(await screen.findByLabelText('Stored question')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+
+    expect(screen.queryByLabelText('Stored question')).toBeNull();
+    expect(screen.queryByLabelText('Answer')).toBeNull();
+    expect((screen.getByLabelText('Question', { selector: '#question' }) as HTMLTextAreaElement).value).toBe('');
+    expect(window.localStorage.getItem('infoscry-history:ask:default')).toBeNull();
+  });
+
+  it('marks the row of the answer the streaming completion event named', async () => {
+    let askHistoryRequests = 0;
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => {
+        askHistoryRequests += 1;
+        return askHistoryRequests === 1
+          ? jsonResponse({ asks: [] })
+          : jsonResponse({ asks: [askHistoryEntry('ask-9', 'The signer', 'Who signed it?')] });
+      },
+      ask: () => eventResponse([
+        { type: 'delta', text: 'Mira signed it [S1].' },
+        { type: 'usage', inputTokens: 20, outputTokens: 9 },
+        { type: 'citation', id: 'S1', valid: true },
+        { type: 'done', text: 'Mira signed it [S1].', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4' }], conversationId: 'ask-9' },
+      ]),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'Who signed it?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+
+    const column = await screen.findByRole('navigation', { name: 'Ask history' });
+    expect(await within(column).findByRole('button', { name: 'The signer', current: true })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
+    expect((await screen.findByLabelText('Stored question')).textContent).toBe('Who signed it?');
+    expect(window.localStorage.getItem('infoscry-history:ask:default')).toBe('ask-9');
+  });
+
+  it('ignores an older Ask history response that arrives after a newer refresh', async () => {
+    let resolveInitial!: (response: Response) => void;
+    let askListRequests = 0;
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => {
+        askListRequests += 1;
+        return askListRequests === 1
+          ? new Promise<Response>((resolve) => { resolveInitial = resolve; })
+          : jsonResponse({ asks: [askHistoryEntry('ask-9', 'Newest title', 'What happened?')] });
+      },
+      ask: () => eventResponse([
+        { type: 'done', text: 'A completed answer.', evidence: [], conversationId: 'ask-9' },
+      ]),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+
+    const column = await screen.findByRole('navigation', { name: 'Ask history' });
+    expect(await within(column).findByRole('button', { name: 'Newest title', current: true })).toBeTruthy();
+    resolveInitial(jsonResponse({ asks: [askHistoryEntry('ask-old', 'Stale question')] }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(within(column).getByRole('button', { name: 'Newest title', current: true })).toBeTruthy();
+    expect(within(column).queryByRole('button', { name: 'Stale question' })).toBeNull();
+    expect(window.localStorage.getItem('infoscry-history:ask:default')).toBe('ask-9');
+  });
+
+  it('keeps the fresh Ask selected when the initial stale list resolves after done but before title completion', async () => {
+    let resolveInitial!: (response: Response) => void;
+    let releaseStream!: () => void;
+    let askListRequests = 0;
+    const streamGate = new Promise<void>((resolve) => { releaseStream = resolve; });
+    const encoder = new TextEncoder();
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => {
+        askListRequests += 1;
+        return askListRequests === 1
+          ? new Promise<Response>((resolve) => { resolveInitial = resolve; })
+          : jsonResponse({ asks: [askHistoryEntry('ask-9', 'Newest title', 'What happened?', 'A fresh answer.')] });
+      },
+      ask: () => ({
+        ok: true,
+        status: 200,
+        statusText: '',
+        body: new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'done', text: 'A fresh answer.', evidence: [], conversationId: 'ask-9' })}\n\n`));
+            await streamGate;
+            controller.close();
+          },
+        }),
+      } as Response),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+    await waitFor(() => expect(window.localStorage.getItem('infoscry-history:ask:default')).toBe('ask-9'));
+
+    // This is the old initial load, which began before the streamed conversation existed.
+    resolveInitial(jsonResponse({ asks: [askHistoryEntry('ask-old', 'Stale question')] }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('A fresh answer.')).toBeTruthy();
+
+    // Closing the SSE stream means the title attempt finished and triggers the authoritative refresh.
+    releaseStream();
+    const column = await screen.findByRole('navigation', { name: 'Ask history' });
+    expect(await within(column).findByRole('button', { name: 'Newest title', current: true })).toBeTruthy();
+    expect(within(column).queryByRole('button', { name: 'Stale question' })).toBeNull();
+  });
+
+  it('ignores an older Investigate history response that arrives after a newer refresh', async () => {
+    let resolveInitial!: (response: Response) => void;
+    let resolveStarted!: (response: Response) => void;
+    let investigationListRequests = 0;
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => {
+        investigationListRequests += 1;
+        if (investigationListRequests === 1) return new Promise<Response>((resolve) => { resolveInitial = resolve; });
+        if (investigationListRequests === 2) return new Promise<Response>((resolve) => { resolveStarted = resolve; });
+        return jsonResponse({ investigations: [investigationSummary('conv-new', 'Newest title', 'What happened?')] });
+      },
+      investigateStart: () => eventResponse([
+        { type: 'started', id: 'conv-new' },
+        { type: 'done', text: 'A completed investigation.', evidence: [] },
+      ]),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    const column = await screen.findByRole('navigation', { name: 'Conversation history' });
+    expect(await within(column).findByRole('button', { name: 'Newest title', current: true })).toBeTruthy();
+    resolveStarted(jsonResponse({ investigations: [investigationSummary('conv-new', 'Opening question')] }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    resolveInitial(jsonResponse({ investigations: [] }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(within(column).getByRole('button', { name: 'Newest title', current: true })).toBeTruthy();
+    expect(within(column).queryByRole('button', { name: 'Opening question' })).toBeNull();
+    expect(window.localStorage.getItem('infoscry-history:investigate:default')).toBe('conv-new');
+  });
+
+  it('keeps Ask and Investigate conversations in their own columns', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty', 'What happened?')] }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+
+    let column = await screen.findByRole('navigation', { name: 'Ask history' });
+    expect(await within(column).findByRole('button', { name: 'The signer' })).toBeTruthy();
+    expect(within(column).queryByRole('button', { name: 'The treaty' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    column = await screen.findByRole('navigation', { name: 'Conversation history' });
+    expect(within(column).getByRole('button', { name: 'The treaty' })).toBeTruthy();
+    expect(within(column).queryByRole('button', { name: 'The signer' })).toBeNull();
+  });
+
+  it('shows an always-visible delete control with an accessible name on every row', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    const column = await screen.findByRole('navigation', { name: 'Conversation history' });
+    const row = within(column).getAllByRole('listitem')[0];
+    const remove = within(row).getByRole('button', { name: 'Delete conversation The treaty' });
+    expect(remove.tagName).toBe('BUTTON');
+    expect(remove.getAttribute('aria-label')).toBe('Delete conversation The treaty');
+    // The title control and the delete control are siblings, never one nested inside the other.
+    const title = within(row).getByRole('button', { name: 'The treaty' });
+    expect(title.contains(remove)).toBe(false);
+  });
+
+  it('asks the platform confirmation and sends the request only when confirmed, then refreshes the list', async () => {
+    const order: string[] = [];
+    const confirm = vi.fn(() => { order.push('confirm'); return true; });
+    vi.stubGlobal('confirm', confirm);
+    let conversationListRequests = 0;
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      // The refreshed list reflects the delete, so the second read holds nothing.
+      investigations: () => {
+        conversationListRequests += 1;
+        return conversationListRequests === 1
+          ? jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] })
+          : jsonResponse({ investigations: [] });
+      },
+      deleteConversation: () => { order.push('request'); return jsonResponse({}, 204); },
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Delete conversation The treaty' }));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('The treaty'));
+    expect(order).toEqual(['confirm', 'request']);
+    const remove = calls.find((call) => call.url === '/api/collections/default/conversations/conv-1' && call.init?.method === 'DELETE');
+    expect(remove).toBeTruthy();
+    // The mutation carries a CSRF token; the exact value depends on which earlier test seeded the
+    // session cache, so only the header's presence is asserted here.
+    expect((remove?.init?.headers as Record<string, string>)['X-InfoScry-Csrf']).toBeTruthy();
+    // The list is refreshed from the server, not patched by hand.
+    await waitFor(() => expect(screen.getByText('No conversations yet.')).toBeTruthy());
+    expect(calls.filter((call) => call.url.endsWith('/investigations'))).toHaveLength(2);
+  });
+
+  it('does not call the API when the confirmation is declined', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => false));
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Delete conversation The treaty' }));
+
+    expect(calls.some((call) => call.url.includes('/conversations/'))).toBe(false);
+    expect(screen.getByRole('button', { name: 'The treaty' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Delete conversation The treaty' })).toBeTruthy();
+  });
+
+  it('keeps the list and the open panel when a delete fails', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({ investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it.') }),
+      deleteConversation: () => jsonResponse({ error: { code: 'MAINTENANCE_IN_PROGRESS', message: 'maintenance is running; try again later' } }, 423),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
+    expect(await screen.findByText('Who signed it?')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete conversation The treaty' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('maintenance is running');
+    expect(screen.getByRole('button', { name: 'The treaty' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'The treaty', current: true })).toBeTruthy();
+    expect(screen.getByText('Mira signed it.')).toBeTruthy();
+  });
+
+  it('deleting the open Investigate conversation clears the panel and forgets its remembered selection', async () => {
+    window.localStorage.setItem('infoscry-history:investigate:default', 'conv-1');
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    let conversationListRequests = 0;
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      // The refreshed list reflects the delete, so the second read holds nothing.
+      investigations: () => {
+        conversationListRequests += 1;
+        return conversationListRequests === 1
+          ? jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] })
+          : jsonResponse({ investigations: [] });
+      },
+      investigation: () => jsonResponse({ investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it.') }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    expect(await screen.findByText('Who signed it?')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete conversation The treaty' }));
+
+    expect(await screen.findByText('No conversations yet.')).toBeTruthy();
+    expect(screen.queryByText('Who signed it?')).toBeNull();
+    expect((screen.getByLabelText('Investigate question') as HTMLTextAreaElement).value).toBe('');
+    expect(window.localStorage.getItem('infoscry-history:investigate:default')).toBeNull();
+  });
+
+  it('deleting the open Ask conversation clears the panel and forgets its remembered selection', async () => {
+    window.localStorage.setItem('infoscry-history:ask:default', 'ask-1');
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    let askListRequests = 0;
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      // The refreshed list reflects the delete, so the second read holds nothing.
+      asks: () => {
+        askListRequests += 1;
+        return askListRequests === 1
+          ? jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] })
+          : jsonResponse({ asks: [] });
+      },
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+    expect(await screen.findByLabelText('Stored question')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete conversation The signer' }));
+
+    expect(await screen.findByText('No conversations yet.')).toBeTruthy();
+    expect(screen.queryByLabelText('Stored question')).toBeNull();
+    expect(screen.queryByLabelText('Answer')).toBeNull();
+    expect((screen.getByLabelText('Question', { selector: '#question' }) as HTMLTextAreaElement).value).toBe('');
+    expect(window.localStorage.getItem('infoscry-history:ask:default')).toBeNull();
+  });
 });
 
 function collection(name: string): Collection {
@@ -484,6 +1448,40 @@ function sourcePage(text: string, offset: number, totalChars: number, truncated 
   };
 }
 
+function investigationSummary(id: string, title: string, question = title) {
+  return { id, createdAt: '2026-09-26T10:00:00Z', question, title };
+}
+
+/** One stored Ask answer, the object the list route returns and the panel replays. */
+function askHistoryEntry(id: string, title: string, question = title, answer = 'Mira signed it [S1].') {
+  return {
+    id,
+    createdAt: '2026-09-26T10:00:00Z',
+    question,
+    title,
+    answer,
+    evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4' }],
+    inputTokens: 20,
+    outputTokens: 9,
+    costUsd: 0.0001,
+  };
+}
+
+function investigationHistory(id: string, question: string, answer: string) {
+  return {
+    id,
+    messages: [
+      { role: 'user', text: question },
+      { role: 'assistant', text: answer },
+    ],
+    evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8' }],
+    inputTokens: 20,
+    outputTokens: 9,
+    costUsd: 0.0001,
+    activity: [{ name: 'search_collection', resultCode: 'SUCCESS', durationMs: 12 }],
+  };
+}
+
 /** The subset of `Response` the client uses, so the tests do not depend on a global fetch stack. */
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -495,13 +1493,18 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function stubFetch(overrides: {
-  list?: () => Response | Promise<Response>;
-  search?: () => Response | Promise<Response>;
-  source?: () => Response | Promise<Response>;
+  list?: (url: string) => Response | Promise<Response>;
+  search?: (url: string) => Response | Promise<Response>;
+  source?: (url: string) => Response | Promise<Response>;
   ask?: (signal?: AbortSignal) => Response | Promise<Response>;
-  defaults?: () => Response | Promise<Response>;
-  profiles?: () => Response | Promise<Response>;
-  presets?: () => Response | Promise<Response>;
+  asks?: (url: string) => Response | Promise<Response>;
+  investigations?: (url: string) => Response | Promise<Response>;
+  investigation?: (url: string) => Response | Promise<Response>;
+  investigateStart?: (signal?: AbortSignal) => Response | Promise<Response>;
+  deleteConversation?: (url: string) => Response | Promise<Response>;
+  defaults?: (url: string) => Response | Promise<Response>;
+  profiles?: (url: string) => Response | Promise<Response>;
+  presets?: (url: string) => Response | Promise<Response>;
   session?: () => Response;
 }) {
   const calls: { url: string; init?: RequestInit }[] = [];
@@ -511,24 +1514,39 @@ function stubFetch(overrides: {
     if (url.endsWith('/api/session')) {
       return (overrides.session ?? (() => jsonResponse({ product: 'InfoScry', csrfToken: 'session-token' })))();
     }
+    if (url.includes('/conversations/') && init?.method === 'DELETE') {
+      return (overrides.deleteConversation ?? (() => jsonResponse({}, 204)))(url);
+    }
     if (url.endsWith('/api/collections')) {
-      return (overrides.list ?? (() => jsonResponse({ collections: [] })))();
+      return (overrides.list ?? (() => jsonResponse({ collections: [] })))(url);
+    }
+    if (url.endsWith('/api/investigations')) {
+      return (overrides.investigateStart ?? (() => eventResponse([{ type: 'done', text: '', evidence: [] }])))(init?.signal as AbortSignal | undefined);
+    }
+    if (url.endsWith('/investigations')) {
+      return (overrides.investigations ?? (() => jsonResponse({ investigations: [] })))(url);
+    }
+    if (url.endsWith('/asks')) {
+      return (overrides.asks ?? (() => jsonResponse({ asks: [] })))(url);
+    }
+    if (url.includes('/investigations/')) {
+      return (overrides.investigation ?? (() => jsonResponse({ investigation: { id: '', messages: [], evidence: [], activity: [], inputTokens: 0, outputTokens: 0, costUsd: 0 } })))(url);
     }
     if (url.startsWith('/api/search')) {
-      return (overrides.search ?? (() => jsonResponse({ hits: [], staleFiltered: 0 })))();
+      return (overrides.search ?? (() => jsonResponse({ hits: [], staleFiltered: 0 })))(url);
     }
-    if (url.endsWith('/api/llm/defaults/ASK')) {
-      return (overrides.defaults ?? (() => jsonResponse({ profileName: 'Local' })))();
+    if (url.includes('/api/llm/defaults/')) {
+      return (overrides.defaults ?? (() => jsonResponse({ profileName: 'Local' })))(url);
     }
     if (url.endsWith('/api/llm/profiles')) {
-      return (overrides.profiles ?? (() => jsonResponse({ profiles: [{ name: 'Local', inputPricePerMillion: 1, outputPricePerMillion: 2 }], defaults: {} })))();
+      return (overrides.profiles ?? (() => jsonResponse({ profiles: [{ name: 'Local', inputPricePerMillion: 1, outputPricePerMillion: 2 }], defaults: {} })))(url);
     }
     if (url.endsWith('/api/llm/presets')) {
-      return (overrides.presets ?? (() => jsonResponse({ presets: [] })))();
+      return (overrides.presets ?? (() => jsonResponse({ presets: [] })))(url);
     }
     if (url.endsWith('/api/ask')) return (overrides.ask ?? (() => eventResponse([{ type: 'done', text: '', evidence: [] }])))(init?.signal as AbortSignal | undefined);
     if (url.includes('/sources/')) {
-      return (overrides.source ?? (() => jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404)))();
+      return (overrides.source ?? (() => jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404)))(url);
     }
     return jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404);
   });

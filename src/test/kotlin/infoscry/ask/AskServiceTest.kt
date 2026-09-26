@@ -55,6 +55,7 @@ class AskServiceTest {
         val saved = mutableListOf<SavedAsk>()
         val service = service(search, provider) { request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
             saved += SavedAsk(request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+            "conversation-id"
         }
 
         val events = service.ask(request()).toList()
@@ -96,6 +97,7 @@ class AskServiceTest {
         var saved: SavedAsk? = null
         val service = service(CapturedSearch(listOf(hit())), provider) { request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
             saved = SavedAsk(request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+            "conversation-id"
         }
 
         val events = service.ask(request()).toList()

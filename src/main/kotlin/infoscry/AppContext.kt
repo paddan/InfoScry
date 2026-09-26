@@ -9,6 +9,7 @@ import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.embedding.E5Embedder
 import infoscry.embedding.ModelManifest
+import infoscry.embedding.QueryEmbedder
 import infoscry.jobs.JobRunner
 import infoscry.library.ManagedLibrary
 import infoscry.logging.LoggingBootstrap
@@ -60,6 +61,14 @@ class AppContext private constructor(
     private val injectedIndexRemover: CollectionIndexRemover,
     initialIndex: LuceneIndex,
     private val lock: ProcessLock,
+    /**
+     * The query embedder the retrieval path uses, or null for the pinned CoreML model.
+     *
+     * This is the same kind of seam as [injectedIndexRemover]: a test that has no GPU and no pinned
+     * model can drive a whole route with a deterministic vector, because [QueryEmbedder] exists
+     * exactly so a search can be proved without a model. Nothing in production passes it.
+     */
+    private val injectedQueryEmbedder: (() -> QueryEmbedder?)? = null,
 ) : AutoCloseable {
 
     /**
@@ -127,7 +136,8 @@ class AppContext private constructor(
             collections = collections,
             documents = documents,
             index = { index() },
-            queryEmbedder = E5Embedder.productionQueryEmbedder(paths.modelsDir, paths.embeddingProfileDir),
+            queryEmbedder = injectedQueryEmbedder
+                ?: E5Embedder.productionQueryEmbedder(paths.modelsDir, paths.embeddingProfileDir),
         )
     }
 
@@ -193,11 +203,13 @@ class AppContext private constructor(
         fun open(
             dataDir: Path,
             index: CollectionIndexRemover = CollectionIndexRemover.NONE,
-        ): AppContext = open(AppPaths.from(dataDir), index)
+            queryEmbedder: (() -> QueryEmbedder?)? = null,
+        ): AppContext = open(AppPaths.from(dataDir), index, queryEmbedder)
 
         fun open(
             paths: AppPaths,
             index: CollectionIndexRemover = CollectionIndexRemover.NONE,
+            queryEmbedder: (() -> QueryEmbedder?)? = null,
         ): AppContext {
             // The whole layout first, before anything can write into it. Opening a data directory creates its
             // database, so this is not a read-only operation and must not pretend to be one: the import path
@@ -243,6 +255,7 @@ class AppContext private constructor(
                             injectedIndexRemover = index,
                             initialIndex = searchIndex,
                             lock = lock,
+                            injectedQueryEmbedder = queryEmbedder,
                         )
                         context.deletionRecovery = runBlocking { context.collectionService.recoverDeletions() }
                         // The sweep runs after the marker is resolved and before any writer is admitted,
