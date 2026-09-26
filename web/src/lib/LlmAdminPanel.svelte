@@ -4,10 +4,14 @@
     ApiError,
     createLlmProfile,
     deleteLlmProfile,
+    fetchLlmCatalog,
+    listLlmPresets,
     listLlmProfiles,
     setLlmDefault,
     updateLlmProfile,
+    type LlmCatalogModel,
     type LlmDefaults,
+    type LlmPreset,
     type LlmProfile,
     type LlmProfileInput,
   } from './api';
@@ -21,6 +25,14 @@
   let saving = false;
   let error: string | null = null;
   let flash: string | null = null;
+  let presets: LlmPreset[] = [];
+  let presetId = '';
+  let fetchingModels = false;
+  let catalog: LlmCatalogModel[] = [];
+  let catalogId = '';
+  let catalogLive = true;
+  let catalogTried = false;
+  let catalogPriceUnknown = false;
 
   $: selectedProfile = profiles.find((profile) => profile.id === selectedId) ?? null;
 
@@ -66,6 +78,7 @@
     loading = true;
     error = null;
     try {
+      presets = await listLlmPresets();
       await reload();
       if (profiles.length === 0) {
         creating = true;
@@ -88,6 +101,46 @@
     draft = toInput(profile);
     error = null;
     flash = null;
+  }
+
+  function applyPreset(id: string): void {
+    const preset = presets.find((candidate) => candidate.id === id);
+    if (!preset) return;
+    draft.provider = preset.provider;
+    draft.endpoint = preset.endpoint;
+    draft.apiKeyEnvironmentVariable = preset.apiKeyEnvironmentVariable;
+  }
+
+  async function fetchModels(): Promise<void> {
+    if (fetchingModels) return;
+    fetchingModels = true;
+    catalog = [];
+    catalogId = '';
+    catalogLive = true;
+    catalogTried = true;
+    catalogPriceUnknown = false;
+    try {
+      const data = await fetchLlmCatalog(draft.provider, draft.endpoint, draft.apiKeyEnvironmentVariable);
+      catalog = data.models;
+      catalogLive = data.live;
+    } catch {
+      catalogLive = false;
+    } finally {
+      fetchingModels = false;
+    }
+  }
+
+  function applyCatalogModel(id: string): void {
+    const model = catalog.find((candidate) => candidate.id === id);
+    if (!model) return;
+    catalogId = id;
+    draft.model = model.id;
+    if (model.contextWindow !== null) draft.contextWindow = model.contextWindow;
+    if (model.maxOutputTokens !== null) draft.maxOutputTokens = model.maxOutputTokens;
+    if (model.inputPricePerMillion !== null) draft.inputPricePerMillion = model.inputPricePerMillion;
+    if (model.outputPricePerMillion !== null) draft.outputPricePerMillion = model.outputPricePerMillion;
+    if (model.cacheReadPricePerMillion !== null) draft.cacheReadPricePerMillion = model.cacheReadPricePerMillion;
+    catalogPriceUnknown = !model.priceKnown;
   }
 
   function startNew(): void {
@@ -228,6 +281,15 @@
         <input id="pf-name" bind:value={draft.name} placeholder="e.g. DeepSeek fast" required />
       </div>
       <div class="field">
+        <label for="pf-preset">Provider preset</label>
+        <select id="pf-preset" bind:value={presetId} onchange={() => applyPreset(presetId)}>
+          <option value="" disabled>Pick a preset…</option>
+          {#each presets as preset (preset.id)}
+            <option value={preset.id}>{preset.label}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="field">
         <label for="pf-provider">Provider</label>
         <select id="pf-provider" bind:value={draft.provider}>
           <option value="OPENAI_COMPATIBLE">OpenAI-compatible</option>
@@ -236,7 +298,27 @@
       </div>
       <div class="field">
         <label for="pf-model">Model</label>
-        <input id="pf-model" bind:value={draft.model} placeholder="e.g. deepseek-chat" required />
+        <div class="inline">
+          <input id="pf-model" bind:value={draft.model} placeholder="e.g. deepseek-chat" required />
+          <button type="button" onclick={fetchModels} disabled={fetchingModels}>
+            {fetchingModels ? 'Fetching…' : 'Fetch models'}
+          </button>
+        </div>
+        {#if catalog.length > 0}
+          <label for="pf-catalog">Model catalog</label>
+          <select id="pf-catalog" bind:value={catalogId} onchange={() => applyCatalogModel(catalogId)}>
+            <option value="" disabled>Choose a model…</option>
+            {#each catalog as model (model.id)}
+              <option value={model.id}>{model.id}</option>
+            {/each}
+          </select>
+        {/if}
+        {#if catalogTried && (catalog.length === 0 || !catalogLive)}
+          <p class="hint">Could not fetch models — enter one manually.</p>
+        {/if}
+        {#if catalogPriceUnknown}
+          <p class="hint">price unknown — enter manually</p>
+        {/if}
       </div>
       <div class="field">
         <label for="pf-endpoint">Endpoint (base URL)</label>
@@ -338,6 +420,8 @@
   .field.check { align-content: end; }
   .field.check label { display: flex; align-items: center; gap: 0.5rem; }
   .field.check input { accent-color: #c4a77d; }
+  .inline { display: flex; align-items: center; gap: 0.55rem; }
+  .inline button { white-space: nowrap; }
   label { color: #b8bcbb; font-size: 0.82rem; }
   select,
   input:not([type='checkbox']) {

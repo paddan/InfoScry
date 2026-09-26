@@ -113,6 +113,28 @@ export type LlmDefaults = { ASK: string | null; INVESTIGATE: string | null };
 
 export type LlmProfiles = { profiles: LlmProfile[]; defaults: LlmDefaults };
 
+/** One curated provider configuration the Admin view offers as a preset. */
+export type LlmPreset = {
+  id: string;
+  label: string;
+  provider: LlmProvider;
+  endpoint: string;
+  apiKeyEnvironmentVariable: string | null;
+};
+
+/** One model a provider lists, with the fields a profile may adopt; null means unknown. */
+export type LlmCatalogModel = {
+  id: string;
+  contextWindow: number | null;
+  maxOutputTokens: number | null;
+  inputPricePerMillion: number | null;
+  outputPricePerMillion: number | null;
+  cacheReadPricePerMillion: number | null;
+  priceKnown: boolean;
+};
+
+export type LlmCatalog = { live: boolean; models: LlmCatalogModel[] };
+
 export type SourceContentResponse = {
   id: string;
   documentId: string;
@@ -175,6 +197,25 @@ export async function listLlmProfilePrices(): Promise<LlmProfilePrice[]> {
 export async function listLlmProfiles(): Promise<LlmProfiles> {
   const body = (await readJson(await fetch('/api/llm/profiles'))) as { profiles: LlmProfile[]; defaults: LlmDefaults };
   return { profiles: body.profiles, defaults: body.defaults };
+}
+
+/** The provider configurations the Admin view offers as presets. */
+export async function listLlmPresets(): Promise<LlmPreset[]> {
+  const body = (await readJson(await fetch('/api/llm/presets'))) as { presets: LlmPreset[] };
+  return body.presets;
+}
+
+/** One provider's model list, live when reachable and the static fallback otherwise. */
+export async function fetchLlmCatalog(
+  provider: LlmProvider,
+  endpoint: string,
+  apiKeyEnvironmentVariable: string | null,
+): Promise<LlmCatalog> {
+  const parameters = new URLSearchParams({ provider, endpoint });
+  if (apiKeyEnvironmentVariable !== null) {
+    parameters.append('apiKeyEnvironmentVariable', apiKeyEnvironmentVariable);
+  }
+  return (await readJson(await fetch(`/api/llm/catalog?${parameters.toString()}`))) as LlmCatalog;
 }
 
 export async function createLlmProfile(profile: LlmProfileInput): Promise<LlmProfile> {
