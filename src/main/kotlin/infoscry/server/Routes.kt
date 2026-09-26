@@ -294,6 +294,7 @@ fun Application.configureRoutes(
         configureSearchRoutes(context, context.mutations)
         configureSourceRoutes(context)
         configureLlmProfileRoutes(context)
+        configureLlmCatalogRoutes()
         configureAskRoutes(context)
         configureInvestigationRoutes(context)
         configureDocumentRoutes(context)
