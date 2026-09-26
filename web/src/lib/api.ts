@@ -205,7 +205,13 @@ export async function listLlmPresets(): Promise<LlmPreset[]> {
   return body.presets;
 }
 
-/** One provider's model list, live when reachable and the static fallback otherwise. */
+/**
+ * One provider's model list, live when reachable and the static fallback otherwise.
+ *
+ * The route sends this server's API key to the endpoint, so it demands a session credential: the
+ * browser presents its CSRF token. After a server restart the cached token is stale; the server
+ * answers 401 and the request is retried once with a fresh token, exactly like [mutate].
+ */
 export async function fetchLlmCatalog(
   provider: LlmProvider,
   endpoint: string,
@@ -215,7 +221,21 @@ export async function fetchLlmCatalog(
   if (apiKeyEnvironmentVariable !== null) {
     parameters.append('apiKeyEnvironmentVariable', apiKeyEnvironmentVariable);
   }
-  return (await readJson(await fetch(`/api/llm/catalog?${parameters.toString()}`))) as LlmCatalog;
+  const url = `/api/llm/catalog?${parameters.toString()}`;
+  const send = async (): Promise<Response> => fetch(url, {
+    headers: { [CSRF_HEADER]: await csrfToken() },
+  });
+  let response = await send();
+  if (!response.ok) {
+    try {
+      await readJson(response);
+    } catch (failure) {
+      if (!(failure instanceof ApiError) || failure.code !== 'CATALOG_REQUIRES_CREDENTIALS') throw failure;
+      sessionToken = null;
+      response = await send();
+    }
+  }
+  return (await readJson(response)) as LlmCatalog;
 }
 
 export async function createLlmProfile(profile: LlmProfileInput): Promise<LlmProfile> {

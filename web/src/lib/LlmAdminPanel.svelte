@@ -26,6 +26,7 @@
   let error: string | null = null;
   let flash: string | null = null;
   let presets: LlmPreset[] = [];
+  let presetError: string | null = null;
   let presetId = '';
   let fetchingModels = false;
   let catalog: LlmCatalogModel[] = [];
@@ -95,8 +96,15 @@
   async function load(): Promise<void> {
     loading = true;
     error = null;
+    // Presets are an optional convenience: a presets failure surfaces as a hint and must not stop the
+    // profile listing, which is the part the operator actually needs.
+    presetError = null;
     try {
       presets = await listLlmPresets();
+    } catch (failure) {
+      presetError = describe(failure);
+    }
+    try {
       await reload();
       if (profiles.length === 0) {
         creating = true;
@@ -310,6 +318,7 @@
             <option value={preset.id}>{preset.label}</option>
           {/each}
         </select>
+        {#if presetError}<p class="hint" role="status">{presetError}</p>{/if}
       </div>
       <div class="field">
         <label for="pf-provider">Provider</label>

@@ -121,7 +121,7 @@ fun Application.installRequestGuard(credentials: ApiCredentials) {
     }
 }
 
-private const val BEARER_PREFIX = "Bearer "
+internal const val BEARER_PREFIX = "Bearer "
 
 /** Compares two tokens without leaking, through timing, how many leading bytes matched. */
 internal fun constantTimeEquals(candidate: String, expected: String): Boolean =

@@ -3,6 +3,7 @@ package infoscry.server
 import io.ktor.client.statement.bodyAsText
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import java.nio.file.Files
 import kotlin.test.AfterTest
@@ -42,7 +43,7 @@ class LlmCatalogRoutesTest {
             listOf(FakeOpenAiResponse(statusCode = 200, body = """{"data":[{"id":"gpt-4o"}]}""")),
         ).use { fake ->
             val path = "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=${fake.url}&apiKeyEnvironmentVariable=PATH"
-            val response = harness.get(path)
+            val response = harness.request(HttpMethod.Get, path, credential = Credential.CSRF)
             assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
             assertContains(response.bodyAsText(), "\"id\":\"gpt-4o\"")
             assertEquals("Bearer ${System.getenv("PATH")}", fake.authorization)
@@ -50,19 +51,50 @@ class LlmCatalogRoutesTest {
     }
 
     @Test fun `catalog falls back when the provider is unreachable`() = runBlocking {
-        val response = harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=http://127.0.0.1:1")
+        val response = harness.request(
+            HttpMethod.Get,
+            "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=http://127.0.0.1:1",
+            credential = Credential.CSRF,
+        )
         assertEquals(HttpStatusCode.OK, response.status)
         assertContains(response.bodyAsText(), "\"live\":false")
     }
 
+    @Test fun `catalog rejects an uncredentialed caller before any request or key lookup`() = runBlocking {
+        FakeOpenAiServer(
+            listOf(FakeOpenAiResponse(statusCode = 200, body = """{"data":[{"id":"gpt-4o"}]}""")),
+        ).use { fake ->
+            val path = "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=${fake.url}&apiKeyEnvironmentVariable=PATH"
+            val response = harness.request(HttpMethod.Get, path, credential = Credential.NONE)
+            assertEquals(HttpStatusCode.Unauthorized, response.status, response.bodyAsText())
+            assertContains(response.bodyAsText(), "CATALOG_REQUIRES_CREDENTIALS")
+            assertEquals(0, fake.handledRequests, "the key must not be sent without a valid credential")
+        }
+    }
+
     @Test fun `invalid catalog requests are rejected without echoing input`() = runBlocking {
-        assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=NOPE&endpoint=https://api.openai.com/v1").status)
-        assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=not-a-url").status)
-        assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=https://x/v1&apiKeyEnvironmentVariable=not a name").status)
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            harness.request(HttpMethod.Get, "/api/llm/catalog?provider=NOPE&endpoint=https://api.openai.com/v1", credential = Credential.CSRF).status,
+        )
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            harness.request(HttpMethod.Get, "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=not-a-url", credential = Credential.CSRF).status,
+        )
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            harness.request(HttpMethod.Get, "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=https://x/v1&apiKeyEnvironmentVariable=not a name", credential = Credential.CSRF).status,
+        )
     }
 
     @Test fun `catalog rejects endpoints without an authority or host`() = runBlocking {
-        assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=http:foo").status)
-        assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=https://").status)
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            harness.request(HttpMethod.Get, "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=http:foo", credential = Credential.CSRF).status,
+        )
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            harness.request(HttpMethod.Get, "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=https://", credential = Credential.CSRF).status,
+        )
     }
 }

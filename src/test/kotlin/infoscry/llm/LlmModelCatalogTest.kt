@@ -69,6 +69,29 @@ class LlmModelCatalogTest {
     }
 
     @Test
+    fun `a loopback endpoint zeroes even curated prices`() {
+        val model = catalog.normalize(
+            LlmProvider.OPENAI_COMPATIBLE, "http://localhost:11434/v1",
+            listOf(Json.parseToJsonElement("""{"id":"gpt-4o"}""").jsonObject),
+        ).single()
+        assertEquals(0.0, model.inputPricePerMillion)
+        assertEquals(0.0, model.outputPricePerMillion)
+        assertEquals(0.0, model.cacheReadPricePerMillion)
+        assertTrue(model.priceKnown)
+    }
+
+    @Test
+    fun `a loopback fallback is local and free too`() {
+        val model = catalog.fallback(
+            LlmProvider.OPENAI_COMPATIBLE, "http://127.0.0.1:4321/v1",
+        ).first { it.id == "gpt-4o" }
+        assertEquals(0.0, model.inputPricePerMillion)
+        assertEquals(0.0, model.outputPricePerMillion)
+        assertEquals(0.0, model.cacheReadPricePerMillion)
+        assertTrue(model.priceKnown)
+    }
+
+    @Test
     fun `an entry without a string id is skipped`() {
         val entries = listOf(
             Json.parseToJsonElement("""{"missing":"id"}""").jsonObject,
@@ -146,7 +169,7 @@ class LlmModelCatalogTest {
 
     @Test
     fun `fetch times out and falls back when the provider hangs`() = runBlocking {
-        val fake = FakeOpenAiServer(listOf(FakeOpenAiResponse(statusCode = 200, body = """{"data":""", stream = true, declaredLength = 4_096, holdMillis = 5_000)))
+        val fake = FakeOpenAiServer(listOf(FakeOpenAiResponse(statusCode = 200, body = """{"data":""", stream = true, declaredLength = 4_096, holdMillis = 500)))
         try {
             val result = LlmModelCatalog(requestTimeoutMillis = 200).fetch(LlmProvider.OPENAI_COMPATIBLE, fake.url, null)
             assertFalse(result.live)

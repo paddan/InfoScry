@@ -32,6 +32,19 @@ describe('app shell', () => {
     expect(screen.queryByRole('button', { name: /create collection/i })).toBeNull();
   });
 
+  it('keeps the Admin view reachable before any collection exists', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [] }),
+      presets: () => jsonResponse({ presets: [] }),
+    });
+
+    render(Page);
+    await screen.findByText('No collections yet.');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Configure LLM profiles' })).toBeTruthy();
+  });
+
   it('reports a failed load instead of showing an empty archive', async () => {
     stubFetch({
       list: () => jsonResponse({ error: { code: 'INTERNAL_ERROR', message: 'the archive is unavailable' } }, 500),
@@ -470,6 +483,7 @@ function stubFetch(overrides: {
   ask?: (signal?: AbortSignal) => Response | Promise<Response>;
   defaults?: () => Response | Promise<Response>;
   profiles?: () => Response | Promise<Response>;
+  presets?: () => Response | Promise<Response>;
   session?: () => Response;
 }) {
   const calls: { url: string; init?: RequestInit }[] = [];
@@ -490,6 +504,9 @@ function stubFetch(overrides: {
     }
     if (url.endsWith('/api/llm/profiles')) {
       return (overrides.profiles ?? (() => jsonResponse({ profiles: [{ name: 'Local', inputPricePerMillion: 1, outputPricePerMillion: 2 }], defaults: {} })))();
+    }
+    if (url.endsWith('/api/llm/presets')) {
+      return (overrides.presets ?? (() => jsonResponse({ presets: [] })))();
     }
     if (url.endsWith('/api/ask')) return (overrides.ask ?? (() => eventResponse([{ type: 'done', text: '', evidence: [] }])))(init?.signal as AbortSignal | undefined);
     if (url.includes('/sources/')) {

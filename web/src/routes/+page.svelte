@@ -216,7 +216,7 @@
       {/if}
     </div>
 
-    {#if collections.length > 0 && !loadingCollections}
+    {#if !loadingCollections}
       <nav class="mode-nav" aria-label="Workspace mode">
         <span class="eyebrow">WORKSPACE</span>
         <div role="tablist" aria-label="Workspace mode" tabindex="-1" onkeydown={handleTabKeydown}>
@@ -306,7 +306,7 @@
       <div><span class="eyebrow">{activeMode === 'SEARCH' ? 'DISCOVER' : activeMode === 'ASK' ? 'ANSWER' : activeMode === 'INVESTIGATE' ? 'EXPLORE' : 'SETTINGS'}</span><h1>{activeMode === 'INVESTIGATE' ? 'Investigate' : activeMode === 'ASK' ? 'Ask your archive' : activeMode === 'ADMIN' ? 'Configure LLM profiles' : 'Search your archive'}</h1></div>
     </header>
 
-  {#if collections.length > 0 && !loadingCollections}
+  {#if !loadingCollections}
     <div class:with-source={selectedHit !== null} class="content-layout">
     <div class="mode-panels">
       <div id="panel-search" role="tabpanel" aria-labelledby="tab-search" hidden={activeMode !== 'SEARCH'}>

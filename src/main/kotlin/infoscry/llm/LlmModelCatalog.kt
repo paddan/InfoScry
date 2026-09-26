@@ -130,20 +130,23 @@ class LlmModelCatalog(
     /**
      * The static answer for a provider that did not answer: the [ProviderPreset.staticModels] for the
      * endpoint when a preset matches, otherwise the [ProviderCatalogData.knownModels] ids for the
-     * provider, with the same curated metadata overlay [normalize] applies (no live fields).
+     * provider, with the same curated metadata overlay [normalize] applies (no live fields). A
+     * loopback endpoint is local-and-free here too, exactly as in [normalize]: a curated price would
+     * otherwise reappear once the local endpoint is down.
      */
     internal fun fallback(provider: LlmProvider, endpoint: String): List<CatalogModel> {
         val ids = ProviderCatalog.presetFor(catalog, endpoint)?.staticModels ?: knownIdsFor(provider)
+        val loopback = isLoopback(endpoint)
         return ids.map { id ->
             val known = knownModel(id, provider)
             CatalogModel(
                 id = id,
                 contextWindow = known?.contextWindow,
                 maxOutputTokens = known?.maxOutputTokens,
-                inputPricePerMillion = known?.inputPricePerMillion,
-                outputPricePerMillion = known?.outputPricePerMillion,
-                cacheReadPricePerMillion = known?.cacheReadPricePerMillion,
-                priceKnown = known?.inputPricePerMillion != null && known?.outputPricePerMillion != null,
+                inputPricePerMillion = 0.0.takeIf { loopback } ?: known?.inputPricePerMillion,
+                outputPricePerMillion = 0.0.takeIf { loopback } ?: known?.outputPricePerMillion,
+                cacheReadPricePerMillion = 0.0.takeIf { loopback } ?: known?.cacheReadPricePerMillion,
+                priceKnown = loopback || (known?.inputPricePerMillion != null && known?.outputPricePerMillion != null),
             )
         }
     }
@@ -153,14 +156,11 @@ class LlmModelCatalog(
         val known = knownModel(id, provider)
         val topProvider = entry["top_provider"] as? JsonObject
         val pricing = entry["pricing"] as? JsonObject
-        var inputPrice = scaledPrice(pricing, "prompt") ?: known?.inputPricePerMillion
-        var outputPrice = scaledPrice(pricing, "completion") ?: known?.outputPricePerMillion
-        var cacheReadPrice = scaledPrice(pricing, "input_cache_read") ?: known?.cacheReadPricePerMillion
-        if (loopback && inputPrice == null && outputPrice == null) {
-            inputPrice = 0.0
-            outputPrice = 0.0
-            cacheReadPrice = 0.0
-        }
+        // A loopback endpoint is local-and-free: nothing is billed and no key is involved, so live or
+        // curated prices must not leak through. The context fields stay whatever the source says.
+        val inputPrice = 0.0.takeIf { loopback } ?: scaledPrice(pricing, "prompt") ?: known?.inputPricePerMillion
+        val outputPrice = 0.0.takeIf { loopback } ?: scaledPrice(pricing, "completion") ?: known?.outputPricePerMillion
+        val cacheReadPrice = 0.0.takeIf { loopback } ?: scaledPrice(pricing, "input_cache_read") ?: known?.cacheReadPricePerMillion
         return CatalogModel(
             id = id,
             contextWindow = intField(entry, "context_length") ?: known?.contextWindow,

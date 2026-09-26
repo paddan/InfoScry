@@ -92,6 +92,21 @@ describe('LLM admin panel', () => {
     expect(api.listLlmProfiles).toHaveBeenCalledTimes(1);
   });
 
+  it('still lists profiles when only the presets route fails', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.listLlmPresets.mockRejectedValue(new Error('the presets service is unavailable'));
+
+    render(LlmAdminPanel);
+
+    await screen.findByLabelText('Name');
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('fast');
+    expect(api.listLlmProfiles).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText('the presets service is unavailable')).toBeTruthy();
+  });
+
   it('creates a profile from the entered fields', async () => {
     api.listLlmProfiles.mockResolvedValue({
       profiles: [profile('p1', 'fast')],
