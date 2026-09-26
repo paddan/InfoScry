@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import LlmAdminPanel from './LlmAdminPanel.svelte';
-import type { LlmCatalogModel, LlmPreset, LlmProfile } from './api';
+import type { LlmCatalog, LlmCatalogModel, LlmPreset, LlmProfile } from './api';
 
 const api = vi.hoisted(() => ({
   listLlmProfiles: vi.fn(),
@@ -260,5 +260,140 @@ describe('LLM admin panel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
 
     expect(await screen.findByText('Could not fetch models — enter one manually.')).toBeDefined();
+  });
+
+  it('drops the fetched models when a Provider preset changes the connection', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.listLlmPresets.mockResolvedValue([
+      preset('OPENAI', 'OpenAI', {
+        endpoint: 'https://api.openai.com/v1',
+        apiKeyEnvironmentVariable: 'OPENAI_API_KEY',
+      }),
+      preset('ANTHROPIC', 'Anthropic', {
+        provider: 'ANTHROPIC',
+        endpoint: 'https://api.anthropic.com',
+        apiKeyEnvironmentVariable: 'ANTHROPIC_API_KEY',
+      }),
+    ]);
+    api.fetchLlmCatalog.mockResolvedValue({
+      live: true,
+      models: [model('gpt-4o')],
+    });
+
+    render(LlmAdminPanel);
+    await screen.findByLabelText('Name');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+    expect(await screen.findByRole('option', { name: 'gpt-4o' })).toBeDefined();
+
+    await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'ANTHROPIC' } });
+
+    expect((screen.getByLabelText('Endpoint (base URL)') as HTMLInputElement).value).toBe(
+      'https://api.anthropic.com',
+    );
+    expect(screen.queryByLabelText('Model catalog')).toBeNull();
+  });
+
+  it('drops the fetched models when the endpoint is edited', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.fetchLlmCatalog.mockResolvedValue({
+      live: true,
+      models: [model('gpt-4o')],
+    });
+
+    render(LlmAdminPanel);
+    await screen.findByLabelText('Name');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+    expect(await screen.findByRole('option', { name: 'gpt-4o' })).toBeDefined();
+
+    await fireEvent.input(screen.getByLabelText('Endpoint (base URL)'), {
+      target: { value: 'https://other.example.test/v1' },
+    });
+
+    expect(screen.queryByLabelText('Model catalog')).toBeNull();
+  });
+
+  it('ignores a stale fetch that settles after the connection changed', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.listLlmPresets.mockResolvedValue([
+      preset('OPENAI', 'OpenAI', {
+        endpoint: 'https://api.openai.com/v1',
+        apiKeyEnvironmentVariable: 'OPENAI_API_KEY',
+      }),
+      preset('ANTHROPIC', 'Anthropic', {
+        provider: 'ANTHROPIC',
+        endpoint: 'https://api.anthropic.com',
+        apiKeyEnvironmentVariable: 'ANTHROPIC_API_KEY',
+      }),
+    ]);
+    const pending: Array<(catalog: LlmCatalog) => void> = [];
+    api.fetchLlmCatalog.mockImplementation(
+      () => new Promise<LlmCatalog>((resolve) => {
+        pending.push(resolve);
+      }),
+    );
+
+    render(LlmAdminPanel);
+    await screen.findByLabelText('Name');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+    await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'ANTHROPIC' } });
+    pending[0]?.({ live: true, models: [model('gpt-4o')] });
+    await act(async () => {});
+
+    expect(screen.queryByLabelText('Model catalog')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Fetch models' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('keeps a newer fetch in flight when an older one settles late', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.listLlmPresets.mockResolvedValue([
+      preset('OPENAI', 'OpenAI', {
+        endpoint: 'https://api.openai.com/v1',
+        apiKeyEnvironmentVariable: 'OPENAI_API_KEY',
+      }),
+      preset('ANTHROPIC', 'Anthropic', {
+        provider: 'ANTHROPIC',
+        endpoint: 'https://api.anthropic.com',
+        apiKeyEnvironmentVariable: 'ANTHROPIC_API_KEY',
+      }),
+    ]);
+    const pending: Array<(catalog: LlmCatalog) => void> = [];
+    api.fetchLlmCatalog.mockImplementation(
+      () => new Promise<LlmCatalog>((resolve) => {
+        pending.push(resolve);
+      }),
+    );
+
+    render(LlmAdminPanel);
+    await screen.findByLabelText('Name');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+    await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'ANTHROPIC' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+    expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(2);
+
+    pending[0]?.({ live: true, models: [model('gpt-4o')] });
+    await act(async () => {});
+
+    expect((screen.getByRole('button', { name: /Fetch/ }) as HTMLButtonElement).disabled).toBe(true);
+
+    pending[1]?.({ live: true, models: [model('gpt-4o')] });
+    await act(async () => {});
+
+    expect((screen.getByRole('button', { name: /Fetch/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

@@ -33,8 +33,26 @@
   let catalogLive = true;
   let catalogTried = false;
   let catalogPriceUnknown = false;
+  // The connection (provider + endpoint + key) the catalog was fetched for, and a
+  // counter that bumps whenever that connection changes so stale fetches are droppable.
+  let connectionKey = '';
+  let appliedConnectionKey: string | null = null;
+  let connectionGeneration = 0;
 
   $: selectedProfile = profiles.find((profile) => profile.id === selectedId) ?? null;
+  $: connectionKey = `${draft.provider}\u0000${draft.endpoint}\u0000${draft.apiKeyEnvironmentVariable ?? ''}`;
+  $: if (connectionKey !== appliedConnectionKey) {
+    // The connection changed (a preset, another profile, or a direct edit): the fetched
+    // catalog no longer belongs to the draft, and any fetch still in flight is stale.
+    appliedConnectionKey = connectionKey;
+    connectionGeneration += 1;
+    fetchingModels = false;
+    catalog = [];
+    catalogId = '';
+    catalogLive = true;
+    catalogTried = false;
+    catalogPriceUnknown = false;
+  }
 
   function emptyDraft(): LlmProfileInput {
     return {
@@ -114,6 +132,8 @@
   async function fetchModels(): Promise<void> {
     if (fetchingModels) return;
     fetchingModels = true;
+    const generation = connectionGeneration;
+    const key = connectionKey;
     catalog = [];
     catalogId = '';
     catalogLive = true;
@@ -121,12 +141,14 @@
     catalogPriceUnknown = false;
     try {
       const data = await fetchLlmCatalog(draft.provider, draft.endpoint, draft.apiKeyEnvironmentVariable);
+      if (generation !== connectionGeneration || key !== connectionKey) return;
       catalog = data.models;
       catalogLive = data.live;
     } catch {
+      if (generation !== connectionGeneration || key !== connectionKey) return;
       catalogLive = false;
     } finally {
-      fetchingModels = false;
+      if (generation === connectionGeneration) fetchingModels = false;
     }
   }
 
