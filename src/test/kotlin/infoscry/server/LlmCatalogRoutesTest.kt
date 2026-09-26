@@ -60,4 +60,9 @@ class LlmCatalogRoutesTest {
         assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=not-a-url").status)
         assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=https://x/v1&apiKeyEnvironmentVariable=not a name").status)
     }
+
+    @Test fun `catalog rejects endpoints without an authority or host`() = runBlocking {
+        assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=http:foo").status)
+        assertEquals(HttpStatusCode.BadRequest, harness.get("/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=https://").status)
+    }
 }

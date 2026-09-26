@@ -71,7 +71,7 @@ fun Routing.configureLlmCatalogRoutes(
                         } catch (failure: URISyntaxException) {
                             throw BadRequestException("endpoint must be an absolute http or https URL")
                         }
-                        uri.isAbsolute && uri.scheme in setOf("http", "https")
+                        uri.isAbsolute && uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
                     }
                     ?: throw BadRequestException("endpoint must be an absolute http or https URL")
                 val apiKeyEnvironmentVariable = parameters["apiKeyEnvironmentVariable"]?.let { raw ->
