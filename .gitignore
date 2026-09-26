@@ -6,4 +6,5 @@ dist/
 web/node_modules/
 web/build/
 web/.svelte-kit/
+web/.vitest/
 .idea/

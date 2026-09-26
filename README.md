@@ -9,17 +9,21 @@ pipeline, CoreML embedding path, hybrid search, crash-aware reindexing, LLM
 profiles, streaming OpenAI-compatible/Anthropic adapters, cited Ask, and
 bounded Investigate exist.
 The reader-focused web UI now has collection search, a bounded extracted-source
-view with a managed-original link, Ask, and an Investigate conversation panel.
-Local end-to-end acceptance is still open, as are the format-specific source
-views described in the design. Import and administration belong in the CLI.
+view with a managed-original link, Ask, an Investigate conversation panel, and
+an Admin view for configuring LLM profiles. Local end-to-end acceptance is
+still open, as are the format-specific source views described in the design.
+Import, jobs, and logs belong in the CLI; LLM profiles can be managed in the
+CLI or the web Admin view.
 This project is built and run locally; CI and distributable packaging are not
 planned.
 
-The web reader uses a dark theme with a sidebar and separate Search, Ask, and
-Investigate views. Search settings include retrieval mode, file type, path,
-metadata, import dates, document status, and OCR-only filtering. Ask and
-Investigate select from configured LLM profiles; Search filters apply only to
-Search. Switching views preserves their current content.
+The web reader uses a dark theme with a sidebar and separate Search, Ask,
+Investigate, and Admin views. Search settings include retrieval mode, file
+type, path, metadata, import dates, document status, and OCR-only filtering.
+Ask and Investigate select from configured LLM profiles; the Admin view
+creates, edits, and deletes those profiles and sets the per-role defaults.
+Search filters apply only to Search. Switching views preserves their current
+content.
 
 ## Planned capabilities
 
@@ -34,7 +38,7 @@ Search. Switching views preserves their current content.
   chapter. Citation validation checks source identifiers; it does not by itself
   prove that an answer's claims are supported.
 - Inspect sources, search results, answers, and citations in an English web
-  interface; handle import, jobs, profiles, and logs in the CLI.
+  interface; handle import, jobs, and logs in the CLI, and LLM profiles in the CLI or Admin view.
 
 The design targets roughly 10,000 documents or one million pages. This is a
 sizing target, not a measured capacity claim.
@@ -143,10 +147,11 @@ server owns that data directory.
 Ask and Investigate require a configured LLM profile to be selected in the
 UI; a default profile for each mode is optional and only preselects a
 convenient choice. InfoScry does **not** start or host an LLM: it calls the
-endpoint you configure. Use `llm add` and `llm test <name>` from the CLI
-before starting the server. Optionally set a default with
-`llm set-default --ask <name>` or `llm set-default --investigate <name>`;
-`llm test` makes real probe requests to that endpoint. Ask and Investigate
+endpoint you configure. Add and test profiles from the CLI (`llm add`,
+`llm test <name>`) or from the web Admin view while the server is running.
+Optionally set a default with `llm set-default --ask <name>` or
+`llm set-default --investigate <name>`, or with the Admin view's per-role
+selectors; `llm test` makes real probe requests to that endpoint. Ask and Investigate
 send selected document evidence to the configured endpoint, which may be
 external. Their browser flows have not yet had the final manual fake-provider
 acceptance check.

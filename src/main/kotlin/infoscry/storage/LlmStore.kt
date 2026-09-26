@@ -25,6 +25,9 @@ import kotlinx.serialization.json.Json
 class DuplicateLlmProfileNameException(val name: String) :
     IllegalStateException("an LLM profile named '$name' already exists")
 
+/** The final profile cannot be deleted: Ask and Investigate need at least one to run against. */
+class LastLlmProfileException : IllegalStateException("the last LLM profile cannot be deleted")
+
 /** The prompt override cache keeps one row per role: the compiler resolves the role by enum name. */
 private val PROMPT_ROLE_COLUMN = "role"
 
@@ -279,6 +282,18 @@ class LlmStore(private val database: Database) {
     }
 
     fun deleteById(id: String): Boolean = database.transaction { connection ->
+        val lastRemaining = connection.prepareStatement("SELECT COUNT(*) FROM llm_profiles").use { statement ->
+            statement.executeQuery().use { results -> results.next() && results.getInt(1) <= 1 }
+        }
+        if (lastRemaining) {
+            // Only refuse when the id names that single profile; a delete of a non-existent id on a
+            // one-profile store still reports "not found" below instead of "last profile".
+            val targetExists = connection.prepareStatement("SELECT 1 FROM llm_profiles WHERE id = ?").use { statement ->
+                statement.setString(1, id)
+                statement.executeQuery().use { results -> results.next() }
+            }
+            if (targetExists) throw LastLlmProfileException()
+        }
         connection.prepareStatement("DELETE FROM llm_profiles WHERE id = ?").use { statement ->
             statement.setString(1, id)
             statement.executeUpdate() > 0

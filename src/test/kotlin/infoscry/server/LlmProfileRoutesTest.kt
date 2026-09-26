@@ -51,9 +51,27 @@ class LlmProfileRoutesTest {
         assertContains(updated.bodyAsText(), id)
         assertContains(updated.bodyAsText(), "Renamed")
 
-        val deleted = harness.request(HttpMethod.Delete, "/api/llm/profiles/$id", credential = Credential.CSRF)
+        // The last profile can no longer be deleted; deletion of a non-final profile is covered by the
+        // dedicated test below.
+        val refused = harness.request(HttpMethod.Delete, "/api/llm/profiles/$id", credential = Credential.CSRF)
+        assertEquals(HttpStatusCode.Conflict, refused.status, refused.bodyAsText())
+        assertContains(harness.get("/api/llm/profiles").bodyAsText(), id)
+    }
+
+    @Test fun `the last profile cannot be deleted`() = runBlocking {
+        val created = create()
+        val id = Regex(""""id":"([^"]+)"""").find(created.bodyAsText())!!.groupValues[1]
+
+        val refused = harness.request(HttpMethod.Delete, "/api/llm/profiles/$id", credential = Credential.CSRF)
+        assertEquals(HttpStatusCode.Conflict, refused.status, refused.bodyAsText())
+        assertContains(refused.bodyAsText(), "LAST_LLM_PROFILE")
+        assertEquals(1, harness.context.llm.list().size)
+
+        val second = create(profileBody.replace("Test profile", "Second profile"))
+        val secondId = Regex(""""id":"([^"]+)"""").find(second.bodyAsText())!!.groupValues[1]
+        val deleted = harness.request(HttpMethod.Delete, "/api/llm/profiles/$secondId", credential = Credential.CSRF)
         assertEquals(HttpStatusCode.NoContent, deleted.status)
-        assertContains(harness.get("/api/llm/profiles").bodyAsText(), "\"profiles\":[]")
+        assertEquals(1, harness.context.llm.list().size)
     }
 
     @Test fun `profile name conflicts ignore case and unknown ids return not found`() = runBlocking {
@@ -76,6 +94,8 @@ class LlmProfileRoutesTest {
         assertEquals(HttpStatusCode.OK, investigate.status, investigate.bodyAsText())
         val missing = harness.request(HttpMethod.Put, "/api/llm/defaults/INVESTIGATE", """{"profileId":"missing"}""", Credential.CSRF)
         assertEquals(HttpStatusCode.NotFound, missing.status)
+        // A second profile makes the defaulted first profile deletable; its dangling default then reads back null.
+        create(profileBody.replace("Test profile", "Second profile"))
         val deleted = harness.request(HttpMethod.Delete, "/api/llm/profiles/$id", credential = Credential.CSRF)
         assertEquals(HttpStatusCode.NoContent, deleted.status)
         val profiles = harness.get("/api/llm/profiles").bodyAsText()

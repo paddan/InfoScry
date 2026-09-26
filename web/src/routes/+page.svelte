@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import AskPanel from '../lib/AskPanel.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
+  import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
   import {
     ApiError,
     listCollections,
@@ -23,7 +24,7 @@
   let searching = false;
   let query = '';
   let mode: SearchMode = 'HYBRID';
-  let activeMode: 'SEARCH' | 'ASK' | 'INVESTIGATE' = 'SEARCH';
+  let activeMode: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN' = 'SEARCH';
   let mediaType = '';
   let pathContains = '';
   let textContains = '';
@@ -139,12 +140,12 @@
     invalidateSearch();
   }
 
-  function selectMode(modeName: 'SEARCH' | 'ASK' | 'INVESTIGATE'): void {
+  function selectMode(modeName: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN'): void {
     activeMode = modeName;
   }
 
   function handleTabKeydown(event: KeyboardEvent): void {
-    const tabs: ('SEARCH' | 'ASK' | 'INVESTIGATE')[] = ['SEARCH', 'ASK', 'INVESTIGATE'];
+    const tabs: ('SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN')[] = ['SEARCH', 'ASK', 'INVESTIGATE', 'ADMIN'];
     const current = tabs.indexOf(activeMode);
     let next = current;
     if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
@@ -222,6 +223,7 @@
           <button id="tab-search" role="tab" aria-selected={activeMode === 'SEARCH'} aria-controls="panel-search" tabindex={activeMode === 'SEARCH' ? 0 : -1} onclick={() => selectMode('SEARCH')}><span aria-hidden="true">⌕</span> Search</button>
           <button id="tab-ask" role="tab" aria-selected={activeMode === 'ASK'} aria-controls="panel-ask" tabindex={activeMode === 'ASK' ? 0 : -1} onclick={() => selectMode('ASK')}><span aria-hidden="true">✦</span> Ask</button>
           <button id="tab-investigate" role="tab" aria-selected={activeMode === 'INVESTIGATE'} aria-controls="panel-investigate" tabindex={activeMode === 'INVESTIGATE' ? 0 : -1} onclick={() => selectMode('INVESTIGATE')}><span aria-hidden="true">◎</span> Investigate</button>
+          <button id="tab-admin" role="tab" aria-selected={activeMode === 'ADMIN'} aria-controls="panel-admin" tabindex={activeMode === 'ADMIN' ? 0 : -1} onclick={() => selectMode('ADMIN')}><span aria-hidden="true">⚙</span> Admin</button>
         </div>
       </nav>
 
@@ -269,6 +271,11 @@
             </div>
           </details>
         </div>
+      {:else if activeMode === 'ADMIN'}
+        <div class="sidebar-note">
+          <span class="eyebrow">ADMINISTRATION</span>
+          <p>Configure the LLM profiles Ask and Investigate can use. API keys stay in environment variables.</p>
+        </div>
       {:else}
         <div class="sidebar-note">
           <span class="eyebrow">{activeMode === 'ASK' ? 'GROUNDED ANSWERS' : 'RESEARCH MODE'}</span>
@@ -296,7 +303,7 @@
 
   <main class="workspace">
     <header class="workspace-header">
-      <div><span class="eyebrow">{activeMode === 'SEARCH' ? 'DISCOVER' : activeMode === 'ASK' ? 'ANSWER' : 'EXPLORE'}</span><h1>{activeMode === 'INVESTIGATE' ? 'Investigate' : activeMode === 'ASK' ? 'Ask your archive' : 'Search your archive'}</h1></div>
+      <div><span class="eyebrow">{activeMode === 'SEARCH' ? 'DISCOVER' : activeMode === 'ASK' ? 'ANSWER' : activeMode === 'INVESTIGATE' ? 'EXPLORE' : 'SETTINGS'}</span><h1>{activeMode === 'INVESTIGATE' ? 'Investigate' : activeMode === 'ASK' ? 'Ask your archive' : activeMode === 'ADMIN' ? 'Configure LLM profiles' : 'Search your archive'}</h1></div>
     </header>
 
   {#if collections.length > 0 && !loadingCollections}
@@ -336,6 +343,8 @@
         </ol>
       {/if}
       </div>
+
+      <div id="panel-admin" role="tabpanel" aria-labelledby="tab-admin" hidden={activeMode !== 'ADMIN'}><LlmAdminPanel /></div>
 
     {#key selectedCollectionId}
       <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}><AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} onOpenSource={(evidence) => openSource({

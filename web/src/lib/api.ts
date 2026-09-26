@@ -86,6 +86,33 @@ export type LlmProfilePrice = {
   outputPricePerMillion: number;
 };
 
+export type LlmProvider = 'OPENAI_COMPATIBLE' | 'ANTHROPIC';
+
+export type LlmProfile = {
+  id: string;
+  name: string;
+  provider: LlmProvider;
+  endpoint: string;
+  model: string;
+  contextWindow: number;
+  maxOutputTokens: number;
+  inputPricePerMillion: number;
+  outputPricePerMillion: number;
+  cacheReadPricePerMillion: number;
+  enabled: boolean;
+  apiKeyEnvironmentVariable: string | null;
+  keyAvailable: boolean;
+  toolCallingMeasured: boolean | null;
+  capabilityCheckedAt: string | null;
+};
+
+/** The fields a profile mutation accepts; the server owns id and capability measurements. */
+export type LlmProfileInput = Omit<LlmProfile, 'id' | 'keyAvailable' | 'toolCallingMeasured' | 'capabilityCheckedAt'>;
+
+export type LlmDefaults = { ASK: string | null; INVESTIGATE: string | null };
+
+export type LlmProfiles = { profiles: LlmProfile[]; defaults: LlmDefaults };
+
 export type SourceContentResponse = {
   id: string;
   documentId: string;
@@ -142,6 +169,30 @@ export async function askDefaultProfile(): Promise<string> {
 export async function listLlmProfilePrices(): Promise<LlmProfilePrice[]> {
   const body = (await readJson(await fetch('/api/llm/profiles'))) as { profiles: LlmProfilePrice[] };
   return body.profiles;
+}
+
+/** Full profile list plus the per-role defaults (profile id per role, or null). */
+export async function listLlmProfiles(): Promise<LlmProfiles> {
+  const body = (await readJson(await fetch('/api/llm/profiles'))) as { profiles: LlmProfile[]; defaults: LlmDefaults };
+  return { profiles: body.profiles, defaults: body.defaults };
+}
+
+export async function createLlmProfile(profile: LlmProfileInput): Promise<LlmProfile> {
+  const body = (await mutate('/api/llm/profiles', 'POST', profile)) as { profile: LlmProfile };
+  return body.profile;
+}
+
+export async function updateLlmProfile(id: string, profile: LlmProfileInput): Promise<LlmProfile> {
+  const body = (await mutate(`/api/llm/profiles/${encodeURIComponent(id)}`, 'PUT', profile)) as { profile: LlmProfile };
+  return body.profile;
+}
+
+export async function deleteLlmProfile(id: string): Promise<void> {
+  await mutate(`/api/llm/profiles/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+export async function setLlmDefault(role: 'ASK' | 'INVESTIGATE', profileId: string): Promise<void> {
+  await mutate(`/api/llm/defaults/${role}`, 'PUT', { profileId });
 }
 
 /** Start an Ask stream with the browser's session CSRF token. */
@@ -359,6 +410,32 @@ export async function createCollection(name: string, description?: string): Prom
   });
   const body = (await readJson(response)) as { collection: Collection };
   return body.collection;
+}
+
+/**
+ * One mutation with the browser's CSRF token, retrying once after a server restart invalidates the
+ * cached token (the same recovery the streaming calls use). A `DELETE` with an empty body needs the
+ * same token, so this helper covers both.
+ */
+async function mutate(path: string, method: 'POST' | 'PUT' | 'DELETE', body?: unknown): Promise<unknown> {
+  const send = async (): Promise<Response> => fetch(path, {
+    method,
+    headers: body === undefined
+      ? { [CSRF_HEADER]: await csrfToken() }
+      : { 'Content-Type': 'application/json', [CSRF_HEADER]: await csrfToken() },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let response = await send();
+  if (!response.ok) {
+    try {
+      await readJson(response);
+    } catch (failure) {
+      if (!(failure instanceof ApiError) || failure.code !== 'MUTATION_REQUIRES_CREDENTIALS') throw failure;
+      sessionToken = null;
+      response = await send();
+    }
+  }
+  return readJson(response);
 }
 
 /**

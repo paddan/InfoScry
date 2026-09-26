@@ -13,6 +13,7 @@ import infoscry.jobs.ImportJobPayload
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
 import infoscry.storage.DuplicateLlmProfileNameException
+import infoscry.storage.LastLlmProfileException
 import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
@@ -441,6 +442,11 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
         respondJson(
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = "DUPLICATE_LLM_PROFILE_NAME", message = "an LLM profile with that name already exists")),
+        )
+    } catch (last: LastLlmProfileException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "LAST_LLM_PROFILE", message = last.message.orEmpty())),
         )
     } catch (mismatch: CollectionConfirmationMismatchException) {
         respondJson(

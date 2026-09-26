@@ -6,14 +6,16 @@ The backend and CLI implement local import/extraction/OCR, collections and jobs,
 CoreML embeddings, hybrid search, recoverable Lucene reindexing, LLM profiles,
 cited Ask, and bounded Investigate. The reader frontend now includes collection
 search, bounded extracted-source pages and managed originals, Ask, and an
-Investigate conversation panel with persisted history. A focused static-asset
+Investigate conversation panel with persisted history, and an Admin view for
+configuring LLM profiles. A focused static-asset
 route fix lets the built JavaScript load in the browser.
 
 The remaining scope is in the [active local-use plan](superpowers/plans/2026-09-23-infoscry-next-work.md):
 exercise Ask and Investigate through the browser with a disposable fake LLM,
 decide whether the foundational source pane is sufficient or the design's
 format-specific previews are still required, and write a short tested run guide.
-Import, jobs, profiles, logs, and other administration stay in the CLI. There
+Import, jobs, and logs stay in the CLI; LLM profiles are now manageable in the
+web Admin view as well. There
 is no CI, package, or release milestone.
 
 ## Current code state
@@ -52,7 +54,7 @@ No branch integration or local acceptance is implied by this status.
 ## Dark reader interface
 
 The reader now uses a dark sidebar layout inspired by Palmemordsarkivet, with
-separate Search, Ask, and Investigate views. Switching views preserves mounted
+separate Search, Ask, Investigate, and Admin views. Switching views preserves mounted
 panels and their current state. The Search sidebar exposes the existing API's
 mode, file type, path, metadata, import-date, document-status, and OCR filters.
 Ask and Investigate have separate configured-profile selectors; Search filters
