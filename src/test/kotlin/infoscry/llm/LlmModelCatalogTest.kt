@@ -124,6 +124,17 @@ class LlmModelCatalogTest {
 
     @Test
     fun `fetch falls back when the body is not JSON`() = runBlocking {
+        val fake = FakeOpenAiServer(listOf(FakeOpenAiResponse(statusCode = 200, body = "<html>not json</html>")))
+        try {
+            val result = LlmModelCatalog().fetch(LlmProvider.OPENAI_COMPATIBLE, fake.url, null)
+            assertFalse(result.live)
+        } finally {
+            fake.close()
+        }
+    }
+
+    @Test
+    fun `fetch falls back when the provider answers with an error status`() = runBlocking {
         val fake = FakeOpenAiServer(listOf(FakeOpenAiResponse(statusCode = 502, body = "<html>bad gateway</html>")))
         try {
             val result = LlmModelCatalog().fetch(LlmProvider.OPENAI_COMPATIBLE, fake.url, null)
