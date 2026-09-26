@@ -135,7 +135,7 @@ class LlmModelCatalogTest {
 
     @Test
     fun `fetch times out and falls back when the provider hangs`() = runBlocking {
-        val fake = FakeOpenAiServer(listOf(FakeOpenAiResponse(statusCode = 200, body = """{"data":""", declaredLength = 4_096, holdMillis = 1_500)))
+        val fake = FakeOpenAiServer(listOf(FakeOpenAiResponse(statusCode = 200, body = """{"data":""", stream = true, declaredLength = 4_096, holdMillis = 5_000)))
         try {
             val result = LlmModelCatalog(requestTimeoutMillis = 200).fetch(LlmProvider.OPENAI_COMPATIBLE, fake.url, null)
             assertFalse(result.live)
