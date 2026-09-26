@@ -1,0 +1,24 @@
+{
+  "presets": [
+    { "id": "OPENAI",     "label": "OpenAI",                   "provider": "OPENAI_COMPATIBLE", "endpoint": "https://api.openai.com/v1",   "apiKeyEnvironmentVariable": "OPENAI_API_KEY",   "staticModels": ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini", "o3", "o3-pro", "o4-mini"] },
+    { "id": "ANTHROPIC",  "label": "Anthropic",                "provider": "ANTHROPIC",         "endpoint": "https://api.anthropic.com",   "apiKeyEnvironmentVariable": "ANTHROPIC_API_KEY", "staticModels": ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"] },
+    { "id": "OLLAMA",     "label": "Ollama (local)",           "provider": "OPENAI_COMPATIBLE", "endpoint": "http://localhost:11434/v1",   "apiKeyEnvironmentVariable": null,               "staticModels": [] },
+    { "id": "OPENROUTER", "label": "OpenRouter",               "provider": "OPENAI_COMPATIBLE", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnvironmentVariable": "OPENROUTER_API_KEY", "staticModels": ["openai/gpt-4o"] },
+    { "id": "CUSTOM",     "label": "Custom OpenAI-compatible", "provider": "OPENAI_COMPATIBLE", "endpoint": "",                            "apiKeyEnvironmentVariable": null,               "staticModels": [] }
+  ],
+  "knownModels": {
+    "gpt-5": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 400000, "maxOutputTokens": 128000, "inputPricePerMillion": 1.25, "outputPricePerMillion": 10.0, "cacheReadPricePerMillion": 0.125 },
+    "gpt-5-mini": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 400000, "maxOutputTokens": 128000, "inputPricePerMillion": 0.25, "outputPricePerMillion": 2.0, "cacheReadPricePerMillion": 0.025 },
+    "gpt-4.1": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 1047576, "maxOutputTokens": 32768, "inputPricePerMillion": 2.0, "outputPricePerMillion": 8.0, "cacheReadPricePerMillion": 0.5 },
+    "gpt-4.1-mini": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 1047576, "maxOutputTokens": 32768, "inputPricePerMillion": 0.4, "outputPricePerMillion": 1.6, "cacheReadPricePerMillion": 0.1 },
+    "gpt-4o": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 128000, "maxOutputTokens": 16384, "inputPricePerMillion": 2.5, "outputPricePerMillion": 10.0, "cacheReadPricePerMillion": 1.25 },
+    "gpt-4o-mini": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 128000, "maxOutputTokens": 16384, "inputPricePerMillion": 0.15, "outputPricePerMillion": 0.6, "cacheReadPricePerMillion": 0.075 },
+    "o3": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 200000, "maxOutputTokens": 100000, "inputPricePerMillion": 2.0, "outputPricePerMillion": 8.0, "cacheReadPricePerMillion": 0.5 },
+    "o3-pro": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 200000, "maxOutputTokens": 100000, "inputPricePerMillion": 20.0, "outputPricePerMillion": 80.0 },
+    "o4-mini": { "provider": "OPENAI_COMPATIBLE", "contextWindow": 200000, "maxOutputTokens": 100000, "inputPricePerMillion": 1.1, "outputPricePerMillion": 4.4, "cacheReadPricePerMillion": 0.275 },
+    "claude-opus-4-8": { "provider": "ANTHROPIC", "contextWindow": 200000, "maxOutputTokens": 32000, "inputPricePerMillion": 15.0, "outputPricePerMillion": 75.0, "cacheReadPricePerMillion": 1.5 },
+    "claude-opus-4-7": { "provider": "ANTHROPIC", "contextWindow": 1000000, "maxOutputTokens": 128000, "inputPricePerMillion": 5.0, "outputPricePerMillion": 25.0, "cacheReadPricePerMillion": 0.5 },
+    "claude-sonnet-4-6": { "provider": "ANTHROPIC", "contextWindow": 1000000, "maxOutputTokens": 128000, "inputPricePerMillion": 3.0, "outputPricePerMillion": 15.0, "cacheReadPricePerMillion": 0.3 },
+    "claude-haiku-4-5-20251001": { "provider": "ANTHROPIC", "contextWindow": 200000, "maxOutputTokens": 64000, "inputPricePerMillion": 1.0, "outputPricePerMillion": 5.0, "cacheReadPricePerMillion": 0.1 }
+  }
+}
