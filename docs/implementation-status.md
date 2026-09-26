@@ -1,18 +1,24 @@
 # InfoScry implementation status
 
-**Updated:** 2026-09-25, branch `codex-task21-ask`.
+**Updated:** 2026-09-26, branch `codex-task21-ask`.
 
 The backend and CLI implement local import/extraction/OCR, collections and jobs,
 CoreML embeddings, hybrid search, recoverable Lucene reindexing, LLM profiles,
 cited Ask, and bounded Investigate. The reader frontend now includes collection
 search, bounded extracted-source pages and managed originals, Ask, and an
 Investigate conversation panel with persisted history, and an Admin view for
-configuring LLM profiles. A focused static-asset
+configuring LLM profiles. The Admin view also offers provider presets (OpenAI,
+Anthropic, Ollama, OpenRouter, Custom) and a Fetch models action backed by two
+read-only GET routes, `/api/llm/presets` and `/api/llm/catalog` (query:
+`provider`, `endpoint`, `apiKeyEnvironmentVariable`) — no
+credential or CSRF applies, and only the environment-variable name, never the
+key value, crosses the boundary. A focused static-asset
 route fix lets the built JavaScript load in the browser.
 
 The remaining scope is in the [active local-use plan](superpowers/plans/2026-09-23-infoscry-next-work.md):
 exercise Ask and Investigate through the browser with a disposable fake LLM,
-decide whether the foundational source pane is sufficient or the design's
+request a real provider's model catalog from the Admin view, decide whether the
+foundational source pane is sufficient or the design's
 format-specific previews are still required, and write a short tested run guide.
 Import, jobs, and logs stay in the CLI; LLM profiles are now manageable in the
 web Admin view as well. There
@@ -23,7 +29,9 @@ is no CI, package, or release milestone.
 The optional HTTP profile-probe refactor was removed with the user's approval.
 The existing CLI `llm test` command remains. Reader endpoints and the static
 asset fix are in `75771c0`; the reader UI and Investigate history/duplicate-turn
-guard are in `21ac4b0`. These are local branch commits, not a release. The
+guard are in `21ac4b0`. The model-catalog surface (preset resource, fetcher and
+routes, Admin panel) landed in `6acb457`—`3c398c4`. These are local branch
+commits, not a release. The
 browser/provider acceptance described below is still open.
 
 ## Verified so far
@@ -48,6 +56,9 @@ browser/provider acceptance described below is still open.
   1–6, and the original endpoint returned HTTP 206 for a byte range. The
   fixture's SHA-256 remained unchanged. This is not a browser proof of Ask or
   Investigate against a provider; their normal tests use fakes.
+- The model-catalog fetch is covered by focused unit, route, and Vitest tests,
+  including a `live: false` fallback, and the frontend build passes; there has
+  been no end-to-end browser acceptance against a real provider.
 
 No branch integration or local acceptance is implied by this status.
 

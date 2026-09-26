@@ -10,8 +10,11 @@ profiles, streaming OpenAI-compatible/Anthropic adapters, cited Ask, and
 bounded Investigate exist.
 The reader-focused web UI now has collection search, a bounded extracted-source
 view with a managed-original link, Ask, an Investigate conversation panel, and
-an Admin view for configuring LLM profiles. Local end-to-end acceptance is
-still open, as are the format-specific source views described in the design.
+an Admin view for configuring LLM profiles. The Admin view offers provider
+presets (OpenAI, Anthropic, Ollama, OpenRouter, and Custom) and a Fetch models
+action that lists the provider's models and prefills the context window, output
+limit, and prices where known. Local end-to-end acceptance is still open, as
+are the format-specific source views described in the design.
 Import, jobs, and logs belong in the CLI; LLM profiles can be managed in the
 CLI or the web Admin view.
 This project is built and run locally; CI and distributable packaging are not
@@ -86,7 +89,9 @@ Originals, extracted text, embeddings, indexes, and saved conversations stay
 local. Ask and Investigate send prompts, questions, and selected evidence with
 citation metadata to the configured OpenAI-compatible or Anthropic endpoint;
 their use is not necessarily offline. API keys come from environment variables
-and are not stored in profiles or exposed to the browser.
+and are not stored in profiles or exposed to the browser; the model catalog is
+fetched with only the environment-variable name, never the key value, crossing
+the boundary.
 
 The server binds only to `127.0.0.1`. Imported documents are untrusted evidence;
 LLM tools cannot access arbitrary paths, switch collections, or browse the web.
@@ -149,6 +154,19 @@ UI; a default profile for each mode is optional and only preselects a
 convenient choice. InfoScry does **not** start or host an LLM: it calls the
 endpoint you configure. Add and test profiles from the CLI (`llm add`,
 `llm test <name>`) or from the web Admin view while the server is running.
+The Admin view's Fetch models action is backed by two read-only GET routes,
+`/api/llm/presets` and `/api/llm/catalog` (query parameters `provider`,
+`endpoint`, and `apiKeyEnvironmentVariable`), which need no credential or
+CSRF token. The API-key value never reaches the
+browser; only the environment-variable name crosses the boundary, and the
+server reads the key from its own environment. Prices come from OpenRouter's
+live `/models` response, from the built-in table
+(`src/main/resources/llm/providers.json`) for OpenAI and Anthropic because
+their `/models` APIs return only model ids, and as free for a loopback
+endpoint such as Ollama; unknown values are left blank for manual entry. The
+catalog fetch and panel are covered by unit, route, and Vitest tests and the
+frontend build passes, but there has been no end-to-end browser acceptance
+against a real provider.
 Optionally set a default with `llm set-default --ask <name>` or
 `llm set-default --investigate <name>`, or with the Admin view's per-role
 selectors; `llm test` makes real probe requests to that endpoint. Ask and Investigate
