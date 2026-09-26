@@ -17,6 +17,45 @@ export type Collection = {
   lifecycle: 'ACTIVE' | 'DELETING';
 };
 
+/** The lifecycle of a job record; stages inside a running job are reported separately. */
+export type JobState = 'QUEUED' | 'RUNNING' | 'COMPLETE' | 'FAILED' | 'CANCELLED';
+
+export type JobType = 'IMPORT' | 'REINDEX';
+
+/**
+ * One persistent job. Optional fields may be absent from the wire (nulls are omitted), so callers
+ * treat `collectionId`, `stage` and `errorCode` as possibly undefined.
+ */
+export type JobApiView = {
+  id: string;
+  type: JobType;
+  state: JobState;
+  createdAt: string;
+  updatedAt: string;
+  collectionId?: string | null;
+  stage?: string | null;
+  completed: number;
+  total: number;
+  errorCode?: string | null;
+  cancelRequested: boolean;
+};
+
+export type ImportItemOutcome = 'IMPORTED' | 'DUPLICATE' | 'FAILED';
+
+/** One source file of an import, and what happened to it. Nulls are omitted from the wire. */
+export type ImportItemApiView = {
+  id: string;
+  jobId: string;
+  documentId: string | null;
+  sourcePath?: string | null;
+  sourceName?: string | null;
+  outcome: ImportItemOutcome;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type SearchMode = 'KEYWORD' | 'SEMANTIC' | 'HYBRID';
 export type SearchFilters = {
   mediaType?: string;
@@ -57,6 +96,21 @@ export type AskEvent =
   | { type: 'citation'; id: string; valid: boolean }
   | { type: 'done'; text: string; evidence: AskEvidence[] }
   | { type: 'error'; code: string; message: string };
+
+/**
+ * One answer the server kept: the question asked, the answer it produced, the sources it cited, and
+ * what it cost.
+ */
+export type AskHistoryEntry = {
+  id: string;
+  createdAt: string;
+  question: string;
+  answer: string;
+  evidence: AskEvidence[];
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+};
 
 export type InvestigateEvidence = AskEvidence & { locatorLabel: string };
 export type InvestigateMessage = { role: 'user' | 'assistant'; text: string };
@@ -186,6 +240,13 @@ export async function searchCollection(collection: string, query: string, mode: 
 export async function askDefaultProfile(): Promise<string> {
   const body = (await readJson(await fetch('/api/llm/defaults/ASK'))) as { profileName: string };
   return body.profileName;
+}
+
+/** The Ask answers this collection kept, newest first. */
+export async function listAsks(collectionId: string): Promise<AskHistoryEntry[]> {
+  const collection = encodeURIComponent(collectionId);
+  const body = (await readJson(await fetch(`/api/collections/${collection}/asks`))) as { asks: AskHistoryEntry[] };
+  return body.asks;
 }
 
 export async function listLlmProfilePrices(): Promise<LlmProfilePrice[]> {
@@ -453,6 +514,41 @@ export async function readSource(
   const source = encodeURIComponent(sourceId);
   const response = await fetch(`/api/collections/${collection}/sources/${source}?offset=${offset}&limit=${limit}`);
   return (await readJson(response)) as SourceContentResponse;
+}
+
+/**
+ * Ask the server to open the native pick dialog for files (`directory = false`) or one folder.
+ * Returns the absolute paths the user chose, in pick order.
+ */
+export async function pickPaths(directory: boolean): Promise<string[]> {
+  const body = (await mutate('/api/imports/pick', 'POST', { directory })) as { paths: string[] };
+  return body.paths;
+}
+
+/** Queue an import of the selected paths into a collection; the job runs in the background. */
+export async function enqueueImport(
+  collection: string,
+  paths: string[],
+  recursive: boolean,
+): Promise<{ accepted: boolean; job: JobApiView }> {
+  return (await mutate('/api/imports', 'POST', { collection, paths, recursive })) as {
+    accepted: boolean;
+    job: JobApiView;
+  };
+}
+
+/** One job's current record; polling stops once `state` is terminal. */
+export async function getJob(id: string): Promise<JobApiView> {
+  const body = (await readJson(await fetch(`/api/jobs/${encodeURIComponent(id)}`))) as { job: JobApiView };
+  return body.job;
+}
+
+/** The per-file results an import finished with. */
+export async function getImportItems(id: string): Promise<ImportItemApiView[]> {
+  const body = (await readJson(await fetch(`/api/jobs/${encodeURIComponent(id)}/items`))) as {
+    items: ImportItemApiView[];
+  };
+  return body.items;
 }
 
 /** Creates a collection, or throws [ApiError] with the server's reason. */

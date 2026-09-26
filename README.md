@@ -10,21 +10,31 @@ profiles, streaming OpenAI-compatible/Anthropic adapters, cited Ask, and
 bounded Investigate exist.
 The reader-focused web UI now has collection search, a bounded extracted-source
 view with a managed-original link, Ask, an Investigate conversation panel, and
-an Admin view for configuring LLM profiles. The Admin view offers provider
+an Admin view with two sub-tabs. The LLM profiles sub-tab offers provider
 presets (OpenAI, Anthropic, Ollama, OpenRouter, and Custom) and a Fetch models
 action that lists the provider's models and prefills the context window, output
-limit, and prices where known. Local end-to-end acceptance is still open, as
-are the format-specific source views described in the design.
-Import, jobs, and logs belong in the CLI; LLM profiles can be managed in the
-CLI or the web Admin view.
+limit, and prices where known. The Import sub-tab creates a collection and loads
+local files or folders into it: the local server opens a native macOS picker and
+returns the chosen absolute paths to the page, which hands them to the same
+import job the CLI starts, with a recursive toggle and per-file results. Local
+end-to-end acceptance of the browser flows is still open, as are the
+format-specific source views described in the design.
+Import is available in the CLI and the web Admin view; jobs and logs belong in
+the CLI.
 This project is built and run locally; CI and distributable packaging are not
 planned.
 
 The web reader uses a dark theme with a sidebar and separate Search, Ask,
 Investigate, and Admin views. Search settings include retrieval mode, file
 type, path, metadata, import dates, document status, and OCR-only filtering.
-Ask and Investigate select from configured LLM profiles; the Admin view
-creates, edits, and deletes those profiles and sets the per-role defaults.
+Ask and Investigate select from configured LLM profiles; both can reopen the
+conversations the server kept for the selected collection, Ask as a history of
+its stored answers and Investigate as its multi-turn conversations. The Admin
+view holds
+two sub-tabs, LLM profiles (create, edit, and delete profiles and set the
+per-role defaults) and Import (create a collection and load local files or
+folders into it). The native picker needs a graphical macOS session; without
+one, the Import sub-tab falls back to entering paths by hand.
 Search filters apply only to Search. Switching views preserves their current
 content.
 
@@ -41,7 +51,9 @@ content.
   chapter. Citation validation checks source identifiers; it does not by itself
   prove that an answer's claims are supported.
 - Inspect sources, search results, answers, and citations in an English web
-  interface; handle import, jobs, and logs in the CLI, and LLM profiles in the CLI or Admin view.
+  interface; import files from the CLI or the Admin view's Import sub-tab, manage
+  LLM profiles from the CLI or the LLM profiles sub-tab, and handle jobs and logs
+  in the CLI.
 
 The design targets roughly 10,000 documents or one million pages. This is a
 sizing target, not a measured capacity claim.
@@ -149,6 +161,16 @@ and install the model there with
 a separate model copy. Do not run profile-management CLI commands while the
 server owns that data directory.
 
+The Admin view's Import sub-tab imports documents without leaving the browser.
+"Choose files…" and "Choose folder…" open a native macOS dialog on the machine
+running the server, and the chosen absolute paths are queued as the same import
+job `infoscry import` starts. A folder is read at its top level; tick "Include
+subfolders" to descend into it. The tab also creates a collection. The dialog
+needs a graphical macOS session: when the server has none, the tab reports that
+and offers a field to enter paths by hand. The pick route (`POST /api/imports/pick`)
+is covered by route tests with the dialog replaced by a fake; the dialog itself
+has had no end-to-end browser acceptance on this machine.
+
 Ask and Investigate require a configured LLM profile to be selected in the
 UI; a default profile for each mode is optional and only preselects a
 convenient choice. InfoScry does **not** start or host an LLM: it calls the
@@ -211,18 +233,20 @@ Subcommands: `list` (shows name, id, OCR languages, description) and
 ### import
 
 Import files or directories into a collection as immutable managed copies.
-Requires `--collection` and at least one path. With `--wait`, the command
-blocks until the import finishes and reports every document (and exits
-nonzero if any failed). Without a running server, the import runs in this
-process regardless of `--wait`.
+Requires `--collection` and at least one path. A directory is read at its top
+level only; pass `--recursive` to descend into its subdirectories. With
+`--wait`, the command blocks until the import finishes and reports every
+document (and exits nonzero if any failed). Without a running server, the
+import runs in this process regardless of `--wait`.
 
 ```bash
 infoscry import --collection Default /path/to/document.pdf
+infoscry import --collection Default --recursive /path/to/dir
 infoscry import --collection Default --wait /path/to/dir /path/to/another.pdf
 infoscry import --collection Default --wait --json /path/to/document.pdf
 ```
 
-Options: `--collection`, `--wait`, `--json`, `--data-dir`.
+Options: `--collection`, `--recursive`, `--wait`, `--json`, `--data-dir`.
 
 ### search
 

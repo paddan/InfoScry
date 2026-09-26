@@ -111,6 +111,35 @@ class ImportCommandProcessTest {
     }
 
     @Test
+    fun `--recursive descends into a directory while the default reads only its top level`() {
+        val inbox = Files.createDirectories(directory.resolve("inbox"))
+        Files.writeString(inbox.resolve("top.txt"), "Top.\n")
+        Files.writeString(Files.createDirectories(inbox.resolve("nested")).resolve("deep.txt"), "Deep.\n")
+
+        val plain = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json",
+            inbox.toString(),
+        )
+        assertEquals(0, plain.exitCode, plain.stderr)
+        val plainReport = ApiJson.decodeFromString<ImportResult>(plain.stdout.lines().last { it.isNotBlank() })
+        assertEquals(
+            listOf("top.txt"),
+            plainReport.items.map { Path.of(it.sourcePath!!).fileName.toString() }.sorted(),
+        )
+
+        val recursive = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "--recursive",
+            inbox.toString(),
+        )
+        assertEquals(0, recursive.exitCode, recursive.stderr)
+        val recursiveReport = ApiJson.decodeFromString<ImportResult>(recursive.stdout.lines().last { it.isNotBlank() })
+        assertEquals(
+            listOf("deep.txt", "top.txt"),
+            recursiveReport.items.map { Path.of(it.sourcePath!!).fileName.toString() }.sorted(),
+        )
+    }
+
+    @Test
     fun `a server accepts an import and keeps working after the command has returned`() {
         val source = writeSource("report.txt", "En rapport.\n")
         val server = startHarness(gated = true, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
@@ -168,7 +197,7 @@ class ImportCommandProcessTest {
     }
 
     @Test
-    fun `server-attached wait reports safe per-file codes without leaking paths or exception text`() {
+    fun `server-attached wait reports the failure sentence the API derived, not the stored one`() {
         val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
         val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
         try {
@@ -181,7 +210,10 @@ class ImportCommandProcessTest {
             assertNotEquals(0, result.exitCode, "a failed server-owned item must still make --wait fail")
             assertContains(result.stdout, "UNSUPPORTED_MEDIA_TYPE")
             assertContains(result.stdout, "blob.bin")
-            assertTrue(!result.stdout.contains("no extractor"), result.stdout)
+            assertContains(result.stdout, "the pipeline has no extractor for this kind of file")
+            // The message stored beside the item names the media type it detected, and that text is the
+            // server's diagnostic rather than the API's answer: only the derived sentence crosses.
+            assertTrue(!result.stdout.contains("application/octet-stream"), result.stdout)
             assertTrue(!result.stdout.contains(dataDir.toString()), result.stdout)
         } finally {
             server.terminate()
@@ -189,7 +221,7 @@ class ImportCommandProcessTest {
     }
 
     @Test
-    fun `server-attached text wait explains where omitted per-file details went`() {
+    fun `server-attached text wait reports the per-file failure the API derived`() {
         val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
         val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
         try {
@@ -202,9 +234,9 @@ class ImportCommandProcessTest {
 
             assertNotEquals(0, result.exitCode)
             assertContains(output, "UNSUPPORTED_MEDIA_TYPE")
-            assertContains(output, "Detailed failure text is omitted by the local API; see the server log.")
+            assertContains(output, "the pipeline has no extractor for this kind of file")
+            assertFalse(output.contains("application/octet-stream"), output)
             assertFalse(output.contains(dataDir.toString()), output)
-            assertFalse(output.lowercase().contains("no extractor"), output)
         } finally {
             server.terminate()
         }

@@ -42,7 +42,25 @@ describe('app shell', () => {
     await screen.findByText('No collections yet.');
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
 
-    expect(await screen.findByRole('heading', { level: 1, name: 'Configure LLM profiles' })).toBeTruthy();
+    expect(await screen.findByRole('tablist', { name: 'Administration section' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'LLM profiles' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('switches the Admin sub-tab between LLM profiles and Import', async () => {
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    expect(await screen.findByRole('tablist', { name: 'Administration section' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'LLM profiles' }).getAttribute('aria-selected')).toBe('true');
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Import' }));
+    expect(screen.getByRole('tab', { name: 'Import' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Choose files…' })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'LLM profiles' }));
+    expect(screen.getByRole('tab', { name: 'LLM profiles' }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('reports a failed load instead of showing an empty archive', async () => {

@@ -213,6 +213,36 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a directory import reads only its top level unless recursion is asked for`() {
+        withHarness { harness ->
+            harness.writeText("top.txt", "top\n")
+            harness.writeText("nested/deep.txt", "deep\n")
+
+            // Without the flag the nested file must not appear at all: importing a directory is now
+            // top-level-only unless the caller says to descend into subdirectories.
+            val topOnly = harness.import(
+                listOf(harness.sourcesDir),
+                harness.pipeline(RecordingUnits(units = 1)),
+            )
+            assertEquals(
+                listOf("top.txt"),
+                topOnly.items.map { Path.of(it.sourcePath).fileName.toString() },
+            )
+
+            // With the flag the whole tree is imported; the nested file is simply another item.
+            val recursive = harness.import(
+                listOf(harness.sourcesDir),
+                harness.pipeline(RecordingUnits(units = 1)),
+                recursive = true,
+            )
+            assertEquals(
+                listOf("deep.txt", "top.txt"),
+                recursive.items.map { Path.of(it.sourcePath).fileName.toString() },
+            )
+        }
+    }
+
+    @Test
     fun `an import whose payload names a missing collection fails the job instead of importing blindly`() {
         withHarness { harness ->
             val source = harness.writeText("orphan.txt", "text\n")
@@ -747,8 +777,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
         collectionId: CollectionId = CollectionId("default"),
         embedder: DocumentEmbedder = TestDocumentEmbedder(),
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
+        recursive: Boolean = false,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId)
+        val job = enqueue(context, sources, settings, collectionId, recursive)
         attach(context, storedPipeline(context, extractor), embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -760,8 +791,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
         collectionId: CollectionId = CollectionId("default"),
         embedder: DocumentEmbedder = TestDocumentEmbedder(),
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
+        recursive: Boolean = false,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId)
+        val job = enqueue(context, sources, settings, collectionId, recursive)
         attach(context, pipeline, embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -839,8 +871,8 @@ internal class Harness(val directory: Path) : AutoCloseable {
     }
 
     /** Queues an import without attaching a worker, for tests that run their own pipeline. */
-    internal fun enqueueForTest(context: AppContext, sources: List<Path>): Job =
-        enqueue(context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"))
+    internal fun enqueueForTest(context: AppContext, sources: List<Path>, recursive: Boolean = false): Job =
+        enqueue(context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"), recursive)
 
     /** Waits for [jobId] to reach a terminal state, which is what a restarted process has to do. */
     internal fun awaitJob(context: AppContext, jobId: JobId): Job = runBlocking { awaitTerminal(context, jobId) }
@@ -850,11 +882,13 @@ internal class Harness(val directory: Path) : AutoCloseable {
         sources: List<Path>,
         settings: ExtractionSettings,
         collectionId: CollectionId,
+        recursive: Boolean = false,
     ): Job {
         val payload = ImportJobPayload(
             collectionId = collectionId.value,
             sources = sources.map { it.toAbsolutePath().normalize().toString() },
             settings = settings,
+            recursive = recursive,
         )
         return context.jobs.enqueue(
             type = JobType.IMPORT,

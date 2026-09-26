@@ -45,6 +45,7 @@ internal class ApiTestServer(
     val dataDir: Path,
     index: CollectionIndexRemover = CollectionIndexRemover.NONE,
     jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
+    picker: suspend (Boolean) -> List<String> = ::pickWithOsascript,
 ) : AutoCloseable {
 
     val context: AppContext = AppContext.open(dataDir, index)
@@ -52,7 +53,12 @@ internal class ApiTestServer(
     // Port 0 lets the operating system choose, so a test never collides with another server — including
     // a second server started inside the same test to observe how maintenance excludes it.
     val server: RunningServer = runBlocking {
-        startLoopbackServer(context, port = 0, jobEventIdleDeadlineMillis = jobEventIdleDeadlineMillis)
+        startLoopbackServer(
+            context,
+            port = 0,
+            jobEventIdleDeadlineMillis = jobEventIdleDeadlineMillis,
+            picker = picker,
+        )
     }
     val client: HttpClient = HttpClient(CIO)
 

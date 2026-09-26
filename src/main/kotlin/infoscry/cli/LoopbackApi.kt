@@ -74,8 +74,8 @@ class LoopbackApi(
         ).jobs.map { it.toDomain() }
 
     /** Hands one import to the server that owns the data directory. */
-    suspend fun enqueueImport(collection: String, paths: List<String>): ImportAcceptedResponse {
-        val request = ImportRequest(collection = collection, paths = paths)
+    suspend fun enqueueImport(collection: String, paths: List<String>, recursive: Boolean): ImportAcceptedResponse {
+        val request = ImportRequest(collection = collection, paths = paths, recursive = recursive)
         val response = client.post("$base/api/imports") {
             header()
             contentType(ContentType.Application.Json)
@@ -183,16 +183,24 @@ class LoopbackApi(
         cancelRequested = cancelRequested,
     )
 
+    /**
+     * One item as the server describes it.
+     *
+     * The server's row carries the source path and a message it derived from the failure code, so both are
+     * taken as they come: a server-attached import now reports the same per-file detail a local one does.
+     * The item key stays empty -- it identifies a row inside the import's own table, and it is the server's
+     * to know, not the caller's.
+     */
     private fun infoscry.server.ImportItemApiView.toDomain() = infoscry.storage.ImportItem(
         id = id,
         jobId = jobId,
         itemKey = "",
         documentId = documentId,
-        sourcePath = "",
+        sourcePath = sourcePath.orEmpty(),
         sourceName = sourceName,
         outcome = outcome,
         errorCode = errorCode,
-        errorMessage = null,
+        errorMessage = errorMessage,
         createdAt = createdAt,
         updatedAt = updatedAt,
     )

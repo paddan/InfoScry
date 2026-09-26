@@ -96,6 +96,11 @@ class ImportCommand(
         help = "Wait for the import to finish and report every document",
     ).flag()
 
+    private val recursiveFlag by option(
+        "--recursive",
+        help = "Recurse into subdirectories when importing a directory",
+    ).flag()
+
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
     private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
@@ -153,6 +158,7 @@ class ImportCommand(
                 collectionId = collection.id,
                 sources = requested,
                 settings = settings,
+                recursive = recursiveFlag,
             )
             val job = try {
                 runBlocking {
@@ -189,7 +195,7 @@ class ImportCommand(
     private fun importThroughServer(runtime: RuntimeInfo, requested: List<String>, options: CliOptions) {
         LoopbackApi(runtime).use { api ->
             val accepted = try {
-                runBlocking { api.enqueueImport(collection, requested) }
+                runBlocking { api.enqueueImport(collection, requested, recursiveFlag) }
             } catch (failure: RemoteApiFailure) {
                 throw CliFailure("${failure.code}: ${failure.message}", failure)
             }
@@ -268,7 +274,7 @@ class ImportCommand(
                 ),
             )
         } else {
-            items.forEach { item -> echo(describe(item, detailsOmitted = !executedHere)) }
+            items.forEach { item -> echo(describe(item)) }
             echo("Imported $imported, duplicate $duplicates, failed $failed of ${items.size}.")
             if (job.state == JobState.FAILED) {
                 val detail = if (executedHere) " ${job.errorMessage.orEmpty()}" else
@@ -295,10 +301,10 @@ class ImportCommand(
         }
     }
 
-    private fun describe(item: ImportItem, detailsOmitted: Boolean): String = buildString {
+    private fun describe(item: ImportItem): String = buildString {
         append(item.outcome)
         append("  ")
-        append(item.sourcePath.ifEmpty { item.sourceName ?: "selected source (details omitted)" })
+        append(item.sourcePath.ifEmpty { item.sourceName ?: "selected source (path not reported)" })
         item.documentId?.let { document ->
             append("  -> document ")
             append(document.value)
@@ -306,11 +312,7 @@ class ImportCommand(
         item.errorCode?.let { code ->
             append("  ")
             append(code)
-            if (item.errorMessage != null) {
-                append(": ").append(item.errorMessage)
-            } else if (detailsOmitted) {
-                append("  Detailed failure text is omitted by the local API; see the server log.")
-            }
+            item.errorMessage?.let { message -> append(": ").append(message) }
         }
     }
 

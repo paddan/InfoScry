@@ -105,6 +105,32 @@ class OpenAiCompatibleClientTest {
     }
 
     @Test
+    fun `a non-ASCII answer survives fragments that split its UTF-8 sequences`() = runBlocking {
+        // "Förhör: å ä ö – … 🙃" — a two-byte (U+00E5), a three-byte (U+2013) and a surrogate pair
+        // (U+1F643). fragmentBytes = 1 puts every fragment boundary inside a multi-byte sequence.
+        val answer = "F\u00f6rh\u00f6r: \u00e5 \u00e4 \u00f6 \u2013 \u2026 \uD83D\uDE43"
+        withServer(
+            listOf(
+                FakeOpenAiResponse(
+                    stream = true,
+                    fragmentBytes = 1,
+                    body = sse(
+                        listOf(
+                            """{"choices":[{"delta":{"content":"$answer"},"finish_reason":null}]}""",
+                            """{"choices":[{"delta":{"finish_reason":"stop"}}]}""",
+                        ),
+                    ),
+                ),
+            ),
+        ) { _, _, llm ->
+            assertEquals(
+                listOf(LlmEvent.TextDelta(answer), LlmEvent.Completed),
+                llm.stream(request()).toList(),
+            )
+        }
+    }
+
+    @Test
     fun `two fragmented tool calls assemble their argument json in index order`() = runBlocking {
         withServer(
             listOf(

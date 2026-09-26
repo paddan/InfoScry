@@ -93,7 +93,7 @@ class ImportJobHandler(
             throw CollectionNotActiveException(collectionId)
         }
 
-        val sources = enumerate(payload.sources)
+        val sources = enumerate(payload.sources, payload.recursive)
         stage.reportProgress(completed = 0, total = sources.size)
 
         var completed = 0
@@ -539,8 +539,11 @@ class ImportJobHandler(
      * attribute it to a path the user never named. A symbolic link the user names *explicitly* is different:
      * it is resolved once, and the resolved path is what the item records, so the same file named twice
      * under two names is one item.
+     *
+     * A directory is only read down to its own files unless [recursive] says otherwise: importing a
+     * directory without `--recursive` takes what is directly inside it, and takes the whole tree with it.
      */
-    private fun enumerate(sources: List<String>): List<ImportSource> {
+    private fun enumerate(sources: List<String>, recursive: Boolean): List<ImportSource> {
         val byKey = LinkedHashMap<String, ImportSource>()
         sources.forEach { raw ->
             val given = Path.of(raw)
@@ -562,7 +565,7 @@ class ImportJobHandler(
                     // directly and once through its directory, would produce two items on a filesystem
                     // that reaches the same tree by two paths.
                     val root = runCatching { given.toRealPath() }.getOrElse { given.toAbsolutePath().normalize() }
-                    regularFilesUnder(root).forEach { file ->
+                    regularFilesUnder(root, recursive).forEach { file ->
                         byKey.putIfAbsent(file.toString(), ImportSource(file.toString(), file, true))
                     }
                 }
@@ -576,10 +579,20 @@ class ImportJobHandler(
         return byKey.values.toList()
     }
 
-    private fun regularFilesUnder(directory: Path): List<Path> {
+    /**
+     * The regular files under [directory], sorted by path string for a stable import order.
+     *
+     * One walk serves both modes: with [recursive] the walk descends the whole tree, and without it the
+     * walk's maximum depth is the directory's own level, so only the files directly inside it are found.
+     * The attributes come from the walk either way, which keeps the two modes identical about symbolic
+     * links: a link is read as a link, never followed.
+     */
+    private fun regularFilesUnder(directory: Path, recursive: Boolean): List<Path> {
         val found = mutableListOf<Path>()
         Files.walkFileTree(
             directory,
+            setOf(),
+            if (recursive) Int.MAX_VALUE else 1,
             object : SimpleFileVisitor<Path>() {
                 override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
                     if (attributes.isRegularFile) found.add(file)
@@ -602,41 +615,58 @@ class ImportJobHandler(
         else -> EXTRACTION_FAILED
     }
 
-    /**
-     * What a refusal code means to the person who has to act on it.
-     *
-     * A code alone is a word; the item's message is where the remedy lives. Only the codes whose remedy is
-     * not obvious are spelled out. Anything else keeps a generic sentence, because a sentence invented for a
-     * code nobody documented would be a guess presented as an explanation — the code itself is still stored
-     * beside it for whoever needs to look it up.
-     */
-    private fun messageFor(code: String): String = when (code) {
-        DOCUMENT_TOO_LARGE_CODE ->
-            "the document is larger than the pipeline reads in one piece, so nothing was extracted"
-
-        ENCRYPTED_DOCUMENT_CODE ->
-            "the document is password-protected or DRM-encrypted, and InfoScry does not decrypt documents"
-
-        DOCUMENT_UNREADABLE_CODE ->
-            "the container could not be opened: its bytes do not match what the file says it is"
-
-        TesseractOcr.NEEDS_TESSERACT_CODE ->
-            "the OCR tool (Tesseract) is not installed, so pages without a text layer cannot be read"
-
-        ModelManager.MODEL_NOT_INSTALLED_CODE -> ModelManager.installRemedy()
-
-        GpuRuntime.GPU_UNAVAILABLE_CODE -> GpuRuntime.remedy()
-
-        CalibreConverter.NEEDS_CALIBRE_CODE ->
-            "this e-book format needs the Calibre converter, which is not installed"
-
-        OCR_FAILED_CODE ->
-            "the OCR tool ran but could not read part of this document; the rest of it was extracted"
-
-        else -> "the extractor stopped before it delivered every unit of this document"
-    }
-
     companion object {
+
+        /**
+         * What a refusal code means to the person who has to act on it.
+         *
+         * A code alone is a word; the message is where the remedy lives. Only the codes whose remedy is not
+         * obvious are spelled out. Anything else keeps a generic sentence, because a sentence invented for a
+         * code nobody documented would be a guess presented as an explanation — the code itself is still
+         * stored beside it for whoever needs to look it up. Every sentence here is InfoScry's own, which is
+         * what makes this safe to serve over the API: the message beside an item's stored outcome may be an
+         * exception's own words (a tool's complaint about a page, a path, a pointer into a document), and
+         * those are diagnostics for the machine that ran the import. That stored text is what the CLI reads
+         * directly, and an unrecognised code served here gets the generic sentence instead of it.
+         */
+        internal fun messageFor(code: String): String = when (code) {
+            SOURCE_MISSING -> GONE_MESSAGE
+
+            SOURCE_UNREADABLE -> "the file could not be read from disk"
+
+            COPY_FAILED -> "the file could not be copied into the library"
+
+            UNSUPPORTED_MEDIA_TYPE -> "the pipeline has no extractor for this kind of file"
+
+            EMBEDDING_FAILED -> "the document could not be embedded and published to the search index"
+
+            INDEX_TOO_LARGE ->
+                "the document has more passages than one import may publish; import it in smaller pieces"
+
+            DOCUMENT_TOO_LARGE_CODE ->
+                "the document is larger than the pipeline reads in one piece, so nothing was extracted"
+
+            ENCRYPTED_DOCUMENT_CODE ->
+                "the document is password-protected or DRM-encrypted, and InfoScry does not decrypt documents"
+
+            DOCUMENT_UNREADABLE_CODE ->
+                "the container could not be opened: its bytes do not match what the file says it is"
+
+            TesseractOcr.NEEDS_TESSERACT_CODE ->
+                "the OCR tool (Tesseract) is not installed, so pages without a text layer cannot be read"
+
+            ModelManager.MODEL_NOT_INSTALLED_CODE -> ModelManager.installRemedy()
+
+            GpuRuntime.GPU_UNAVAILABLE_CODE -> GpuRuntime.remedy()
+
+            CalibreConverter.NEEDS_CALIBRE_CODE ->
+                "this e-book format needs the Calibre converter, which is not installed"
+
+            OCR_FAILED_CODE ->
+                "the OCR tool ran but could not read part of this document; the rest of it was extracted"
+
+            else -> "the extractor stopped before it delivered every unit of this document"
+        }
 
         /** Where a verified CoreML session writes its one profile, under the data directory's temp root. */
         private const val STAGE_QUEUE = "queue"
@@ -673,6 +703,7 @@ class ImportJobHandler(
 
         /** The document was refused before embedding because it exceeds [MAX_CHUNKS_PER_DOCUMENT]. */
         private const val INDEX_TOO_LARGE = "INDEX_TOO_LARGE"
+        private const val UNSUPPORTED_MEDIA_TYPE = "UNSUPPORTED_MEDIA_TYPE"
 
         private const val COMPONENT_FIELD = "component"
         private const val DOCUMENT_FIELD = "document_id"

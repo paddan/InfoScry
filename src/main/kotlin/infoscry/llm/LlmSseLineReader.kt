@@ -31,45 +31,13 @@ internal object LlmSseLineReader {
     }
 
     /**
-     * Decodes one line of UTF-8 from its octets (dropping a trailing carriage return). The bitwise
-     * building uses the Kotlin 2.x method forms (`.and`/`.or`/`.shl`) because the operator symbols are
-     * gone.
+     * Decodes one line of UTF-8 from its octets (dropping a trailing carriage return). Provider SSE
+     * payloads are JSON, which is well-formed UTF-8, so the platform decoder is exact: every sequence
+     * a hand-rolled decoder would have to build by hand — two- and three-byte characters, and the
+     * surrogate pair an astral character becomes — is its business, not ours.
      */
     private fun decodeLine(bytes: List<Int>): String {
         val length = if (bytes.lastOrNull() == '\r'.code) bytes.size - 1 else bytes.size
-        val text = StringBuilder()
-        var index = 0
-        while (index < length) {
-            val first = bytes.get(index).and(0xFF)
-            index += 1
-            if (first < 0x80) {
-                text.append(first.toChar())
-            } else if (first < 0xE0) {
-                text.append(
-                    first.and(0x1F).shl(8)
-                        .or(bytes.get(index).and(0x3F))
-                        .toChar(),
-                )
-                index += 1
-            } else if (first < 0xF0) {
-                text.append(
-                    first.and(0x0F).shl(12)
-                        .or(bytes.get(index).and(0x3F).shl(6))
-                        .or(bytes.get(index + 1).and(0x3F))
-                        .toChar(),
-                )
-                index += 2
-            } else {
-                text.append(
-                    first.and(0x07).shl(18)
-                        .or(bytes.get(index).and(0x3F).shl(12))
-                        .or(bytes.get(index + 1).and(0x3F).shl(6))
-                        .or(bytes.get(index + 2).and(0x3F))
-                        .toChar(),
-                )
-                index += 3
-            }
-        }
-        return text.toString()
+        return String(ByteArray(length) { bytes[it].toByte() }, Charsets.UTF_8)
     }
 }

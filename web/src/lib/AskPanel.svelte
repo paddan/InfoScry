@@ -3,11 +3,13 @@
   import {
     ApiError,
     askDefaultProfile,
+    listAsks,
     listLlmProfilePrices,
     readAskEvents,
     startAsk,
     type AskEvidence,
     type AskEvent,
+    type AskHistoryEntry,
     type LlmProfilePrice,
   } from './api';
 
@@ -29,6 +31,10 @@
   let renderedAnswerParts: { text: string; evidence: AskEvidence | null }[] = [];
   let askGeneration = 0;
   let abortController: AbortController | null = null;
+  let asks: AskHistoryEntry[] = [];
+  let selectedAskId = '';
+  let storedQuestion = '';
+  let costUsd: number | null = null;
 
   async function loadConfiguration(): Promise<void> {
     try {
@@ -44,6 +50,28 @@
       // Pricing is optional; Ask remains usable when profile listing is unavailable.
       profileStatus = 'Could not load LLM profiles.';
     }
+    await refreshHistory();
+  }
+
+  /** Reload the answers the server kept. A history that cannot be read never blocks asking. */
+  async function refreshHistory(): Promise<void> {
+    try { asks = await listAsks(collectionId); }
+    catch { asks = []; }
+  }
+
+  /**
+   * Show one stored answer in the same view a fresh answer uses, so its citations keep working.
+   * The empty id is the fresh question: it clears the view and leaves the form ready.
+   */
+  function showStored(id: string): void {
+    selectedAskId = id;
+    const stored = asks.find((item) => item.id === id);
+    storedQuestion = stored?.question ?? '';
+    answerText = stored?.answer ?? '';
+    answerEvidence = stored?.evidence ?? [];
+    renderedAnswerParts = stored === undefined ? [] : splitAnswer(stored.answer, stored.evidence);
+    usage = stored === undefined ? null : { inputTokens: stored.inputTokens, outputTokens: stored.outputTokens };
+    costUsd = stored?.costUsd ?? null;
   }
 
   async function ask(event: SubmitEvent): Promise<void> {
@@ -55,6 +83,9 @@
     const controller = new AbortController();
     abortController = controller;
     asking = true;
+    selectedAskId = '';
+    storedQuestion = '';
+    costUsd = null;
     answerText = '';
     answerEvidence = [];
     renderedAnswerParts = [];
@@ -70,6 +101,8 @@
       if (askStatus === 'Preparing answer…' || askStatus === 'Generating answer…') {
         askStatus = 'The Ask stream ended before a final answer arrived.';
       }
+      // The answer the server just stored belongs in the history it was written to.
+      if (generation === askGeneration) await refreshHistory();
     } catch (failure) {
       if (generation === askGeneration) askError = describe(failure);
     } finally {
@@ -122,6 +155,7 @@
   }
 
   function estimatedCost(): string | null {
+    if (costUsd !== null) return `$${costUsd.toFixed(4)}`;
     if (usage === null) return null;
     const profile = profilePrices.find((item) => item.name === requestProfile);
     if (profile === undefined) return null;
@@ -140,6 +174,16 @@
 
 <section aria-labelledby="ask-heading">
   <h2 id="ask-heading">Ask</h2>
+  {#if asks.length > 0}
+    <div class="history">
+      <label for="ask-history">Question history</label>
+      <select id="ask-history" value={selectedAskId} onchange={(event) => showStored(event.currentTarget.value)}>
+        <option value="">New question</option>
+        {#each asks as item (item.id)}<option value={item.id}>{item.question || 'Untitled question'}</option>{/each}
+      </select>
+    </div>
+  {/if}
+  {#if storedQuestion !== ''}<p class="stored-question" aria-label="Stored question">{storedQuestion}</p>{/if}
   <form class="ask-form" onsubmit={ask}>
     <label for="question">Question</label>
     <textarea id="question" name="question" bind:value={question} rows="3" required></textarea>
@@ -174,8 +218,11 @@
   .ask-form label,
   .ask-form textarea { grid-column: 1 / -1; }
   textarea,
+  select,
   button { font: inherit; padding: 0.45rem; }
   textarea { padding: 0.5rem; resize: vertical; }
+  .history { display: grid; gap: 0.35rem; margin: 0.75rem 0 0; }
+  .stored-question { font-weight: 600; margin: 1rem 0 0; }
   .answer {
     line-height: 1.6;
     margin-top: 1rem;

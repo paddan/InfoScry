@@ -9,6 +9,7 @@ import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.domain.JobType
+import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportJobPayload
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
@@ -17,6 +18,7 @@ import infoscry.storage.LastLlmProfileException
 import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
+import infoscry.extract.ExternalProcess
 import io.ktor.http.ContentType
 import infoscry.search.SearchUnavailableException
 import io.ktor.http.HttpStatusCode
@@ -33,6 +35,9 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.server.http.content.staticResources
+import java.nio.file.Path
+import java.time.Duration
+import kotlinx.coroutines.sync.Mutex
 import org.slf4j.LoggerFactory
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
@@ -96,22 +101,47 @@ data class JobsResponse(val jobs: List<JobApiView>)
 @Serializable
 data class JobResponse(val job: JobApiView)
 
-/** A safe browser row: no selected source path, item key, or untrusted failure text. */
+/**
+ * A browser import-item row: the document's name, its outcome, its source path, and what the failure
+ * amounts to.
+ *
+ * The source path is here because a folder import needs to name the file that failed, and the browser is
+ * the machine's own reader on a loopback socket. The message is not the one stored beside the outcome:
+ * that one may be an exception's own words, and [ImportJobHandler.messageFor] turns the outcome's code into
+ * a sentence InfoScry wrote. An unrecognised code gets the generic sentence, never the stored text.
+ */
 @Serializable
 data class ImportItemApiView(
     val id: String,
     val jobId: JobId,
     val documentId: infoscry.domain.DocumentId?,
+    val sourcePath: String? = null,
     val sourceName: String?,
     val outcome: ImportItemOutcome,
     val errorCode: String?,
+    val errorMessage: String? = null,
     val createdAt: String,
     val updatedAt: String,
 )
 
 /** What a caller asks for: the collection by name or id, and the files or directories it selected. */
 @Serializable
-data class ImportRequest(val collection: String, val paths: List<String>)
+data class ImportRequest(
+    val collection: String,
+    val paths: List<String>,
+    // Defaulted rather than required so a caller that predates the flag keeps working, and it defaults to
+    // false on purpose: a directory import no longer descends into subdirectories unless recursion is
+    // asked for, so a request that says nothing gets exactly that non-recursive behavior.
+    val recursive: Boolean = false,
+)
+
+/** What the picker is asked to choose: files (any number of them) or one folder. */
+@Serializable
+data class PickRequest(val directory: Boolean = false)
+
+/** The absolute paths the native pick dialog returned, in the order the user chose them. */
+@Serializable
+data class PickResponse(val paths: List<String>)
 
 /**
  * The answer to an import request.
@@ -150,8 +180,13 @@ fun Application.configureRoutes(
     context: AppContext,
     credentials: ApiCredentials,
     jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
+    picker: suspend (Boolean) -> List<String> = ::pickWithOsascript,
 ) {
     installRequestGuard(credentials)
+
+    // One pick dialog at a time for the whole process: a second concurrent pick would open another
+    // dialog on top of the first, which a user cannot even see, let alone answer.
+    val pickMutex = Mutex()
 
     routing {
         get("/api/session") {
@@ -226,6 +261,7 @@ fun Application.configureRoutes(
                             collectionId = collection.id,
                             sources = request.paths,
                             settings = settings,
+                            recursive = request.recursive,
                         )
                         val job = context.jobs.enqueue(
                             type = JobType.IMPORT,
@@ -237,6 +273,72 @@ fun Application.configureRoutes(
                             HttpStatusCode.Accepted,
                             ImportAcceptedResponse(accepted = true, job = job.toApiView()),
                         )
+                    }
+                }
+            }
+
+            // The native picker is opened by the server on the user's machine, and the browser gets back
+            // the absolute paths it chose. A pick is a mutation like every other here -- the dialog changes
+            // state outside the server -- so it stands behind the same request guard as any other POST.
+            post("/pick") {
+                call.handle {
+                    val request = call.receiveJson<PickRequest>()
+                    if (!pickMutex.tryLock()) {
+                        call.respondJson(
+                            HttpStatusCode.Conflict,
+                            ApiErrorResponse(
+                                ApiError(
+                                    code = PICK_BUSY_CODE,
+                                    message = "another pick dialog is already open; wait for it before asking again",
+                                ),
+                            ),
+                        )
+                    } else {
+                        try {
+                            call.respondJson(HttpStatusCode.OK, PickResponse(picker(request.directory)))
+                        } catch (cancelled: PickerCancelledException) {
+                            call.respondJson(
+                                HttpStatusCode.BadRequest,
+                                ApiErrorResponse(
+                                    ApiError(
+                                        code = PICK_CANCELLED_CODE,
+                                        message = cancelled.message
+                                            ?: "the pick dialog was closed without choosing anything",
+                                    ),
+                                ),
+                            )
+                        } catch (unavailable: PickerUnavailableException) {
+                            call.respondJson(
+                                HttpStatusCode.ServiceUnavailable,
+                                ApiErrorResponse(
+                                    ApiError(
+                                        code = PICK_UNAVAILABLE_CODE,
+                                        message = unavailable.message
+                                            ?: "the pick dialog could not be opened on this machine",
+                                    ),
+                                ),
+                            )
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                            // A caller that went away is not a picker failure: the cancellation is passed on
+                            // so the request dies the way it should instead of being answered as a 503.
+                            throw cancelled
+                        } catch (_: Exception) {
+                            // Whatever else the picker threw is a failure to present the dialog, not a
+                            // defect in a handler: the caller gets the same code and remedy it would for
+                            // osascript missing, because both mean "no pick dialog right now".
+                            call.respondJson(
+                                HttpStatusCode.ServiceUnavailable,
+                                ApiErrorResponse(
+                                    ApiError(
+                                        code = PICK_UNAVAILABLE_CODE,
+                                        message = "the pick dialog could not be opened; keep InfoScry running on " +
+                                            "a graphical macOS session with osascript available and try again",
+                                    ),
+                                ),
+                            )
+                        } finally {
+                            pickMutex.unlock()
+                        }
                     }
                 }
             }
@@ -329,6 +431,116 @@ private const val DEFAULT_JOB_PAGE = 100
 
 private const val API_PREFIX = "/api/"
 
+/** The status-and-code pair the pick route names when a second dialog is asked for while one is open. */
+private const val PICK_BUSY_CODE = "PICK_BUSY"
+
+/** The status-and-code pair the pick route names when nothing was chosen. */
+private const val PICK_CANCELLED_CODE = "PICK_CANCELLED"
+
+/** The status-and-code pair the pick route names when no dialog could be presented. */
+private const val PICK_UNAVAILABLE_CODE = "PICK_UNAVAILABLE"
+
+/** What osascript prints when the user closes the dialog instead of choosing; matched case-insensitively. */
+private const val PICK_CANCEL_TEXT = "cancel"
+
+/** The user paces the dialog, so the bound is generous: minutes, not seconds. */
+private val PICK_TIMEOUT: Duration = Duration.ofMinutes(10)
+
+/**
+ * The osascript that asks for one folder and prints its POSIX path on stdout.
+ *
+ * Every `-e` is one list element on purpose: this is a command list, never a string, so a path the user
+ * chooses can never become shell syntax. `choose folder` prints its POSIX path when told to, and exits
+ * nonzero with "User canceled" on stderr when the dialog is closed without a choice.
+ */
+private val PICK_FOLDER_SCRIPT: List<String> = listOf(
+    "osascript", "-e", "POSIX path of (choose folder)",
+)
+
+/**
+ * The osascript that asks for files, one POSIX path per line, several allowed.
+ *
+ * `choose file with multiple selections allowed` returns a list, so the script walks it and appends each
+ * path followed by a linefeed; a cancelled dialog exits nonzero with "User canceled" on stderr.
+ */
+private val PICK_FILES_SCRIPT: List<String> = listOf(
+    "osascript",
+    "-e", "set output to \"\"",
+    "-e", "set chosen to choose file with multiple selections allowed",
+    "-e", "repeat with f in chosen",
+    "-e", "set output to output & POSIX path of f & linefeed",
+    "-e", "end repeat",
+    "-e", "return output",
+)
+
+/**
+ * The user closed the native pick dialog without choosing anything.
+ *
+ * This is an outcome of the dialog, not a failure of the server: the caller reports it as the user's
+ * decision and moves on.
+ */
+class PickerCancelledException(message: String) : IllegalStateException(message)
+
+/**
+ * The native pick dialog could not be presented at all.
+ *
+ * No osascript, a headless session (no window server), or a picker that failed in a way that names no
+ * user decision: whichever it is, [message] says what has to be true for a pick to work.
+ */
+class PickerUnavailableException(message: String) : IllegalStateException(message)
+
+/**
+ * Opens the native macOS pick dialog and returns the absolute paths it chose.
+ *
+ * The dialog runs on the server's machine, which is the machine the user is sitting at, and the browser
+ * only ever sees the paths back. The exit status and stderr of osascript say which way the dialog ended:
+ * a zero exit with lines of output means a choice was made, a nonzero exit naming a cancel (or no output
+ * at all) means the user closed it, and anything else means the dialog could not be presented.
+ */
+internal suspend fun pickWithOsascript(directory: Boolean): List<String> {
+    val outcome = try {
+        ExternalProcess.run(
+            if (directory) PICK_FOLDER_SCRIPT else PICK_FILES_SCRIPT,
+            PICK_TIMEOUT,
+        )
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        // The requester went away while the dialog was open. ExternalProcess has already stopped it, so the
+        // cancellation is passed on rather than dressed up as a failure to present a dialog.
+        throw cancelled
+    } catch (failure: Exception) {
+        throw PickerUnavailableException(
+            "the macOS file picker could not be started" +
+                (failure.message?.let { ": $it" } ?: "") +
+                "; run InfoScry from a graphical macOS session with osascript available and try again",
+        )
+    }
+    return pickOutcomeOf(outcome.exitCode, outcome.stdout, outcome.stderr)
+}
+
+/**
+ * What one osascript run means: the chosen paths, the user closing the dialog, or no dialog at all.
+ *
+ * Only osascript's own cancel wording means the user closed the dialog. A nonzero exit with any other
+ * message -- a headless session refusing user interaction, most of all -- means no dialog was ever shown,
+ * which the caller treats differently: it can offer a typed path where a cancel simply ends the attempt.
+ */
+internal fun pickOutcomeOf(exitCode: Int, stdout: String, stderr: String): List<String> {
+    val paths = stdout.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .map { Path.of(it).toAbsolutePath().normalize().toString() }
+        .toList()
+    return when {
+        exitCode == 0 && paths.isNotEmpty() -> paths
+        stderr.contains(PICK_CANCEL_TEXT, ignoreCase = true) ->
+            throw PickerCancelledException("the pick dialog was closed without choosing anything")
+        else -> throw PickerUnavailableException(
+            "the macOS picker failed (osascript exit $exitCode); " +
+                "run InfoScry from a graphical macOS session with osascript available and try again",
+        )
+    }
+}
+
 /**
  * Serves the application shell for a client-side route.
  *
@@ -396,9 +608,11 @@ private fun ImportItem.toApiView() = ImportItemApiView(
     id = id,
     jobId = jobId,
     documentId = documentId,
+    sourcePath = sourcePath,
     sourceName = sourcePath.substringAfterLast('/').substringAfterLast('\\').takeIf(String::isNotEmpty),
     outcome = outcome,
     errorCode = errorCode,
+    errorMessage = errorCode?.let { ImportJobHandler.messageFor(it) },
     createdAt = createdAt,
     updatedAt = updatedAt,
 )

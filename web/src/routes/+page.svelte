@@ -3,6 +3,7 @@
   import AskPanel from '../lib/AskPanel.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
+  import ImportPanel from '../lib/ImportPanel.svelte';
   import {
     ApiError,
     listCollections,
@@ -25,6 +26,7 @@
   let query = '';
   let mode: SearchMode = 'HYBRID';
   let activeMode: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN' = 'SEARCH';
+  let adminTab: 'LLM' | 'IMPORT' = 'LLM';
   let mediaType = '';
   let pathContains = '';
   let textContains = '';
@@ -158,6 +160,20 @@
     document.getElementById(`tab-${activeMode.toLowerCase()}`)?.focus();
   }
 
+  function handleAdminTabKeydown(event: KeyboardEvent): void {
+    const tabs: ('LLM' | 'IMPORT')[] = ['LLM', 'IMPORT'];
+    const current = tabs.indexOf(adminTab);
+    let next = current;
+    if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
+    else if (event.key === 'ArrowLeft') next = (current + tabs.length - 1) % tabs.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    adminTab = tabs[next];
+    document.getElementById(`admin-tab-${adminTab.toLowerCase()}`)?.focus();
+  }
+
   function clearSelectedSource(): void {
     sourceGeneration += 1;
     selectedHit = null;
@@ -189,6 +205,13 @@
   function describe(failure: unknown): string {
     if (failure instanceof ApiError) return failure.message;
     return failure instanceof Error ? failure.message : 'Something went wrong.';
+  }
+
+  async function handleCollectionsChanged(selectedId?: string): Promise<void> {
+    await refresh();
+    if (selectedId !== undefined && collections.some((collection) => collection.id === selectedId)) {
+      selectedCollectionId = selectedId;
+    }
   }
 
   onMount(() => {
@@ -274,7 +297,11 @@
       {:else if activeMode === 'ADMIN'}
         <div class="sidebar-note">
           <span class="eyebrow">ADMINISTRATION</span>
-          <p>Configure the LLM profiles Ask and Investigate can use. API keys stay in environment variables.</p>
+          {#if adminTab === 'LLM'}
+            <p>Configure the LLM profiles Ask and Investigate can use. API keys stay in environment variables.</p>
+          {:else}
+            <p>Import local files and folders into a collection. Choosing paths opens a native dialog on this machine.</p>
+          {/if}
         </div>
       {:else}
         <div class="sidebar-note">
@@ -302,9 +329,11 @@
   </aside>
 
   <main class="workspace">
-    <header class="workspace-header">
-      <div><span class="eyebrow">{activeMode === 'SEARCH' ? 'DISCOVER' : activeMode === 'ASK' ? 'ANSWER' : activeMode === 'INVESTIGATE' ? 'EXPLORE' : 'SETTINGS'}</span><h1>{activeMode === 'INVESTIGATE' ? 'Investigate' : activeMode === 'ASK' ? 'Ask your archive' : activeMode === 'ADMIN' ? 'Configure LLM profiles' : 'Search your archive'}</h1></div>
-    </header>
+    {#if activeMode !== 'ADMIN'}
+      <header class="workspace-header">
+        <div><span class="eyebrow">{activeMode === 'SEARCH' ? 'DISCOVER' : activeMode === 'ASK' ? 'ANSWER' : 'EXPLORE'}</span><h1>{activeMode === 'INVESTIGATE' ? 'Investigate' : activeMode === 'ASK' ? 'Ask your archive' : 'Search your archive'}</h1></div>
+      </header>
+    {/if}
 
   {#if !loadingCollections}
     <div class:with-source={selectedHit !== null} class="content-layout">
@@ -344,7 +373,30 @@
       {/if}
       </div>
 
-      <div id="panel-admin" role="tabpanel" aria-labelledby="tab-admin" hidden={activeMode !== 'ADMIN'}><LlmAdminPanel /></div>
+      <div id="panel-admin" role="tabpanel" aria-labelledby="tab-admin" hidden={activeMode !== 'ADMIN'}>
+        <div class="admin-tabs" role="tablist" aria-label="Administration section" tabindex="-1" onkeydown={handleAdminTabKeydown}>
+          <button
+            id="admin-tab-llm"
+            role="tab"
+            aria-selected={adminTab === 'LLM'}
+            aria-controls="admin-panel-llm"
+            tabindex={adminTab === 'LLM' ? 0 : -1}
+            onclick={() => (adminTab = 'LLM')}
+          >LLM profiles</button>
+          <button
+            id="admin-tab-import"
+            role="tab"
+            aria-selected={adminTab === 'IMPORT'}
+            aria-controls="admin-panel-import"
+            tabindex={adminTab === 'IMPORT' ? 0 : -1}
+            onclick={() => (adminTab = 'IMPORT')}
+          >Import</button>
+        </div>
+        <div class="admin-panels">
+          <div id="admin-panel-llm" role="tabpanel" aria-labelledby="admin-tab-llm" hidden={adminTab !== 'LLM'}><LlmAdminPanel /></div>
+          <div id="admin-panel-import" role="tabpanel" aria-labelledby="admin-tab-import" hidden={adminTab !== 'IMPORT'}><ImportPanel collectionId={selectedCollectionId} onCollectionsChanged={handleCollectionsChanged} /></div>
+        </div>
+      </div>
 
     {#key selectedCollectionId}
       <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}><AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} onOpenSource={(evidence) => openSource({
@@ -439,6 +491,10 @@
   .mode-panels { min-width: 0; }
   .mode-panels > div[role="tabpanel"] { margin: 0; min-width: 0; }
   .mode-panels [hidden] { display: none !important; }
+  .admin-tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid #2a2d2e; margin-bottom: 1.35rem; }
+  .admin-tabs [role="tab"] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 0.6rem 0.95rem; color: #929997; font-size: 0.88rem; margin-bottom: -1px; }
+  .admin-tabs [role="tab"]:hover { color: #d5d8d6; }
+  .admin-tabs [role="tab"][aria-selected="true"] { border-bottom-color: #c4a77d; color: #f3e6d1; font-weight: 600; }
   .search-input-row { margin-bottom: 1.5rem; }
   .search-input-row form { display: flex; gap: 0.55rem; }
   .search-input-row input { min-height: 2.9rem; background: #1b1e1f; border-color: #373b3b; padding-left: 1rem; }

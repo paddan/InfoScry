@@ -19,6 +19,11 @@ data class ImportJobPayload(
     val collectionId: String,
     val sources: List<String>,
     val settings: ExtractionSettings,
+    // Defaulted rather than required, and it has to default to false: this payload's own JSON omits a
+    // defaulted field, so a new non-recursive job is written without it and has to read back as false.
+    // A payload written before this flag existed therefore also reads as false, and a directory it named
+    // is read top-level-only on resume -- the same deliberate change the flag makes everywhere else.
+    val recursive: Boolean = false,
 ) {
 
     init {
@@ -44,10 +49,12 @@ data class ImportJobPayload(
             collectionId: CollectionId,
             sources: List<String>,
             settings: ExtractionSettings,
+            recursive: Boolean = false,
         ): ImportJobPayload = ImportJobPayload(
             collectionId = collectionId.value,
             sources = sources.map { java.nio.file.Path.of(it).toAbsolutePath().normalize().toString() },
             settings = settings,
+            recursive = recursive,
         )
 
         /**

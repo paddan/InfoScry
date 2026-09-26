@@ -12,8 +12,6 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
-import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.InternalAPI
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
@@ -132,7 +130,7 @@ class OpenAiCompatibleClient(
         val channel = response.bodyAsChannel()
         var streaming = true
         while (streaming) {
-            val line = channelLine(channel) ?: break
+            val line = LlmSseLineReader.readLine(channel) ?: break
             for (event in scanner.feed(line + "\n")) {
                 if (!applyEvent(event, toolCalls)) {
                     streaming = false
@@ -146,70 +144,6 @@ class OpenAiCompatibleClient(
             }
             flushToolCalls(toolCalls)
         }
-    }
-
-    /**
-     * Reads one line of UTF-8 from [channel]'s byte source, or null at the end of the stream. Reads a
-     * byte at a time so a newline never splits an unreadable remainder; [awaitContent] suspends the
-     * reader instead of blocking a thread, which is what lets a cancelled consumer unwind this loop.
-     *
-     * [readBuffer] is marked internal by Ktor (it is the raw octet pipe under the public channel), so
-     * this function opts in: there is no public line-reading API on [ByteReadChannel] itself.
-     */
-    @OptIn(InternalAPI::class)
-    private suspend fun channelLine(channel: ByteReadChannel): String? {
-        val bytes = ArrayList<Int>()
-        while (true) {
-            if (channel.readBuffer.exhausted() && !channel.awaitContent(1)) {
-                return if (bytes.isEmpty()) null else decodeLine(bytes)
-            }
-            val next = channel.readBuffer.readByte().toInt().and(0xFF)
-            if (next == '\n'.code) return decodeLine(bytes)
-            bytes.add(next)
-        }
-    }
-
-    /**
-     * Decodes one line of UTF-8 from its octets (dropping a trailing carriage return). Provider SSE
-     * payloads are JSON, which is well-formed UTF-8, so a direct decode is exact. The bitwise building
-     * uses the Kotlin 2.x method forms (`.and`/`.or`/`.shl`) because the operator symbols are gone.
-     */
-    private fun decodeLine(bytes: List<Int>): String {
-        val length = if (bytes.lastOrNull() == '\r'.code) bytes.size - 1 else bytes.size
-        val text = StringBuilder()
-        var index = 0
-        while (index < length) {
-            val first = bytes.get(index).and(0xFF)
-            index += 1
-            if (first < 0x80) {
-                text.append(first.toChar())
-            } else if (first < 0xE0) {
-                text.append(
-                    first.and(0x1F).shl(8)
-                        .or(bytes.get(index).and(0x3F))
-                        .toChar(),
-                )
-                index += 1
-            } else if (first < 0xF0) {
-                text.append(
-                    first.and(0x0F).shl(12)
-                        .or(bytes.get(index).and(0x3F).shl(6))
-                        .or(bytes.get(index + 1).and(0x3F))
-                        .toChar(),
-                )
-                index += 2
-            } else {
-                text.append(
-                    first.and(0x07).shl(18)
-                        .or(bytes.get(index).and(0x3F).shl(12))
-                        .or(bytes.get(index + 1).and(0x3F).shl(6))
-                        .or(bytes.get(index + 2).and(0x3F))
-                        .toChar(),
-                )
-                index += 3
-            }
-        }
-        return text.toString()
     }
 
     /** Returns false once the provider's end marker ([DONE]) is seen; throws on an unparseable event. */

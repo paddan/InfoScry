@@ -55,12 +55,13 @@ suspend fun startLoopbackServer(
     context: AppContext,
     port: Int = DEFAULT_PORT,
     jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
+    picker: suspend (Boolean) -> List<String> = ::pickWithOsascript,
 ): RunningServer {
     require(port in 0..MAX_PORT) { "port must be between 0 and $MAX_PORT, was $port" }
 
     val credentials = ApiCredentials.new()
     val engine = embeddedServer(Netty, port = port, host = LOOPBACK_HOST) {
-        configureRoutes(context, credentials, jobEventIdleDeadlineMillis)
+        configureRoutes(context, credentials, jobEventIdleDeadlineMillis, picker)
     }
     engine.start(wait = false)
 
