@@ -443,6 +443,51 @@ class LlmStoreTest {
     }
 
     @Test
+    fun `evidence ledger entries round trip their introducing message seq`() {
+        val savedProfile = pricedProfile()
+        store.create(savedProfile)
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, promptVersion = 1, retrievalSnapshot = "{}")
+        store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{}", "excerpt one", messageSeq = 2)
+        store.persistEvidenceLedgerEntry(convId, "S2", "unit-2", "{}", "excerpt two")
+        val history = store.loadInvestigateHistory(convId)
+        assertEquals(listOf("S1" to 2, "S2" to null), history!!.evidence.map { it.evidenceId to it.messageSeq })
+        assertEquals(listOf("S1", "S2"), history.evidenceIds)
+    }
+
+    @Test
+    fun `superseded investigate messages are excluded from reloaded history`() {
+        val savedProfile = pricedProfile()
+        store.create(savedProfile)
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, promptVersion = 1, retrievalSnapshot = "{}")
+        store.persistInvestigateMessage(convId, 0, "user", "question")
+        store.persistInvestigateMessage(convId, 1, LlmMessage("assistant", "draft [S9]"), superseded = true)
+        store.persistInvestigateMessage(convId, 2, "assistant", "adopted [S1]")
+        val history = store.loadInvestigateHistory(convId)
+        assertEquals(listOf("question", "adopted [S1]"), history!!.messages.map { it.content })
+        assertEquals(listOf(0, 2), history.messageSeqs)
+        assertEquals(3, history.nextMessageSeq, "the superseded row keeps its durable seq")
+    }
+
+    @Test
+    fun `legacy evidence without a message seq is associated with its tool result on reload`() {
+        val savedProfile = pricedProfile()
+        store.create(savedProfile)
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, promptVersion = 1, retrievalSnapshot = "{}")
+        val call = ToolCall("call-1", "read_content_unit", "{\"contentUnitId\":\"unit-1\"}")
+        store.persistInvestigateMessage(convId, 0, "user", "find x")
+        store.persistInvestigateMessage(convId, 1, LlmMessage("assistant", "", toolCalls = listOf(call)))
+        store.persistInvestigateMessage(
+            convId, 2,
+            LlmMessage("tool", """{"evidence":[{"evidenceId":"S1","text":"excerpt"}]}""", toolCallId = "call-1"),
+        )
+        store.persistInvestigateMessage(convId, 3, "assistant", "answer [S1]")
+        // Written the pre-migration way: the ledger row has no introducing seq.
+        store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{}", "excerpt")
+        val history = store.loadInvestigateHistory(convId)
+        assertEquals(2, history!!.evidence.single().messageSeq, "the introducing tool result's seq is recovered")
+    }
+
+    @Test
     fun `request eligibility records which evidence ids were in a model call`() {
         val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), promptVersion = 1, retrievalSnapshot = "{}")
         store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{}", "excerpt")

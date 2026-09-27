@@ -16,9 +16,21 @@ action that lists the provider's models and prefills the context window, output
 limit, and prices where known. The Import sub-tab creates a collection and loads
 local files or folders into it: the local server opens a native macOS picker and
 returns the chosen absolute paths to the page, which hands them to the same
-import job the CLI starts, with a recursive toggle and per-file results. Local
-end-to-end acceptance of the browser flows is still open, as are the
-format-specific source views described in the design.
+import job the CLI starts, with a recursive toggle and per-file results. Ask's
+browser flow and the format-specific source views described in the design still
+lack end-to-end browser acceptance. Investigate follow-ups now
+restore retained source evidence with its stable citation identifiers, reuse it
+without re-researching, expose one adopted final answer per completed turn while
+the superseded draft stays as audit data, distinguish a 120-second
+provider-inactivity cap from the fixed per-question deadline, and detect
+equivalent repeated tool calls despite JSON formatting. Focused backend suites,
+the reader component tests, `svelte-check`, and the frontend build pass. The
+complete Investigate conversation — first cited question, retained-evidence
+follow-up, reload/reopen, correction, rejection, empty-evidence completion,
+research cutoff, repeated-call limit, and cancellation recovery — is verified in
+a real browser
+by `./gradlew externalTest` against a local server and the local fake provider
+(not a real provider or GPU acceptance).
 Import is available in the CLI and the web Admin view; jobs and logs belong in
 the CLI.
 This project is built and run locally; CI and distributable packaging are not
@@ -193,17 +205,28 @@ Optionally set a default with `llm set-default --ask <name>` or
 `llm set-default --investigate <name>`, or with the Admin view's per-role
 selectors; `llm test` makes real probe requests to that endpoint. Ask and Investigate
 send selected document evidence to the configured endpoint, which may be
-external. Their browser flows have not yet had the final manual fake-provider
-acceptance check.
+external. Investigate's browser flow is covered by `./gradlew externalTest`, which
+drives the real reader against a local server and the local fake provider; Ask's
+browser flow still lacks that final acceptance check.
 
 Investigate's sidebar settings apply to the next question or follow-up: tool
 rounds and tool calls both default to 50 (ranges 1–50 and 1–100), and time per
 question defaults to 600 seconds (range 10–1800). The first limit reached stops research.
 InfoScry then prepares one tool-free final answer from the evidence sent to the
-model and validates its citations against that evidence. The time budget includes
+model and validates its citations against that evidence. A follow-up may cite
+sources gathered earlier in the conversation when those sources were actually
+included in the generating request; evidence pruned out of that request cannot
+justify a new citation, although older displayed citations still resolve. Two
+tool calls count as the same repeated call when their tool name and canonical
+JSON arguments match (object-key order and whitespace are ignored; array order,
+value types, and values are not).
+The time budget includes
 request preparation, provider work, synthesis, and citation correction, but not
 the optional conversation title. Up to 120 seconds or 20% of the total budget,
-whichever is smaller, is reserved for synthesis. Settings are stored as numeric
+whichever is smaller, is reserved for synthesis. A streaming provider call is
+bounded by a 120-second inactivity cap that resets on every provider event, so
+an active stream may outlive one interval while the fixed total budget still
+bounds the turn; a genuinely silent provider reports a provider timeout. Settings are stored as numeric
 preferences in this browser under `infoscry-investigate-limits:v1`; a change
 applies to future turns, not a running one. Synchronous native work cannot be
 hard-cancelled and may overshoot the research deadline by one in-flight tool

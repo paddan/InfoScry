@@ -314,6 +314,144 @@ class InvestigationRoutesTest {
         }
     }
 
+    @Test
+    fun `a continued conversation reuses retained evidence without new tools or correction`() = runBlocking {
+        val sourceText = "Mira signed the note."
+        val contentUnitId = addEvidenceUnit(sourceText)
+        val arguments = """{"contentUnitId":"$contentUnitId"}""".replace("\"", "\\\"")
+        val research = sse(
+            listOf(
+                """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_content_unit","arguments":"$arguments"}}]},"finish_reason":null}]}""",
+                """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""",
+                """{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}""",
+            ),
+        )
+        val firstAnswer = sse(
+            listOf("""{"choices":[{"delta":{"content":"Mira signed the note [S1]."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}"""),
+        )
+        val followUpAnswer = sse(
+            listOf("""{"choices":[{"delta":{"content":"The note was signed [S1]."},"finish_reason":"stop"}],"usage":{"prompt_tokens":21,"completion_tokens":5}}"""),
+        )
+
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = research),
+                FakeOpenAiResponse(stream = true, body = firstAnswer),
+                FakeOpenAiResponse(body = titleCompletion("The signed note")),
+                FakeOpenAiResponse(stream = true, body = followUpAnswer),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+            val first = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = createBody(question = "Who signed the note?", limits = """{"maxToolRounds":2}"""),
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, first.status, first.bodyAsText())
+            val firstEvents = sseEvents(first.bodyAsText())
+            assertEquals("done", firstEvents.last().getValue("type").jsonPrimitive.content)
+            val conversationId = firstEvents.first().getValue("id").jsonPrimitive.content
+
+            val followUp = harness.request(
+                HttpMethod.Post,
+                "/api/investigations/$conversationId/continue",
+                body = createBody(question = "When was it signed?", limits = """{"maxToolRounds":2}"""),
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, followUp.status, followUp.bodyAsText())
+            val followUpEvents = sseEvents(followUp.bodyAsText())
+            assertEquals(1, followUpEvents.count { it.getValue("type").jsonPrimitive.content == "done" }, followUp.bodyAsText())
+            assertFalse("error" in followUpEvents.map { it.getValue("type").jsonPrimitive.content }, followUp.bodyAsText())
+            val citation = followUpEvents.single { it.getValue("type").jsonPrimitive.content == "citation" }
+            assertEquals("S1", citation.getValue("id").jsonPrimitive.content)
+            assertEquals("true", citation.getValue("valid").jsonPrimitive.content)
+
+            // The follow-up carried the retained tool exchange, so it needed no research and no correction.
+            val followUpRequest = Json.parseToJsonElement(fake.requestBodies[3]).jsonObject
+            val followUpContext = followUpRequest.getValue("messages").jsonArray
+                .joinToString(" ") { it.jsonObject.getValue("content").jsonPrimitive.content }
+            assertContains(followUpContext, sourceText)
+            assertContains(followUpContext, "S1")
+            assertEquals(4, fake.handledRequests, "research, first answer, title, and one follow-up — no correction and no extra research")
+
+            val history = harness.request(
+                HttpMethod.Get,
+                "/api/collections/Default/investigations/$conversationId",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, history.status, history.bodyAsText())
+            assertContains(history.bodyAsText(), "Mira signed the note [S1].")
+            assertContains(history.bodyAsText(), "The note was signed [S1].")
+        }
+    }
+
+    @Test
+    fun `a corrected answer replaces its draft as one adopted history answer`() = runBlocking {
+        val sourceText = "Mira signed the note."
+        val contentUnitId = addEvidenceUnit(sourceText)
+        val arguments = """{"contentUnitId":"$contentUnitId"}""".replace("\"", "\\\"")
+        val research = sse(
+            listOf(
+                """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_content_unit","arguments":"$arguments"}}]},"finish_reason":null}]}""",
+                """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""",
+                """{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}""",
+            ),
+        )
+        val draft = sse(
+            listOf("""{"choices":[{"delta":{"content":"draft cites [S9]"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}"""),
+        )
+        val correction = """{"choices":[{"message":{"role":"assistant","content":"corrected cites [S1]"}}],"usage":{"prompt_tokens":5,"completion_tokens":4}}"""
+
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = research),
+                FakeOpenAiResponse(stream = true, body = draft),
+                FakeOpenAiResponse(body = correction),
+                FakeOpenAiResponse(body = titleCompletion("The signed note")),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+            val response = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = createBody(question = "Who signed the note?", limits = """{"maxToolRounds":2}"""),
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            val events = sseEvents(response.bodyAsText())
+            assertEquals(
+                "corrected cites [S1]",
+                events.last().getValue("text").jsonPrimitive.content,
+                "the done answer must be the corrected one",
+            )
+            val conversationId = events.first().getValue("id").jsonPrimitive.content
+
+            val history = harness.request(
+                HttpMethod.Get,
+                "/api/collections/Default/investigations/$conversationId",
+                credential = Credential.BEARER,
+            )
+            assertContains(history.bodyAsText(), "corrected cites [S1]")
+            assertFalse(history.bodyAsText().contains("draft cites [S9]"), "the superseded draft must not be a reader answer")
+
+            // The superseded draft is retained as audit data on the row, not deleted.
+            val rows = harness.context.database.read { connection ->
+                connection.prepareStatement(
+                    "SELECT content, superseded FROM messages WHERE conversation_id = ? AND role = 'assistant' AND content <> '' ORDER BY seq",
+                ).use { statement ->
+                    statement.setString(1, conversationId)
+                    statement.executeQuery().use { results ->
+                        buildList {
+                            while (results.next()) add(results.getString("content") to results.getInt("superseded"))
+                        }
+                    }
+                }
+            }
+            assertEquals(listOf("draft cites [S9]" to 1, "corrected cites [S1]" to 0), rows)
+        }
+    }
+
     // ---- The 422 capability gate ----
 
     @Test
@@ -490,6 +628,25 @@ class InvestigationRoutesTest {
             assertEquals(4, fake.requestBodies.size, "opening turn, its title, one configured round, and synthesis")
             assertTrue("tools" in Json.parseToJsonElement(fake.requestBodies[2]).jsonObject, "the continue's research round must expose tools")
             assertFalse("tools" in Json.parseToJsonElement(fake.requestBodies[3]).jsonObject, "the continue's synthesis must not expose tools")
+
+            // The continue's final answer, citation and limit outcome must be durable, not only streamed.
+            val history = harness.request(
+                HttpMethod.Get,
+                "/api/collections/Default/investigations/$conversationId",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, history.status, history.bodyAsText())
+            assertContains(history.bodyAsText(), "Mira signed the note [S1].", message = "the continue's final answer must be persisted")
+            val persistedLimit = harness.context.database.read { connection ->
+                connection.prepareStatement("SELECT event_type FROM limit_events WHERE conversation_id = ?").use { statement ->
+                    statement.setString(1, conversationId)
+                    statement.executeQuery().use { rows ->
+                        assertTrue(rows.next(), "the continued turn's MAX_ROUNDS event must be durable")
+                        rows.getString("event_type")
+                    }
+                }
+            }
+            assertEquals("MAX_ROUNDS", persistedLimit)
         }
     }
 
@@ -1052,6 +1209,11 @@ class InvestigationRoutesTest {
 
     private fun sse(dataLines: List<String>): String =
         dataLines.map { "data: $it\n\n" }.joinToString("") + "data: [DONE]\n\n"
+
+    private fun sseEvents(body: String): List<kotlinx.serialization.json.JsonObject> = body.lineSequence()
+        .filter { it.startsWith("data: ") && !it.removePrefix("data: ").startsWith("[DONE]") }
+        .map { Json.parseToJsonElement(it.removePrefix("data: ")).jsonObject }
+        .toList()
 
     private fun turnSse(): String = sse(
         listOf(

@@ -149,6 +149,8 @@
     const answerIndex = messages.length - 1;
     question = '';
     let usage: { inputTokens: number; outputTokens: number } | null = null;
+    /** A `done` or `error` event: the turn reached an outcome the reader can see. */
+    let finished = false;
     const validCitationIds = new Set<string>();
     const liveActivity = new Map<string, InvestigateActivity>();
     try {
@@ -182,6 +184,7 @@
         } else if (event.type === 'citation') {
           if (event.valid) validCitationIds.add(event.id);
         } else if (event.type === 'done') {
+          finished = true;
           messages[answerIndex] = { role: 'assistant', text: event.text };
           messages = [...messages];
           evidence = mergeEvidence(evidence, (event.evidence ?? []).filter((item) => validCitationIds.has(item.id)));
@@ -199,11 +202,18 @@
           working = false;
           onWorkingChanged?.(false);
         } else if (event.type === 'error') {
+          finished = true;
           status = null;
           error = event.message;
         }
       }
-      if (status !== null && signalController.signal.aborted === false) status = null;
+      // A stream that ends without a done or an error event is an interruption, never a completion:
+      // the turn has no answer, the controls are released, and the reader is told it can ask again.
+      // Only the current turn reports this; an older stream's closure leaves the newer turn alone.
+      if (turn === generation && !finished && !signalController.signal.aborted) {
+        status = null;
+        error = 'The investigation was interrupted before it finished. You can send another question.';
+      }
     } catch (failure) {
       if (turn === generation && !signalController.signal.aborted) error = describe(failure);
     } finally {
@@ -223,11 +233,13 @@
   async function cancel(): Promise<void> {
     const id = conversationId;
     status = 'Cancelling…';
+    // Stop the local stream before asking the server: the server answers by ending the stream
+    // without a done event, and that ending must read as this cancellation, not as an interruption.
+    controller?.abort();
     if (id !== null) {
       try { await cancelInvestigation(id); }
       catch (failure) { error = describe(failure); }
     }
-    controller?.abort();
     status = 'Investigation cancelled.';
     working = false;
     onWorkingChanged?.(false);

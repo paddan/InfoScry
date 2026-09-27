@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import InvestigatePanel from './InvestigatePanel.svelte';
 import { DEFAULT_INVESTIGATION_LIMITS } from './investigationLimits';
-import type { InvestigateEvent } from './api';
+import { ApiError, type InvestigateEvent } from './api';
 
 /**
  * The panel takes the open conversation from the page: the page owns the id, the panel loads and
@@ -19,7 +19,14 @@ const api = vi.hoisted(() => ({
 }));
 
 vi.mock('./api', () => ({
-  ApiError: class ApiError extends Error {},
+  ApiError: class ApiError extends Error {
+    readonly code: string;
+
+    constructor(code: string, message: string) {
+      super(message);
+      this.code = code;
+    }
+  },
   investigateDefaultProfile: api.investigateDefaultProfile,
   listLlmProfilePrices: api.listLlmProfilePrices,
   getInvestigation: api.getInvestigation,
@@ -106,6 +113,7 @@ describe('Investigate panel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
 
     expect(await screen.findByText('Answer without sources')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull());
     await waitFor(() => expect(onConversationFinished).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole('alert')).toBeNull();
   });
@@ -357,6 +365,214 @@ describe('Investigate panel', () => {
     expect(screen.queryByText('Mira signed it.')).toBeNull();
     expect(screen.queryByText('Loading conversation…')).toBeNull();
     expect(api.continueInvestigation).not.toHaveBeenCalled();
+  });
+
+  it('shows the submitted question and visible activity and admits no blank or duplicate submission', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    api.startInvestigation.mockResolvedValue(new Response());
+    api.readInvestigationEvents.mockReturnValue((async function* () {
+      yield { type: 'started', id: 'conversation-busy' };
+      await gate;
+      yield { type: 'done', text: 'The only answer', evidence: [] };
+    })());
+    render(InvestigatePanel, { props: { ...props, conversationId: null } });
+    const input = await screen.findByLabelText('Investigate question');
+    await fireEvent.input(input, { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    // The submitted question is shown at once and the running turn reports activity.
+    expect(screen.getByText('What happened?')).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('Starting investigation…');
+
+    // A second question is not admitted while the turn runs, through the button or the form.
+    await fireEvent.input(input, { target: { value: 'Second question?' } });
+    expect((screen.getByRole('button', { name: 'Send follow-up' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.submit(input.closest('form')!);
+    expect(api.continueInvestigation).not.toHaveBeenCalled();
+    expect(screen.queryByText('Second question?')).toBeNull();
+
+    // A blank submission adds no turn either.
+    await fireEvent.input(input, { target: { value: '   ' } });
+    expect((screen.getByRole('button', { name: 'Send follow-up' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.submit(input.closest('form')!);
+    expect(api.continueInvestigation).not.toHaveBeenCalled();
+    expect(api.startInvestigation).toHaveBeenCalledTimes(1);
+
+    release();
+    expect(await screen.findByText('The only answer')).toBeTruthy();
+  });
+
+  it('releases the controls when a done event reports an explicit empty evidence list', async () => {
+    api.startInvestigation.mockResolvedValue(new Response());
+    api.readInvestigationEvents.mockReturnValue(events(
+      { type: 'started', id: 'conversation-empty-evidence' },
+      { type: 'delta', text: 'No sources were needed' },
+      { type: 'done', text: 'No sources were needed', evidence: [] },
+    )());
+    render(InvestigatePanel, { props: { ...props, conversationId: null } });
+    await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'Question?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    expect(await screen.findByText('No sources were needed')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull());
+    expect(screen.queryByRole('alert')).toBeNull();
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'And then?' } });
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Send follow-up' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('reports a rejected request as a failure and admits the next question', async () => {
+    api.startInvestigation.mockResolvedValue(new Response(null, { status: 500 }));
+    api.readInvestigationEvents
+      .mockImplementationOnce(async function* () {
+        // What the real reader does for a non-OK response: the failure surfaces on the first read.
+        throw new ApiError('HTTP_500', 'the server rejected the investigation request');
+      })
+      .mockImplementation(async function* () {
+        yield { type: 'started', id: 'conversation-recovered' };
+        yield { type: 'done', text: 'Answer after the failure', evidence: [] };
+      });
+    render(InvestigatePanel, { props: { ...props, conversationId: null } });
+    await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'Explain this' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    // A rejected request never looks like a completed turn.
+    expect((await screen.findByRole('alert')).textContent).toContain('the server rejected the investigation request');
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'Try again' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+    expect(await screen.findByText('Answer after the failure')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(api.startInvestigation).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a recoverable interruption when the stream closes with no done and no error', async () => {
+    api.startInvestigation.mockResolvedValue(new Response());
+    api.continueInvestigation.mockResolvedValue(new Response());
+    api.readInvestigationEvents
+      .mockReturnValueOnce(events(
+        { type: 'started', id: 'conversation-cut' },
+        { type: 'delta', text: 'Half an answer' },
+      )())
+      .mockReturnValueOnce(events(
+        { type: 'started', id: 'conversation-cut' },
+        { type: 'done', text: 'The finished answer', evidence: [] },
+      )());
+    render(InvestigatePanel, { props: { ...props, conversationId: null } });
+    await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    // The closing stream is an interruption, not a completion, and it releases the turn.
+    expect((await screen.findByRole('alert')).textContent).toContain('interrupted');
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
+
+    // The reader can ask again in the same conversation, and the interruption notice clears.
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'And then?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    expect(await screen.findByText('The finished answer')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(api.continueInvestigation).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives cancellation its own outcome and releases the current turn', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let streamSignal: AbortSignal | undefined;
+    api.startInvestigation.mockResolvedValue(new Response());
+    api.cancelInvestigation.mockResolvedValue(undefined);
+    api.readInvestigationEvents.mockImplementation(async function* (_response: Response, signal?: AbortSignal) {
+      streamSignal = signal;
+      yield { type: 'started', id: 'conversation-cancelled' };
+      yield { type: 'delta', text: 'Working on it' };
+      await gate;
+    });
+    render(InvestigatePanel, { props: { ...props, conversationId: null } });
+    await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'Long question?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+    expect(await screen.findByText('Working on it')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(api.cancelInvestigation).toHaveBeenCalledWith('conversation-cancelled');
+    // The local stream stops before the server round trip, so the ending stream is never mistaken
+    // for the interruption that a stream closing without a done event otherwise reports.
+    expect(streamSignal?.aborted).toBe(true);
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Investigation cancelled.'));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+
+    // The cancelled stream ending later cannot turn the cancellation into an interruption.
+    release();
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Investigation cancelled.'));
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    api.continueInvestigation.mockResolvedValue(new Response());
+    api.readInvestigationEvents.mockReturnValue(events(
+      { type: 'started', id: 'conversation-cancelled' },
+      { type: 'done', text: 'Answer after cancelling', evidence: [] },
+    )());
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'Shorter question?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    expect(await screen.findByText('Answer after cancelling')).toBeTruthy();
+  });
+
+  it('lets a follow-up start while the previous stream drains and ignores its late events', async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    api.startInvestigation.mockResolvedValue(new Response());
+    api.continueInvestigation.mockResolvedValue(new Response());
+    api.readInvestigationEvents
+      .mockReturnValueOnce((async function* () {
+        yield { type: 'started', id: 'conversation-overlap' };
+        yield { type: 'done', text: 'First answer', evidence: [] };
+        await firstGate;
+        // A late frame from the abandoned stream, after the follow-up answered.
+        yield { type: 'delta', text: 'Stale text' };
+      })())
+      .mockReturnValueOnce((async function* () {
+        yield { type: 'started', id: 'conversation-overlap' };
+        yield { type: 'delta', text: 'Follow-up answer' };
+        await secondGate;
+        yield { type: 'done', text: 'Follow-up answer', evidence: [] };
+      })());
+    const onWorkingChanged = vi.fn();
+    const onConversationFinished = vi.fn();
+    render(InvestigatePanel, {
+      props: { ...props, conversationId: null, onWorkingChanged, onConversationFinished },
+    });
+    await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+    expect(await screen.findByText('First answer')).toBeTruthy();
+
+    // The follow-up starts while the first stream is still open, and shows itself as running.
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'When?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    expect(screen.getByText('When?')).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Investigating…'));
+
+    releaseFirst();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    // The older stream's closure and late frame leave the newer turn running and untouched.
+    expect(screen.queryByText(/Stale text/)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('Investigating…');
+    expect(screen.queryByText('Follow-up answer')).toBeTruthy();
+    // The old stream's closure reported no working change at all: the newer turn keeps its lock.
+    expect(onWorkingChanged.mock.calls.map((call) => call[0])).toEqual([true, false, true]);
+
+    releaseSecond();
+    await waitFor(() => expect(onConversationFinished).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    expect(screen.queryByText(/Stale text/)).toBeNull();
+    expect(screen.getByText('Follow-up answer')).toBeTruthy();
+    // Done released the turn; the stream closing afterwards repeats that release harmlessly.
+    expect(onWorkingChanged.mock.calls.map((call) => call[0])).toEqual([true, false, true, false, false]);
   });
 
   it('unlocks the panel at done while the stream is still draining', async () => {

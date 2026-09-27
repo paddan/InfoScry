@@ -3,8 +3,10 @@
 ## Current repository
 
 The backend, CLI, and reader-focused web UI exist. Browser acceptance for Ask
-and Investigate and the source-viewer finish line remain open; do not describe
-them as complete.
+and the source-viewer finish line remain open; do not describe them as complete.
+Investigate's browser flow is covered by the `externalTest` Playwright acceptance
+(`InvestigateBrowserAcceptanceTest`), which uses a local fake provider rather than
+a real provider or GPU.
 
 - Read [README.md](README.md) for current status.
 - Design specs live in `docs/specs/` and implementation tickets in

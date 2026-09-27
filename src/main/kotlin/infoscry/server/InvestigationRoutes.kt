@@ -139,7 +139,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
 
             val messages = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT role, content FROM messages WHERE conversation_id = ? AND role IN ('user', 'assistant') AND (role = 'user' OR content <> '') ORDER BY seq",
+                    "SELECT role, content FROM messages WHERE conversation_id = ? AND role IN ('user', 'assistant') AND (role = 'user' OR (content <> '' AND superseded = 0)) ORDER BY seq",
                 ).use { statement ->
                     statement.setString(1, conversationId)
                     statement.executeQuery().use { rows ->
@@ -323,7 +323,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
 
         override fun appendTurn(conversationId: String, snapshot: InvestigateTurnSnapshot) {
             snapshot.messages.forEach { (seq, message) ->
-                context.llm.persistInvestigateMessage(conversationId, seq, message)
+                context.llm.persistInvestigateMessage(conversationId, seq, message, superseded = seq in snapshot.supersededSeqs)
             }
             snapshot.modelCalls.forEach { call ->
                 val modelCallId = context.llm.persistInvestigateModelCall(
@@ -355,7 +355,9 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
                 context.llm.persistRequestOmissions(modelCallId, conversationId, call.omissionGroupLabels)
             }
             snapshot.evidenceEntries.forEach { entry ->
-                context.llm.persistEvidenceLedgerEntry(conversationId, entry.evidenceId, entry.sourceUnitId, entry.locatorJson, entry.excerpt)
+                context.llm.persistEvidenceLedgerEntry(
+                    conversationId, entry.evidenceId, entry.sourceUnitId, entry.locatorJson, entry.excerpt, entry.messageSeq,
+                )
             }
             snapshot.limitEvents.forEach { event ->
                 context.llm.persistLimitEvent(conversationId, event.eventType, event.message)

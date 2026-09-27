@@ -15,11 +15,16 @@ import infoscry.ask.Evidence
 import infoscry.ask.CitationValidation
 import infoscry.ask.CorrectionSnapshot
 import infoscry.domain.CollectionId
+import infoscry.investigate.EvidenceLedgerSnapshot
 import infoscry.investigate.InvestigateHistory
 import infoscry.llm.LlmMessage
 import infoscry.llm.ToolCall
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /** A profile name is already used (compared case-insensitively). */
 class DuplicateLlmProfileNameException(val name: String) :
@@ -532,16 +537,22 @@ class LlmStore(private val database: Database) {
         content: String,
     ): String = persistInvestigateMessage(conversationId, seq, LlmMessage(role, content))
 
-    fun persistInvestigateMessage(conversationId: String, seq: Int, message: LlmMessage): String {
+    fun persistInvestigateMessage(
+        conversationId: String,
+        seq: Int,
+        message: LlmMessage,
+        /** True for model output superseded by a corrected adopted answer; excluded from conversation views. */
+        superseded: Boolean = false,
+    ): String {
         val id = UUID.randomUUID().toString()
         database.transaction { connection ->
             connection.prepareStatement(
-                "INSERT INTO messages (id,conversation_id,seq,role,content,tool_calls_json,tool_call_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO messages (id,conversation_id,seq,role,content,tool_calls_json,tool_call_id,superseded,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             ).use { s ->
                 s.setString(1, id); s.setString(2, conversationId); s.setInt(3, seq)
                 s.setString(4, message.role); s.setString(5, message.content)
                 s.setString(6, message.toolCalls.takeIf { it.isNotEmpty() }?.let { Json.encodeToString(it) })
-                s.setString(7, message.toolCallId); s.setString(8, Instants.now())
+                s.setString(7, message.toolCallId); s.setInt(8, if (superseded) 1 else 0); s.setString(9, Instants.now())
                 s.executeUpdate()
             }
         }
@@ -608,14 +619,16 @@ class LlmStore(private val database: Database) {
         sourceUnitId: String,
         locatorJson: String,
         excerpt: String,
+        /** The seq of the assistant tool-call exchange that introduced this evidence; null for legacy rows. */
+        messageSeq: Int? = null,
     ) {
         database.transaction { connection ->
             connection.prepareStatement(
-                "INSERT INTO evidence_ledger (conversation_id,evidence_id,source_unit_id,locator_json,excerpt) VALUES (?,?,?,?,?)",
+                "INSERT INTO evidence_ledger (conversation_id,evidence_id,source_unit_id,locator_json,excerpt,message_seq) VALUES (?,?,?,?,?,?) ON CONFLICT(conversation_id,evidence_id) DO NOTHING",
             ).use { s ->
                 s.setString(1, conversationId); s.setString(2, evidenceId)
                 s.setString(3, sourceUnitId); s.setString(4, locatorJson)
-                s.setString(5, excerpt); s.executeUpdate()
+                s.setString(5, excerpt); setIntOrNull(s, 6, messageSeq); s.executeUpdate()
             }
         }
     }
@@ -730,8 +743,10 @@ class LlmStore(private val database: Database) {
             }
         } ?: return@read null
 
-        val storedMessages = connection.prepareStatement(
-            "SELECT role, content, tool_calls_json, tool_call_id FROM messages WHERE conversation_id = ? ORDER BY seq",
+        data class StoredMessage(val seq: Int, val message: LlmMessage, val superseded: Boolean)
+
+        val storedRows = connection.prepareStatement(
+            "SELECT seq, role, content, tool_calls_json, tool_call_id, superseded FROM messages WHERE conversation_id = ? ORDER BY seq",
         ).use { statement ->
             statement.setString(1, conversationId)
             statement.executeQuery().use { results ->
@@ -739,9 +754,13 @@ class LlmStore(private val database: Database) {
                     while (results.next()) {
                         val calls = results.getString("tool_calls_json")?.let { Json.decodeFromString<List<ToolCall>>(it) }
                             ?: emptyList()
-                        add(LlmMessage(
-                            results.getString("role"), results.getString("content"), calls,
-                            results.getString("tool_call_id"),
+                        add(StoredMessage(
+                            seq = results.getInt("seq"),
+                            message = LlmMessage(
+                                results.getString("role"), results.getString("content"), calls,
+                                results.getString("tool_call_id"),
+                            ),
+                            superseded = results.getInt("superseded") != 0,
                         ))
                     }
                 }
@@ -749,14 +768,28 @@ class LlmStore(private val database: Database) {
         }
         // Version 6 stored only role/content. Its tool exchange has no call IDs and cannot be
         // sent to either provider. Preserve the surrounding user and assistant turns instead.
-        val messages = storedMessages.filterIndexed { index, message ->
+        // A superseded draft answer is excluded from the provider view: only the adopted answer of
+        // each completed turn is replayed. Legacy rows default to not-superseded, so an ambiguous
+        // old duplicate pair stays visible rather than being silently collapsed.
+        val visibleMessages = storedRows.filterIndexed { index, row ->
+            val message = row.message
             val legacyTool = message.role == "tool" && message.toolCallId == null
             val legacyCall = message.role == "assistant" && message.content.isEmpty() &&
-                message.toolCalls.isEmpty() && storedMessages.getOrNull(index + 1)?.let {
+                message.toolCalls.isEmpty() && storedRows.getOrNull(index + 1)?.message?.let {
                     it.role == "tool" && it.toolCallId == null
                 } == true
-            !legacyTool && !legacyCall
+            !legacyTool && !legacyCall && !row.superseded
         }
+        val messages = visibleMessages.map { it.message }
+        val messageSeqs = visibleMessages.map { it.seq }
+        // Legacy rows written before migration 009 carry no introducing seq. Recover it from the
+        // visible tool result that names the evidence id, so a reopened pre-migration conversation
+        // keeps the same citation eligibility as one created after the migration. An entry whose
+        // tool exchange was dropped from provider history stays unassociated and ineligible.
+        val legacyEvidenceSeqs = visibleMessages
+            .filter { it.message.role == "tool" && it.message.toolCallId != null }
+            .flatMap { row -> evidenceIdsInPayload(row.message.content).map { it to row.seq } }
+            .toMap()
         val nextMessageSeq = connection.prepareStatement(
             "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE conversation_id = ?",
         ).use { statement ->
@@ -764,13 +797,31 @@ class LlmStore(private val database: Database) {
             statement.executeQuery().use { results -> results.next(); results.getInt(1) }
         }
 
-        val evidenceIds = connection.prepareStatement(
-            "SELECT evidence_id FROM evidence_ledger WHERE conversation_id = ? ORDER BY evidence_id",
+        val evidence = connection.prepareStatement(
+            "SELECT evidence_id, source_unit_id, locator_json, excerpt, message_seq FROM evidence_ledger WHERE conversation_id = ? ORDER BY evidence_id",
         ).use { statement ->
             statement.setString(1, conversationId)
             statement.executeQuery().use { results ->
-                buildList { while (results.next()) add(results.getString("evidence_id")) }
+                buildList {
+                    while (results.next()) {
+                        val rawMessageSeq = results.getInt("message_seq")
+                        val messageSeq = if (results.wasNull()) null else rawMessageSeq
+                        add(
+                            EvidenceLedgerSnapshot(
+                                evidenceId = results.getString("evidence_id"),
+                                sourceUnitId = results.getString("source_unit_id"),
+                                locatorJson = results.getString("locator_json"),
+                                excerpt = results.getString("excerpt"),
+                                messageSeq = messageSeq,
+                            ),
+                        )
+                    }
+                }
             }
+        }
+
+        val resolvedEvidence = evidence.map { entry ->
+            if (entry.messageSeq != null) entry else entry.copy(messageSeq = legacyEvidenceSeqs[entry.evidenceId])
         }
 
         InvestigateHistory(
@@ -784,7 +835,9 @@ class LlmStore(private val database: Database) {
             promptVersion = conversation.promptVersion,
             retrievalSnapshot = conversation.retrievalSnapshot,
             messages = messages,
-            evidenceIds = evidenceIds,
+            evidenceIds = resolvedEvidence.map { it.evidenceId },
+            evidence = resolvedEvidence,
+            messageSeqs = messageSeqs,
             nextMessageSeq = nextMessageSeq,
         )
     }
@@ -811,5 +864,31 @@ class LlmStore(private val database: Database) {
 
     private fun setLongOrNull(s: java.sql.PreparedStatement, idx: Int, value: Long?) {
         if (value != null) s.setLong(idx, value) else s.setNull(idx, java.sql.Types.BIGINT)
+    }
+
+    private fun setIntOrNull(s: java.sql.PreparedStatement, idx: Int, value: Int?) {
+        if (value != null) s.setInt(idx, value) else s.setNull(idx, java.sql.Types.INTEGER)
+    }
+
+    /**
+     * Every `evidenceId` string value in a tool payload, at any depth. Used only to recover the
+     * introducing exchange of legacy evidence rows that predate the durable `message_seq` column.
+     */
+    private fun evidenceIdsInPayload(content: String): List<String> = try {
+        collectEvidenceIds(Json.parseToJsonElement(content))
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    private fun collectEvidenceIds(element: JsonElement): List<String> = when (element) {
+        is JsonObject -> element.entries.flatMap { (key, value) ->
+            if (key == "evidenceId" && value is JsonPrimitive && value.isString) {
+                listOf(value.content)
+            } else {
+                collectEvidenceIds(value)
+            }
+        }
+        is JsonArray -> element.flatMap(::collectEvidenceIds)
+        else -> emptyList()
     }
 }

@@ -45,6 +45,14 @@ data class InvestigateHistory(
     val messages: List<LlmMessage>,
     /** Every evidence id already allocated in this conversation, e.g. ["S1","S2"]. */
     val evidenceIds: List<String>,
+    /**
+     * The complete retained evidence ledger, each entry carrying the durable seq of the assistant
+     * tool-call exchange that introduced it (null for legacy rows). Eligibility is derived from the
+     * groups that actually carry an entry into a request, never from ledger membership alone.
+     */
+    val evidence: List<EvidenceLedgerSnapshot> = emptyList(),
+    /** The durable seq of each entry in [messages]; empty when a caller builds a history without one. */
+    val messageSeqs: List<Int> = emptyList(),
     /** Next durable sequence, including legacy rows omitted from provider history. */
     val nextMessageSeq: Int = messages.size,
 )
@@ -104,6 +112,8 @@ data class InvestigateTurnSnapshot(
     val modelCalls: List<ModelCallSnapshot>,
     val evidenceEntries: List<EvidenceLedgerSnapshot>,
     val limitEvents: List<LimitEventSnapshot>,
+    /** Seqs of messages whose model output was superseded by a corrected adopted answer. */
+    val supersededSeqs: Set<Int> = emptySet(),
 )
 
 data class ModelCallSnapshot(
@@ -136,12 +146,21 @@ data class EvidenceLedgerSnapshot(
     val sourceUnitId: String,
     val locatorJson: String,
     val excerpt: String,
+    /** The seq of the assistant tool-call exchange that introduced this evidence; null for legacy rows. */
+    val messageSeq: Int? = null,
 )
 
 data class LimitEventSnapshot(
     val eventType: String,
     val message: String,
 )
+
+/**
+ * The unambiguous identity of one tool call for repeated-call admission: tool names and argument
+ * strings are distinct fields, so a malformed raw argument can never collide with a different
+ * name/argument split.
+ */
+private data class ToolCallKey(val name: String, val arguments: String)
 
 class InvestigationService(
     private val tools: InvestigationTools,
@@ -155,6 +174,11 @@ class InvestigationService(
      * request's [InvestigationLimits.maxTurnSeconds].
      */
     private val turnTimeoutMs: Long? = null,
+    /**
+     * Test seam: the provider inactivity cap in milliseconds. Production passes null so each turn
+     * uses [InvestigationTimeouts.PROVIDER_INACTIVITY_MS].
+     */
+    private val providerInactivityMs: Long? = null,
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
     fun investigate(request: InvestigateRequest): Flow<InvestigateEvent> = flow {
@@ -201,8 +225,13 @@ class InvestigationService(
         // be appended through the same path, with the typed limit event recorded last.
         val messageRecords = mutableListOf<Pair<Int, LlmMessage>>()
         val modelCalls = mutableListOf<ModelCallSnapshot>()
-        val evidenceEntries = mutableListOf<EvidenceLedgerSnapshot>()
+        // Retained evidence from earlier turns is restored in full, with the durable seq of the
+        // exchange that introduced it; only what survives request pruning is eligible for a new
+        // citation. Superseded drafts never enter the provider view (loadInvestigateHistory filters
+        // them), so their seqs never reappear here.
+        val evidenceEntries = (history?.evidence ?: emptyList()).toMutableList()
         val limitEvents = mutableListOf<LimitEventSnapshot>()
+        val supersededSeqs = mutableSetOf<Int>()
         var evidenceCounter = history
             ?.evidenceIds
             ?.mapNotNull { id -> id.removePrefix("S").toIntOrNull() }
@@ -222,6 +251,7 @@ class InvestigationService(
                 modelCalls = modelCalls.toList(),
                 evidenceEntries = evidenceEntries.toList(),
                 limitEvents = limitEvents.toList(),
+                supersededSeqs = supersededSeqs.toSet(),
             ))
             turnAppended = true
         }
@@ -238,6 +268,7 @@ class InvestigationService(
         // interrupted, and no native work is moved to arbitrary threads to fake a hard cancel. If
         // the total deadline is gone, the turn fails with a typed TURN_TIMEOUT and never emits Done.
         val turnBudgetMs = turnTimeoutMs ?: limits.maxTurnSeconds * 1_000L
+        val inactivityMs = providerInactivityMs ?: InvestigationTimeouts.PROVIDER_INACTIVITY_MS
         val turnDeadlineNanos = nanoTime() + turnBudgetMs * 1_000_000L
         val researchDeadlineNanos =
             turnDeadlineNanos - InvestigationTimeouts.researchReserveMs(turnBudgetMs) * 1_000_000L
@@ -245,15 +276,13 @@ class InvestigationService(
         /** True once the whole turn budget is gone: no provider or completion work may start then. */
         fun totalDeadlinePassed() = nanoTime() >= turnDeadlineNanos
 
-        /** The inactivity cap, shortened when a phase deadline has less time remaining. */
-        fun providerCallBudget(deadlineNanos: Long): Pair<Long, Boolean> {
-            val remainingNanos = deadlineNanos - nanoTime()
-            val inactivityNanos = InvestigationTimeouts.PROVIDER_INACTIVITY_MS * 1_000_000L
-            return minOf(
-                InvestigationTimeouts.PROVIDER_INACTIVITY_MS,
-                (remainingNanos / 1_000_000L).coerceAtLeast(1L),
-            ) to (remainingNanos <= inactivityNanos)
-        }
+        /** The inactivity cap for a non-streaming provider call, shortened by the applicable deadline. */
+        fun providerCallTimeoutMs(deadlineNanos: Long): Long =
+            minOf(inactivityMs, ((deadlineNanos - nanoTime()) / 1_000_000L).coerceAtLeast(1L))
+
+        /** True when [deadlineNanos] leaves no more than one inactivity interval, so a timeout means the deadline. */
+        fun deadlineWithinInactivity(deadlineNanos: Long): Boolean =
+            (deadlineNanos - nanoTime()) <= inactivityMs * 1_000_000L
 
         /** Records and emits the fatal TURN_TIMEOUT: the turn never emits Done after it. */
         suspend fun emitFatalTurnTimeout() {
@@ -279,28 +308,37 @@ class InvestigationService(
             messageRecords.add(seq++ to LlmMessage("system", systemPrompt))
 
             val seededGroups = mutableListOf<Pair<Int, Int>>()
-            val seededMessages = history?.messages?.filter { it.role != "system" }.orEmpty()
+            // The durable seq of every message in each seeded group, so retained evidence can be tied
+            // to the group that actually carried its introducing exchange into this request.
+            val seededGroupSeqs = mutableListOf<MutableSet<Int>>()
+            val seededMessages = history?.let { loaded ->
+                loaded.messages.mapIndexed { index, message -> (loaded.messageSeqs.getOrNull(index) ?: index) to message }
+            }.orEmpty().filter { it.second.role != "system" }
             var nextIndex = 1
             var i = 0
             while (i < seededMessages.size) {
-                val seeded = seededMessages[i]
+                val (seededSeq, seeded) = seededMessages[i]
                 if (seeded.role == "user") {
                     // A completed prior user turn: the question plus everything up to the next
                     // question, pruned as a whole so a tool exchange inside it stays intact.
                     val groupStart = nextIndex
+                    val groupSeqs = mutableSetOf(seededSeq)
                     conversationMessages.add(seeded)
                     nextIndex++
                     i++
-                    while (i < seededMessages.size && seededMessages[i].role != "user") {
-                        conversationMessages.add(seededMessages[i])
+                    while (i < seededMessages.size && seededMessages[i].second.role != "user") {
+                        groupSeqs.add(seededMessages[i].first)
+                        conversationMessages.add(seededMessages[i].second)
                         nextIndex++
                         i++
                     }
                     seededGroups.add(Pair(groupStart, nextIndex))
+                    seededGroupSeqs.add(groupSeqs)
                 } else {
                     // Defensive singleton for a malformed history; never splits a tool exchange.
                     conversationMessages.add(seeded)
                     seededGroups.add(Pair(nextIndex, nextIndex + 1))
+                    seededGroupSeqs.add(mutableSetOf(seededSeq))
                     nextIndex++
                     i++
                 }
@@ -314,13 +352,32 @@ class InvestigationService(
             messageRecords.add(seq++ to LlmMessage("user", request.question))
 
             // Evidence ids introduced by each completed exchange group, keyed by group index (2..).
-            // Lets per-request eligibility exclude the ids of groups that pruning omitted.
+            // Per-request eligibility is the union of the surviving groups' ids: an entry whose
+            // group was pruned, or that has no group at all (legacy/ledger-only), is ineligible.
             val groupEvidenceIds = mutableMapOf<Int, List<String>>()
+            val evidenceBySeq = history?.evidence.orEmpty().mapNotNull { entry ->
+                entry.messageSeq?.let { messageSeq -> messageSeq to entry.evidenceId }
+            }
+            seededGroups.forEachIndexed { seededIndex, _ ->
+                val groupIndex = 2 + seededIndex
+                val seqs = seededGroupSeqs[seededIndex]
+                groupEvidenceIds[groupIndex] = evidenceBySeq.filter { it.first in seqs }.map { it.second }
+            }
+
+            /** The evidence ids the request carrying [omittedGroupLabels] actually included. */
+            fun eligibleEvidenceIds(omittedGroupLabels: List<String>): Set<String> {
+                val omitted = omittedGroupLabels.mapNotNull { it.removePrefix("grp").toIntOrNull() }.toSet()
+                val eligible = mutableSetOf<String>()
+                groupEvidenceIds.forEach { (groupIndex, ids) ->
+                    if (groupIndex !in omitted) eligible.addAll(ids)
+                }
+                return eligible
+            }
 
             var roundCount = 0
             var totalToolCalls = 0
             var limitReached = false
-            val callArgumentsSeen = mutableSetOf<String>()
+            val callArgumentsSeen = mutableSetOf<ToolCallKey>()
             var totalInput = 0L
             var totalOutput = 0L
             var totalCache = 0L
@@ -363,6 +420,8 @@ class InvestigationService(
                 evidence: List<Evidence>,
                 modelCallUsage: TokenUsage?,
                 omissionGroupLabels: List<String>,
+                /** The seq of the draft answer message this call adopts or supersedes. */
+                draftSeq: Int,
             ) {
                 var currentAnswer = answer
                 var validation = CitationValidator().validate(currentAnswer, evidence)
@@ -400,41 +459,54 @@ class InvestigationService(
                             emitFatalTurnTimeout()
                             return
                         }
-                        val (correctionTimeoutMs, totalDeadlineBoundsCorrection) = providerCallBudget(turnDeadlineNanos)
+                        val correctionTimeoutMs = providerCallTimeoutMs(turnDeadlineNanos)
+                        val totalDeadlineBoundsCorrection = deadlineWithinInactivity(turnDeadlineNanos)
                         try {
                             val client = streamingClient(profile)
                             if (client !is LlmCompletionClient) throw IllegalStateException("provider cannot perform citation correction")
                             val correctionResult = kotlinx.coroutines.withTimeout(correctionTimeoutMs) {
                                 client.complete(correctionRequest)
                             }
-                            currentAnswer = correctionResult.text
                             totalInput += correctionResult.usage.inputTokens
                             totalOutput += correctionResult.usage.outputTokens
                             totalCache += correctionResult.usage.cacheReadTokens
                             totalCost += cost(profile, correctionResult.usage)
-                            messageRecords.add(seq++ to LlmMessage("assistant", currentAnswer))
+                            // A provider that returns no text corrected nothing: adopting an empty
+                            // answer would supersede the draft and, because reader history excludes
+                            // empty assistant messages, leave the turn with no visible answer.
+                            val correctionAdopted = correctionResult.text.isNotBlank()
                             val correctionCallSnapshot = ModelCallSnapshot(
                                 provider = profile.provider.name,
                                 endpoint = profile.endpoint.takeIf { it.isNotBlank() },
                                 model = profile.model,
                                 profileName = profile.name,
                                 promptVersion = lockedPromptVersion,
-                                status = "SUCCEEDED",
+                                status = if (correctionAdopted) "SUCCEEDED" else "FAILED",
                                 inputTokens = correctionResult.usage.inputTokens,
                                 outputTokens = correctionResult.usage.outputTokens,
                                 cacheReadTokens = correctionResult.usage.cacheReadTokens,
                                 costUsd = cost(profile, correctionResult.usage),
+                                errorCode = if (correctionAdopted) null else "EMPTY_CORRECTION",
                                 eligibilityEvidenceIds = evidence.map { it.id },
                                 omissionGroupLabels = emptyList(),
                             )
                             modelCalls.add(correctionCallSnapshot)
-                            validation = CitationValidator().validate(currentAnswer, evidence)
+                            if (correctionAdopted) {
+                                // The corrected answer replaces the streamed draft as the turn's
+                                // single adopted answer; the draft stays durable but is excluded from
+                                // the reader and provider conversation views as audit data.
+                                currentAnswer = correctionResult.text
+                                supersededSeqs.add(draftSeq)
+                                messageRecords.add(seq++ to LlmMessage("assistant", currentAnswer))
+                                validation = CitationValidator().validate(currentAnswer, evidence)
+                            }
                         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
                             if (totalDeadlineBoundsCorrection || totalDeadlinePassed()) {
                                 emitFatalTurnTimeout()
                                 return
                             }
-                            // Provider inactivity used up this correction call; keep the original answer.
+                            // Provider inactivity used up this correction call; keep the original answer
+                            // as the adopted one.
                         } catch (failure: kotlinx.coroutines.CancellationException) {
                             // An explicit cancellation is never swallowed as a correction failure.
                             throw failure
@@ -485,12 +557,12 @@ class InvestigationService(
                 emit(InvestigateEvent.AnswerStart)
 
                 val pruned = pruneToFit(profile, budget, conversationMessages.toList(), conversationGroups, tools.definitions, profile.maxOutputTokens)
-                val omittedEvidenceIds = pruned.omittedGroupIds
-                    .mapNotNull { label -> label.removePrefix("grp").toIntOrNull()?.let { gi -> groupEvidenceIds[gi] } }
-                    .flatten()
-                    .toSet()
+                // Eligibility is exactly the evidence the pruned request carried: the union of the
+                // surviving groups' ids. Dropped evidence stays in the ledger for older displayed
+                // citations but can justify no new one.
+                val eligible = eligibleEvidenceIds(pruned.omittedGroupIds)
                 val evidence = evidenceEntries
-                    .filter { it.evidenceId !in omittedEvidenceIds }
+                    .filter { it.evidenceId in eligible }
                     .map { entry ->
                         Evidence(
                             id = entry.evidenceId,
@@ -504,8 +576,9 @@ class InvestigationService(
                     }
 
                 if (evidence.isEmpty()) {
+                    val draftSeq = seq
                     messageRecords.add(seq++ to LlmMessage("assistant", NO_EVIDENCE_ANSWER))
-                    finalizeAnswer(NO_EVIDENCE_ANSWER, emptyList(), modelCallUsage = null, omissionGroupLabels = pruned.omittedGroupIds)
+                    finalizeAnswer(NO_EVIDENCE_ANSWER, emptyList(), modelCallUsage = null, omissionGroupLabels = pruned.omittedGroupIds, draftSeq = draftSeq)
                     return
                 }
 
@@ -529,21 +602,19 @@ class InvestigationService(
                     emitFatalTurnTimeout()
                     return
                 }
-                val (synthesisTimeoutMs, totalDeadlineBoundsSynthesis) = providerCallBudget(turnDeadlineNanos)
-                if (totalDeadlinePassed()) {
-                    emitFatalTurnTimeout()
-                    return
-                }
 
                 val answer = StringBuilder()
                 val returnedToolCalls = mutableListOf<infoscry.llm.ToolCall>()
                 var callUsage = TokenUsage(0, 0, 0)
                 try {
                     val client = streamingClient(profile)
-                    InvestigationTimeouts.collectWithProviderDeadline(
+                    when (InvestigationTimeouts.collectWithInactivityDeadline(
                         client.stream(request),
-                        // Synthesis spends the reserve, so it is bounded by the total deadline.
-                        timeoutMs = synthesisTimeoutMs,
+                        // Synthesis spends the reserve, so it is bounded by the total deadline; its
+                        // inactivity timer resets on every provider event.
+                        deadlineNanos = turnDeadlineNanos,
+                        inactivityMs = inactivityMs,
+                        nanoTime = nanoTime,
                     ) { event ->
                         when (event) {
                             is LlmEvent.TextDelta -> {
@@ -555,15 +626,18 @@ class InvestigationService(
                             is LlmEvent.Usage -> callUsage = callUsage + event.usage
                             is LlmEvent.Completed -> Unit
                         }
+                    }) {
+                        InvestigationTimeouts.ProviderCollectOutcome.Completed -> Unit
+                        InvestigationTimeouts.ProviderCollectOutcome.DeadlineExceeded -> {
+                            emitFatalTurnTimeout()
+                            return
+                        }
+                        InvestigationTimeouts.ProviderCollectOutcome.InactivityTimeout -> {
+                            limitEvents.add(LimitEventSnapshot("PROVIDER_TIMEOUT", "provider did not produce an event in time"))
+                            emit(InvestigateEvent.Error("PROVIDER_TIMEOUT", "Provider did not produce an event in time"))
+                            return
+                        }
                     }
-                } catch (failure: kotlinx.coroutines.TimeoutCancellationException) {
-                    if (totalDeadlinePassed() || totalDeadlineBoundsSynthesis) {
-                        emitFatalTurnTimeout()
-                    } else {
-                        limitEvents.add(LimitEventSnapshot("PROVIDER_TIMEOUT", "provider did not produce an event in time"))
-                        emit(InvestigateEvent.Error("PROVIDER_TIMEOUT", "Provider did not produce an event in time"))
-                    }
-                    return
                 } catch (failure: LlmError) {
                     modelCalls.add(synthesisModelCall(
                         status = "FAILED",
@@ -595,8 +669,9 @@ class InvestigationService(
                     return
                 }
 
+                val draftSeq = seq
                 messageRecords.add(seq++ to LlmMessage("assistant", answer.toString()))
-                finalizeAnswer(answer.toString(), evidence, callUsage, pruned.omittedGroupIds)
+                finalizeAnswer(answer.toString(), evidence, callUsage, pruned.omittedGroupIds, draftSeq)
             }
 
             while (true) {
@@ -635,12 +710,10 @@ class InvestigationService(
                     synthesizeFromEvidence("TURN_TIMEOUT", "Research time is up; preparing an answer from collected sources.")
                     break
                 }
-                val researchCallTimeoutMs = minOf(
-                    InvestigationTimeouts.PROVIDER_INACTIVITY_MS,
-                    (researchRemainingNanos / 1_000_000L).coerceAtLeast(1L),
-                )
-                val researchDeadlineBoundsCall =
-                    researchRemainingNanos <= InvestigationTimeouts.PROVIDER_INACTIVITY_MS * 1_000_000L
+                // The evidence this round's request actually carried: the surviving groups as they
+                // stood before this round's new evidence exists. A citation may use only what it was
+                // given, so the model-call record uses this very set.
+                val requestEligibleIds = eligibleEvidenceIds(omittedGroups)
 
                 val answer = StringBuilder()
                 val toolCalls = mutableListOf<infoscry.llm.ToolCall>()
@@ -649,11 +722,13 @@ class InvestigationService(
 
                 try {
                     val client = streamingClient(profile)
-                    InvestigationTimeouts.collectWithProviderDeadline(
+                    val outcome = InvestigationTimeouts.collectWithInactivityDeadline(
                         client.stream(candidateRequest),
                         // Research may only use the time left before its own deadline; the reserve is
-                        // never spent on another round.
-                        timeoutMs = researchCallTimeoutMs,
+                        // never spent on another round. Its inactivity timer resets on every event.
+                        deadlineNanos = researchDeadlineNanos,
+                        inactivityMs = inactivityMs,
+                        nanoTime = nanoTime,
                     ) { event ->
                         when (event) {
                             is LlmEvent.TextDelta -> {
@@ -667,28 +742,35 @@ class InvestigationService(
                             is LlmEvent.Completed -> Unit
                         }
                     }
-                } catch (failure: kotlinx.coroutines.TimeoutCancellationException) {
-                    callFailed = true
-                    totalInput += callUsage.inputTokens
-                    totalOutput += callUsage.outputTokens
-                    totalCache += callUsage.cacheReadTokens
-                    totalCost += cost(profile, callUsage)
-                    val totalExpired = totalDeadlinePassed()
-                    val researchExpired = researchDeadlineBoundsCall || nanoTime() >= researchDeadlineNanos
-                    val timeoutCode = if (totalExpired || researchExpired) "TURN_TIMEOUT" else "PROVIDER_TIMEOUT"
-                    modelCalls.add(synthesisModelCall(
-                        status = "FAILED",
-                        usage = callUsage,
-                        errorCode = timeoutCode,
-                        eligibleEvidenceIds = evidenceEntries.map { it.evidenceId },
-                        omissionGroupLabels = omittedGroups,
-                    ))
-                    when {
-                        totalExpired -> emitFatalTurnTimeout()
-                        researchExpired -> synthesizeFromEvidence("TURN_TIMEOUT", "Research time is up; preparing an answer from collected sources.")
-                        else -> {
-                            limitEvents.add(LimitEventSnapshot("PROVIDER_TIMEOUT", "provider did not produce an event in time"))
-                            emit(InvestigateEvent.Error("PROVIDER_TIMEOUT", "Provider did not produce an event in time"))
+                    if (outcome != InvestigationTimeouts.ProviderCollectOutcome.Completed) {
+                        callFailed = true
+                        totalInput += callUsage.inputTokens
+                        totalOutput += callUsage.outputTokens
+                        totalCache += callUsage.cacheReadTokens
+                        totalCost += cost(profile, callUsage)
+                        modelCalls.add(synthesisModelCall(
+                            status = "FAILED",
+                            usage = callUsage,
+                            errorCode = when (outcome) {
+                                InvestigationTimeouts.ProviderCollectOutcome.InactivityTimeout -> "PROVIDER_TIMEOUT"
+                                else -> "TURN_TIMEOUT"
+                            },
+                            eligibleEvidenceIds = requestEligibleIds.toList(),
+                            omissionGroupLabels = omittedGroups,
+                        ))
+                        when (outcome) {
+                            InvestigationTimeouts.ProviderCollectOutcome.Completed -> Unit
+                            InvestigationTimeouts.ProviderCollectOutcome.DeadlineExceeded -> {
+                                if (totalDeadlinePassed()) {
+                                    emitFatalTurnTimeout()
+                                } else {
+                                    synthesizeFromEvidence("TURN_TIMEOUT", "Research time is up; preparing an answer from collected sources.")
+                                }
+                            }
+                            InvestigationTimeouts.ProviderCollectOutcome.InactivityTimeout -> {
+                                limitEvents.add(LimitEventSnapshot("PROVIDER_TIMEOUT", "provider did not produce an event in time"))
+                                emit(InvestigateEvent.Error("PROVIDER_TIMEOUT", "Provider did not produce an event in time"))
+                            }
                         }
                     }
                 } catch (failure: LlmError) {
@@ -722,15 +804,12 @@ class InvestigationService(
 
                 // No tool calls => final answer
                 if (toolCalls.isEmpty()) {
+                    val draftSeq = seq
                     messageRecords.add(seq++ to LlmMessage("assistant", answer.toString()))
                     conversationMessages.add(LlmMessage("assistant", answer.toString()))
 
-                    val omittedEvidenceIds = pruned.omittedGroupIds
-                        .mapNotNull { label -> label.removePrefix("grp").toIntOrNull()?.let { gi -> groupEvidenceIds[gi] } }
-                        .flatten()
-                        .toSet()
-                    val eligibleEntries = evidenceEntries.filter { it.evidenceId !in omittedEvidenceIds }
-                    val evidence = eligibleEntries.mapIndexed { _, entry ->
+                    val eligibleEntries = evidenceEntries.filter { it.evidenceId in requestEligibleIds }
+                    val evidence = eligibleEntries.map { entry ->
                         Evidence(
                             id = entry.evidenceId,
                             collectionId = collectionId.value,
@@ -742,7 +821,7 @@ class InvestigationService(
                         )
                     }
 
-                    finalizeAnswer(answer.toString(), evidence, callUsage, omittedGroups.toList())
+                    finalizeAnswer(answer.toString(), evidence, callUsage, omittedGroups.toList(), draftSeq)
                     break
                 }
 
@@ -751,6 +830,9 @@ class InvestigationService(
                 val toolCallSnapshots = mutableListOf<ToolCallSnapshot>()
                 val toolResultMessages = mutableListOf<LlmMessage>()
                 val roundEvidenceIds = mutableListOf<String>()
+                // New ledger entries wait here until the exchange's seq is known, then get stamped
+                // with it so a later turn can associate them with this group.
+                val roundEvidenceSnapshots = mutableListOf<EvidenceLedgerSnapshot>()
 
                 // The research stop this batch trips, if any: a repeated call or the call cap refuses
                 // the rest of the batch and ends research, and the turn then answers from its evidence.
@@ -779,7 +861,12 @@ class InvestigationService(
                         researchStopCode = "TURN_TIMEOUT"
                     }
 
-                    val callKey = "${tc.name}:${tc.arguments}"
+                    // Equivalent calls are compared by tool name and canonical parsed JSON
+                    // arguments: whitespace and object-key order are ignored, while array order,
+                    // value types, and distinct values are preserved. The structured key keeps a
+                    // malformed raw argument from colliding with a different name/argument split,
+                    // and malformed arguments keep their typed tool failure.
+                    val callKey = ToolCallKey(tc.name, canonicalToolArguments(tc.arguments))
                     val refusal = when {
                         researchStopCode != null -> "research already stopped after $researchStopCode"
                         callKey in callArgumentsSeen -> {
@@ -846,7 +933,7 @@ class InvestigationService(
                     if (result is ToolResult.Success && result.evidence.isNotEmpty()) {
                         result.evidence.forEach { ev ->
                             val locatorJson = kotlinx.serialization.json.Json.encodeToString(ev.locator)
-                            evidenceEntries.add(EvidenceLedgerSnapshot(
+                            roundEvidenceSnapshots.add(EvidenceLedgerSnapshot(
                                 evidenceId = ev.evidenceId,
                                 sourceUnitId = ev.sourceUnitId,
                                 locatorJson = locatorJson,
@@ -862,19 +949,19 @@ class InvestigationService(
                 if (toolCalls.isNotEmpty()) {
                     val assistantToolMsg = LlmMessage("assistant", "", toolCalls = toolCalls.toList())
                     val exchangeStart = conversationMessages.size
+                    val exchangeSeq = seq
                     conversationMessages.add(assistantToolMsg)
                     messageRecords.add(seq++ to assistantToolMsg)
                     conversationMessages.addAll(toolResultMessages)
                     conversationGroups.add(Pair(exchangeStart, conversationMessages.size))
                     groupEvidenceIds[conversationGroups.size - 1] = roundEvidenceIds.toList()
+                    // Stamp the round's new evidence with the exchange that introduced it, so a later
+                    // turn can map it to this group and exclude it when pruning drops the group.
+                    roundEvidenceSnapshots.forEach { evidenceEntries.add(it.copy(messageSeq = exchangeSeq)) }
                     toolResultMessages.forEach { msg ->
                         messageRecords.add(seq++ to msg)
                     }
 
-                    val omittedEvidenceIds = pruned.omittedGroupIds
-                        .mapNotNull { label -> label.removePrefix("grp").toIntOrNull()?.let { gi -> groupEvidenceIds[gi] } }
-                        .flatten()
-                        .toSet()
                     modelCalls.add(ModelCallSnapshot(
                         provider = profile.provider.name,
                         endpoint = profile.endpoint.takeIf { it.isNotBlank() },
@@ -887,7 +974,7 @@ class InvestigationService(
                         cacheReadTokens = callUsage.cacheReadTokens,
                         costUsd = cost(profile, callUsage),
                         toolCalls = toolCallSnapshots.toList(),
-                        eligibilityEvidenceIds = evidenceEntries.filter { it.evidenceId !in omittedEvidenceIds }.map { it.evidenceId },
+                        eligibilityEvidenceIds = requestEligibleIds.toList(),
                         omissionGroupLabels = omittedGroups.toList(),
                     ))
                 }

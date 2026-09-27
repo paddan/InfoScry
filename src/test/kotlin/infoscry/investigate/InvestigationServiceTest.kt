@@ -81,6 +81,8 @@ class InvestigationServiceTest {
         // Null keeps the production path: the turn budget comes from the request's limits. Tests that
         // need a fixed clock-pinned budget pass an explicit override here.
         turnTimeoutMs: Long? = null,
+        // Null keeps the production inactivity cap; a deterministic test injects a short one.
+        providerInactivityMs: Long? = null,
         nanoTime: () -> Long = System::nanoTime,
     ) = InvestigationService(
         tools,
@@ -89,6 +91,7 @@ class InvestigationServiceTest {
         streamingClient = { provider },
         persistence = persistence,
         turnTimeoutMs = turnTimeoutMs,
+        providerInactivityMs = providerInactivityMs,
         nanoTime = nanoTime,
     )
 
@@ -645,21 +648,23 @@ class InvestigationServiceTest {
 
     @Test
     fun `a round-limited turn with no evidence answers honestly without a provider call`() = runBlocking {
+        // The boundary is the submitted round limit, not the shipped default.
+        val rounds = 2
         val provider = PerRoundProvider(
-            (1..InvestigationService.MAX_ROUNDS).map { round ->
+            (1..rounds).map { round ->
                 listOf(LlmEvent.ToolCallReady(infoscry.llm.ToolCall("c$round", "search_collection", """{"query":"q$round"}""")), LlmEvent.Completed)
             },
         )
         val persistence = FakePersistence()
 
         val events = service(tools(CollectionId("collection")), provider, persistence = persistence)
-            .investigate(request().copy(limits = roundCapLimits()))
+            .investigate(request().copy(limits = roundLimit(rounds)))
             .toList()
 
         assertEquals(
-            InvestigationService.MAX_ROUNDS,
+            rounds,
             provider.streamRequests.size,
-            "a no-evidence answer must not call the provider; a synthesis request would be stream call ${InvestigationService.MAX_ROUNDS + 1}",
+            "a no-evidence answer must not call the provider; a synthesis request would be stream call ${rounds + 1}",
         )
         assertTrue(events.none { it is InvestigateEvent.Error }, "a no-evidence answer is not a fatal turn: ${labels(events)}")
         val done = events.filterIsInstance<InvestigateEvent.Done>().single()
@@ -673,7 +678,7 @@ class InvestigationServiceTest {
 
         val snapshot = persistence.appended.single().second
         assertTrue(snapshot.limitEvents.any { it.eventType == "MAX_ROUNDS" }, "the limit reason must be durable: ${snapshot.limitEvents}")
-        assertEquals(InvestigationService.MAX_ROUNDS, snapshot.modelCalls.size, "the local answer must add no model call")
+        assertEquals(rounds, snapshot.modelCalls.size, "the local answer must add no model call")
         assertTrue(
             snapshot.messages.any { it.second.role == "assistant" && it.second.content == done.answer },
             "the no-evidence answer must be persisted",
@@ -685,8 +690,10 @@ class InvestigationServiceTest {
         val collection = CollectionStore(database).create("Synthesis tool collection").id
         val documentId = insertDocument(collection)
         val unitId = addUnit(documentId, ordinal = 0, "synthesis-tool-unit", "Only this source exists.")
+        // An explicit small round limit: the boundary is submitted, not inherited from the defaults.
+        val rounds = 2
         val provider = PerRoundProvider(
-            researchRoundsToTheCap(unitId) + listOf(
+            researchRoundsToTheCap(unitId, rounds) + listOf(
                 listOf(
                     LlmEvent.ToolCallReady(infoscry.llm.ToolCall("sneaky", "read_content_unit", """{"contentUnitId":"${unitId.value}"}""")),
                     LlmEvent.Completed,
@@ -696,13 +703,13 @@ class InvestigationServiceTest {
         val persistence = FakePersistence()
 
         val events = service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "question", profile(), limits = roundCapLimits()))
+            .investigate(InvestigateRequest(collection, "question", profile(), limits = roundLimit(rounds)))
             .toList()
 
         assertEquals("SYNTHESIS_TOOL_CALL", assertIs<InvestigateEvent.Error>(events.last()).code)
-        assertEquals(InvestigationService.MAX_ROUNDS + 1, provider.streamRequests.size)
+        assertEquals(rounds + 1, provider.streamRequests.size)
         assertEquals(
-            InvestigationService.MAX_ROUNDS,
+            rounds,
             events.filterIsInstance<InvestigateEvent.ToolResult>().size,
             "a tool returned by synthesis must never be executed",
         )
@@ -722,19 +729,21 @@ class InvestigationServiceTest {
         val collection = CollectionStore(database).create("Synthesis failure collection").id
         val documentId = insertDocument(collection)
         val unitId = addUnit(documentId, ordinal = 0, "synthesis-failure-unit", "Only this source exists.")
+        // An explicit small round limit: the boundary is submitted, not inherited from the defaults.
+        val rounds = 2
         val provider = PerRoundProvider(
-            researchRoundsToTheCap(unitId),
+            researchRoundsToTheCap(unitId, rounds),
             afterScript = infoscry.llm.LlmError.ProviderUnavailableError("synthesis is down"),
         )
         val persistence = FakePersistence()
 
         val events = service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "question", profile(), limits = roundCapLimits()))
+            .investigate(InvestigateRequest(collection, "question", profile(), limits = roundLimit(rounds)))
             .toList()
 
         assertEquals("LLM_REQUEST_FAILED", assertIs<InvestigateEvent.Error>(events.last()).code)
         assertTrue(events.none { it is InvestigateEvent.Done }, "a failed synthesis must not report a successful answer")
-        assertEquals(InvestigationService.MAX_ROUNDS + 1, provider.streamRequests.size)
+        assertEquals(rounds + 1, provider.streamRequests.size)
         assertTrue(provider.streamRequests.last().tools.isEmpty(), "the failed call must have been the tool-free synthesis request")
         assertEquals(
             "FAILED",
@@ -766,6 +775,8 @@ class InvestigationServiceTest {
      * The default round cap with the call cap raised out of its way. The shipped defaults are equal, so
      * a turn that spends one call per round reaches both caps in the same round and the call cap is what
      * stops research; a round-cap scenario needs room above [InvestigationService.MAX_ROUNDS] calls.
+     * Only the default-cap assertion below may use this; a specific-boundary test submits [roundLimit]
+     * so a shipped-default change cannot silently move its boundary.
      */
     private fun roundCapLimits() = InvestigationLimits(
         maxToolRounds = InvestigationService.MAX_ROUNDS,
@@ -773,21 +784,26 @@ class InvestigationServiceTest {
     )
 
     /**
-     * [InvestigationService.MAX_ROUNDS] tool rounds: distinct searches that reach the round cap without
-     * tripping the repeat guard, and the evidence read last. The read is last on purpose: at the default
-     * context window a fifty-exchange transcript prunes its oldest groups out of the synthesis request,
-     * so evidence read in the first round would be gone by the time research stops. The pruned-evidence
-     * path is covered on its own by `synthesis only validates citations for evidence surviving request
-     * pruning`.
+     * The explicit small round cap a boundary test submits, with a call allowance above it so only the
+     * round limit — never the shipped [InvestigationLimits] defaults — can stop research.
      */
-    private fun researchRoundsToTheCap(contentUnitId: ContentUnitId): List<List<LlmEvent>> =
-        (1 until InvestigationService.MAX_ROUNDS).map { round ->
+    private fun roundLimit(rounds: Int) = InvestigationLimits(maxToolRounds = rounds, maxToolCalls = rounds * 2)
+
+    /**
+     * [rounds] tool rounds: distinct searches that reach the round cap without tripping the repeat guard,
+     * and the evidence read last. The read is last on purpose: the shipped default of fifty rounds builds a
+     * fifty-exchange transcript that prunes its oldest groups out of the synthesis request, so evidence read
+     * in the first round would be gone by the time research stops. The pruned-evidence path is covered on its
+     * own by `synthesis only validates citations for evidence surviving request pruning`.
+     */
+    private fun researchRoundsToTheCap(contentUnitId: ContentUnitId, rounds: Int = InvestigationService.MAX_ROUNDS): List<List<LlmEvent>> =
+        (1 until rounds).map { round ->
             listOf(LlmEvent.ToolCallReady(infoscry.llm.ToolCall("c$round", "search_collection", """{"query":"q$round"}""")), LlmEvent.Completed)
         } + listOf(
             listOf(
                 LlmEvent.ToolCallReady(
                     infoscry.llm.ToolCall(
-                        "c${InvestigationService.MAX_ROUNDS}",
+                        "c$rounds",
                         "read_content_unit",
                         """{"contentUnitId":"${contentUnitId.value}"}""",
                     ),
@@ -1260,6 +1276,260 @@ class InvestigationServiceTest {
         assertEquals(2, timeEvents.size, "the research cutoff and correction timeout are both durable")
     }
 
+    @Test
+    fun `a follow-up cites retained historical evidence without researching or correcting`() = runBlocking {
+        val collection = CollectionId("collection")
+        val history = InvestigateHistory(
+            collectionId = collection,
+            profile = profile(),
+            promptVersion = 1,
+            retrievalSnapshot = RetrievalSnapshot.value(),
+            messages = listOf(
+                LlmMessage("user", "first question"),
+                LlmMessage("assistant", "", toolCalls = listOf(infoscry.llm.ToolCall("c1", "search_collection", """{"query":"x"}"""))),
+                LlmMessage("tool", "result", toolCallId = "c1"),
+                LlmMessage("assistant", "First answer [S1]"),
+            ),
+            evidenceIds = listOf("S1"),
+            evidence = listOf(EvidenceLedgerSnapshot("S1", "unit-1", """{"type":"pdf_page","page":4}""", "The meeting began at noon.", messageSeq = 1)),
+            messageSeqs = listOf(0, 1, 2, 3),
+            nextMessageSeq = 4,
+        )
+        val provider = ScriptedProvider(
+            LlmEvent.TextDelta("It began at noon [S1]."),
+            LlmEvent.Usage(TokenUsage(1L, 1L)),
+            LlmEvent.Completed,
+        )
+        val persistence = FakePersistence(mapOf("conv-1" to history))
+
+        val events = service(tools(collection), provider, persistence = persistence)
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), conversationId = "conv-1"))
+            .toList()
+
+        assertEquals(1, provider.streamRequests.size, "a retained-evidence follow-up must not research again")
+        assertTrue(provider.completionRequests.isEmpty(), "a valid retained citation must not trigger correction")
+        assertTrue(
+            events.filterIsInstance<InvestigateEvent.Citation>().any { it.evidenceId == "S1" && it.valid },
+            "the retained source must be citable, got ${events.filterIsInstance<InvestigateEvent.Citation>()}",
+        )
+        assertEquals(listOf("S1"), assertIs<InvestigateEvent.Done>(events.last()).evidence.map { it.id })
+    }
+
+    @Test
+    fun `a pruned historical group makes its retained evidence ineligible`() = runBlocking {
+        val collection = CollectionId("collection")
+        val padding = "x".repeat(8_000)
+        val history = InvestigateHistory(
+            collectionId = collection,
+            profile = profile(contextWindow = 6_000),
+            promptVersion = 1,
+            retrievalSnapshot = RetrievalSnapshot.value(),
+            messages = listOf(
+                LlmMessage("user", "prior question $padding"),
+                LlmMessage("assistant", "", toolCalls = listOf(infoscry.llm.ToolCall("c1", "search_collection", """{"query":"y"}"""))),
+                LlmMessage("tool", padding, toolCallId = "c1"),
+                LlmMessage("assistant", "prior answer"),
+            ),
+            evidenceIds = listOf("S1"),
+            evidence = listOf(EvidenceLedgerSnapshot("S1", "unit-1", """{"type":"pdf_page","page":4}""", "retained excerpt", messageSeq = 1)),
+            messageSeqs = listOf(0, 1, 2, 3),
+            nextMessageSeq = 4,
+        )
+        val provider = ScriptedProvider(
+            LlmEvent.TextDelta("cites [S1]"),
+            LlmEvent.Usage(TokenUsage(1L, 1L)),
+            LlmEvent.Completed,
+            completion = LlmCompletion("still [S1]", TokenUsage(0, 0)),
+        )
+
+        val events = service(tools(collection), provider, persistence = FakePersistence(mapOf("conv-1" to history)))
+            .investigate(InvestigateRequest(collection, "And?", profile(contextWindow = 6_000), conversationId = "conv-1"))
+            .toList()
+
+        assertTrue(
+            provider.streamRequests.first().messages.none { it.content.contains("prior question") },
+            "the oversized prior group must be pruned from the request",
+        )
+        assertTrue(
+            events.filterIsInstance<InvestigateEvent.Citation>().any { it.evidenceId == "S1" && !it.valid },
+            "evidence whose group was pruned must be ineligible, got ${events.filterIsInstance<InvestigateEvent.Citation>()}",
+        )
+        assertTrue(
+            provider.completionRequests.single().messages.first().content.let { !it.contains("S1") },
+            "correction must not re-authorize pruned evidence",
+        )
+        assertTrue(events.filterIsInstance<InvestigateEvent.Done>().single().evidence.isEmpty())
+    }
+
+    @Test
+    fun `a corrected answer supersedes its draft as the single adopted answer`() = runBlocking {
+        val collection = CollectionStore(database).create("Adoption collection").id
+        val documentId = insertDocument(collection)
+        val unitId = addUnit(documentId, 0, "adoption-source", "The meeting began at noon.")
+        val provider = PerRoundProvider(
+            listOf(
+                listOf(LlmEvent.ToolCallReady(infoscry.llm.ToolCall("c1", "read_content_unit", """{"contentUnitId":"${unitId.value}"}""")), LlmEvent.Completed),
+                listOf(LlmEvent.TextDelta("draft cites [S9]"), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed),
+            ),
+            completion = LlmCompletion("corrected cites [S1]", TokenUsage(0, 0)),
+        )
+        val persistence = FakePersistence()
+
+        service(tools(collection), provider, persistence = persistence)
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile()))
+            .toList()
+
+        val snapshot = persistence.appended.single().second
+        val assistantMessages = snapshot.messages.filter { it.second.role == "assistant" }.map { it.first to it.second.content }
+        val draftSeq = assistantMessages.first { it.second == "draft cites [S9]" }.first
+        val adoptedSeq = assistantMessages.first { it.second == "corrected cites [S1]" }.first
+        assertEquals(1, provider.completionRequests.size, "exactly one correction attempt")
+        assertTrue(draftSeq in snapshot.supersededSeqs, "the superseded draft must be marked as audit data")
+        assertFalse(adoptedSeq in snapshot.supersededSeqs, "the corrected answer is the adopted one")
+    }
+
+    @Test
+    fun `an empty correction keeps the draft as the adopted answer`() = runBlocking {
+        val collection = CollectionStore(database).create("Empty correction collection").id
+        val documentId = insertDocument(collection)
+        val unitId = addUnit(documentId, 0, "empty-correction-source", "The meeting began at noon.")
+        val provider = PerRoundProvider(
+            listOf(
+                listOf(LlmEvent.ToolCallReady(infoscry.llm.ToolCall("c1", "read_content_unit", """{"contentUnitId":"${unitId.value}"}""")), LlmEvent.Completed),
+                listOf(LlmEvent.TextDelta("draft cites [S9]"), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed),
+            ),
+            completion = LlmCompletion("", TokenUsage(2, 2)),
+        )
+        val persistence = FakePersistence()
+
+        val events = service(tools(collection), provider, persistence = persistence)
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile()))
+            .toList()
+
+        val snapshot = persistence.appended.single().second
+        assertTrue(snapshot.supersededSeqs.isEmpty(), "an empty correction must not supersede the draft")
+        assertTrue(
+            snapshot.messages.any { it.second.role == "assistant" && it.second.content == "draft cites [S9]" },
+            "the draft must stay the adopted answer",
+        )
+        assertEquals("draft cites [S9]", assertIs<InvestigateEvent.Done>(events.last()).answer)
+    }
+
+    @Test
+    fun `repeated malformed arguments are refused while the first keeps its typed failure`() = runBlocking {
+        val provider = PerRoundProvider(
+            listOf(
+                listOf(LlmEvent.ToolCallReady(infoscry.llm.ToolCall("first", "search_collection", "not json")), LlmEvent.Completed),
+                listOf(LlmEvent.ToolCallReady(infoscry.llm.ToolCall("repeat", "search_collection", "not json")), LlmEvent.Completed),
+            ),
+        )
+
+        val events = service(tools(CollectionId("collection")), provider).investigate(request()).toList()
+
+        val results = events.filterIsInstance<InvestigateEvent.ToolResult>()
+        val first = results.first { it.callId == "first" }
+        assertTrue(first.resultCode != "SUCCESS" && first.resultCode != "LIMIT_REACHED", "the first malformed call keeps its typed failure, was ${first.resultCode}")
+        assertEquals("LIMIT_REACHED", results.first { it.callId == "repeat" }.resultCode)
+        assertTrue(events.filterIsInstance<InvestigateEvent.Limit>().any { it.code == "REPEATED_TOOL_CALL" })
+    }
+
+    @Test
+    fun `an active stream outlives one inactivity interval within the turn budget`() = runBlocking {
+        val provider = PacedProvider(
+            listOf(LlmEvent.TextDelta("part one "), LlmEvent.TextDelta("part two "), LlmEvent.TextDelta("part three"), LlmEvent.Usage(TokenUsage(3, 3)), LlmEvent.Completed),
+            gapMs = 40,
+        )
+        // Four gaps of 40 ms exceed one 60 ms inactivity interval, but each gap is under it.
+        val sv = service(tools(CollectionId("collection")), provider, providerInactivityMs = 60)
+
+        val events = sv.investigate(request()).toList()
+
+        assertTrue(events.none { it is InvestigateEvent.Error }, "an active stream must not be treated as inactive, got $events")
+        assertEquals("part one part two part three", assertIs<InvestigateEvent.Done>(events.last()).answer)
+    }
+
+    @Test
+    fun `a silent provider reports inactivity rather than a total-deadline failure`() = runBlocking {
+        val provider = SuspendingProvider()
+        val sv = service(tools(CollectionId("collection")), provider, providerInactivityMs = 60)
+
+        val events = sv.investigate(request()).toList()
+
+        assertEquals("PROVIDER_TIMEOUT", events.filterIsInstance<InvestigateEvent.Error>().single().code)
+        assertTrue(events.none { it is InvestigateEvent.Done })
+    }
+
+    @Test
+    fun `continuous progress cannot extend the total turn budget`() = runBlocking {
+        val provider = PacedProvider(
+            (1..20).map { LlmEvent.TextDelta("chunk $it ") } + listOf(LlmEvent.Usage(TokenUsage(1, 1)), LlmEvent.Completed),
+            gapMs = 40,
+        )
+        val sv = service(tools(CollectionId("collection")), provider, turnTimeoutMs = 120, providerInactivityMs = 60)
+
+        val events = sv.investigate(request()).toList()
+
+        // Continuous provider activity resets the inactivity timer, so the end is the fixed absolute
+        // deadline, not a provider timeout. The turn ends with a TURN_TIMEOUT outcome and never
+        // completes the provider's full research script.
+        assertTrue(
+            events.any { it is InvestigateEvent.Error && it.code == "TURN_TIMEOUT" } ||
+                events.any { it is InvestigateEvent.Limit && it.code == "TURN_TIMEOUT" },
+            "a bounded turn must report TURN_TIMEOUT, got $events",
+        )
+        events.filterIsInstance<InvestigateEvent.Done>().forEach { done ->
+            assertFalse(done.answer.contains("chunk"), "continuous progress must not extend the budget into a full answer")
+        }
+    }
+
+    @Test
+    fun `equivalent repeated calls with reordered keys and whitespace are refused`() = runBlocking {
+        val provider = PerRoundProvider(
+            listOf(
+                listOf(
+                    LlmEvent.ToolCallReady(infoscry.llm.ToolCall("first", "search_collection", """{"query":"x","filters":{"ocrOnly":true,"mediaTypes":["pdf"]}}""")),
+                    LlmEvent.Completed,
+                ),
+                listOf(
+                    LlmEvent.ToolCallReady(infoscry.llm.ToolCall("repeat", "search_collection", """{ "filters" : { "mediaTypes" : ["pdf"], "ocrOnly" : true }, "query" : "x" }""")),
+                    LlmEvent.Completed,
+                ),
+            ),
+        )
+
+        val events = service(tools(CollectionId("collection")), provider).investigate(request()).toList()
+
+        val refused = events.filterIsInstance<InvestigateEvent.ToolResult>().filter { it.callId == "repeat" }
+        assertEquals(listOf("LIMIT_REACHED"), refused.map { it.resultCode })
+        assertTrue(events.filterIsInstance<InvestigateEvent.Limit>().any { it.code == "REPEATED_TOOL_CALL" })
+        assertEquals(2, provider.streamRequests.size, "an equivalent repeat must not start another research round")
+    }
+
+    @Test
+    fun `genuinely different arguments and reordered arrays remain executable`() = runBlocking {
+        val provider = PerRoundProvider(
+            listOf(
+                listOf(
+                    LlmEvent.ToolCallReady(infoscry.llm.ToolCall("first", "search_collection", """{"query":"x","filters":{"mediaTypes":["pdf","epub"]}}""")),
+                    LlmEvent.Completed,
+                ),
+                listOf(
+                    LlmEvent.ToolCallReady(infoscry.llm.ToolCall("reordered", "search_collection", """{"query":"x","filters":{"mediaTypes":["epub","pdf"]}}""")),
+                    LlmEvent.Completed,
+                ),
+                listOf(LlmEvent.TextDelta("done"), LlmEvent.Usage(TokenUsage(1, 1)), LlmEvent.Completed),
+            ),
+        )
+
+        val events = service(tools(CollectionId("collection")), provider).investigate(request()).toList()
+
+        assertTrue(
+            events.filterIsInstance<InvestigateEvent.ToolResult>().none { it.resultCode == "LIMIT_REACHED" },
+            "reordered arrays and different values are genuinely different calls",
+        )
+        assertEquals(3, provider.streamRequests.size, "both distinct calls must execute and research continue")
+    }
+
     private interface InvestigateProvider : LlmStreamingClient, LlmCompletionClient
 
     /** Serves one distinct event script per stream call, so each round can make different calls. */
@@ -1339,6 +1609,18 @@ class InvestigationServiceTest {
         }
 
         override suspend fun complete(request: LlmRequest): LlmCompletion = error("must not correct")
+    }
+
+    /** Emits each event after a fixed gap, so a stream can outlive one inactivity interval while staying active. */
+    private class PacedProvider(private val events: List<LlmEvent>, private val gapMs: Long) : InvestigateProvider {
+        override fun stream(request: LlmRequest): Flow<LlmEvent> = kotlinx.coroutines.flow.flow {
+            events.forEach { event ->
+                kotlinx.coroutines.delay(gapMs)
+                emit(event)
+            }
+        }
+
+        override suspend fun complete(request: LlmRequest): LlmCompletion = LlmCompletion("", TokenUsage(0, 0))
     }
 
     /** Never emits and never completes, so the turn deadline fires while the stream is suspended. */
