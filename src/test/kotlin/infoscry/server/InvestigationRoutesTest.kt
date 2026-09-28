@@ -5,6 +5,7 @@ import infoscry.ask.RetrievalSnapshot
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
@@ -63,6 +64,9 @@ class InvestigationRoutesTest {
     fun startServer() {
         dataDir = Files.createTempDirectory("infoscry-investigation-routes")
         harness = ApiTestServer(dataDir)
+        // A new archive has no automatic Default, and every request body in this class names the
+        // collection it uses, so the one the tests share is created explicitly here.
+        runBlocking { harness.context.collectionService.create("Default") }
     }
 
     @AfterTest
@@ -1258,6 +1262,7 @@ class InvestigationRoutesTest {
                 locator = SourceLocation.TextLines(1, 1),
                 extractedText = text,
                 searchText = text,
+                method = ExtractionMethod.DIRECT_TEXT,
             ),
             artifactRoot = harness.context.paths.libraryDir,
         ).unit.id.value

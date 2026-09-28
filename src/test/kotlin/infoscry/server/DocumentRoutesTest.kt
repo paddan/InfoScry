@@ -4,9 +4,19 @@ import infoscry.domain.CollectionId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
+import infoscry.domain.SourceLocation
+import infoscry.domain.UnitKind
+import infoscry.embedding.GpuRuntime
+import infoscry.extract.TesseractOcr
+import infoscry.extract.ContentUnitDraft
+import infoscry.extract.ExtractionFingerprint
+import infoscry.extract.ExtractionSettings
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -15,6 +25,9 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -151,6 +164,197 @@ class DocumentRoutesTest {
     }
 
     @Test
+    fun `filters and the total describe the same criteria before any paging`() = runBlocking {
+        val id = CollectionId(newCollection())
+        repeat(120) { index ->
+            harness.context.documents.insert(
+                documentAt(
+                    id = "doc-%03d".format(index),
+                    collectionId = id,
+                    filename = "report-%03d.pdf".format(index),
+                    status = if (index in 90..94) DocumentStatus.FAILED else DocumentStatus.COMPLETE,
+                    createdAt = "2026-01-01T00:00:00.%03dZ".format(index),
+                ),
+            )
+        }
+
+        // One hundred rows match the term and five of them failed. The page is drawn from the matching
+        // rows: an offset of ten lands on the eleventh match, not on the eleventh document of the
+        // collection with the term applied afterwards.
+        val filtered = page(id, "?q=report-0&limit=5&offset=10")
+        assertEquals(
+            listOf("doc-089", "doc-088", "doc-087", "doc-086", "doc-085"),
+            filtered.documents.map { it.id.value },
+        )
+        assertEquals(100, filtered.total, "the total counts the criteria, not the collection")
+
+        val unfiltered = page(id, "?limit=5&offset=10")
+        assertEquals(
+            listOf("doc-109", "doc-108", "doc-107", "doc-106", "doc-105"),
+            unfiltered.documents.map { it.id.value },
+        )
+        assertEquals(120, unfiltered.total)
+
+        val failed = page(id, "?q=report-0&status=FAILED")
+        assertEquals(
+            listOf("doc-094", "doc-093", "doc-092", "doc-091", "doc-090"),
+            failed.documents.map { it.id.value },
+        )
+        assertEquals(5, failed.total)
+
+        assertEquals(5, page(id, "?status=FAILED").total)
+        assertEquals(5, page(id, "?q=report-0&status=failed").total, "a status name is matched case-insensitively")
+        assertEquals(100, page(id, "?q=report-0").total)
+    }
+
+    @Test
+    fun `filename search is literal, case-insensitive, and never reads the external source path`() = runBlocking {
+        val id = CollectionId(newCollection())
+        listOf("a_b.txt", "axb.txt", "100% done.txt", "back\\slash.txt", "plain.txt").forEachIndexed { index, name ->
+            harness.context.documents.insert(documentAt("doc-$index", id, name))
+        }
+        harness.context.documents.insert(
+            documentAt(
+                id = "doc-other",
+                collectionId = id,
+                filename = "other.pdf",
+                sourcePath = "/private/evidence/unique-source-token.pdf",
+            ),
+        )
+
+        assertEquals(listOf("a_b.txt"), filenames(id, "_"), "an underscore matches itself")
+        assertEquals(listOf("a_b.txt"), filenames(id, "A_B"), "the filename match is case-insensitive")
+        assertEquals(emptyList(), filenames(id, "a%b"), "a wildcard the reader typed matches itself")
+        assertEquals(emptyList(), filenames(id, "a_b_c"))
+        assertEquals(listOf("100% done.txt"), filenames(id, "%"))
+        assertEquals(listOf("back\\slash.txt"), filenames(id, "\\"))
+        assertEquals(emptyList(), filenames(id, "unique-source-token"), "the source path is not searched")
+        assertEquals(emptyList(), filenames(id, "private/evidence"))
+        assertEquals(listOf("axb.txt"), filenames(id, "axb"), "the escaped underscore does not widen the match")
+    }
+
+    @Test
+    fun `sorting is total, so tied dates and filenames cannot repeat or drop a row`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val names = listOf("beta.pdf", "alpha.pdf", "beta.pdf", "gamma.pdf", "alpha.pdf")
+        names.forEachIndexed { index, name ->
+            harness.context.documents.insert(
+                documentAt("doc-$index", id, name, createdAt = TIED_DATE),
+            )
+        }
+
+        assertEquals(listOf("doc-0", "doc-1", "doc-2", "doc-3", "doc-4"), idsOf(page(id, "?sort=newest")))
+        assertEquals(listOf("doc-0", "doc-1", "doc-2", "doc-3", "doc-4"), idsOf(page(id, "?sort=oldest")))
+        assertEquals(
+            listOf("doc-1", "doc-4", "doc-0", "doc-2", "doc-3"),
+            idsOf(page(id, "?sort=name-asc")),
+            "ties fall back to the document id, not to whatever the file returns first",
+        )
+        assertEquals(listOf("doc-3", "doc-0", "doc-2", "doc-1", "doc-4"), idsOf(page(id, "?sort=name-desc")))
+
+        // Page boundaries inside those ties still partition the rows exactly once.
+        val paged = listOf(
+            idsOf(page(id, "?sort=name-asc&limit=2")),
+            idsOf(page(id, "?sort=name-asc&limit=2&offset=2")),
+            idsOf(page(id, "?sort=name-asc&limit=2&offset=4")),
+        ).flatten()
+        assertEquals(listOf("doc-1", "doc-4", "doc-0", "doc-2", "doc-3"), paged)
+    }
+
+    @Test
+    fun `an unknown sort or status is a typed bad request`() = runBlocking {
+        val id = newCollection()
+        val base = "/api/collections/$id/documents"
+
+        listOf("?sort=sideways", "?status=NOT_A_STATUS", "?status=FAILED&status=nonsense").forEach { query ->
+            val response = harness.get(base + query)
+            assertEquals(HttpStatusCode.BadRequest, response.status, "query $query")
+            assertContains(response.bodyAsText(), "INVALID_REQUEST", message = "query $query must be a typed bad request")
+        }
+
+        assertEquals(HttpStatusCode.OK, harness.get("$base?sort=Name-Desc&status=failed").status)
+    }
+
+    @Test
+    fun `the scoped detail carries safe metadata, the curated error and the first reader source`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-detail")
+        harness.context.documents.insert(
+            documentAt(
+                id = documentId.value,
+                collectionId = id,
+                filename = "budget.pdf",
+                status = DocumentStatus.FAILED,
+                errorCode = "UNSUPPORTED_MEDIA_TYPE",
+                errorMessage = "could not read sheet 2 of the 2025 budget worksheet",
+            ),
+        )
+        val firstUnit = commitUnit(documentId, ordinal = 0, text = "Budget summary.")
+        val secondUnit = commitUnit(documentId, ordinal = 1, text = "Second page.")
+
+        val response = harness.get("/api/collections/${id.value}/documents/${documentId.value}")
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        val body = response.bodyAsText()
+        assertFalse(body.contains("original_path"), "the wire name of sourcePath must never appear")
+        assertFalse(body.contains("sha256"), "the content hash must never be serialized")
+        assertFalse(body.contains("2025 budget worksheet"), "the stored error text may carry document text")
+        assertFalse(body.contains("/private/evidence"), "the filesystem path itself must not reach the response")
+
+        val detail = ApiJson.decodeFromString<DocumentDetail>(body)
+        assertEquals(documentId.value, detail.document.id.value)
+        assertEquals("budget.pdf", detail.document.originalFilename)
+        assertEquals(DocumentStatus.FAILED, detail.document.status)
+        assertEquals("UNSUPPORTED_MEDIA_TYPE", detail.document.errorCode)
+        assertEquals(
+            "the pipeline has no extractor for this kind of file",
+            detail.errorMessage,
+            "the message beside a code is InfoScry's own sentence for that code",
+        )
+        assertEquals(
+            firstUnit,
+            detail.sourceId,
+            "opening a document starts at its first unit, not at its newest one",
+        )
+        assertNotEquals(secondUnit, detail.sourceId)
+        assertEquals(2, harness.context.content.listUnits(documentId, afterOrdinal = -1, limit = 10).size)
+    }
+
+    @Test
+    fun `a document without readable content reports no reader source`() = runBlocking {
+        val id = CollectionId(newCollection())
+        harness.context.documents.insert(documentAt("doc-empty", id, "scan.pdf", status = DocumentStatus.QUEUED))
+
+        val detail = ApiJson.decodeFromString<DocumentDetail>(
+            harness.get("/api/collections/${id.value}/documents/doc-empty").bodyAsText(),
+        )
+
+        assertNull(detail.sourceId)
+        assertNull(detail.errorMessage)
+    }
+
+    @Test
+    fun `another collection's document is not found and leaks nothing`() = runBlocking {
+        val mine = CollectionId(newCollection())
+        harness.createCollection("Other", Credential.BEARER)
+        val other = CollectionId(harness.collectionIdOf("Other"))
+        harness.context.documents.insert(documentAt("doc-other", other, "secret-plans.pdf"))
+
+        val crossCollection = harness.get("/api/collections/${mine.value}/documents/doc-other")
+        assertEquals(HttpStatusCode.NotFound, crossCollection.status)
+        val body = crossCollection.bodyAsText()
+        assertContains(body, "NOT_FOUND")
+        assertFalse(body.contains("secret-plans"), "not-found must not describe the other collection's document")
+        assertFalse(body.contains(other.value), "not-found must not name the other collection")
+        listOf("originalFilename", "mediaType", "sizeBytes", "createdAt").forEach { field ->
+            assertFalse(body.contains(field), "a refusal carries the envelope, not a document row: $field")
+        }
+
+        val unknown = harness.get("/api/collections/${mine.value}/documents/does-not-exist")
+        assertEquals(HttpStatusCode.NotFound, unknown.status)
+        assertContains(unknown.bodyAsText(), "NOT_FOUND")
+    }
+
+    @Test
     fun `the listing needs no credential, like every other read route`() = runBlocking {
         val id = newCollection()
 
@@ -162,6 +366,168 @@ class DocumentRoutesTest {
         )
 
         assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+    }
+
+    @Test
+    fun `a row and its detail carry the attempt's own counts, and its method counters stay apart`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-progress")
+        harness.context.documents.insert(
+            documentAt(documentId.value, id, "scan.pdf", status = DocumentStatus.OCR),
+        )
+        harness.context.content.recordProgress(documentId, fingerprintOf(documentId), UnitKind.PAGE, 40)
+        commitUnit(documentId, ordinal = 0, text = "Page one.")
+        commitUnit(documentId, ordinal = 1, text = "Page two.", method = ExtractionMethod.OCR)
+        harness.context.content.commitFailedUnit(
+            documentId = documentId,
+            fingerprint = fingerprintOf(documentId),
+            key = "page-3",
+            ordinal = 2,
+            code = "OCR_FAILED",
+        )
+
+        val listed = page(id, "?q=scan").documents.single()
+        val progress = assertNotNull(listed.progress, "a row shows the progress of its document's attempt")
+        assertEquals(UnitKind.PAGE, progress.unitKind, "the count is in the units the document is made of")
+        assertEquals(40, progress.totalUnits, "the denominator is the total the extractor announced")
+        assertEquals(2, progress.processedUnits)
+        assertEquals(1, progress.failedUnits)
+        assertEquals(1, progress.directTextUnits)
+        assertEquals(1, progress.ocrUnits)
+
+        val detail = ApiJson.decodeFromString<DocumentDetail>(
+            harness.get("/api/collections/${id.value}/documents/${documentId.value}").bodyAsText(),
+        )
+        assertEquals(progress, detail.progress, "the detail and the row read the same durable counts")
+        assertEquals(1, detail.warnings.size)
+        assertContains(detail.warnings.single(), "OCR tool ran")
+    }
+
+    @Test
+    fun `a count with no announced total is shown without a denominator`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-open")
+        harness.context.documents.insert(
+            documentAt(documentId.value, id, "minutes.txt", status = DocumentStatus.EXTRACTING),
+        )
+        commitUnit(documentId, ordinal = 0, text = "Only unit.")
+
+        val detail = ApiJson.decodeFromString<DocumentDetail>(
+            harness.get("/api/collections/${id.value}/documents/${documentId.value}").bodyAsText(),
+        )
+
+        val progress = assertNotNull(detail.progress)
+        assertNull(progress.totalUnits, "nobody announced a total, so there is no denominator to divide by")
+        assertEquals(1, progress.processedUnits)
+    }
+
+    @Test
+    fun `a document whose units carry no method reports unknown, not zero`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-legacy")
+        harness.context.documents.insert(documentAt(documentId.value, id, "old.pdf"))
+        commitUnit(documentId, ordinal = 0, text = "Page one.")
+        // What an archive written before the method was recorded looks like: the column did not exist, so
+        // the unit has no value in it rather than a value that happens to be direct text.
+        harness.context.database.transaction { connection ->
+            connection.prepareStatement("UPDATE content_units SET extraction_method = NULL").use {
+                it.executeUpdate()
+            }
+        }
+
+        val detail = ApiJson.decodeFromString<DocumentDetail>(
+            harness.get("/api/collections/${id.value}/documents/${documentId.value}").bodyAsText(),
+        )
+
+        val progress = assertNotNull(detail.progress)
+        assertEquals(1, progress.processedUnits)
+        assertNull(progress.directTextUnits, "an unknown method is not zero units of direct text")
+        assertNull(progress.ocrUnits)
+    }
+
+    @Test
+    fun `the detail's warnings are InfoScry's own sentences, one per failed code`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-warnings")
+        harness.context.documents.insert(
+            documentAt(documentId.value, id, "partial.pdf", status = DocumentStatus.COMPLETE_WITH_WARNINGS),
+        )
+        commitUnit(documentId, ordinal = 0, text = "Page one.")
+        listOf(1, 2).forEach { ordinal ->
+            harness.context.content.commitFailedUnit(
+                documentId = documentId,
+                fingerprint = fingerprintOf(documentId),
+                key = "page-${ordinal + 1}",
+                ordinal = ordinal,
+                code = "OCR_FAILED",
+            )
+        }
+
+        val body = harness.get("/api/collections/${id.value}/documents/${documentId.value}").bodyAsText()
+        val detail = ApiJson.decodeFromString<DocumentDetail>(body)
+
+        assertEquals(2, assertNotNull(detail.progress).failedUnits)
+        assertEquals(
+            listOf(
+                "the OCR tool ran but could not read part of this document; the rest of it was extracted",
+            ),
+            detail.warnings,
+            "two pages with the same code are one warning, in InfoScry's words rather than the code's",
+        )
+        assertFalse(body.contains("OCR_FAILED"), "a warning is a sentence, not the code it came from")
+    }
+
+    @Test
+    fun `a missing ocr tool gives the remedy and leaves the readable pages openable`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-needs-tool")
+        harness.context.documents.insert(
+            documentAt(
+                id = documentId.value,
+                collectionId = id,
+                filename = "scan.pdf",
+                status = DocumentStatus.NEEDS_TOOL,
+                errorCode = TesseractOcr.NEEDS_TESSERACT_CODE,
+                errorMessage = "could not read page 4 of the 2025 budget scan",
+            ),
+        )
+        val sourceId = commitUnit(documentId, ordinal = 0, text = "A page with its own text layer.")
+
+        val body = harness.get("/api/collections/${id.value}/documents/${documentId.value}").bodyAsText()
+        val detail = ApiJson.decodeFromString<DocumentDetail>(body)
+
+        assertEquals(
+            "the OCR tool (Tesseract) is not installed, so pages without a text layer cannot be read",
+            detail.errorMessage,
+            "a missing prerequisite has to name its own remedy",
+        )
+        assertEquals(sourceId, detail.sourceId, "the pages that were read stay openable")
+        assertFalse(body.contains("2025 budget scan"), "the stored text may quote the document")
+    }
+
+    @Test
+    fun `a gpu failure keeps its diagnostic, its remedy and the source view`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-no-gpu")
+        harness.context.documents.insert(
+            documentAt(
+                id = documentId.value,
+                collectionId = id,
+                filename = "report.pdf",
+                status = DocumentStatus.FAILED,
+                errorCode = GpuRuntime.GPU_UNAVAILABLE_CODE,
+                errorMessage = "the CoreML runtime reported an error",
+            ),
+        )
+        val sourceId = commitUnit(documentId, ordinal = 0, text = "Extracted before embedding.")
+
+        val detail = ApiJson.decodeFromString<DocumentDetail>(
+            harness.get("/api/collections/${id.value}/documents/${documentId.value}").bodyAsText(),
+        )
+
+        assertEquals(GpuRuntime.remedy(), detail.errorMessage, "the failure keeps the remedy, not the raw error")
+        assertEquals(sourceId, detail.sourceId, "the text that was extracted is still readable without a GPU")
+        assertEquals(1, assertNotNull(detail.progress).processedUnits)
     }
 
     private suspend fun newCollection(): String {
@@ -189,4 +555,71 @@ class DocumentRoutesTest {
         createdAt = "2026-01-01T00:00:00.${"%03d".format(index)}Z",
         updatedAt = "2026-01-01T00:00:00.${"%03d".format(index)}Z",
     )
+
+    /** One document with the exact facts a criterion test needs; the defaults are the common case. */
+    private fun documentAt(
+        id: String,
+        collectionId: CollectionId,
+        filename: String,
+        status: DocumentStatus = DocumentStatus.COMPLETE,
+        createdAt: String = "2026-01-01T00:00:00.000Z",
+        sourcePath: String = "/private/evidence/$filename",
+        errorCode: String? = null,
+        errorMessage: String? = null,
+    ): Document = Document(
+        id = DocumentId(id),
+        collectionId = collectionId,
+        sha256 = "sha256-of-$id",
+        mediaType = "application/pdf",
+        originalFilename = filename,
+        sourcePath = sourcePath,
+        sizeBytes = 2048L,
+        status = status,
+        title = null,
+        author = null,
+        language = null,
+        errorCode = errorCode,
+        errorMessage = errorMessage,
+        createdAt = createdAt,
+        updatedAt = createdAt,
+    )
+
+    /** One committed unit, so a detail read has a real reader source to name; returns the unit's id. */
+    private fun commitUnit(
+        documentId: DocumentId,
+        ordinal: Int,
+        text: String,
+        method: ExtractionMethod = ExtractionMethod.DIRECT_TEXT,
+    ): String =
+        harness.context.content.commitExtractedUnit(
+            documentId = documentId,
+            fingerprint = fingerprintOf(documentId),
+            key = "unit-$ordinal",
+            ordinal = ordinal,
+            draft = ContentUnitDraft(
+                locator = SourceLocation.PdfPage(ordinal + 1),
+                extractedText = text,
+                searchText = text,
+                method = method,
+            ),
+            artifactRoot = harness.context.paths.libraryDir,
+        ).unit.id.value
+
+    /** The attempt these tests commit under: the one a document's own bytes and settings fingerprint. */
+    private fun fingerprintOf(documentId: DocumentId): ExtractionFingerprint = ExtractionFingerprint.of(
+        "sha256-of-${documentId.value}",
+        ExtractionSettings(ocrLanguages = "eng", extractorSchemaVersion = DOCUMENTS_ROUTES_SCHEMA),
+    )
+
+    private suspend fun filenames(id: CollectionId, term: String): List<String> =
+        page(id, "?q=${URLEncoder.encode(term, StandardCharsets.UTF_8)}").documents.map { it.originalFilename }
+
+    private fun idsOf(response: DocumentsResponse): List<String> = response.documents.map { it.id.value }
+
+    private companion object {
+        /** One instant every tied document shares, so only the id can order them. */
+        const val TIED_DATE = "2026-03-01T09:00:00.000Z"
+
+        const val DOCUMENTS_ROUTES_SCHEMA = "documents-routes-test"
+    }
 }

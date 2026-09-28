@@ -5,6 +5,7 @@ import infoscry.ask.CorrectionSnapshot
 import infoscry.ask.Evidence
 import infoscry.domain.CollectionId
 import infoscry.domain.SourceLocation
+import infoscry.storage.CollectionStore
 import infoscry.storage.Database
 import infoscry.storage.DuplicateLlmProfileNameException
 import infoscry.storage.LlmStore
@@ -36,6 +37,9 @@ class LlmStoreTest {
         database = Database(directory.resolve("state.db"))
         SchemaMigrator(database).migrate()
         store = LlmStore(database)
+        // A new archive has no automatic Default collection, and these tests name one: create it the way
+        // a person would rather than seeding a row the product no longer creates.
+        CollectionStore(database).create("Default")
     }
 
     @AfterTest

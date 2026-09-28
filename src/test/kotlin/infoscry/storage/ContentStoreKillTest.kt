@@ -1,6 +1,7 @@
 package infoscry.storage
 
 import infoscry.domain.DocumentId
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import java.nio.file.Files
@@ -122,6 +123,7 @@ class ContentStoreKillTest {
                         locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
                         extractedText = ContentCommitHarness.unitText(index),
                         searchText = ContentCommitHarness.unitText(index),
+                        method = ExtractionMethod.DIRECT_TEXT,
                         artifactRelativePath = ContentCommitHarness.artifactRelativePath(index),
                         artifactSha256 = sha256Of(artifact),
                     ),
@@ -146,6 +148,7 @@ class ContentStoreKillTest {
                     locator = SourceLocation.TextLines(start = before + 1, end = before + 1),
                     extractedText = ContentCommitHarness.unitText(before),
                     searchText = ContentCommitHarness.unitText(before),
+                    method = ExtractionMethod.DIRECT_TEXT,
                 ),
                 artifactRoot = artifactRoot,
             )

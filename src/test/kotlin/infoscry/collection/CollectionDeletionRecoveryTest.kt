@@ -8,6 +8,8 @@ import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
+import infoscry.domain.JobState
+import infoscry.domain.JobType
 import infoscry.domain.SourceLocation
 import infoscry.library.ManagedLibrary
 import infoscry.search.DocumentRow
@@ -21,6 +23,7 @@ import infoscry.storage.DeletionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.MutationCoordinator
+import infoscry.storage.ImportItemOutcome
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -106,6 +109,8 @@ class CollectionDeletionRecoveryTest {
 
             assertEquals(1, report.blocked.size, "recovery must stop instead of choosing a directory")
             assertContains(report.blocked.single().lastError.orEmpty(), "both")
+            // The code is what a client may see; the message with its paths stays in the log.
+            assertEquals(CollectionService.UNSAFE_RECOVERY_CODE, report.blocked.single().errorCode)
             assertTrue(Files.exists(imported.managedPath), "the managed original must not be deleted")
             assertTrue(Files.exists(trash), "the parked copy must not be deleted either")
             assertFailsWith<DeletionRecoveryBlockedException> {
@@ -128,6 +133,7 @@ class CollectionDeletionRecoveryTest {
 
             assertEquals(1, report.blocked.size)
             assertContains(report.blocked.single().lastError.orEmpty(), "missing")
+            assertEquals(CollectionService.UNSAFE_RECOVERY_CODE, report.blocked.single().errorCode)
             assertEquals(
                 DeletionPhase.PREPARED,
                 report.blocked.single().phase,
@@ -401,6 +407,52 @@ class CollectionDeletionRecoveryTest {
             assertNull(context.collectionService.get(collection.id))
             assertTrue(context.collectionService.list().none { it.id == collection.id })
             assertFailsWith<NoSuchElementException> { context.collectionService.requireActive(collection.id) }
+        }
+    }
+
+    @Test
+    fun `admitting a deletion asks the collection's unfinished jobs to stop`() {
+        AppContext.open(dataDir).use { context ->
+            val collection = runBlocking { context.collectionService.create(COLLECTION_NAME) }
+            val other = runBlocking { context.collectionService.create("Untouched") }
+            val doomed = context.jobs.enqueue(JobType.IMPORT, collectionId = collection.id, payload = "{}")
+            val safe = context.jobs.enqueue(JobType.IMPORT, collectionId = other.id, payload = "{}")
+
+            context.collectionService.beginDeletion(collection.id, COLLECTION_NAME)
+
+            val requested = context.jobs.get(doomed.id)!!
+            assertTrue(requested.cancelRequested, "the collection's own work is asked to stop")
+            assertEquals(JobState.QUEUED, requested.state, "a request is not a claim that the work already stopped")
+            assertFalse(context.jobs.get(safe.id)!!.cancelRequested, "another collection's import is not touched")
+        }
+    }
+
+    @Test
+    fun `a queued file-only item is recorded as cancelled work when the collection's deletion is admitted`() {
+        AppContext.open(dataDir).use { context ->
+            val collection = runBlocking { context.collectionService.create(COLLECTION_NAME) }
+            val other = runBlocking { context.collectionService.create("Untouched") }
+            val doomed = context.jobs.enqueue(JobType.IMPORT, collectionId = collection.id, payload = "{}", total = 1)
+            val safe = context.jobs.enqueue(JobType.IMPORT, collectionId = other.id, payload = "{}", total = 1)
+            // A file that was queued and never copied: there is no document to disposition, only the path.
+            val queued = context.importItems.queue(doomed.id, "queued-file", "/tmp/never-copied.txt")
+            context.importItems.queue(safe.id, "queued-file", "/tmp/never-copied.txt")
+            assertEquals(ImportItemOutcome.PENDING, queued.outcome)
+
+            context.collectionService.beginDeletion(collection.id, COLLECTION_NAME)
+
+            val cancelled = context.importItems.find(doomed.id, "queued-file")
+            assertEquals(
+                ImportItemOutcome.CANCELLED,
+                cancelled?.outcome,
+                "a file target that never reached a document is cancelled work, not pending work",
+            )
+            assertNull(cancelled?.documentId)
+            assertEquals(
+                ImportItemOutcome.PENDING,
+                context.importItems.find(safe.id, "queued-file")?.outcome,
+                "another collection's queued file is not touched",
+            )
         }
     }
 

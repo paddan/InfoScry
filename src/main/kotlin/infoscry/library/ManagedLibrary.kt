@@ -16,6 +16,7 @@ import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.sql.Connection
 import java.io.IOException
 
 /** Whether an import stored new bytes or matched a document the collection already holds. */
@@ -71,7 +72,20 @@ class ManagedLibrary(
      * this class cannot fix. An ordinary exception, by contrast, never leaves such a ghost: the
      * compensating actions below ensure the database row and the on-disk file are always removed.
      */
-    fun importFile(collectionId: CollectionId, source: Path): ManagedImport {
+    fun importFile(
+        collectionId: CollectionId,
+        source: Path,
+        /**
+         * A durable reference the caller wants written for the new document, in the same commit as its row.
+         *
+         * It runs inside the insert's own transaction and only when this call *created* the document: a
+         * caller that has to be able to find what this copy made — a deletion owning the source path, for
+         * instance — cannot rely on a later write of its own, because the process can die, or the deletion
+         * can be admitted, in between. The callback is handed the live connection for exactly that reason.
+         * It is never called for a duplicate, whose bytes and row were somebody else's.
+         */
+        onDocumentCreated: (Connection, DocumentId) -> Unit = { _, _ -> },
+    ): ManagedImport {
         val canonicalSource = source.toAbsolutePath().normalize()
         if (!Files.exists(canonicalSource)) {
             throw NoSuchFileException(canonicalSource.toString())
@@ -88,7 +102,7 @@ class ManagedLibrary(
         )
         try {
             val copied = copyWhileHashing(canonicalSource, temporary)
-            return publish(collectionId, canonicalSource, temporary, copied)
+            return publish(collectionId, canonicalSource, temporary, copied, onDocumentCreated)
         } finally {
             Files.deleteIfExists(temporary)
         }
@@ -99,6 +113,7 @@ class ManagedLibrary(
         source: Path,
         temporary: Path,
         copied: CopiedBytes,
+        onDocumentCreated: (Connection, DocumentId) -> Unit,
     ): ManagedImport {
         documents.findBySha256(collectionId, copied.sha256)?.let { existing ->
             return ManagedImport(ManagedImportOutcome.DUPLICATE, existing, managedPathOf(existing))
@@ -124,7 +139,9 @@ class ManagedLibrary(
         paths.createDocumentDirectories(collectionId, documentId)
         try {
             moveInto(temporary, managedPath)
-            documents.insert(document)
+            // The caller's reference is written by the insert's own transaction, so the row and the link are
+            // one commit: a crash after this point leaves a document somebody can still account for.
+            documents.insert(document, onDocumentCreated)
         } catch (duplicate: DuplicateDocumentException) {
             discardDocumentDirectory(collectionId, documentId)
             val existing = documents.findBySha256(collectionId, copied.sha256) ?: throw duplicate

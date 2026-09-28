@@ -6,6 +6,7 @@ import infoscry.ask.Evidence
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.embedding.QueryEmbedder
 import infoscry.extract.ContentUnitDraft
@@ -100,7 +101,7 @@ class AskRoutesTest {
                     endpoint = "https://provider.invalid/v1",
                 )
                 harness.context.llm.create(profile)
-                val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+                val collection = harness.context.collectionService.create("Default")
                 val other = harness.context.collectionService.create("Other")
 
                 val documentId = DocumentId.new()
@@ -131,7 +132,7 @@ class AskRoutesTest {
                     ),
                     key = "unit-0",
                     ordinal = 0,
-                    draft = ContentUnitDraft(locator = locator, extractedText = "Mira signed it.", searchText = "Mira signed it."),
+                    draft = ContentUnitDraft(locator = locator, extractedText = "Mira signed it.", searchText = "Mira signed it.", method = ExtractionMethod.DIRECT_TEXT),
                     artifactRoot = harness.context.paths.libraryDir,
                 ).unit
                 harness.context.llm.persistAsk(
@@ -198,6 +199,7 @@ class AskRoutesTest {
                         FakeOpenAiResponse(statusCode = 200, body = titleCompletion("The signing")),
                     ),
                 ).use { fake ->
+                    val defaultCollection = harness.context.collectionService.create("Default")
                     createLlmProfile(harness, name = "title-asker", model = "title-model", endpoint = fake.url)
 
                     val response = harness.request(
@@ -214,7 +216,7 @@ class AskRoutesTest {
                     assertContains(fake.requestBodies[1], "\"model\":\"title-model\"", message = "the title call must use the conversation's locked model")
                     assertContains(fake.requestBodies[1], "\"stream\":false", message = "the title call must be the non-streaming completion boundary")
 
-                    val defaultCollectionId = harness.context.collectionService.requireActiveByNameOrId("Default").id.value
+                    val defaultCollectionId = defaultCollection.id.value
                     val conversationId = harness.context.database.read { connection ->
                         connection.createStatement().use { statement ->
                             statement.executeQuery("SELECT id FROM conversations WHERE mode = 'ASK' ORDER BY created_at DESC LIMIT 1").use { rows ->
@@ -267,6 +269,7 @@ class AskRoutesTest {
                         FakeOpenAiResponse(statusCode = 200, body = titleCompletion("Two")),
                     ),
                 ).use { fake ->
+                    harness.context.collectionService.create("Default")
                     createLlmProfile(harness, name = "asker-a", model = "model-a", endpoint = fake.url)
                     createLlmProfile(harness, name = "asker-b", model = "model-b", endpoint = fake.url)
 
@@ -309,6 +312,7 @@ class AskRoutesTest {
                     FakeOpenAiServer(
                         listOf(FakeOpenAiResponse(stream = true, body = answerSse()), titleFailure),
                     ).use { fake ->
+                        harness.context.collectionService.create("Default")
                         createLlmProfile(harness, name = "failure-asker-$index", model = "fail-model", endpoint = fake.url)
 
                         val response = harness.request(
@@ -367,6 +371,7 @@ class AskRoutesTest {
                     ),
                 )
                 try {
+                    harness.context.collectionService.create("Default")
                     createLlmProfile(harness, name = "timeout-asker", model = "timeout-model", endpoint = fake.url)
 
                     val startedAt = System.nanoTime()
@@ -405,7 +410,7 @@ class AskRoutesTest {
         val dataDir = Files.createTempDirectory("infoscry-ask-title-list")
         try {
             ApiTestServer(dataDir).use { harness ->
-                val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+                val collection = harness.context.collectionService.create("Default")
                 val profile = createLlmProfile(harness, name = "list-asker", model = "list-model", endpoint = "https://provider.invalid/v1")
                 harness.context.llm.persistAsk(
                     collectionId = collection.id,

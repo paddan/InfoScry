@@ -45,6 +45,8 @@ class ImportCommandProcessTest {
         directory = Files.createTempDirectory("infoscry-import-cli")
         dataDir = Files.createDirectories(directory.resolve("data"))
         gate = directory.resolve("gate")
+        // Every import in this class targets Default, and a new archive no longer holds one.
+        CliProcess.run("--data-dir", dataDir.toString(), "collection", "create", "Default")
     }
 
     @AfterTest

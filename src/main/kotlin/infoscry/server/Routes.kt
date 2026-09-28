@@ -77,8 +77,15 @@ data class UpdateOcrLanguagesRequest(val ocrLanguages: String)
 @Serializable
 data class DeleteCollectionRequest(val confirmName: String)
 
+/**
+ * What an admitted collection deletion answers with: the operation to follow, the collection it
+ * removes, and the phase it has already recorded.
+ *
+ * The deletion is not finished when this is sent — the phases after admission take minutes — so the
+ * caller follows [operationId] on `GET /api/deletions/{operationId}` to know when it is.
+ */
 @Serializable
-data class DeleteCollectionResponse(val collectionId: String, val phase: String)
+data class DeleteCollectionResponse(val operationId: String, val collectionId: String, val phase: String)
 
 @Serializable
 data class JobApiView(
@@ -89,6 +96,8 @@ data class JobApiView(
     val updatedAt: String,
     val collectionId: CollectionId? = null,
     val stage: String? = null,
+    /** The file the job is working on now, as its own name; never the path it was selected from. */
+    val currentItem: String? = null,
     val completed: Int = 0,
     val total: Int = 0,
     val errorCode: String? = null,
@@ -102,20 +111,20 @@ data class JobsResponse(val jobs: List<JobApiView>)
 data class JobResponse(val job: JobApiView)
 
 /**
- * A browser import-item row: the document's name, its outcome, its source path, and what the failure
- * amounts to.
+ * A browser import-item row: the file's own name, its outcome, and what the failure amounts to.
  *
- * The source path is here because a folder import needs to name the file that failed, and the browser is
- * the machine's own reader on a loopback socket. The message is not the one stored beside the outcome:
- * that one may be an exception's own words, and [ImportJobHandler.messageFor] turns the outcome's code into
- * a sentence InfoScry wrote. An unrecognised code gets the generic sentence, never the stored text.
+ * Only the name is carried, never the persisted absolute source path: the durable import history is a
+ * management read, and the path it was selected from is not part of it. A folder import still names the
+ * file that failed, because the name is the last segment of that path. The message is not the one stored
+ * beside the outcome: that one may be an exception's own words, and [ImportJobHandler.messageFor] turns
+ * the outcome's code into a sentence InfoScry wrote. An unrecognised code gets the generic sentence,
+ * never the stored text.
  */
 @Serializable
 data class ImportItemApiView(
     val id: String,
     val jobId: JobId,
     val documentId: infoscry.domain.DocumentId?,
-    val sourcePath: String? = null,
     val sourceName: String?,
     val outcome: ImportItemOutcome,
     val errorCode: String?,
@@ -224,14 +233,21 @@ fun Application.configureRoutes(
                     )
                 }
             }
+            // Admission is durable before this answers and the destructive work continues in the
+            // server's own process, so a caller that goes away, or never reads the answer, cannot lose
+            // the deletion. 202 says exactly that: accepted, not done.
             delete {
                 call.handle {
                     val id = call.collectionId()
                     val request = call.receiveJson<DeleteCollectionRequest>()
-                    val operation = context.collectionService.deleteConfirmed(id, request.confirmName)
+                    val operation = context.collectionService.requestDeletion(id, request.confirmName)
                     call.respondJson(
-                        HttpStatusCode.OK,
-                        DeleteCollectionResponse(collectionId = id.value, phase = operation.phase.name),
+                        HttpStatusCode.Accepted,
+                        DeleteCollectionResponse(
+                            operationId = operation.id,
+                            collectionId = id.value,
+                            phase = operation.phase.name,
+                        ),
                     )
                 }
             }
@@ -252,6 +268,10 @@ fun Application.configureRoutes(
             post {
                 call.handle {
                     context.mutations.withMutation {
+                        // The same gate every other mutating command passes: while an unsafe deletion state is
+                        // unresolved, admitting an import would add work to an archive an operator has to
+                        // repair first.
+                        context.collectionService.requireMutationsAllowed()
                         val request = call.receiveJson<ImportRequest>()
                         val collection = context.collectionService.requireActiveByNameOrId(request.collection)
                         // The job records the tool version it will run with, so its checkpoints are keyed by
@@ -401,6 +421,8 @@ fun Application.configureRoutes(
         configureInvestigationRoutes(context)
         configureConversationRoutes(context)
         configureDocumentRoutes(context)
+        configureImportHistoryRoutes(context)
+        configureDeletionRoutes(context)
         configureJobEventRoutes(context, jobEventIdleDeadlineMillis)
 
         // The compiled SvelteKit application. Its client-side routes all fall back to this file.
@@ -599,6 +621,7 @@ private fun Job.toApiView() = JobApiView(
     updatedAt = updatedAt,
     collectionId = collectionId,
     stage = stage,
+    currentItem = currentItem,
     completed = completed,
     total = total,
     errorCode = errorCode,
@@ -609,7 +632,6 @@ private fun ImportItem.toApiView() = ImportItemApiView(
     id = id,
     jobId = jobId,
     documentId = documentId,
-    sourcePath = sourcePath,
     sourceName = sourcePath.substringAfterLast('/').substringAfterLast('\\').takeIf(String::isNotEmpty),
     outcome = outcome,
     errorCode = errorCode,
@@ -645,9 +667,13 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             ApiErrorResponse(ApiError(code = "MAINTENANCE_IN_PROGRESS", message = maintenance.message.orEmpty())),
         )
     } catch (blocked: DeletionRecoveryBlockedException) {
+        // The exception's own message names managed and parked directories for the log; the client gets the
+        // curated sentence, which carries the phase and the error code instead of any path.
+        LOGGER.atWarn().addKeyValue(ERROR_DETAIL_FIELD, blocked.message.orEmpty())
+            .log("a mutating command was refused while a deletion recovery is unresolved")
         respondJson(
             HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "DELETION_RECOVERY_BLOCKED", message = blocked.message.orEmpty())),
+            ApiErrorResponse(ApiError(code = "DELETION_RECOVERY_BLOCKED", message = blocked.clientMessage)),
         )
     } catch (duplicate: DuplicateCollectionNameException) {
         respondJson(

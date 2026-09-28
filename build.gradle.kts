@@ -104,8 +104,9 @@ val externalTest = tasks.register<Test>("externalTest") {
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
     jvmArgs("--enable-native-access=ALL-UNNAMED")
-    // The browser acceptance test drives this script, so a change to it is an input.
+    // The browser acceptance tests drive these scripts, so a change to one is an input.
     inputs.file(layout.projectDirectory.file("web/e2e/investigate-browser-acceptance.mjs"))
+    inputs.file(layout.projectDirectory.file("web/e2e/collections-browser-acceptance.mjs"))
 }
 
 /*

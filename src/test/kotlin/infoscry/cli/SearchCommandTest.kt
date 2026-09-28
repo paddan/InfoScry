@@ -29,6 +29,8 @@ class SearchCommandTest {
     fun createTemporaryDirectories() {
         directory = Files.createTempDirectory("infoscry-search-cli")
         dataDir = Files.createDirectories(directory.resolve("data"))
+        // Every search in this class names Default, and a new archive no longer holds one.
+        CliProcess.run("--data-dir", dataDir.toString(), "collection", "create", "Default")
     }
 
     @AfterTest

@@ -17,16 +17,18 @@ export type Collection = {
   updatedAt: string;
   description?: string | null;
   lifecycle: 'ACTIVE' | 'DELETING';
+  /** Documents the collection holds; the listing route counts them, a read by id reports `0`. */
+  documentCount: number;
 };
 
 /** The lifecycle of a job record; stages inside a running job are reported separately. */
 export type JobState = 'QUEUED' | 'RUNNING' | 'COMPLETE' | 'FAILED' | 'CANCELLED';
 
-export type JobType = 'IMPORT' | 'REINDEX';
+export type JobType = 'IMPORT' | 'REINDEX' | 'RETRY';
 
 /**
  * One persistent job. Optional fields may be absent from the wire (nulls are omitted), so callers
- * treat `collectionId`, `stage` and `errorCode` as possibly undefined.
+ * treat `collectionId`, `stage`, `currentItem` and `errorCode` as possibly undefined.
  */
 export type JobApiView = {
   id: string;
@@ -36,20 +38,30 @@ export type JobApiView = {
   updatedAt: string;
   collectionId?: string | null;
   stage?: string | null;
+  /** The file the job is working on now, as its own name; never the path it was selected from. */
+  currentItem?: string | null;
   completed: number;
   total: number;
   errorCode?: string | null;
   cancelRequested: boolean;
 };
 
-export type ImportItemOutcome = 'IMPORTED' | 'DUPLICATE' | 'FAILED';
+/**
+ * What one selected file ended as. `PENDING` is a queued file whose work has not finished: an import that
+ * is still copying, or a file that never became a document, stays visible as an item rather than as a row.
+ */
+export type ImportItemOutcome = 'PENDING' | 'IMPORTED' | 'DUPLICATE' | 'FAILED' | 'CANCELLED';
 
-/** One source file of an import, and what happened to it. Nulls are omitted from the wire. */
+/**
+ * One source file of an import, and what happened to it. Nulls are omitted from the wire.
+ *
+ * Only the file's own name crosses, never the absolute path it was selected from: this is a management
+ * read of the durable import history, and the archive's stored source path stays behind it.
+ */
 export type ImportItemApiView = {
   id: string;
   jobId: string;
   documentId: string | null;
-  sourcePath?: string | null;
   sourceName?: string | null;
   outcome: ImportItemOutcome;
   errorCode?: string | null;
@@ -227,6 +239,118 @@ let sessionToken: string | null = null;
 export async function listCollections(): Promise<Collection[]> {
   const body = (await readJson(await fetch('/api/collections'))) as { collections: Collection[] };
   return body.collections;
+}
+
+/** The document statuses the pipeline moves a document through; the server owns this vocabulary. */
+export type DocumentStatusName =
+  | 'QUEUED'
+  | 'COPYING'
+  | 'EXTRACTING'
+  | 'OCR'
+  | 'CHUNKING'
+  | 'EMBEDDING'
+  | 'INDEXING'
+  | 'COMPLETE'
+  | 'COMPLETE_WITH_WARNINGS'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'NEEDS_TOOL';
+
+/** What one unit of a document is; the UI chooses the words a reader actually sees. */
+export type UnitKindName = 'PAGE' | 'SECTION' | 'SLIDE' | 'SHEET' | 'LINE' | 'IMAGE';
+
+/**
+ * What a document's current attempt has committed.
+ *
+ * `totalUnits` is null when no extractor announced a total, and the UI must then show a count without a
+ * denominator rather than invent one. The two method counters are null when no committed unit carries a
+ * stored method, which is what a document extracted before methods were recorded looks like: that is
+ * "unknown", not zero.
+ */
+export type DocumentProgressView = {
+  unitKind?: UnitKindName | null;
+  totalUnits?: number | null;
+  processedUnits: number;
+  failedUnits: number;
+  directTextUnits?: number | null;
+  ocrUnits?: number | null;
+};
+
+/**
+ * One document row of a collection listing. Safe metadata only: the managed copy's path, the content
+ * hash and the stored error message are never part of the wire, so a row cannot carry them further.
+ */
+export type DocumentApiRow = {
+  id: string;
+  collectionId: string;
+  mediaType: string;
+  originalFilename: string;
+  sizeBytes: number;
+  status: DocumentStatusName;
+  createdAt: string;
+  updatedAt: string;
+  title?: string | null;
+  author?: string | null;
+  language?: string | null;
+  errorCode?: string | null;
+  /** Compact progress of the current attempt; absent while the document has no attempt recorded. */
+  progress?: DocumentProgressView | null;
+};
+
+/** A page of one collection's documents plus the total the same criteria match. */
+export type DocumentsPage = { documents: DocumentApiRow[]; total: number };
+
+/** One document's collection-scoped detail: its row, its curated error sentence, its first source unit. */
+export type DocumentDetail = {
+  document: DocumentApiRow;
+  /** InfoScry's own sentence for the error code; never the stored message, which may quote the document. */
+  errorMessage?: string | null;
+  /** The first content unit a reader can open, or null when the document has none yet. */
+  sourceId?: string | null;
+  /** The same counts the row shows, read for this one document. */
+  progress?: DocumentProgressView | null;
+  /**
+   * Whether Retry is offered: the document's status has unfinished business, nothing is deleting it, and
+   * its managed copy is still there. Admission can still refuse for a reason only it knows, which is why
+   * a refusal comes back with its own sentence.
+   */
+  retryEligible?: boolean;
+  /** InfoScry's own sentences for the codes of the units this attempt could not read. */
+  warnings?: string[];
+};
+
+export type DocumentSort = 'newest' | 'oldest' | 'name-asc' | 'name-desc';
+
+export type DocumentListOptions = {
+  /** A literal, case-insensitive contains match on the original filename only. */
+  q?: string;
+  status?: DocumentStatusName;
+  sort?: DocumentSort;
+  limit?: number;
+  offset?: number;
+};
+
+/** One page of a collection's documents, filtered and ordered by the server before it is paged. */
+export async function listCollectionDocuments(
+  collectionId: string,
+  options: DocumentListOptions = {},
+): Promise<DocumentsPage> {
+  const parameters = new URLSearchParams();
+  if (options.q?.trim()) parameters.set('q', options.q.trim());
+  if (options.status) parameters.set('status', options.status);
+  if (options.sort) parameters.set('sort', options.sort);
+  if (options.limit !== undefined) parameters.set('limit', String(options.limit));
+  if (options.offset) parameters.set('offset', String(options.offset));
+  const collection = encodeURIComponent(collectionId);
+  const query = parameters.toString();
+  return (await readJson(await fetch(`/api/collections/${collection}/documents${query === '' ? '' : `?${query}`}`))) as DocumentsPage;
+}
+
+/** One document's collection-scoped detail. A cross-collection or unknown id is a 404. */
+export async function getCollectionDocument(collectionId: string, documentId: string): Promise<DocumentDetail> {
+  const collection = encodeURIComponent(collectionId);
+  const document = encodeURIComponent(documentId);
+  return (await readJson(await fetch(`/api/collections/${collection}/documents/${document}`))) as DocumentDetail;
 }
 
 /** Search one collection using the existing search route. */
@@ -573,6 +697,46 @@ export async function getImportItems(id: string): Promise<ImportItemApiView[]> {
   return body.items;
 }
 
+/**
+ * One import of a collection as its history lists it: the job's durable state and stage, how many of its
+ * files it has finished, and where its per-file outcomes are read.
+ *
+ * The counters are files, one per selected source; an import queues files, never OCR pages. The route
+ * carries no source path, no worker payload, and no stored failure text.
+ */
+export type ImportHistoryEntry = {
+  id: string;
+  state: JobState;
+  stage?: string | null;
+  /** The file the import is working on now, as its own name; never the path it was selected from. */
+  currentItem?: string | null;
+  filesCompleted: number;
+  filesTotal: number;
+  errorCode?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** The persisted per-file outcomes of this import, on the existing job-items route. */
+  itemsUrl: string;
+};
+
+/** A page of one collection's imports plus the total the same criteria match. */
+export type ImportHistoryPage = { imports: ImportHistoryEntry[]; total: number };
+
+/** One page of a collection's durable import history, newest first. */
+export async function listCollectionImports(
+  collectionId: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<ImportHistoryPage> {
+  const parameters = new URLSearchParams();
+  if (options.limit !== undefined) parameters.set('limit', String(options.limit));
+  if (options.offset) parameters.set('offset', String(options.offset));
+  const collection = encodeURIComponent(collectionId);
+  const query = parameters.toString();
+  return (await readJson(
+    await fetch(`/api/collections/${collection}/imports${query === '' ? '' : `?${query}`}`),
+  )) as ImportHistoryPage;
+}
+
 /** Creates a collection, or throws [ApiError] with the server's reason. */
 export async function createCollection(name: string, description?: string): Promise<Collection> {
   const request: { name: string; description?: string } = { name };
@@ -591,12 +755,146 @@ export async function createCollection(name: string, description?: string): Prom
   return body.collection;
 }
 
+/** Renames a collection. Its id, its documents and its import history stay as they were. */
+export async function renameCollection(collectionId: string, name: string): Promise<Collection> {
+  const body = (await mutate(`/api/collections/${encodeURIComponent(collectionId)}`, 'PATCH', { name })) as {
+    collection: Collection;
+  };
+  return body.collection;
+}
+
+/**
+ * Saves the OCR languages a collection snapshots into future imports and explicit retries. Nothing is
+ * reprocessed by this call: documents that completed are left alone.
+ */
+export async function updateCollectionOcrLanguages(collectionId: string, ocrLanguages: string): Promise<Collection> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/ocr-languages`,
+    'PATCH',
+    { ocrLanguages },
+  )) as { collection: Collection };
+  return body.collection;
+}
+
+/**
+ * One deletion operation as the server reports it.
+ *
+ * It carries no managed or trash path: the ids, the phase, whether the deletion has finished, and — when
+ * it stopped — the stable code whose remedy the UI writes in its own words.
+ */
+export type DeletionOperation = {
+  operationId: string;
+  kind: string;
+  collectionId: string;
+  collectionName: string;
+  documentIds: string[];
+  phase: string;
+  terminal: boolean;
+  errorCode?: string | null;
+};
+
+/** What an admitted deletion answers with: the operation to follow, its collection, and its phase. */
+export type DeletionAdmission = { operationId: string; collectionId: string; phase: string };
+
+/**
+ * What an admitted document deletion answers with: the operation to follow, the collection it removes
+ * from, the documents it targets, and the phase it has already recorded.
+ */
+export type DocumentDeletionAdmission = {
+  operationId: string;
+  collectionId: string;
+  documentIds: string[];
+  phase: string;
+};
+
+/**
+ * Confirms a collection's permanent removal. The server admits it durably and answers before the
+ * destructive phases run, so the caller follows the operation rather than waiting for the deletion.
+ */
+export async function deleteCollection(collectionId: string, confirmName: string): Promise<DeletionAdmission> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}`,
+    'DELETE',
+    { confirmName },
+  )) as DeletionAdmission;
+  return body;
+}
+
+/**
+ * Confirms the permanent removal of explicit documents from one collection. The server validates every
+ * id against the active collection before it admits anything and answers before the destructive phases
+ * run, so the caller follows the operation rather than waiting for the deletion.
+ */
+export async function deleteDocuments(
+  collectionId: string,
+  documentIds: string[],
+): Promise<DocumentDeletionAdmission> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/documents/delete`,
+    'POST',
+    { documentIds, confirmed: true },
+  )) as DocumentDeletionAdmission;
+  return body;
+}
+
+/** One document a retry refused, and InfoScry's own sentence for the reason. */
+export type RetryRejection = { documentId: string; reason: string };
+
+/**
+ * What a retry asks for: the documents to read again, or every eligible one in the collection.
+ *
+ * The two are mutually exclusive because they are different requests — one may explain a document the user
+ * named, and the other picks the set itself.
+ */
+export type RetryRequest = { documentIds: string[] } | { allEligible: true };
+
+/** What an admitted retry answers with: the attempts it queued and the documents it refused. */
+export type RetryAdmission = {
+  collectionId: string;
+  acceptedJobIds: string[];
+  rejected: RetryRejection[];
+};
+
+/**
+ * Reads existing documents again from the managed copies InfoScry holds, keeping their identities.
+ *
+ * The server decides per document: some may be accepted (and appear as job ids) while others come back with
+ * the sentence that says why they were not — already running, being deleted, or needing a tool this machine
+ * does not have. It never copies or classifies bytes, so a retry cannot mistake the archive's own copy for a
+ * duplicate of itself.
+ */
+export async function retryDocuments(collectionId: string, request: RetryRequest): Promise<RetryAdmission> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/documents/retry`,
+    'POST',
+    request,
+  )) as RetryAdmission;
+  return body;
+}
+
+/** What an Admin retry action has to show: the attempt it queued, or why there is none. */
+export type RetryAttempt = { accepted: true; jobId: string } | { accepted: false; reason: string };
+
+/** One deletion operation, terminal or not, read from the server's own record. */
+export async function getDeletion(operationId: string): Promise<DeletionOperation> {
+  const body = (await readJson(
+    await fetch(`/api/deletions/${encodeURIComponent(operationId)}`),
+  )) as { operation: DeletionOperation };
+  return body.operation;
+}
+
+/** The deletions that still need work: what a reopened Admin restores as unfinished. */
+export async function listUnfinishedDeletions(): Promise<DeletionOperation[]> {
+  const body = (await readJson(await fetch('/api/deletions'))) as { deletions: DeletionOperation[] };
+  return body.deletions;
+}
+
 /**
  * One mutation with the browser's CSRF token, retrying once after a server restart invalidates the
  * cached token (the same recovery the streaming calls use). A `DELETE` with an empty body needs the
  * same token, so this helper covers both.
  */
-async function mutate(path: string, method: 'POST' | 'PUT' | 'DELETE', body?: unknown): Promise<unknown> {
+async function mutate(path: string, method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', body?: unknown): Promise<unknown> {
   const send = async (): Promise<Response> => fetch(path, {
     method,
     headers: body === undefined

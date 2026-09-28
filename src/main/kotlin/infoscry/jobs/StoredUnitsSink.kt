@@ -2,10 +2,13 @@ package infoscry.jobs
 
 import infoscry.config.AppPaths
 import infoscry.domain.DocumentId
+import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.extract.ExtractionEvent
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSink
 import infoscry.storage.ContentStore
+import infoscry.storage.DocumentBeingDeletedException
 import infoscry.storage.DocumentStore
 import java.nio.file.Files
 import java.nio.file.Path
@@ -32,6 +35,10 @@ import org.slf4j.LoggerFactory
  * - **Cleaning up after a killed conversion.** A converter that was terminated leaves its private working
  *   directory inside the document's artifacts; it is swept when the document is next touched, because
  *   nothing else will ever look at it again.
+ *
+ * It also publishes the two facts a reader watches while a document is being read: the total an extractor
+ * announced, and the OCR phase itself. Both are written only after the unit they describe is committed, so
+ * what the collection shows can never be ahead of what the archive holds.
  */
 class StoredUnitsSink(
     private val paths: AppPaths,
@@ -57,10 +64,32 @@ class StoredUnitsSink(
     override suspend fun committedKeys(
         documentId: DocumentId,
         fingerprint: ExtractionFingerprint,
+    ): Set<String> = reuseKeys(documentId, fingerprint, revisitFailedUnits = false)
+
+    /**
+     * The units an explicit retry may skip: only what an earlier attempt committed successfully.
+     *
+     * A failed unit is not skipped here, because revisiting it is what the retry asked for; a crash
+     * resume through [committedKeys] takes the other answer on purpose.
+     */
+    override suspend fun retryKeys(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+    ): Set<String> = reuseKeys(documentId, fingerprint, revisitFailedUnits = true)
+
+    /** Which keys this attempt may skip, after verifying that their artifacts are still there. */
+    private fun reuseKeys(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+        revisitFailedUnits: Boolean,
     ): Set<String> {
         val root = artifactRoot(documentId)
         sweepKilledConversions(root, documentId)
-        val reuse = content.reusableCheckpoints(documentId, fingerprint, root)
+        val reuse = if (revisitFailedUnits) {
+            content.reusableSucceededCheckpoints(documentId, fingerprint, root)
+        } else {
+            content.reusableCheckpoints(documentId, fingerprint, root)
+        }
         if (reuse.repaired.isNotEmpty()) {
             LOGGER.atWarn()
                 .addKeyValue(COMPONENT_FIELD, EXTRACTION_COMPONENT)
@@ -76,6 +105,10 @@ class StoredUnitsSink(
         fingerprint: ExtractionFingerprint,
         event: ExtractionEvent,
     ) {
+        // The commit boundary is where an extraction unit becomes durable, so it is where the deletion
+        // guard belongs: a unit committed for a document that is being deleted would outlive the document
+        // it cites, and its row's foreign key would fail the whole attempt instead of skipping one file.
+        if (documents.isDeletionTarget(documentId)) throw DocumentBeingDeletedException(documentId)
         val root = artifactRoot(documentId)
         when (event) {
             is ExtractionEvent.UnitReady -> {
@@ -96,6 +129,12 @@ class StoredUnitsSink(
                         .addKeyValue(ORDINAL_FIELD, event.ordinal)
                         .log("a unit's artifact could not be verified; its text was kept without the reference")
                 }
+                // A unit read by a tool means this document is in its OCR phase, and the phase is written
+                // only after the unit is durable: a document must not read as "reading with OCR" while
+                // nothing has been recorded by it yet.
+                if (event.unit.method == ExtractionMethod.OCR) {
+                    documents.updateStatus(documentId, DocumentStatus.OCR)
+                }
             }
 
             is ExtractionEvent.UnitFailed -> content.commitFailedUnit(
@@ -104,6 +143,13 @@ class StoredUnitsSink(
                 key = event.key,
                 ordinal = event.ordinal,
                 code = event.code,
+            )
+
+            is ExtractionEvent.Progress -> content.recordProgress(
+                documentId = documentId,
+                fingerprint = fingerprint,
+                unitKind = event.unitKind,
+                totalUnits = event.totalUnits,
             )
 
             is ExtractionEvent.Finished -> content.finishExtraction(

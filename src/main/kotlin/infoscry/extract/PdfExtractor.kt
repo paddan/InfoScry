@@ -1,7 +1,9 @@
 package infoscry.extract
 
 import infoscry.domain.DocumentId
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
+import infoscry.domain.UnitKind
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -276,6 +278,13 @@ class PdfExtractor(
         val run = PageRun()
         var workDirectory: Path? = null
         try {
+            // The page count is known as soon as the container opens, so the reader can be told what one
+            // unit of this document is and how many of them there are before the first page is read.
+            // "12/40 pages processed" needs both halves, and both are facts the container states rather
+            // than a guess about how long the rest of the document will take.
+            input.boundary.unit {
+                emit(ExtractionEvent.Progress(unitKind = UnitKind.PAGE, totalUnits = document.numberOfPages))
+            }
             for (page in 1..document.numberOfPages) {
                 if (run.abortCode != null) break
                 input.boundary.unit {
@@ -294,7 +303,7 @@ class PdfExtractor(
                         null
                     }
                     if (text != null && !PdfPageCandidate(page, text).needsOcr) {
-                        emitTextUnit(key, page, text)
+                        emitTextUnit(key = key, page = page, text = text, method = ExtractionMethod.DIRECT_TEXT)
                         return@unit
                     }
 
@@ -343,6 +352,7 @@ class PdfExtractor(
                         key = key,
                         page = page,
                         text = result.text,
+                        method = ExtractionMethod.OCR,
                         artifactRelativePath = result.artifactRelativePath,
                         artifactSha256 = result.artifactSha256,
                         meanConfidence = result.meanConfidence,
@@ -431,6 +441,7 @@ class PdfExtractor(
         key: String,
         page: Int,
         text: String,
+        method: ExtractionMethod,
         artifactRelativePath: String? = null,
         artifactSha256: String? = null,
         meanConfidence: Double? = null,
@@ -444,6 +455,7 @@ class PdfExtractor(
                     locator = SourceLocation.PdfPage(page),
                     extractedText = normalised.extracted,
                     searchText = normalised.search,
+                    method = method,
                     artifactRelativePath = artifactRelativePath,
                     artifactSha256 = artifactSha256,
                     meanConfidence = meanConfidence,

@@ -56,13 +56,13 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(9, database.userVersion())
-            assertEquals(9, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(16, database.userVersion())
+            assertEquals(16, SchemaMigrator.SUPPORTED_VERSION)
         }
     }
 
     @Test
-    fun `migration creates the core tables and seeds the default collection`() {
+    fun `migration creates the core tables and exposes no collection in a new archive`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
 
@@ -76,10 +76,12 @@ class SchemaMigratorTest {
                         "jobs",
                         "import_items",
                         "deletion_operations",
+                        "document_deletion_targets",
                         "content_units",
                         "chunks",
                         "extraction_checkpoints",
                         "document_extractions",
+                        "document_extraction_progress",
                         "document_chunking",
                         "llm_profiles",
                         "app_defaults",
@@ -99,18 +101,8 @@ class SchemaMigratorTest {
                 "missing tables, found $tables",
             )
 
-            assertEquals(9, count(database, "schema_version"))
-            assertEquals(1, count(database, "collections"))
-            assertEquals(listOf("Default", "eng", "ACTIVE"), database.read { connection ->
-                connection.createStatement().use { statement ->
-                    statement.executeQuery(
-                        "SELECT name, ocr_languages, lifecycle FROM collections",
-                    ).use { rows ->
-                        rows.next()
-                        listOf(rows.getString(1), rows.getString(2), rows.getString(3))
-                    }
-                }
-            })
+            assertEquals(16, count(database, "schema_version"))
+            assertEquals(0, count(database, "collections"), "a new archive must expose no collection")
         }
     }
 
@@ -118,16 +110,17 @@ class SchemaMigratorTest {
     fun `migration refuses a database written by newer code`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
-            database.setUserVersion(10)
+            val future = SchemaMigrator.SUPPORTED_VERSION + 1
+            database.setUserVersion(future)
 
             val failure = assertFailsWith<SchemaVersionTooNewException> {
                 SchemaMigrator(database).migrate()
             }
 
-            assertEquals(10, failure.found)
-            assertEquals(9, failure.supported)
+            assertEquals(future, failure.found)
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, failure.supported)
             assertTrue(
-                failure.message!!.contains("10") && failure.message!!.contains("9"),
+                failure.message!!.contains("$future") && failure.message!!.contains("${SchemaMigrator.SUPPORTED_VERSION}"),
                 "message should name both versions, was ${failure.message}",
             )
         }
@@ -192,7 +185,7 @@ class SchemaMigratorTest {
             }
 
             assertEquals(0, count(database, "documents"))
-            assertEquals(1, count(database, "collections"))
+            assertEquals(0, count(database, "collections"))
             assertEquals(1, count(database, "deletion_operations"))
             assertEquals(1, count(database, "jobs"))
             assertEquals(1, count(database, "import_items"))

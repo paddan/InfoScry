@@ -8,13 +8,13 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
 import infoscry.search.DocumentRow
 import infoscry.search.vectorFor
-import infoscry.storage.CollectionStore
 import infoscry.storage.Instants
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.request.get
@@ -53,10 +53,14 @@ class SearchRoutesTest {
     private lateinit var dataDir: Path
     private lateinit var harness: ApiTestServer
 
+    /** The id of the Default collection this class creates: a new archive has no automatic one. */
+    private var defaultCollectionId: CollectionId = CollectionId("unset")
+
     @BeforeTest
     fun startServer() {
         dataDir = Files.createTempDirectory("infoscry-search-routes")
         harness = ApiTestServer(dataDir)
+        defaultCollectionId = runBlocking { harness.context.collectionService.create("Default").id }
     }
 
     @AfterTest
@@ -184,12 +188,11 @@ class SearchRoutesTest {
             assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
             assertContains(response.bodyAsText(), "notes about the harbour")
 
-            harness.request(
-                HttpMethod.Delete,
-                "/api/collections/${harness.collectionIdOf("Default")}",
-                body = """{"confirmName":"Default"}""",
-                credential = Credential.BEARER,
-            )
+            // The deletion is admitted, then followed: its phases run after the response, and the
+            // assertion below is about the state the finished deletion leaves behind.
+            val defaultCollectionId = harness.collectionIdOf("Default")
+            val admitted = harness.admitCollectionDeletion(defaultCollectionId, "Default")
+            harness.awaitDeletion(admitted.operationId)
 
             val afterDelete = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
             assertEquals(HttpStatusCode.NotFound, afterDelete.status, afterDelete.bodyAsText())
@@ -275,7 +278,7 @@ class SearchRoutesTest {
         val (documentId, _) = seedUnit(document = "source.txt", text = "managed source")
         val collectionId = harness.collectionIdOf("Default")
         harness.createCollection("Other")
-        val original = harness.context.paths.originalFile(CollectionStore.DEFAULT_ID, documentId, "txt")
+        val original = harness.context.paths.originalFile(defaultCollectionId, documentId, "txt")
         Files.createDirectories(original.parent)
         Files.writeString(original, "original bytes")
 
@@ -323,7 +326,7 @@ class SearchRoutesTest {
         for ((filename, mediaType, disposition) in cases) {
             val (documentId, _) = seedUnit(document = filename, text = "source", mediaType = mediaType)
             val extension = filename.substringAfterLast('.')
-            val original = harness.context.paths.originalFile(CollectionStore.DEFAULT_ID, documentId, extension)
+            val original = harness.context.paths.originalFile(defaultCollectionId, documentId, extension)
             Files.createDirectories(original.parent)
             Files.writeString(original, "source bytes")
 
@@ -364,7 +367,7 @@ class SearchRoutesTest {
         mediaType: String = "text/plain",
     ): Pair<DocumentId, ContentUnitId> {
         val context = harness.context
-        val collection = CollectionStore.DEFAULT_ID
+        val collection = defaultCollectionId
         val now = Instants.now()
         val documentId = DocumentId.new()
         context.documents.insert(
@@ -396,6 +399,7 @@ class SearchRoutesTest {
                 locator = SourceLocation.TextLines(1, 1),
                 extractedText = text,
                 searchText = text,
+                method = ExtractionMethod.DIRECT_TEXT,
             ),
             artifactRoot = context.paths.libraryDir,
         )

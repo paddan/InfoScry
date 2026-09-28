@@ -21,12 +21,16 @@ import kotlinx.serialization.encodeToString
  * rules protect. [Job.payload] and [Job.errorMessage] can carry paths — the import request names the
  * files the user picked, and the worker's failure note names the tool or the file that failed — so
  * they stay out of every event. The error code crosses, because a caller is meant to act on it.
+ *
+ * [Job.currentItem] is derived from a source path and still crosses, because what crosses is the file's
+ * own name: a name is not the path it was selected from, and it is what makes a progress line readable.
  */
 @Serializable
 internal data class JobEventWire(
     val jobId: String,
     val state: JobState,
     val stage: String? = null,
+    val currentItem: String? = null,
     val completed: Int = 0,
     val total: Int = 0,
     val errorCode: String? = null,
@@ -37,6 +41,7 @@ private fun Job.toJobEventWire() = JobEventWire(
     jobId = id.value,
     state = state,
     stage = stage,
+    currentItem = currentItem,
     completed = completed,
     total = total,
     errorCode = errorCode,

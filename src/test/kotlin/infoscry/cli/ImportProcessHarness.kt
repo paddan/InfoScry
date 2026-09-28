@@ -3,6 +3,7 @@ package infoscry.cli
 import com.github.ajalt.clikt.core.main
 import infoscry.AppContext
 import infoscry.config.AppPaths
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.TestDocumentEmbedder
@@ -108,6 +109,7 @@ internal class HarnessExtractor : DocumentExtractor {
                                 locator = SourceLocation.TextLines(start = 1, end = 1),
                                 extractedText = text,
                                 searchText = text,
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )

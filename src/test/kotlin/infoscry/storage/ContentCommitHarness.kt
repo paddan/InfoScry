@@ -3,6 +3,7 @@ package infoscry.storage
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
@@ -106,6 +107,7 @@ object ContentCommitHarness {
                     locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
                     extractedText = unitText(index),
                     searchText = unitText(index),
+                    method = ExtractionMethod.DIRECT_TEXT,
                     artifactRelativePath = relative,
                     artifactSha256 = sha256Of(artifact),
                 ),

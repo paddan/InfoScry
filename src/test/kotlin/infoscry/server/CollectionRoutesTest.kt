@@ -2,10 +2,13 @@ package infoscry.server
 
 import infoscry.collection.CollectionIndexRemover
 import infoscry.domain.CollectionId
+import infoscry.domain.Document
+import infoscry.domain.DocumentId
+import infoscry.domain.DocumentStatus
 import infoscry.domain.JobType
 import infoscry.extract.ExtractionSettings
 import infoscry.jobs.ImportJobPayload
-import infoscry.storage.CollectionStore
+import infoscry.storage.Instants
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -17,6 +20,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -49,13 +53,28 @@ class CollectionRoutesTest {
     }
 
     @Test
-    fun `the seeded Default collection is listed`() = runBlocking {
-        val collections = listed()
-
-        assertTrue(
-            collections.any { it.id == CollectionStore.DEFAULT_ID && it.name == "Default" },
-            "the migration seeds Default so a user has somewhere to import without organising first",
+    fun `a new archive exposes no collections`() = runBlocking {
+        assertEquals(
+            emptyList(),
+            listed(),
+            "a new archive starts without collections, so an import cannot rely on an automatic Default",
         )
+    }
+
+    @Test
+    fun `the listing reports each collection's document count`() = runBlocking {
+        harness.createCollection("Nightfall", Credential.BEARER)
+        harness.createCollection("Empty", Credential.BEARER)
+        harness.context.documents.insert(document("nightfall-1", CollectionId(harness.collectionIdOf("Nightfall"))))
+
+        val body = harness.get("/api/collections").bodyAsText()
+        val counts = ApiJson.decodeFromString<CollectionsResponse>(body)
+            .collections.associate { it.name to it.documentCount }
+
+        assertContains(body, "\"documentCount\"", message = "the browser reads the count off the wire")
+        assertEquals(1, counts["Nightfall"])
+        assertEquals(0, counts["Empty"])
+        assertEquals(setOf("Nightfall", "Empty"), counts.keys, "a new archive lists only what was created")
     }
 
     @Test
@@ -65,6 +84,16 @@ class CollectionRoutesTest {
         assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
         assertContains(response.bodyAsText(), "Project Nightfall")
         assertTrue(listed().any { it.name == "Project Nightfall" })
+    }
+
+    @Test
+    fun `a person may create a collection named Default, and it is not the retired seed`() = runBlocking {
+        val response = harness.createCollection("Default", Credential.BEARER)
+
+        assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+        val created = listed().single { it.name == "Default" }
+        // The seed's identifier is retired, so this one has a generated id and is never treated as it.
+        assertNotEquals("default", created.id.value)
     }
 
     @Test
@@ -202,6 +231,95 @@ class CollectionRoutesTest {
     }
 
     @Test
+    fun `renaming onto another collection's name is a conflict and keeps the old name`() = runBlocking {
+        harness.createCollection("Acme", Credential.BEARER)
+        harness.createCollection("Nightfall", Credential.BEARER)
+        val id = harness.collectionIdOf("Nightfall")
+
+        val response = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id",
+            body = """{"name":"acme"}""",
+            credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.Conflict, response.status, response.bodyAsText())
+        assertContains(response.bodyAsText(), "DUPLICATE_COLLECTION_NAME")
+        assertEquals("Nightfall", harness.context.collectionService.get(CollectionId(id))!!.name)
+    }
+
+    @Test
+    fun `a blank rename is refused as a bad request`() = runBlocking {
+        harness.createCollection("Nightfall", Credential.BEARER)
+        val id = harness.collectionIdOf("Nightfall")
+
+        val response = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id",
+            body = """{"name":"   "}""",
+            credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
+        assertContains(response.bodyAsText(), "INVALID_REQUEST")
+        assertEquals("Nightfall", harness.context.collectionService.get(CollectionId(id))!!.name)
+    }
+
+    @Test
+    fun `a future import snapshots the OCR languages a settings save just wrote`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+        val source = dataDir.resolve("future.txt")
+        Files.writeString(source, "A report.")
+
+        val saved = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrLanguages":"swe"}""",
+            credential = Credential.CSRF,
+        )
+        assertEquals(HttpStatusCode.OK, saved.status, saved.bodyAsText())
+
+        val accepted = harness.request(
+            HttpMethod.Post,
+            "/api/imports",
+            body = """{"collection":"OCR settings","paths":["$source"]}""",
+            credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.Accepted, accepted.status, accepted.bodyAsText())
+        val job = harness.context.jobs.list(100).single()
+        assertEquals("swe", ImportJobPayload.decode(job.payload).settings.ocrLanguages)
+    }
+
+    @Test
+    fun `a settings save queues no work and leaves a completed document untouched`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = CollectionId(harness.collectionIdOf("OCR settings"))
+        harness.context.documents.insert(document("done-1", id))
+
+        val languages = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/${id.value}/ocr-languages",
+            body = """{"ocrLanguages":"swe"}""",
+            credential = Credential.CSRF,
+        )
+        val renamed = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/${id.value}",
+            body = """{"name":"OCR settings renamed"}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.OK, languages.status, languages.bodyAsText())
+        assertEquals(HttpStatusCode.OK, renamed.status, renamed.bodyAsText())
+        assertEquals("swe", harness.context.collectionService.get(id)!!.ocrLanguages)
+        // Changing settings never reprocesses a document that already completed.
+        assertEquals(DocumentStatus.COMPLETE, harness.context.documents.get(DocumentId("done-1"))!!.status)
+        assertEquals(0, harness.context.jobs.list(100).size, "a settings save must not queue extraction or embedding")
+    }
+
+    @Test
     fun `an unknown collection is not found`() = runBlocking {
         val response = harness.request(
             HttpMethod.Patch,
@@ -232,21 +350,43 @@ class CollectionRoutesTest {
     }
 
     @Test
-    fun `deleting with the exact name removes the collection`() = runBlocking {
+    fun `deleting with the exact name admits the operation and removes the collection`() = runBlocking {
         harness.createCollection("Acme", Credential.BEARER)
         val id = harness.collectionIdOf("Acme")
 
-        val response = harness.request(
-            HttpMethod.Delete,
-            "/api/collections/$id",
-            body = """{"confirmName":"Acme"}""",
-            credential = Credential.BEARER,
-        )
+        val admitted = harness.admitCollectionDeletion(id, "Acme")
 
-        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
-        assertContains(response.bodyAsText(), "DONE")
+        // Accepted, not done: the response names the operation to follow rather than claiming removal.
+        assertEquals(id, admitted.collectionId)
+        assertEquals("PREPARED", admitted.phase)
+        val finished = harness.awaitDeletion(admitted.operationId)
+        assertEquals("DONE", finished.phase)
         assertFalse(listed().any { it.name == "Acme" })
         assertFalse(Files.exists(harness.context.paths.collectionDir(infoscry.domain.CollectionId(id))))
+    }
+
+    @Test
+    fun `deleting a collection with an unfinished import removes the import with it`() = runBlocking {
+        harness.createCollection("Nightfall", Credential.BEARER)
+        val id = harness.collectionIdOf("Nightfall")
+        val source = dataDir.resolve("queued.txt")
+        Files.writeString(source, "A report.")
+        val accepted = harness.request(
+            HttpMethod.Post,
+            "/api/imports",
+            body = """{"collection":"$id","paths":["$source"]}""",
+            credential = Credential.BEARER,
+        )
+        assertEquals(HttpStatusCode.Accepted, accepted.status, accepted.bodyAsText())
+        assertEquals(1, harness.context.jobs.list(100, 0).size)
+
+        val admitted = harness.admitCollectionDeletion(id, "Nightfall")
+
+        // The deletion does not wait for the import: it asks the collection's jobs to stop, and the
+        // job rows go with the collection rather than outliving it.
+        assertEquals("DONE", harness.awaitDeletion(admitted.operationId).phase)
+        assertEquals(0, harness.context.jobs.list(100, 0).size)
+        assertFalse(listed().any { it.name == "Nightfall" })
     }
 
     @Test
@@ -278,9 +418,23 @@ class CollectionRoutesTest {
                 assertEquals(HttpStatusCode.Locked, refused.status)
                 assertContains(refused.bodyAsText(), "MAINTENANCE_IN_PROGRESS")
 
+                // The settings routes stand behind the same shared admission as every other mutation.
+                val refusedRename = gatedServer.request(
+                    HttpMethod.Patch,
+                    "/api/collections/$id",
+                    body = """{"name":"Renamed during maintenance"}""",
+                    credential = Credential.BEARER,
+                )
+                assertEquals(HttpStatusCode.Locked, refusedRename.status)
+                assertContains(refusedRename.bodyAsText(), "MAINTENANCE_IN_PROGRESS")
+
                 release.complete(Unit)
-                val finished = withTimeout(TIMEOUT_MILLIS) { deletion.await() }
-                assertEquals(HttpStatusCode.OK, finished.status, finished.bodyAsText())
+                val admitted = withTimeout(TIMEOUT_MILLIS) { deletion.await() }
+                assertEquals(HttpStatusCode.Accepted, admitted.status, admitted.bodyAsText())
+                // The deletion is not the request's: it finishes in the server after the answer, which
+                // is what the release of the gated phase lets it do.
+                val operation = ApiJson.decodeFromString<DeleteCollectionResponse>(admitted.bodyAsText())
+                assertEquals("DONE", gatedServer.awaitDeletion(operation.operationId).phase)
             }
         } finally {
             otherDataDir.toFile().deleteRecursively()
@@ -293,6 +447,9 @@ class CollectionRoutesTest {
         val release = CompletableDeferred<Unit>()
         val source = dataDir.resolve("during-maintenance.txt")
         Files.writeString(source, "A report.")
+        // The import needs a collection that exists: a refused request is refused for maintenance, not
+        // for an unknown collection.
+        harness.createCollection("Default", Credential.BEARER)
         val maintenance = async(Dispatchers.Default) {
             harness.context.mutations.withExclusiveMaintenance("reindex") {
                 started.complete(Unit)
@@ -348,6 +505,22 @@ class CollectionRoutesTest {
         val unknownApi = harness.get("/api/not-a-route")
         assertEquals(HttpStatusCode.NotFound, unknownApi.status)
         assertContains(unknownApi.bodyAsText(), "NOT_FOUND")
+    }
+
+    private fun document(id: String, collectionId: CollectionId): Document {
+        val now = Instants.now()
+        return Document(
+            id = DocumentId(id),
+            collectionId = collectionId,
+            sha256 = "sha256-of-$id",
+            mediaType = "application/pdf",
+            originalFilename = "$id.pdf",
+            sourcePath = "/private/evidence/$id.pdf",
+            sizeBytes = 1024,
+            status = DocumentStatus.COMPLETE,
+            createdAt = now,
+            updatedAt = now,
+        )
     }
 
     private suspend fun listed(): List<infoscry.domain.Collection> =

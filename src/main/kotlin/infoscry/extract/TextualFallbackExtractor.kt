@@ -1,5 +1,6 @@
 package infoscry.extract
 
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import java.nio.file.Files
 import kotlinx.coroutines.flow.Flow
@@ -44,6 +45,7 @@ class TextualFallbackExtractor : DocumentExtractor {
                             locator = SourceLocation.TextLines(start = 1, end = lineCount(normalised.extracted)),
                             extractedText = normalised.extracted,
                             searchText = normalised.search,
+                            method = ExtractionMethod.DIRECT_TEXT,
                         ),
                     ),
                 )

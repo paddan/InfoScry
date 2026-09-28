@@ -36,6 +36,7 @@ class ReindexCommandTest {
 
     @Test
     fun `a foreground reindex waits for a terminal job result and releases the directory`() {
+        CliProcess.run("--data-dir", dataDir.toString(), "collection", "create", "Default")
         val result = CliProcess.run(
             "reindex", "--data-dir", dataDir.toString(), "--wait", "--json",
         )

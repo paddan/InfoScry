@@ -6,7 +6,9 @@ import infoscry.domain.ChunkId
 import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
+import infoscry.domain.UnitKind
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
 import java.nio.file.Files
@@ -65,6 +67,29 @@ data class ExtractionMarker(
 data class ContentUnitSummary(val id: ContentUnitId, val ordinal: Int, val locator: SourceLocation)
 
 /**
+ * How far one attempt of one document has got, read back from the rows the attempt committed.
+ *
+ * Nothing here is a stored counter. [processedUnits] and [failedUnits] are counts of the checkpoints the
+ * attempt committed, so a resumed pass that skips what an earlier one already wrote cannot add to them: the
+ * row it would have counted is the row it skipped. [totalUnits] is what the extractor announced, and stays
+ * `null` when it announced nothing — a processed count without a denominator is a fact, a made-up
+ * denominator is not.
+ *
+ * [directTextUnits] and [ocrUnits] are `null` when no committed unit of the attempt carries a stored method,
+ * which is what a document committed before methods were recorded looks like. Zero would be a different
+ * claim, and a false one.
+ */
+data class DocumentProgress(
+    val unitKind: UnitKind?,
+    val totalUnits: Int?,
+    val processedUnits: Int,
+    val failedUnits: Int,
+    val directTextUnits: Int?,
+    val ocrUnits: Int?,
+    val failedCodes: List<String>,
+)
+
+/**
  * The durable content of documents: their units, the chunks built from them, and the checkpoints that make an
  * interrupted attempt resumable.
  *
@@ -105,6 +130,7 @@ class ContentStore(private val database: Database) {
         val storedPath = if (issue == null) draft.artifactRelativePath else null
         val storedSha = if (issue == null) draft.artifactSha256 else null
         val storedConfidence = if (issue == null) draft.meanConfidence else null
+        val storedMethod = if (issue == null) draft.method else null
         val now = Instants.now()
 
         val existing = connection.selectUnit(documentId, ordinal)
@@ -119,6 +145,7 @@ class ContentStore(private val database: Database) {
             artifactRelativePath = storedPath,
             artifactSha256 = storedSha,
             meanConfidence = storedConfidence,
+            extractionMethod = storedMethod,
             now = now,
         )
 
@@ -139,7 +166,41 @@ class ContentStore(private val database: Database) {
             artifactSha256 = storedSha,
             now = now,
         )
+        // The attempt's own row, written in the same transaction as the unit it describes: what the UI
+        // calls progress and what the store holds as committed text are then never two different states.
+        connection.upsertProgress(
+            documentId = documentId,
+            fingerprint = fingerprint,
+            unitKind = draft.locator.unitKind,
+            totalUnits = null,
+            now = now,
+        )
         UnitCommit(unit = unit, artifactIssue = issue)
+    }
+
+    /**
+     * Records what the extractor announced it has, before it has read all of it.
+     *
+     * The total is the extractor's statement, so an extractor that never announces one never gets a
+     * denominator. Re-announcing inside the same attempt keeps the first row's `started_at`, because the
+     * attempt has not restarted; announcing under a new fingerprint starts the row over, because it has.
+     */
+    fun recordProgress(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+        unitKind: UnitKind,
+        totalUnits: Int,
+    ) {
+        require(totalUnits >= 0) { "totalUnits must not be negative, was $totalUnits" }
+        database.transaction { connection ->
+            connection.upsertProgress(
+                documentId = documentId,
+                fingerprint = fingerprint,
+                unitKind = unitKind,
+                totalUnits = totalUnits,
+                now = Instants.now(),
+            )
+        }
     }
 
     /**
@@ -212,18 +273,52 @@ class ContentStore(private val database: Database) {
      * [CheckpointReuse.repaired] so the caller can say which units had to be read again. The check is what
      * makes "skip what was already read" safe — a skip without it would reuse a hash of text whose word boxes
      * are no longer the ones the citation would open.
+     *
+     * A failed unit is a known result and is skipped too, which is what an interrupted attempt resuming from
+     * its checkpoint wants. An explicit retry wants the opposite and uses [reusableSucceededCheckpoints].
      */
     fun reusableCheckpoints(
         documentId: DocumentId,
         fingerprint: ExtractionFingerprint,
         artifactRoot: Path,
+    ): CheckpointReuse = reuse(documentId, fingerprint, artifactRoot, revisitFailedUnits = false)
+
+    /**
+     * The same answer for an explicit retry: only units that were committed *successfully* are reusable.
+     *
+     * A failed checkpoint is deliberately not reusable, because revisiting what failed is what an explicit
+     * retry is for; its row is removed with the rest of the failures of this fingerprint, so the pass that
+     * follows describes only the failures it actually found. A succeeded unit is still verified against its
+     * artifact, so reuse never rests on evidence that is no longer there.
+     */
+    fun reusableSucceededCheckpoints(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+        artifactRoot: Path,
+    ): CheckpointReuse = reuse(documentId, fingerprint, artifactRoot, revisitFailedUnits = true)
+
+    /** The shared answer: which keys may be skipped, and which committed units have to be read again. */
+    private fun reuse(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+        artifactRoot: Path,
+        revisitFailedUnits: Boolean,
     ): CheckpointReuse {
         val skip = mutableSetOf<String>()
         val repaired = mutableListOf<String>()
+        // The failures an explicit retry is about to derive again. Their rows go, because a checkpoint left
+        // behind would outlive the failure it describes: the marker written at the end of the pass counts
+        // every failed checkpoint of the fingerprint, so a refusal the new pass did not repeat would still
+        // be reported as a warning about content that was read in full.
+        val rederived = mutableListOf<String>()
         loadCheckpoints(documentId, fingerprint).forEach { checkpoint ->
+            if (!checkpoint.succeeded) {
+                if (revisitFailedUnits) rederived += checkpoint.key else skip += checkpoint.key
+                return@forEach
+            }
             val relative = checkpoint.artifactRelativePath
-            if (!checkpoint.succeeded || relative == null) {
-                // A failed unit is a known result, and a unit with no artifact has nothing to verify.
+            if (relative == null) {
+                // A unit with no artifact has nothing to verify, so its committed text is what stands.
                 skip += checkpoint.key
                 return@forEach
             }
@@ -234,13 +329,13 @@ class ContentStore(private val database: Database) {
             }
         }
 
-        if (repaired.isNotEmpty()) {
+        if (repaired.isNotEmpty() || rederived.isNotEmpty()) {
             database.transaction { connection ->
                 loadCheckpoints(documentId, fingerprint)
-                    .filter { it.key in repaired }
+                    .filter { it.key in repaired || it.key in rederived }
                     .forEach { checkpoint ->
                         connection.deleteCheckpoint(documentId, fingerprint, checkpoint.key)
-                        connection.clearUnitArtifact(documentId, checkpoint.ordinal)
+                        if (checkpoint.key in repaired) connection.clearUnitArtifact(documentId, checkpoint.ordinal)
                     }
             }
         }
@@ -484,6 +579,39 @@ class ContentStore(private val database: Database) {
     /** How many chunks a document has, across its units. */
     fun chunkCount(documentId: DocumentId): Int = database.read { connection -> connection.countChunks(documentId) }
 
+    /**
+     * How far each of [documentIds] has got in its current attempt, for the ones that have one.
+     *
+     * Batched on purpose: the documents table shows a progress cell per row, and a page of fifty rows must
+     * not become fifty round trips. A document with no attempt recorded at all — one that is still queued,
+     * or was imported before any of this existed and has no summary either — is simply absent from the map
+     * rather than being given a row of zeroes.
+     */
+    fun documentProgress(documentIds: Collection<DocumentId>): Map<DocumentId, DocumentProgress> {
+        if (documentIds.isEmpty()) return emptyMap()
+        val ids = documentIds.map { it.value }.distinct()
+        return database.read { connection ->
+            val attempts = connection.progressAttempts(ids)
+            val counts = connection.progressCounts(ids)
+            val committedKinds = connection.committedUnitKinds(ids)
+            val failedCodes = connection.failedCheckpointCodes(ids)
+            attempts.mapValues { (documentId, attempt) ->
+                val counted = counts[documentId to attempt.fingerprint]
+                val knownMethods = counted?.unitsWithMethod ?: 0
+                DocumentProgress(
+                    // What the attempt said its units are, or what the units it committed turned out to be.
+                    unitKind = attempt.unitKind ?: committedKinds[documentId],
+                    totalUnits = attempt.totalUnits,
+                    processedUnits = counted?.processed ?: 0,
+                    failedUnits = counted?.failed ?: 0,
+                    directTextUnits = counted?.directText.takeIf { knownMethods > 0 },
+                    ocrUnits = counted?.ocr.takeIf { knownMethods > 0 },
+                    failedCodes = failedCodes[documentId to attempt.fingerprint].orEmpty(),
+                )
+            }
+        }
+    }
+
     private fun artifactIssue(draft: ContentUnitDraft, artifactRoot: Path): ArtifactIssue? {
         val relative = draft.artifactRelativePath ?: return null
         val sha = draft.artifactSha256 ?: return ArtifactIssue(
@@ -541,6 +669,119 @@ class ContentStore(private val database: Database) {
         return HexFormat.of().formatHex(digest.digest())
     }
 
+    /**
+     * The attempt each document is on: its own progress row when it has one, else its finished summary.
+     *
+     * The second half is what an older archive looks like. A document extracted before progress was
+     * recorded has a summary and no progress row, and the summary already answers what the question is:
+     * which attempt, and how many units it had. What it cannot answer — the method each unit was read by —
+     * stays unknown rather than being filled in with a guess.
+     */
+    private fun Connection.progressAttempts(ids: List<String>): Map<DocumentId, Attempt> {
+        val attempts = LinkedHashMap<DocumentId, Attempt>()
+        readRows(SELECT_PROGRESS, ids) { rows ->
+            while (rows.next()) {
+                attempts[DocumentId(rows.getString("document_id"))] = Attempt(
+                    fingerprint = rows.getString("fingerprint"),
+                    unitKind = rows.getString("unit_kind")?.let(UnitKind::valueOf),
+                    totalUnits = rows.getInt("total_units").takeUnless { rows.wasNull() },
+                )
+            }
+        }
+        readRows(SELECT_EXTRACTION_SUMMARIES, ids) { rows ->
+            while (rows.next()) {
+                attempts.putIfAbsent(
+                    DocumentId(rows.getString("document_id")),
+                    Attempt(
+                        fingerprint = rows.getString("fingerprint"),
+                        // An older document's unit kind is nowhere in its summary; the units below answer it.
+                        unitKind = null,
+                        totalUnits = rows.getInt("total_units"),
+                    ),
+                )
+            }
+        }
+        return attempts
+    }
+
+    /** The attempt's committed and failed unit counts, and how many of its units carry a method. */
+    private fun Connection.progressCounts(ids: List<String>): Map<Pair<DocumentId, String>, Counted> {
+        val counts = mutableMapOf<Pair<DocumentId, String>, Counted>()
+        readRows(COUNT_PROGRESS, ids) { rows ->
+            while (rows.next()) {
+                counts[DocumentId(rows.getString("document_id")) to rows.getString("fingerprint")] = Counted(
+                    processed = rows.getInt("processed_units"),
+                    failed = rows.getInt("failed_units"),
+                    directText = rows.getInt("direct_text_units"),
+                    ocr = rows.getInt("ocr_units"),
+                    unitsWithMethod = rows.getInt("units_with_method"),
+                )
+            }
+        }
+        return counts
+    }
+
+    /** What each document's first committed unit is, for an attempt that announced no kind of its own. */
+    private fun Connection.committedUnitKinds(ids: List<String>): Map<DocumentId, UnitKind> {
+        val kinds = mutableMapOf<DocumentId, UnitKind>()
+        readRows(SELECT_FIRST_UNIT_LOCATOR, ids) { rows ->
+            while (rows.next()) {
+                UNIT_KIND_BY_LOCATOR_TYPE[rows.getString("locator_type")]
+                    ?.let { kind -> kinds[DocumentId(rows.getString("document_id"))] = kind }
+            }
+        }
+        return kinds
+    }
+
+    /** The codes of the units each attempt could not read, distinct and ordered by code. */
+    private fun Connection.failedCheckpointCodes(ids: List<String>): Map<Pair<DocumentId, String>, List<String>> {
+        val codes = mutableMapOf<Pair<DocumentId, String>, MutableList<String>>()
+        readRows(SELECT_FAILED_CODES, ids) { rows ->
+            while (rows.next()) {
+                val key = DocumentId(rows.getString("document_id")) to rows.getString("fingerprint")
+                codes.getOrPut(key) { mutableListOf() } += rows.getString("error_code")
+            }
+        }
+        return codes
+    }
+
+    /** Runs one of the batched progress reads, whose `%s` is the id list it binds in order. */
+    private fun <T> Connection.readRows(template: String, ids: List<String>, block: (ResultSet) -> T): T =
+        prepareStatement(template.format(ids.joinToString(",") { "?" })).use { statement ->
+            ids.forEachIndexed { index, id -> statement.setString(index + 1, id) }
+            statement.executeQuery().use(block)
+        }
+
+    /**
+     * Writes the current attempt's row.
+     *
+     * A commit and an announcement both land here, which is why the update has to be explicit about what it
+     * keeps: the same attempt keeps its start instant and a total it already announced, while a new
+     * fingerprint starts the row over with no total at all, because the new attempt has announced nothing.
+     * The unit kind survives either way — a document's format does not change because it is read again.
+     */
+    private fun Connection.upsertProgress(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+        unitKind: UnitKind?,
+        totalUnits: Int?,
+        now: String,
+    ) {
+        prepareStatement(UPSERT_PROGRESS).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setString(2, fingerprint.value)
+            statement.setString(3, unitKind?.name)
+            if (totalUnits == null) {
+                statement.setNull(4, java.sql.Types.INTEGER)
+            } else {
+                statement.setInt(4, totalUnits)
+            }
+            statement.setString(5, now)
+            statement.setString(6, now)
+            statement.executeUpdate()
+        }
+    }
+
     private fun Connection.selectUnit(documentId: DocumentId, ordinal: Int): ContentUnit? =
         prepareStatement("$SELECT_UNITS WHERE document_id = ? AND ordinal = ?").use { statement ->
             statement.setString(1, documentId.value)
@@ -557,19 +798,20 @@ class ContentStore(private val database: Database) {
         artifactRelativePath: String?,
         artifactSha256: String?,
         meanConfidence: Double?,
+        extractionMethod: ExtractionMethod?,
         now: String,
     ): ContentUnit {
         val id = existing?.id ?: ContentUnitId.new()
         connection.prepareStatement(
             "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
-                "search_text, artifact_relative_path, artifact_sha256, mean_confidence, created_at, updated_at) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (document_id, ordinal) DO UPDATE SET locator_type = excluded.locator_type, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, " +
                 "artifact_relative_path = excluded.artifact_relative_path, " +
                 "artifact_sha256 = excluded.artifact_sha256, mean_confidence = excluded.mean_confidence, " +
-                "updated_at = excluded.updated_at",
+                "extraction_method = excluded.extraction_method, updated_at = excluded.updated_at",
         ).use { statement ->
             statement.setString(1, id.value)
             statement.setString(2, documentId.value)
@@ -585,8 +827,9 @@ class ContentStore(private val database: Database) {
             } else {
                 statement.setDouble(10, meanConfidence)
             }
-            statement.setString(11, now)
+            statement.setString(11, extractionMethod?.name)
             statement.setString(12, now)
+            statement.setString(13, now)
             statement.executeUpdate()
         }
         return checkNotNull(connection.selectUnit(documentId, ordinal)) {
@@ -731,6 +974,7 @@ class ContentStore(private val database: Database) {
         artifactRelativePath = getString("artifact_relative_path"),
         artifactSha256 = getString("artifact_sha256"),
         meanConfidence = getDouble("mean_confidence").takeUnless { wasNull() },
+        extractionMethod = getString("extraction_method")?.let(ExtractionMethod::valueOf),
     )
 
     private fun ResultSet.toChunk(): Chunk = Chunk(
@@ -743,6 +987,18 @@ class ContentStore(private val database: Database) {
         tokenCount = getInt("token_count"),
         tokenStart = getInt("token_start"),
         tokenEnd = getInt("token_end"),
+    )
+
+    /** One document's current attempt: which one it is, and what it said about its own units. */
+    private data class Attempt(val fingerprint: String, val unitKind: UnitKind?, val totalUnits: Int?)
+
+    /** What one attempt's checkpoints add up to. */
+    private data class Counted(
+        val processed: Int,
+        val failed: Int,
+        val directText: Int,
+        val ocr: Int,
+        val unitsWithMethod: Int,
     )
 
     private data class ChunkingMarker(
@@ -763,7 +1019,92 @@ class ContentStore(private val database: Database) {
 
         private const val UNIT_COLUMNS =
             "id, document_id, ordinal, locator_type, locator, extracted_text, search_text, " +
-                "artifact_relative_path, artifact_sha256, mean_confidence"
+                "artifact_relative_path, artifact_sha256, mean_confidence, extraction_method"
+
+        /** The current attempt's own row, written by the migration that made it possible to keep one. */
+        private const val SELECT_PROGRESS =
+            "SELECT document_id, fingerprint, unit_kind, total_units FROM document_extraction_progress " +
+                "WHERE document_id IN (%s)"
+
+        /** The finished summaries, which are all an archive written before progress existed has. */
+        private const val SELECT_EXTRACTION_SUMMARIES =
+            "SELECT document_id, fingerprint, total_units FROM document_extractions " +
+                "WHERE document_id IN (%s)"
+
+        /**
+         * What one attempt's checkpoints add up to.
+         *
+         * Counted from the checkpoints rather than from stored counters, so a resumed attempt that skips a
+         * committed unit cannot count it twice: the row it would have counted is the row it skipped. The
+         * method counts are joined on the unit the checkpoint stands for, which is where the method lives.
+         */
+        private val COUNT_PROGRESS = """
+            SELECT c.document_id AS document_id,
+                   c.fingerprint AS fingerprint,
+                   SUM(CASE WHEN c.outcome = 'EXTRACTED' THEN 1 ELSE 0 END) AS processed_units,
+                   SUM(CASE WHEN c.outcome = 'FAILED' THEN 1 ELSE 0 END) AS failed_units,
+                   SUM(CASE WHEN c.outcome = 'EXTRACTED' AND u.extraction_method = 'DIRECT_TEXT'
+                            THEN 1 ELSE 0 END) AS direct_text_units,
+                   SUM(CASE WHEN c.outcome = 'EXTRACTED' AND u.extraction_method = 'OCR'
+                            THEN 1 ELSE 0 END) AS ocr_units,
+                   SUM(CASE WHEN c.outcome = 'EXTRACTED' AND u.extraction_method IS NOT NULL
+                            THEN 1 ELSE 0 END) AS units_with_method
+            FROM extraction_checkpoints c
+            LEFT JOIN content_units u ON u.document_id = c.document_id AND u.ordinal = c.ordinal
+            WHERE c.document_id IN (%s)
+            GROUP BY c.document_id, c.fingerprint
+        """.trimIndent()
+
+        /** The lowest-ordinal committed unit of each document, which says what its units are. */
+        private const val SELECT_FIRST_UNIT_LOCATOR =
+            "SELECT document_id, locator_type FROM content_units cu WHERE document_id IN (%s) " +
+                "AND ordinal = (SELECT MIN(ordinal) FROM content_units m WHERE m.document_id = cu.document_id)"
+
+        /** The distinct codes of the units the attempt could not read, for the sentences shown beside them. */
+        private const val SELECT_FAILED_CODES =
+            "SELECT DISTINCT document_id, fingerprint, error_code FROM extraction_checkpoints " +
+                "WHERE outcome = 'FAILED' AND error_code IS NOT NULL AND document_id IN (%s) " +
+                "ORDER BY document_id, error_code"
+
+        /**
+         * The current attempt's row, written by a commit or by an announcement.
+         *
+         * A commit carries no total (`NULL`), so the case below is what decides: inside the same attempt the
+         * total already announced is kept, and under a new fingerprint the row starts over with nothing
+         * announced yet. The kind is kept across attempts because a document's format does not change.
+         */
+        private val UPSERT_PROGRESS = """
+            INSERT INTO document_extraction_progress
+                (document_id, fingerprint, unit_kind, total_units, started_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (document_id) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                unit_kind = COALESCE(document_extraction_progress.unit_kind, excluded.unit_kind),
+                total_units = CASE WHEN document_extraction_progress.fingerprint = excluded.fingerprint
+                                   THEN COALESCE(document_extraction_progress.total_units, excluded.total_units)
+                                   ELSE excluded.total_units END,
+                started_at = CASE WHEN document_extraction_progress.fingerprint = excluded.fingerprint
+                                  THEN document_extraction_progress.started_at ELSE excluded.started_at END,
+                updated_at = excluded.updated_at
+        """.trimIndent()
+
+        /**
+         * The unit kind each stored locator type means.
+         *
+         * The locator type names are stable database spellings (see [locatorType]), and this is their other
+         * direction: a document whose attempt announced no kind of its own still has units, and what they
+         * are is a fact about the document rather than something to guess.
+         */
+        private val UNIT_KIND_BY_LOCATOR_TYPE = mapOf(
+            "pdf_page" to UnitKind.PAGE,
+            "image" to UnitKind.IMAGE,
+            "slide" to UnitKind.SLIDE,
+            "text_lines" to UnitKind.LINE,
+            "spreadsheet_range" to UnitKind.SHEET,
+            "html_section" to UnitKind.SECTION,
+            "ebook_section" to UnitKind.SECTION,
+            "word_section" to UnitKind.SECTION,
+        )
 
         private const val SELECT_UNITS = "SELECT $UNIT_COLUMNS FROM content_units"
 

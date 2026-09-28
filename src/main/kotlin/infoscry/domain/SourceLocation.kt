@@ -116,6 +116,25 @@ sealed interface SourceLocation {
     }
 
     /**
+     * What one of this location's units is called: the structure the unit came from, not a guess.
+     *
+     * A page is a page and a slide is a slide, so progress counted in these units is counted in the thing
+     * the reader can point at. It is read off the locator rather than announced separately, because the
+     * locator *is* the structure the extractor expressed its document in.
+     */
+    val unitKind: UnitKind
+        get() = when (this) {
+            is PdfPage -> UnitKind.PAGE
+            is Image -> UnitKind.IMAGE
+            is Slide -> UnitKind.SLIDE
+            is TextLines -> UnitKind.LINE
+            is SpreadsheetRange -> UnitKind.SHEET
+            is HtmlSection -> UnitKind.SECTION
+            is EbookSection -> UnitKind.SECTION
+            is WordSection -> UnitKind.SECTION
+        }
+
+    /**
      * The human-readable label of this location, as a search result or citation shows it.
      *
      * One pointer per variant, in English: page numbers and slides are one-based, spreadsheet addresses

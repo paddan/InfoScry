@@ -341,6 +341,7 @@ class EbookExtractorsTest {
                 is ExtractionEvent.UnitReady -> event.unit.extractedText
                 is ExtractionEvent.Finished -> event.metadata.toString()
                 is ExtractionEvent.UnitFailed -> event.code
+                is ExtractionEvent.Progress -> event.toString()
             }
         }
         assertFalse(

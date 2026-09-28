@@ -2,9 +2,15 @@ package infoscry
 
 import infoscry.collection.CollectionIndexRemover
 import infoscry.collection.CollectionService
+import infoscry.collection.DeletionBlockers
 import infoscry.collection.DeletionRecoveryReport
 import infoscry.config.AppPaths
 import infoscry.config.ProcessLock
+import infoscry.document.DocumentIndexRemover
+import infoscry.document.DocumentService
+import infoscry.document.RetryPrerequisites
+import infoscry.document.RetryService
+import infoscry.domain.Collection
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.embedding.E5Embedder
@@ -58,7 +64,14 @@ class AppContext private constructor(
     val mutations: MutationCoordinator,
     val jobs: JobStore,
     val llm: LlmStore,
+    /**
+     * The unsafe deletion states that refuse every mutating command. One object, shared by the
+     * collection and document deletion machines, so the refusal is the same answer whichever service a
+     * route asks first.
+     */
+    val blockers: DeletionBlockers,
     private val injectedIndexRemover: CollectionIndexRemover,
+    private val injectedDocumentIndexRemover: DocumentIndexRemover,
     initialIndex: LuceneIndex,
     private val lock: ProcessLock,
     /**
@@ -69,6 +82,14 @@ class AppContext private constructor(
      * exactly so a search can be proved without a model. Nothing in production passes it.
      */
     private val injectedQueryEmbedder: (() -> QueryEmbedder?)? = null,
+    /**
+     * What a retry may assume about this machine, or null for the machine's own answer.
+     *
+     * The same kind of seam as [injectedQueryEmbedder]: the tools a retry needs are a property of the
+     * machine, and a test that would otherwise depend on Tesseract, Calibre or the pinned model being
+     * installed has to be able to say what it wants the answer to be. Nothing in production passes it.
+     */
+    private val injectedRetryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
 ) : AutoCloseable {
 
     /**
@@ -105,6 +126,50 @@ class AppContext private constructor(
         deletions = deletions,
         coordinator = mutations,
         index = indexRemover,
+        blockers = blockers,
+    )
+
+    /**
+     * The document phase of a deletion removes one document's rows from the generation the process
+     * serves right now, for the same reason the collection remover reads through the accessor.
+     */
+    private val documentIndexRemover: DocumentIndexRemover =
+        if (injectedDocumentIndexRemover === DocumentIndexRemover.NONE) {
+            DocumentIndexRemover { documentId -> index().deleteDocument(documentId) }
+        } else {
+            injectedDocumentIndexRemover
+        }
+
+    /**
+     * Deleting chosen documents from a collection, durably. It shares the mutation gate, the process
+     * lock and the deletion blockers with the collection service, because an unsafe state of either kind
+     * has to refuse the same mutations.
+     */
+    val documentService: DocumentService = DocumentService(
+        database = database,
+        paths = paths,
+        collections = collections,
+        documents = documents,
+        deletions = deletions,
+        coordinator = mutations,
+        blockers = blockers,
+        index = documentIndexRemover,
+    )
+
+    /**
+     * Admitting a retry: which documents may be read again from their managed copies, and the durable
+     * attempt that does it. It shares the mutation gate and the deletion blockers with both deletion
+     * machines, because an unsafe deletion state of either kind has to refuse this mutation too.
+     */
+    val retryService: RetryService = RetryService(
+        database = database,
+        collections = collections,
+        documents = documents,
+        jobs = jobs,
+        coordinator = mutations,
+        blockers = blockers,
+        prerequisites = injectedRetryPrerequisites
+            ?: { collection -> RetryPrerequisites.probe(collection.ocrLanguages, paths.modelsDir) },
     )
 
     /** The generation the process currently serves. Reading it is a single atomic reference read. */
@@ -174,6 +239,11 @@ class AppContext private constructor(
         private set
 
     override fun close() {
+        // Deletions stop before the stores they write to are closed: one may be holding exclusive
+        // maintenance and working through its phases, and its last written phase is what makes the next
+        // startup able to finish it.
+        runCatching { collectionService.close() }
+        runCatching { documentService.close() }
         // The worker stops first: it writes, so it must not still be running when the database closes.
         // Its close hands unfinished attempts back to the queue, which is what makes a clean shutdown
         // resumable.
@@ -204,12 +274,16 @@ class AppContext private constructor(
             dataDir: Path,
             index: CollectionIndexRemover = CollectionIndexRemover.NONE,
             queryEmbedder: (() -> QueryEmbedder?)? = null,
-        ): AppContext = open(AppPaths.from(dataDir), index, queryEmbedder)
+            documentIndex: DocumentIndexRemover = DocumentIndexRemover.NONE,
+            retryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
+        ): AppContext = open(AppPaths.from(dataDir), index, queryEmbedder, documentIndex, retryPrerequisites)
 
         fun open(
             paths: AppPaths,
             index: CollectionIndexRemover = CollectionIndexRemover.NONE,
             queryEmbedder: (() -> QueryEmbedder?)? = null,
+            documentIndex: DocumentIndexRemover = DocumentIndexRemover.NONE,
+            retryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
         ): AppContext {
             // The whole layout first, before anything can write into it. Opening a data directory creates its
             // database, so this is not a read-only operation and must not pretend to be one: the import path
@@ -252,12 +326,24 @@ class AppContext private constructor(
                             mutations = mutations,
                             jobs = jobs,
                             llm = llm,
+                            blockers = DeletionBlockers(),
                             injectedIndexRemover = index,
+                            injectedDocumentIndexRemover = documentIndex,
                             initialIndex = searchIndex,
                             lock = lock,
                             injectedQueryEmbedder = queryEmbedder,
+                            injectedRetryPrerequisites = retryPrerequisites,
                         )
-                        context.deletionRecovery = runBlocking { context.collectionService.recoverDeletions() }
+                        context.deletionRecovery = runBlocking {
+                            // Both kinds are finished before the marker is resolved and before any job is
+                            // admitted, so no worker can see a document whose rows are half removed.
+                            val collections = context.collectionService.recoverDeletions()
+                            val documents = context.documentService.recoverDeletions()
+                            DeletionRecoveryReport(
+                                recovered = collections.recovered + documents.recovered,
+                                blocked = collections.blocked + documents.blocked,
+                            )
+                        }
                         // The sweep runs after the marker is resolved and before any writer is admitted,
                         // so the set it removes is exactly the unreferenced one: a half-built successor
                         // and a generation a previous process could not retire.

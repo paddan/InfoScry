@@ -1,5 +1,6 @@
 package infoscry.extract
 
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import java.io.IOException
 import java.nio.file.Files
@@ -100,6 +101,8 @@ class ImageExtractor(
                         locator = SourceLocation.Image(input.originalFilename),
                         extractedText = normalised.extracted,
                         searchText = normalised.search,
+                        // The picture is the document and the tool read it; there is no text layer here.
+                        method = ExtractionMethod.OCR,
                         artifactRelativePath = reading.artifactRelativePath,
                         artifactSha256 = reading.artifactSha256,
                         meanConfidence = reading.meanConfidence,

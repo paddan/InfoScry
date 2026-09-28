@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Page from './+page.svelte';
 import type { Collection } from '../lib/api';
@@ -63,24 +63,66 @@ describe('app shell', () => {
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
 
     expect(await screen.findByRole('tablist', { name: 'Administration section' })).toBeTruthy();
-    expect(screen.getByRole('tab', { name: 'LLM profiles' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'Collections' }).getAttribute('aria-selected')).toBe('true');
+    // The empty archive still offers the create action, and no Import tab exists.
+    expect(await screen.findByText('No collections yet')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Create collection' })).toBeTruthy();
+    expect(screen.queryByRole('tab', { name: 'Import' })).toBeNull();
   });
 
-  it('switches the Admin sub-tab between LLM profiles and Import', async () => {
-    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+  it('refreshes the workspace selector after a rename without changing the workspace selection', async () => {
+    let renames = 0;
+    const { calls } = stubFetch({
+      list: () => jsonResponse({
+        collections: renames === 0
+          ? [collection('Default', 2), collection('Nightfall', 0)]
+          : [collection('Default', 2), { ...collection('Nightfall archive', 0), id: 'nightfall' }],
+      }),
+      rename: () => {
+        renames += 1;
+        return jsonResponse({ collection: { ...collection('Nightfall archive'), id: 'nightfall' } });
+      },
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 0 documents' }));
+    await fireEvent.input(screen.getByLabelText('Collection name'), { target: { value: 'Nightfall archive' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+
+    // The panel stays mounted through the reload, so the save reports itself instead of flashing a spinner.
+    expect(await screen.findByText('Name saved.')).toBeTruthy();
+    await act(async () => {});
+    const options = within(screen.getByLabelText('Collection')).getAllByRole('option');
+    expect(options.map((option) => option.textContent)).toEqual(['Default', 'Nightfall archive']);    // Renaming is not a workspace switch: the workspace keeps the collection it had, and Admin keeps
+    // managing the renamed one, which kept its id.
+    expect((screen.getByLabelText('Collection') as HTMLSelectElement).value).toBe('default');
+    expect(screen.getByRole('region', { name: 'Manage Nightfall archive' })).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/nightfall' && call.init?.method === 'PATCH')).toBe(true);
+  });
+
+  it('switches the Admin sub-tab between Collections and LLM profiles', async () => {
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default', 2), collection('Nightfall', 0)] }) });
 
     render(Page);
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
     expect(await screen.findByRole('tablist', { name: 'Administration section' })).toBeTruthy();
-    expect(screen.getByRole('tab', { name: 'LLM profiles' }).getAttribute('aria-selected')).toBe('true');
-
-    await fireEvent.click(screen.getByRole('tab', { name: 'Import' }));
-    expect(screen.getByRole('tab', { name: 'Import' }).getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByRole('button', { name: 'Choose files…' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Collections' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'LLM profiles' }).getAttribute('aria-selected')).toBe('false');
+    expect(screen.queryByRole('tab', { name: 'Import' })).toBeNull();
+    expect(screen.getByText('2 documents')).toBeTruthy();
 
     await fireEvent.click(screen.getByRole('tab', { name: 'LLM profiles' }));
     expect(screen.getByRole('tab', { name: 'LLM profiles' }).getAttribute('aria-selected')).toBe('true');
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Collections' }));
+    expect(screen.getByRole('tab', { name: 'Collections' }).getAttribute('aria-selected')).toBe('true');
+
+    // Managing a collection in Admin never switches the workspace collection or its conversations.
+    await fireEvent.click(screen.getByRole('button', { name: 'Nightfall 0 documents' }));
+    expect((screen.getByLabelText('Collection') as HTMLSelectElement).value).toBe('default');
   });
 
   it('reports a failed load instead of showing an empty archive', async () => {
@@ -257,6 +299,250 @@ describe('app shell', () => {
     finishOldSearch(jsonResponse({ hits: [hit('Default', 'Page 1')], staleFiltered: 0 }));
     expect(screen.queryByText('Page 1')).toBeNull();
     expect(screen.getByText('Page 9')).toBeTruthy();
+  });
+
+  it('opens a managed document from Admin in the existing source viewer', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 2)] }),
+      documents: () => jsonResponse({
+        documents: [{
+          id: 'document-1',
+          collectionId: 'nightfall',
+          mediaType: 'application/pdf',
+          originalFilename: 'quarterly.pdf',
+          sizeBytes: 2048,
+          status: 'COMPLETE',
+          createdAt: '2026-09-21T07:00:00Z',
+          updatedAt: '2026-09-21T07:00:00Z',
+        }],
+        total: 2,
+      }),
+      document: () => jsonResponse({
+        document: {
+          id: 'document-1',
+          collectionId: 'nightfall',
+          mediaType: 'application/pdf',
+          originalFilename: 'quarterly.pdf',
+          sizeBytes: 2048,
+          status: 'COMPLETE',
+          createdAt: '2026-09-21T07:00:00Z',
+          updatedAt: '2026-09-21T07:00:00Z',
+        },
+        errorMessage: null,
+        sourceId: 'unit-9',
+      }),
+      source: () => jsonResponse(sourcePage('Managed document text', 0, 21)),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 2 documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+
+    expect(await screen.findByRole('heading', { name: 'Source' })).toBeTruthy();
+    expect(screen.getByText('Managed document text')).toBeTruthy();
+    // The viewer reads the collection Admin manages, not the workspace's own selected collection,
+    // and the managed original link names the same document.
+    expect(calls.some((call) => call.url === '/api/collections/nightfall/sources/unit-9?offset=0&limit=16384')).toBe(true);
+    expect(screen.getByRole('link', { name: 'Open original' }).getAttribute('href'))
+      .toBe('/api/collections/nightfall/documents/document-1/original');
+  });
+
+  it('asks the server for every eligible document of the managed collection, not the displayed page', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 61)] }),
+      documents: () => jsonResponse({
+        documents: [{
+          id: 'document-1',
+          collectionId: 'nightfall',
+          mediaType: 'application/pdf',
+          originalFilename: 'quarterly.pdf',
+          sizeBytes: 2048,
+          status: 'FAILED',
+          createdAt: '2026-09-21T07:00:00Z',
+          updatedAt: '2026-09-21T07:00:00Z',
+        }],
+        total: 61,
+      }),
+      retry: () => jsonResponse({ collectionId: 'nightfall', acceptedJobIds: ['job-3'], rejected: [] }, 202),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 61 documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Retry all eligible documents' }));
+
+    // Collection-wide selection is the server's to make: the request names the collection and asks for every
+    // eligible document, never the ids of the page the table happens to show.
+    await waitFor(() => {
+      expect(calls.some((call) => call.url === '/api/collections/nightfall/documents/retry')).toBe(true);
+    });
+    const retry = calls.find((call) => call.url === '/api/collections/nightfall/documents/retry');
+    expect(retry?.init?.method).toBe('POST');
+    expect(JSON.parse(String(retry?.init?.body))).toEqual({ allEligible: true });
+    const outcome = await screen.findByRole('region', { name: 'Retry documents in Nightfall' });
+    await waitFor(() => {
+      expect(within(outcome).getByRole('status').textContent)
+        .toContain('Retry queued for every eligible document in Nightfall');
+    });
+  });
+
+  it('closes the viewer and drops the collection when Admin deletes it', async () => {
+    let deleted = false;
+    const { calls } = stubFetch({
+      list: () => jsonResponse({
+        collections: deleted
+          ? [collection('Default', 0)]
+          : [collection('Default', 0), collection('Nightfall', 1)],
+      }),
+      documents: () => jsonResponse({
+        documents: [{
+          id: 'document-1',
+          collectionId: 'nightfall',
+          mediaType: 'application/pdf',
+          originalFilename: 'quarterly.pdf',
+          sizeBytes: 2048,
+          status: 'COMPLETE',
+          createdAt: '2026-09-21T07:00:00Z',
+          updatedAt: '2026-09-21T07:00:00Z',
+        }],
+        total: 1,
+      }),
+      document: () => jsonResponse({
+        document: {
+          id: 'document-1',
+          collectionId: 'nightfall',
+          mediaType: 'application/pdf',
+          originalFilename: 'quarterly.pdf',
+          sizeBytes: 2048,
+          status: 'COMPLETE',
+          createdAt: '2026-09-21T07:00:00Z',
+          updatedAt: '2026-09-21T07:00:00Z',
+        },
+        errorMessage: null,
+        sourceId: 'unit-9',
+      }),
+      source: () => jsonResponse(sourcePage('Managed document text', 0, 21)),
+      deleteCollection: () => {
+        deleted = true;
+        return jsonResponse({ operationId: 'op-1', collectionId: 'nightfall', phase: 'PREPARED' }, 202);
+      },
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    expect(await screen.findByRole('heading', { name: 'Source' })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete collection' }));
+    await fireEvent.input(
+      screen.getByLabelText('Type the collection name to confirm'),
+      { target: { value: 'Nightfall' } },
+    );
+    await fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Delete Nightfall?' })).getByRole('button', { name: 'Delete collection' }),
+    );
+
+    // The finished deletion closes the viewer bound to the removed collection and refreshes both lists.
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Source' })).toBeNull());
+    await waitFor(() => {
+      const options = within(screen.getByLabelText('Collection')).getAllByRole('option');
+      expect(options.map((option) => option.textContent)).toEqual(['Default']);
+    });
+    expect(screen.queryByRole('button', { name: 'Nightfall 1 document' })).toBeNull();
+    expect(calls.some((call) => call.url === '/api/collections/nightfall' && call.init?.method === 'DELETE')).toBe(true);
+  });
+
+  it('drops the deleted collection’s results when admitting the deletion already moved the selection', async () => {
+    let deleted = false;
+    stubFetch({
+      list: () => jsonResponse({
+        collections: deleted
+          ? [collection('Default', 0)]
+          : [collection('Default', 0), collection('Nightfall', 1)],
+      }),
+      search: () => jsonResponse({ hits: [hit('Nightfall', 'Page 7')], staleFiltered: 0 }),
+      documents: () => jsonResponse({ documents: [], total: 0 }),
+      deleteCollection: () => {
+        deleted = true;
+        return jsonResponse({ operationId: 'op-1', collectionId: 'nightfall', phase: 'PREPARED' }, 202);
+      },
+      // The deletion is still running when this checks, so only the admission's own refresh can move the
+      // workspace selection: nothing here waits for the completion event to clean up.
+      deletion: () => jsonResponse({
+        operation: {
+          operationId: 'op-1',
+          kind: 'COLLECTION',
+          collectionId: 'nightfall',
+          collectionName: 'Nightfall',
+          documentIds: [],
+          phase: 'PREPARED',
+          terminal: false,
+          errorCode: null,
+        },
+      }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.change(screen.getByLabelText('Collection'), { target: { value: 'nightfall' } });
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'payment records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('Page 7')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete collection' }));
+    await fireEvent.input(
+      screen.getByLabelText('Type the collection name to confirm'),
+      { target: { value: 'Nightfall' } },
+    );
+    await fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Delete Nightfall?' })).getByRole('button', { name: 'Delete collection' }),
+    );
+
+    // Admitting the deletion refreshes the list, which moves the workspace selection to the collection
+    // that is left; the rows the search drew from the deleted one go before that, not after the deletion
+    // is done.
+    await waitFor(() => expect((screen.getByLabelText('Collection') as HTMLSelectElement).value).toBe('default'));
+    await fireEvent.click(screen.getByRole('tab', { name: 'Search' }));
+    expect(screen.queryByText('Page 7')).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Search results' })).toBeNull();
+  });
+
+  it('shows the managed collection\u2019s durable import history from the server', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      imports: () => jsonResponse({
+        imports: [{
+          id: 'job-1',
+          state: 'RUNNING',
+          stage: 'COPYING',
+          filesCompleted: 1,
+          filesTotal: 4,
+          createdAt: '2026-09-21T07:00:00Z',
+          updatedAt: '2026-09-21T07:00:01Z',
+          itemsUrl: '/api/jobs/job-1/items',
+        }],
+        total: 1,
+      }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+
+    const history = await screen.findByRole('region', { name: 'Import history for Nightfall' });
+    expect(await within(history).findByText('1 of 4 files')).toBeTruthy();
+    // The history read names the collection Admin manages, and carries no source path or payload.
+    expect(calls.some((call) => call.url === '/api/collections/nightfall/imports?limit=50')).toBe(true);
   });
 
   it('opens an exact source from a result using an accessible keyboard-operable control', async () => {
@@ -1409,7 +1695,7 @@ describe('app shell', () => {
   });
 });
 
-function collection(name: string): Collection {
+function collection(name: string, documentCount = 0): Collection {
   return {
     id: name.toLowerCase(),
     name,
@@ -1417,6 +1703,7 @@ function collection(name: string): Collection {
     createdAt: '2026-09-21T07:00:00Z',
     updatedAt: '2026-09-21T07:00:00Z',
     lifecycle: 'ACTIVE',
+    documentCount,
   };
 }
 
@@ -1494,6 +1781,15 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function stubFetch(overrides: {
   list?: (url: string) => Response | Promise<Response>;
+  documents?: (url: string) => Response | Promise<Response>;
+  retry?: (url: string) => Response | Promise<Response>;
+  document?: (url: string) => Response | Promise<Response>;
+  imports?: (url: string) => Response | Promise<Response>;
+  rename?: (url: string) => Response | Promise<Response>;
+  ocrLanguages?: (url: string) => Response | Promise<Response>;
+  deleteCollection?: (url: string) => Response | Promise<Response>;
+  deletions?: (url: string) => Response | Promise<Response>;
+  deletion?: (url: string) => Response | Promise<Response>;
   search?: (url: string) => Response | Promise<Response>;
   source?: (url: string) => Response | Promise<Response>;
   ask?: (signal?: AbortSignal) => Response | Promise<Response>;
@@ -1519,6 +1815,45 @@ function stubFetch(overrides: {
     }
     if (url.endsWith('/api/collections')) {
       return (overrides.list ?? (() => jsonResponse({ collections: [] })))(url);
+    }
+    if (url.includes('/ocr-languages')) {
+      return (overrides.ocrLanguages ?? (() => jsonResponse({ collection: collection('Nightfall') })))(url);
+    }
+    if (url.startsWith('/api/collections/') && init?.method === 'PATCH') {
+      return (overrides.rename ?? (() => jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404)))(url);
+    }
+    if (url.startsWith('/api/collections/') && init?.method === 'DELETE') {
+      return (overrides.deleteCollection
+        ?? (() => jsonResponse({ operationId: 'op-1', collectionId: 'nightfall', phase: 'PREPARED' }, 202)))(url);
+    }
+    if (url.startsWith('/api/deletions/')) {
+      return (overrides.deletion ?? (() => jsonResponse({
+        operation: {
+          operationId: 'op-1',
+          kind: 'COLLECTION',
+          collectionId: 'nightfall',
+          collectionName: 'Nightfall',
+          documentIds: [],
+          phase: 'DONE',
+          terminal: true,
+          errorCode: null,
+        },
+      })))(url);
+    }
+    if (url.endsWith('/api/deletions')) {
+      return (overrides.deletions ?? (() => jsonResponse({ deletions: [] })))(url);
+    }
+    if (url.includes('/imports')) {
+      return (overrides.imports ?? (() => jsonResponse({ imports: [], total: 0 })))(url);
+    }
+    if (url.endsWith('/documents/retry')) {
+      return (overrides.retry ?? (() => jsonResponse({ collectionId: 'nightfall', acceptedJobIds: [], rejected: [] }, 202)))(url);
+    }
+    if (url.includes('/documents/')) {
+      return (overrides.document ?? (() => jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404)))(url);
+    }
+    if (url.includes('/documents')) {
+      return (overrides.documents ?? (() => jsonResponse({ documents: [], total: 0 })))(url);
     }
     if (url.endsWith('/api/investigations')) {
       return (overrides.investigateStart ?? (() => eventResponse([{ type: 'done', text: '', evidence: [] }])))(init?.signal as AbortSignal | undefined);

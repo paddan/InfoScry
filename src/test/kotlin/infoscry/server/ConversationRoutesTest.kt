@@ -42,7 +42,7 @@ class ConversationRoutesTest {
         val dataDir = Files.createTempDirectory("infoscry-delete-conversation")
         try {
             ApiTestServer(dataDir).use { harness ->
-                val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+                val collection = harness.context.collectionService.create("Default")
                 val profile = createProfile(harness, "delete-investigator")
 
                 // An Investigate conversation with every child the schema keeps: messages, a model
@@ -137,7 +137,7 @@ class ConversationRoutesTest {
         val dataDir = Files.createTempDirectory("infoscry-delete-unknown")
         try {
             ApiTestServer(dataDir).use { harness ->
-                val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+                val collection = harness.context.collectionService.create("Default")
 
                 val response = harness.request(
                     HttpMethod.Delete,
@@ -160,7 +160,7 @@ class ConversationRoutesTest {
         val dataDir = Files.createTempDirectory("infoscry-delete-foreign")
         try {
             ApiTestServer(dataDir).use { harness ->
-                val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+                val collection = harness.context.collectionService.create("Default")
                 val other = harness.context.collectionService.create("Other")
                 val profile = createProfile(harness, "delete-owner")
                 val conversationId = harness.context.llm.persistInvestigateConversation(
@@ -201,7 +201,7 @@ class ConversationRoutesTest {
         val dataDir = Files.createTempDirectory("infoscry-delete-uncredentialed")
         try {
             ApiTestServer(dataDir).use { harness ->
-                val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+                val collection = harness.context.collectionService.create("Default")
 
                 val response = harness.request(
                     HttpMethod.Delete,

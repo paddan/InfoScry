@@ -1,5 +1,6 @@
 package infoscry.extract
 
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import java.io.Reader
 import java.nio.file.Files
@@ -116,6 +117,7 @@ class PlainTextExtractor(
                                 locator = SourceLocation.TextLines(start = start, end = end),
                                 extractedText = normalised.extracted,
                                 searchText = normalised.search,
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )
@@ -197,6 +199,7 @@ class MarkdownExtractor : DocumentExtractor {
                                 locator = SourceLocation.TextLines(start = ready.startLine, end = ready.endLine),
                                 extractedText = normalised.extracted,
                                 searchText = normalised.search,
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )
@@ -378,6 +381,7 @@ class HtmlExtractor(
                             locator = SourceLocation.HtmlSection(section.headingPath),
                             extractedText = normalised.extracted,
                             searchText = normalised.search,
+                            method = ExtractionMethod.DIRECT_TEXT,
                         ),
                     ),
                 )
@@ -573,6 +577,7 @@ class CsvExtractor(private val rowsPerUnit: Int = DEFAULT_ROWS_PER_UNIT) : Docum
                                 ),
                                 extractedText = TextNormalizer.normalize(printRows(batch)).extracted,
                                 searchText = TextNormalizer.normalize(searchableRows(header, batch)).search,
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )

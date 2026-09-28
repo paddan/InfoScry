@@ -32,6 +32,21 @@ class CollectionNotActiveException(val collectionId: CollectionId) :
     )
 
 /**
+ * The document is a document deletion's target, so no stage may write it any more.
+ *
+ * Raised where the write happens rather than by each caller, because there are many writers — a status
+ * transition in the import handler, one in the extraction sink, one in the embedding stage — and a
+ * guard a caller can forget is not a guard. The document's row may already be gone, which is why this
+ * is distinct from [NoSuchElementException]: the resume must treat it as "this file is cancelled", not
+ * as "the document does not exist".
+ *
+ * The durable record behind it is the deletion target, which outlives the document it names, so the
+ * answer stays true after the deletion has finished and the identifiers can never be reused.
+ */
+class DocumentBeingDeletedException(val documentId: DocumentId) :
+    IllegalStateException("document ${documentId.value} is being deleted and cannot be written")
+
+/**
  * Persistence for documents. The row-level constraints are the authority: the unique
  * `(collection_id, sha256)` index decides duplicates, and the foreign key to `collections` decides
  * whether a collection exists, so no caller has to race a `SELECT` before writing. The collection's
@@ -54,6 +69,34 @@ data class DocumentCriterion(
     val importedUntil: String? = null,
     val statuses: Set<DocumentStatus> = emptySet(),
     val ocrOnly: Boolean = false,
+)
+
+/**
+ * The order one collection's document page comes back in.
+ *
+ * Every clause ends in the document id, so documents that share an import date or a filename still come
+ * back in one repeatable order: a page boundary that falls inside such a tie cannot repeat one row and
+ * drop another.
+ */
+enum class DocumentSort(internal val orderBy: String) {
+    NEWEST("created_at DESC, id"),
+    OLDEST("created_at ASC, id"),
+    NAME_ASC("original_filename COLLATE NOCASE ASC, id"),
+    NAME_DESC("original_filename COLLATE NOCASE DESC, id"),
+}
+
+/**
+ * The criteria a collection's document listing is restricted to, in the storage vocabulary.
+ *
+ * [filenameContains] is a literal, case-insensitive contains match on the original filename alone: the
+ * external source path is not a product surface, so it is neither searched nor returned, and a `%`, `_`
+ * or backslash the reader typed matches itself rather than widening the search.
+ */
+data class DocumentListing(
+    val collectionId: CollectionId,
+    val filenameContains: String? = null,
+    val statuses: Set<DocumentStatus> = emptySet(),
+    val sort: DocumentSort = DocumentSort.NEWEST,
 )
 
 class DocumentStore(private val database: Database) {
@@ -129,7 +172,19 @@ class DocumentStore(private val database: Database) {
         "%" + contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-    fun insert(document: Document): Document {
+    /**
+     * Inserts [document], and lets the caller record a durable reference to it in the same commit.
+     *
+     * [onDocumentCreated] runs inside this insert's own transaction, immediately after the row exists and
+     * before the commit. That is what makes a link written there outlive a crash between "this row exists"
+     * and whatever the caller does next: the row and the reference are either both there or both gone. It is
+     * called only for a document this call created — a refused insert throws instead, so nobody can claim a
+     * document that was never written.
+     */
+    fun insert(
+        document: Document,
+        onDocumentCreated: (Connection, DocumentId) -> Unit = { _, _ -> },
+    ): Document {
         database.transaction { connection ->
             connection.prepareStatement(INSERT_DOCUMENT).use { statement ->
                 bindDocument(statement, document)
@@ -140,11 +195,21 @@ class DocumentStore(private val database: Database) {
                 }
                 if (inserted == 0) throw refusalFor(connection, document)
             }
+            onDocumentCreated(connection, document.id)
         }
         return document
     }
 
     fun get(id: DocumentId): Document? = database.read { connection -> selectById(connection, id) }
+
+    /**
+     * Whether anything is deleting or has deleted [documentId].
+     *
+     * The target row outlives the document, so this is true for a resumed stage that still holds the id
+     * of a document whose row is already gone. Every write boundary that names a document reads it
+     * before it writes, which is what stops a deletion and a resume from resurrecting each other's work.
+     */
+    fun isDeletionTarget(id: DocumentId): Boolean = database.read { connection -> isDeletionTarget(connection, id) }
 
     fun findBySha256(collectionId: CollectionId, sha256: String): Document? =
         database.read { connection ->
@@ -188,8 +253,67 @@ class DocumentStore(private val database: Database) {
     }
 
     /**
+     * One page of a collection's documents under [listing].
+     *
+     * The criteria are applied in SQL, before the limit: a page holds rows that passed the filter, never
+     * the filter's result taken from an unfiltered page. [countListing] applies the same criteria, so the
+     * total a caller displays always describes exactly the rows it asked for.
+     */
+    fun listListing(listing: DocumentListing, limit: Int, offset: Int = 0): List<Document> {
+        require(limit > 0) { "limit must be positive, was $limit" }
+        require(offset >= 0) { "offset must not be negative, was $offset" }
+        val (where, parameters) = listingWhere(listing)
+        return database.read { connection ->
+            connection.prepareStatement(
+                "$SELECT_DOCUMENTS WHERE $where ORDER BY ${listing.sort.orderBy} LIMIT ? OFFSET ?",
+            ).use { statement ->
+                parameters.forEachIndexed { index, value -> statement.setString(index + 1, value) }
+                statement.setInt(parameters.size + 1, limit)
+                statement.setInt(parameters.size + 2, offset)
+                statement.executeQuery().use { rows ->
+                    buildList { while (rows.next()) add(rows.toDocument()) }
+                }
+            }
+        }
+    }
+
+    /** How many documents [listing] matches, under the criteria [listListing] pages through. */
+    fun countListing(listing: DocumentListing): Int {
+        val (where, parameters) = listingWhere(listing)
+        return database.read { connection ->
+            connection.prepareStatement("SELECT COUNT(*) FROM documents WHERE $where").use { statement ->
+                parameters.forEachIndexed { index, value -> statement.setString(index + 1, value) }
+                statement.executeQuery().use { rows ->
+                    rows.next()
+                    rows.getInt(1)
+                }
+            }
+        }
+    }
+
+    /** The `WHERE` clause and its bound values that a listing's page and its total share. */
+    private fun listingWhere(listing: DocumentListing): Pair<String, List<String>> {
+        val clause = StringBuilder("collection_id = ?")
+        val parameters = mutableListOf(listing.collectionId.value)
+        listing.filenameContains?.let { contains ->
+            clause.append(" AND original_filename LIKE ? ESCAPE '\\'")
+            parameters += likePattern(contains)
+        }
+        if (listing.statuses.isNotEmpty()) {
+            clause.append(" AND status IN (").append(listing.statuses.joinToString(",") { "?" }).append(")")
+            listing.statuses.forEach { status -> parameters += status.name }
+        }
+        return clause.toString() to parameters
+    }
+
+    /**
      * Moves a document to [status]. Passing null error values clears any previous error, so a
      * document that later succeeds does not keep a stale failure attached to it.
+     *
+     * The write is guarded against a document deletion in the same statement, so a status transition
+     * and the deletion cannot both win: the row is written only while nothing is deleting the document.
+     * When nothing matched, the distinction matters — a missing row is an error, a target of a deletion
+     * is a cancellation — so the guard is read back inside the same transaction to say which it was.
      */
     fun updateStatus(
         id: DocumentId,
@@ -199,17 +323,21 @@ class DocumentStore(private val database: Database) {
     ): Document {
         val updatedAt = Instants.now()
         val changed = database.transaction { connection ->
-            connection.prepareStatement(
+            val updated = connection.prepareStatement(
                 "UPDATE documents SET status = ?, error_code = ?, error_message = ?, updated_at = ? " +
-                    "WHERE id = ?",
+                    "WHERE id = ? AND NOT EXISTS " +
+                    "(SELECT 1 FROM document_deletion_targets WHERE document_id = ?)",
             ).use { statement ->
                 statement.setString(1, status.name)
                 statement.setString(2, errorCode)
                 statement.setString(3, errorMessage)
                 statement.setString(4, updatedAt)
                 statement.setString(5, id.value)
+                statement.setString(6, id.value)
                 statement.executeUpdate()
             }
+            if (updated == 0 && isDeletionTarget(connection, id)) throw DocumentBeingDeletedException(id)
+            updated
         }
         if (changed == 0) throw NoSuchElementException("no document with id ${id.value}")
         return get(id) ?: throw NoSuchElementException("no document with id ${id.value}")
@@ -221,6 +349,12 @@ class DocumentStore(private val database: Database) {
             statement.executeUpdate() > 0
         }
     }
+
+    private fun isDeletionTarget(connection: Connection, id: DocumentId): Boolean =
+        connection.prepareStatement("SELECT 1 FROM document_deletion_targets WHERE document_id = ?").use { statement ->
+            statement.setString(1, id.value)
+            statement.executeQuery().use { rows -> rows.next() }
+        }
 
     private fun selectById(connection: Connection, id: DocumentId): Document? =
         connection.prepareStatement("$SELECT_DOCUMENTS WHERE id = ?").use { statement ->

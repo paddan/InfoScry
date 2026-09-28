@@ -78,6 +78,25 @@ class CollectionStore(private val database: Database) {
         }
     }
 
+    /**
+     * [list] with each collection's number of documents, counted in the same query that reads the
+     * rows. A separate count query per collection would let the listing show a document that a
+     * concurrent import added after its own row was read.
+     */
+    fun listWithDocumentCounts(): List<Collection> = database.read { connection ->
+        connection.createStatement().use { statement ->
+            statement
+                .executeQuery("$SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT ORDER BY c.name COLLATE NOCASE")
+                .use { rows ->
+                    buildList {
+                        while (rows.next()) {
+                            add(rows.toCollection().copy(documentCount = rows.getInt("document_count")))
+                        }
+                    }
+                }
+        }
+    }
+
     fun get(id: CollectionId): Collection? = database.read { connection ->
         selectById(connection, id)
     }
@@ -182,12 +201,22 @@ class CollectionStore(private val database: Database) {
     )
 
     companion object {
-        /** The identifier of the collection created by the first migration. */
+        /** The identifier of the legacy collection the first migration created. */
         val DEFAULT_ID: CollectionId = CollectionId("default")
 
         const val DEFAULT_OCR_LANGUAGES = "eng"
 
         private const val SELECT_COLLECTIONS =
             "SELECT id, name, description, ocr_languages, lifecycle, created_at, updated_at FROM collections"
+
+        /**
+         * The same columns plus a document count, joined and grouped so one round trip answers the
+         * whole listing. `COUNT(d.id)` counts matched document rows and not collections, so a
+         * collection without documents is listed with 0 rather than dropped.
+         */
+        private const val SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT =
+            "SELECT c.id, c.name, c.description, c.ocr_languages, c.lifecycle, c.created_at, " +
+                "c.updated_at, COUNT(d.id) AS document_count FROM collections c " +
+                "LEFT JOIN documents d ON d.collection_id = c.id GROUP BY c.id"
     }
 }

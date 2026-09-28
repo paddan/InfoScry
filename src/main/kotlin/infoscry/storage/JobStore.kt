@@ -95,6 +95,43 @@ open class JobStore(private val database: Database) {
     }
 
     /**
+     * One page of a collection's import jobs, newest first.
+     *
+     * Import history is a collection-scoped read: another collection's import is never selected, so a page
+     * can only describe the collection the caller named. Ordering ties are broken by insertion order
+     * (`rowid`) for the same reason [list] does it: two imports enqueued in the same millisecond must still
+     * page deterministically. Reindex jobs are not imports and are not part of this history.
+     */
+    fun listImports(collectionId: CollectionId, limit: Int, offset: Int = 0): List<Job> {
+        require(limit > 0) { "limit must be positive, was $limit" }
+        require(offset >= 0) { "offset must not be negative, was $offset" }
+        return database.read { connection ->
+            connection.prepareStatement(
+                "$SELECT_JOBS WHERE collection_id = ? AND type = ? ORDER BY created_at DESC, rowid DESC " +
+                    "LIMIT ? OFFSET ?",
+            ).use { statement ->
+                statement.setString(1, collectionId.value)
+                statement.setString(2, JobType.IMPORT.name)
+                statement.setInt(3, limit)
+                statement.setInt(4, offset)
+                statement.executeQuery().use { rows -> rows.readAll() }
+            }
+        }
+    }
+
+    /** How many imports a collection holds, under the same criteria [listImports] pages through. */
+    fun countImports(collectionId: CollectionId): Int = database.read { connection ->
+        connection.prepareStatement("SELECT COUNT(*) FROM jobs WHERE collection_id = ? AND type = ?").use { statement ->
+            statement.setString(1, collectionId.value)
+            statement.setString(2, JobType.IMPORT.name)
+            statement.executeQuery().use { rows ->
+                rows.next()
+                rows.getInt(1)
+            }
+        }
+    }
+
+    /**
      * Takes one job for a worker, or returns `null` when it is no longer queued — an unknown id and an
      * already-claimed job are the same answer, because both mean there is nothing to take.
      */
@@ -120,12 +157,18 @@ open class JobStore(private val database: Database) {
         claimIn(connection, next.id)
     }
 
-    /** Records the stage an attempt is in and how far it has come. */
+    /**
+     * Records the stage an attempt is in, how far it has come, and which file it is holding.
+     *
+     * A `null` argument keeps what the row already holds, so a caller that only reports the file it is
+     * reading does not have to repeat the counters it reported a moment ago.
+     */
     fun progress(
         id: JobId,
         stage: String? = null,
         completed: Int? = null,
         total: Int? = null,
+        currentItem: String? = null,
     ): Job = database.transaction { connection ->
         val job = requireRunning(connection, id, "progress is only reported while a job is RUNNING")
         val nextCompleted = completed ?: job.completed
@@ -137,11 +180,12 @@ open class JobStore(private val database: Database) {
         }
         updateIn(
             connection,
-            "UPDATE jobs SET stage = ?, completed = ?, total = ?, updated_at = ? " +
+            "UPDATE jobs SET stage = ?, completed = ?, total = ?, current_item = ?, updated_at = ? " +
                 "WHERE id = ? AND state = ?",
             stage ?: job.stage,
             nextCompleted,
             nextTotal,
+            currentItem ?: job.currentItem,
             Instants.now(),
             id.value,
             JobState.RUNNING.name,
@@ -240,8 +284,8 @@ open class JobStore(private val database: Database) {
      *
      * This is what a clean shutdown does: the process is going away, so the attempt is not a failure and
      * not a cancellation — it is work that will be picked up again. The counters are the checkpoint that
-     * stops the next attempt redoing what this one finished, so they are kept; the stage and the error
-     * described the attempt that ended and are cleared.
+     * stops the next attempt redoing what this one finished, so they are kept; the stage, the current file
+     * and the error described the attempt that ended and are cleared.
      */
     fun requeue(id: JobId): Job = database.transaction { connection ->
         requireRunning(connection, id, "only a RUNNING attempt can be queued again")
@@ -281,8 +325,8 @@ open class JobStore(private val database: Database) {
     private fun requeueIn(connection: Connection, id: JobId): Job {
         updateIn(
             connection,
-            "UPDATE jobs SET state = ?, stage = NULL, error_code = NULL, error_message = NULL, " +
-                "updated_at = ? WHERE id = ? AND state = ?",
+            "UPDATE jobs SET state = ?, stage = NULL, current_item = NULL, error_code = NULL, " +
+                "error_message = NULL, updated_at = ? WHERE id = ? AND state = ?",
             JobState.QUEUED.name,
             Instants.now(),
             id.value,
@@ -345,14 +389,15 @@ open class JobStore(private val database: Database) {
         statement.setString(3, job.type.name)
         statement.setString(4, job.state.name)
         statement.setString(5, job.stage)
-        statement.setInt(6, job.completed)
-        statement.setInt(7, job.total)
-        statement.setString(8, job.payload)
-        statement.setString(9, job.errorCode)
-        statement.setString(10, job.errorMessage)
-        statement.setInt(11, if (job.cancelRequested) 1 else 0)
-        statement.setString(12, job.createdAt)
-        statement.setString(13, job.updatedAt)
+        statement.setString(6, job.currentItem)
+        statement.setInt(7, job.completed)
+        statement.setInt(8, job.total)
+        statement.setString(9, job.payload)
+        statement.setString(10, job.errorCode)
+        statement.setString(11, job.errorMessage)
+        statement.setInt(12, if (job.cancelRequested) 1 else 0)
+        statement.setString(13, job.createdAt)
+        statement.setString(14, job.updatedAt)
     }
 
     private fun ResultSet.readAll(): List<Job> = buildList { while (next()) add(toJob()) }
@@ -363,6 +408,7 @@ open class JobStore(private val database: Database) {
         state = JobState.valueOf(getString("state")),
         collectionId = getString("collection_id")?.let(::CollectionId),
         stage = getString("stage"),
+        currentItem = getString("current_item"),
         completed = getInt("completed"),
         total = getInt("total"),
         payload = getString("payload"),
@@ -398,12 +444,12 @@ open class JobStore(private val database: Database) {
         fun isLegalTransition(from: JobState, to: JobState): Boolean = to in LEGAL_TRANSITIONS.getValue(from)
 
         private const val SELECT_JOBS =
-            "SELECT id, collection_id, type, state, stage, completed, total, payload, error_code, " +
-                "error_message, cancel_requested, created_at, updated_at FROM jobs"
+            "SELECT id, collection_id, type, state, stage, current_item, completed, total, payload, " +
+                "error_code, error_message, cancel_requested, created_at, updated_at FROM jobs"
 
         private const val INSERT_JOB =
-            "INSERT INTO jobs (id, collection_id, type, state, stage, completed, total, payload, " +
-                "error_code, error_message, cancel_requested, created_at, updated_at) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO jobs (id, collection_id, type, state, stage, current_item, completed, total, " +
+                "payload, error_code, error_message, cancel_requested, created_at, updated_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     }
 }

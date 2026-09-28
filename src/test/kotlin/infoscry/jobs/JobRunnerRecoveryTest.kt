@@ -40,6 +40,8 @@ class JobRunnerRecoveryTest {
         database = Database(dataDir.resolve("infoscry.db"))
         SchemaMigrator(database).migrate()
         jobs = JobStore(database)
+        // The harness imports into the archive's first collection, and a new archive holds none.
+        CollectionStore(database).create("Recovery")
     }
 
     @AfterTest

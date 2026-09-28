@@ -3,7 +3,6 @@ package infoscry.cli
 import infoscry.server.ApiJson
 import infoscry.server.CollectionResponse
 import infoscry.server.CollectionsResponse
-import infoscry.storage.CollectionStore
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -36,12 +35,14 @@ class CollectionCommandTest {
     }
 
     @Test
-    fun `list prints the seeded Default collection as JSON`() {
+    fun `list prints the collections that exist as JSON`() {
+        CliProcess.run(*args("collection", "create", "Default"))
+
         val result = CliProcess.run(*args("collection", "list", "--json"))
 
         assertEquals(0, result.exitCode, result.stderr)
         val listed = ApiJson.decodeFromString<CollectionsResponse>(result.stdout.trim())
-        assertTrue(listed.collections.any { it.id == CollectionStore.DEFAULT_ID && it.name == "Default" })
+        assertTrue(listed.collections.any { it.name == "Default" })
     }
 
     @Test
@@ -54,6 +55,7 @@ class CollectionCommandTest {
 
     @Test
     fun `the data directory may be given after the subcommand`() {
+        CliProcess.run(*args("collection", "create", "Default"))
         val result = CliProcess.run(
             "collection",
             "list",
@@ -99,7 +101,6 @@ class CollectionCommandTest {
         val listed = CliProcess.run(*args("collection", "list"))
 
         assertEquals(0, listed.exitCode, listed.stderr)
-        assertContains(listed.stdout, "Default")
         assertContains(listed.stdout, "Acme")
         assertContains(listed.stdout, "ocr: eng")
     }

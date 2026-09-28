@@ -163,6 +163,10 @@ class ImportCommand(
             val job = try {
                 runBlocking {
                     open.mutations.withMutation {
+                        // The same gate the API route passes: an unresolved unsafe deletion refuses new work
+                        // here too, so a standalone import cannot add documents an operator has to repair
+                        // around first.
+                        open.collectionService.requireMutationsAllowed()
                         open.jobs.enqueue(
                             type = JobType.IMPORT,
                             collectionId = collection.id,

@@ -186,17 +186,18 @@ class LoopbackApi(
     /**
      * One item as the server describes it.
      *
-     * The server's row carries the source path and a message it derived from the failure code, so both are
-     * taken as they come: a server-attached import now reports the same per-file detail a local one does.
-     * The item key stays empty -- it identifies a row inside the import's own table, and it is the server's
-     * to know, not the caller's.
+     * The server's row carries the file's own name and a message it derived from the failure code, so both
+     * are taken as they come: a server-attached import now reports the same per-file detail a local one does.
+     * The item key and the source path stay empty -- the key identifies a row inside the import's own table,
+     * and the absolute path a file was selected from is the archive's own bookkeeping rather than part of
+     * this read, so an item from the server is named by its [sourceName].
      */
     private fun infoscry.server.ImportItemApiView.toDomain() = infoscry.storage.ImportItem(
         id = id,
         jobId = jobId,
         itemKey = "",
         documentId = documentId,
-        sourcePath = sourcePath.orEmpty(),
+        sourcePath = "",
         sourceName = sourceName,
         outcome = outcome,
         errorCode = errorCode,

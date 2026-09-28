@@ -168,10 +168,12 @@ class SecurityTest {
 
     @Test
     fun `reads need no credential`() = runBlocking {
+        harness.createCollection("Nightfall", Credential.BEARER)
+
         val response = harness.get("/api/collections")
 
         assertEquals(HttpStatusCode.OK, response.status)
-        assertContains(response.bodyAsText(), "Default")
+        assertContains(response.bodyAsText(), "Nightfall")
     }
 
     @Test

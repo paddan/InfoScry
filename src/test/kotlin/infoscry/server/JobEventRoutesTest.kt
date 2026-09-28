@@ -89,13 +89,14 @@ class JobEventRoutesTest {
                 assertEquals(JobState.RUNNING, decode(first.data).state)
                 assertEquals(0, decode(first.data).completed)
 
-                harness.context.jobs.progress(job.id, stage = "ocr", completed = 2)
+                harness.context.jobs.progress(job.id, stage = "ocr", completed = 2, currentItem = "report.pdf")
 
                 val second = assertNotNull(readEvent(channel), "a store change must produce a further event")
                 assertEquals(2L, second.id, "event ids must increase strictly on the same stream")
                 val progress = decode(second.data)
                 assertEquals(JobState.RUNNING, progress.state)
                 assertEquals("ocr", progress.stage)
+                assertEquals("report.pdf", progress.currentItem, "the file the attempt holds crosses by its own name")
                 assertEquals(2, progress.completed)
                 assertEquals(5, progress.total)
             }

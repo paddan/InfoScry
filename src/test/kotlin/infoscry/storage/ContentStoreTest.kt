@@ -9,6 +9,7 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
@@ -126,6 +127,28 @@ class ContentStoreTest {
         // A known failure is a committed result: a resume skips it rather than deriving the same failure from
         // the same page again.
         assertEquals(setOf("page-7"), store.reusableCheckpoints(document, fingerprint, artifactRoot(document)).skipKeys)
+    }
+
+    @Test
+    fun `an explicit retry may skip only the units that succeeded, and drops the failures it will derive again`() {
+        val document = newDocument()
+        val root = artifactRoot(document)
+        store.commitExtractedUnit(document, fingerprint, "page-1", 0, draftOf(), artifactRoot = root)
+        store.commitFailedUnit(document, fingerprint, "page-2", 1, "OCR_FAILED")
+
+        val reuse = store.reusableSucceededCheckpoints(document, fingerprint, root)
+
+        assertEquals(
+            setOf("page-1"),
+            reuse.skipKeys,
+            "a failed unit is what an explicit retry exists for, so it is not reusable work",
+        )
+        assertEquals(emptyList(), reuse.repaired, "nothing was damaged, so nothing had to be read again")
+        // The failure's row goes too: the pass that follows is going to derive that failure again, and a row
+        // left behind would be reported as a warning about content the retry did read in full.
+        val remaining = store.loadCheckpoints(document, fingerprint)
+        assertEquals(listOf("page-1"), remaining.map { it.key })
+        assertTrue(remaining.all { it.succeeded })
     }
 
     @Test
@@ -491,7 +514,7 @@ class ContentStoreTest {
         locator: SourceLocation = SourceLocation.TextLines(start = 1, end = 1),
         extracted: String = "still readable",
         search: String = extracted,
-    ): ContentUnitDraft = ContentUnitDraft(locator = locator, extractedText = extracted, searchText = search)
+    ): ContentUnitDraft = ContentUnitDraft(locator = locator, extractedText = extracted, searchText = search, method = ExtractionMethod.DIRECT_TEXT)
 
     private fun artifactRoot(document: DocumentId): Path =
         dataDir.resolve("library").resolve(collectionId.value).resolve(document.value).resolve("artifacts")

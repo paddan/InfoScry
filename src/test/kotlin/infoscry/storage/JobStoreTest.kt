@@ -119,6 +119,29 @@ class JobStoreTest {
     }
 
     @Test
+    fun `a running job reports the file it is holding, and a report that names none keeps it`() {
+        val job = jobs.enqueue(JobType.IMPORT, collectionId, total = 5)
+        jobs.claim(job.id)
+
+        val named = jobs.progress(job.id, stage = "copy", completed = 1, currentItem = "report.pdf")
+
+        assertEquals("report.pdf", named.currentItem)
+        assertEquals("copy", named.stage)
+
+        // Progress between two files says how far the attempt has come, not which file it holds: a report
+        // that names no file keeps the one the attempt already named, the way a null stage keeps the stage.
+        val advanced = jobs.progress(job.id, stage = "extract", completed = 2)
+        assertEquals("report.pdf", advanced.currentItem)
+        assertEquals("extract", advanced.stage)
+
+        assertEquals(
+            "report.pdf",
+            jobs.get(job.id)!!.currentItem,
+            "the file the attempt is holding is durable, not the attempt's own memory",
+        )
+    }
+
+    @Test
     fun `a terminal job accepts nothing more`() {
         val completed = jobs.enqueue(JobType.IMPORT, collectionId)
         jobs.claim(completed.id)
@@ -173,7 +196,7 @@ class JobStoreTest {
     fun `interrupted work returns to the queue exactly once and keeps its checkpoint`() {
         val job = jobs.enqueue(JobType.IMPORT, collectionId, total = 5)
         jobs.claim(job.id)
-        jobs.progress(job.id, stage = "ocr", completed = 2)
+        jobs.progress(job.id, stage = "ocr", completed = 2, currentItem = "report.pdf")
 
         assertEquals(1, jobs.resetInterrupted())
 
@@ -182,6 +205,7 @@ class JobStoreTest {
         assertEquals(2, requeued.completed, "the durable checkpoint is what stops the work being redone")
         assertEquals(5, requeued.total)
         assertNull(requeued.stage, "the stage named the attempt that ended, not the one about to start")
+        assertNull(requeued.currentItem, "the file named the attempt that ended, not the one about to start")
 
         assertEquals(0, jobs.resetInterrupted(), "a second sweep must not re-examine cleaned work")
         assertEquals(JobState.QUEUED, jobs.get(job.id)!!.state)

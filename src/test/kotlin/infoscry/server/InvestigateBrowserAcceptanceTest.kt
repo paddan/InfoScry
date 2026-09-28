@@ -4,6 +4,7 @@ import infoscry.EXTERNAL_TAG
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
@@ -46,6 +47,8 @@ class InvestigateBrowserAcceptanceTest {
     fun startServer() {
         dataDir = Files.createTempDirectory("infoscry-browser-acceptance")
         harness = ApiTestServer(dataDir)
+        // A new archive has no automatic Default, and every scenario here names one.
+        harness.context.collections.create("Default")
     }
 
     @AfterTest
@@ -337,6 +340,7 @@ class InvestigateBrowserAcceptanceTest {
                 locator = SourceLocation.TextLines(1, 1),
                 extractedText = text,
                 searchText = text,
+                method = ExtractionMethod.DIRECT_TEXT,
             ),
             artifactRoot = harness.context.paths.libraryDir,
         ).unit.id.value

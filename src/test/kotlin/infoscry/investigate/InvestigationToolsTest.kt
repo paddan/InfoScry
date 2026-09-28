@@ -5,6 +5,7 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
@@ -401,7 +402,7 @@ class InvestigationToolsTest {
             fingerprint = fingerprint,
             key = "unit-$ordinal",
             ordinal = ordinal,
-            draft = ContentUnitDraft(locator = locator, extractedText = text, searchText = text),
+            draft = ContentUnitDraft(locator = locator, extractedText = text, searchText = text, method = ExtractionMethod.DIRECT_TEXT),
             artifactRoot = dataDir.resolve("artifacts"),
         )
         return commit.unit.id

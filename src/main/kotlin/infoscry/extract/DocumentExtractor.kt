@@ -1,7 +1,9 @@
 package infoscry.extract
 
 import infoscry.domain.DocumentId
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
+import infoscry.domain.UnitKind
 import java.io.IOException
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -108,11 +110,17 @@ class OcrUnavailableException(val code: String, message: String) : IOException(m
  * together and a reader can later verify the artifact still matches the unit it belongs to.
  * [meanConfidence] is how sure an OCR tool was about this unit, and is absent for text that a parser read
  * rather than a tool recognised.
+ *
+ * [method] is which of the two ways this unit's text was read, and it is a required statement rather than
+ * something derived: a parser's page and a recognised page are two methods, and `meanConfidence` is not
+ * either of them (a page can be read by OCR and come back with no confidence to report, and a parser's text
+ * is not evidence that OCR ran). Only the extractor knows which path it took, so only the extractor can say.
  */
 data class ContentUnitDraft(
     val locator: SourceLocation,
     val extractedText: String,
     val searchText: String,
+    val method: ExtractionMethod,
     val artifactRelativePath: String? = null,
     val artifactSha256: String? = null,
     val meanConfidence: Double? = null,
@@ -205,6 +213,16 @@ sealed interface ExtractionEvent {
 
     /** One unit could not be produced; the rest of the document is still attempted. */
     data class UnitFailed(val key: String, val ordinal: Int, val code: String) : ExtractionEvent
+
+    /**
+     * The extractor knows how many units its document has, before it has read them all.
+     *
+     * An extractor announces this as soon as it can (a PDF knows its page count when it opens the file, a
+     * workbook its sheets), because until it does, progress can only be counted and cannot be compared to
+     * anything. It is a fact the extractor states, never a prediction: an extractor with no total to
+     * announce sends nothing, and its progress stays a count without a denominator.
+     */
+    data class Progress(val unitKind: UnitKind, val totalUnits: Int) : ExtractionEvent
 
     /** Every unit this extractor has was delivered. [metadata] is what it learned about the document. */
     data class Finished(val metadata: Map<String, String>, val totalUnits: Int) : ExtractionEvent
@@ -353,6 +371,19 @@ interface ExtractionSink {
         documentId: DocumentId,
         fingerprint: ExtractionFingerprint,
     ): Set<String>
+
+    /**
+     * Keys an explicit retry may skip: what a previous attempt committed *successfully* under this
+     * fingerprint, with its artifacts still intact.
+     *
+     * It defaults to [committedKeys] because that is the crash-resume answer, and a sink that cannot tell
+     * a committed unit from a known failure has nothing better to offer. A durable sink overrides it,
+     * since an explicit retry exists to revisit the units that failed.
+     */
+    suspend fun retryKeys(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+    ): Set<String> = committedKeys(documentId, fingerprint)
 
     /** Commits one delivered event. Returning means the unit is durable. */
     suspend fun deliver(

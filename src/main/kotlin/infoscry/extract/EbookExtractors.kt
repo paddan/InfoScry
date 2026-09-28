@@ -1,5 +1,6 @@
 package infoscry.extract
 
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import java.io.IOException
 import java.nio.file.Files
@@ -208,6 +209,7 @@ class EpubExtractor(
                                 ),
                                 extractedText = normalised.extracted,
                                 searchText = normalised.search,
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )
@@ -304,6 +306,8 @@ class EpubExtractor(
                             ),
                             extractedText = normalised.extracted,
                             searchText = normalised.search,
+                            // A chapter with no text of its own is a run of pictures the tool read.
+                            method = ExtractionMethod.OCR,
                             artifactRelativePath = artifactPath,
                             artifactSha256 = artifactSha,
                             meanConfidence = confidence,
@@ -794,6 +798,7 @@ class Fb2Extractor(
                                 ),
                                 extractedText = normalised.extracted,
                                 searchText = normalised.search,
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )

@@ -4,7 +4,7 @@
   import HistoryColumn from '../lib/HistoryColumn.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
-  import ImportPanel from '../lib/ImportPanel.svelte';
+  import CollectionsPanel from '../lib/CollectionsPanel.svelte';
   import {
     DEFAULT_INVESTIGATION_LIMITS,
     INVESTIGATION_LIMIT_FIELDS,
@@ -22,12 +22,15 @@
     listCollections,
     listInvestigations,
     readSource,
+    retryDocuments,
     searchCollection,
     type AskHistoryEntry,
     type Collection,
     type InvestigateEvidence,
     type InvestigationSummary,
     type LlmProfilePrice,
+    type RetryAdmission,
+    type RetryAttempt,
     type SearchHit,
     type SearchFilters,
     type SearchMode,
@@ -36,12 +39,21 @@
 
   let collections: Collection[] = [];
   let selectedCollectionId = '';
+  /** The collection the Admin Collections tab manages; independent of the workspace selection. */
+  let managedCollectionId = '';
   let loadingCollections = true;
+  /**
+   * Whether the collection list has ever been read. A reload after the first one must not put the
+   * workspace back into its loading state: the Admin Collections panel is only mounted while collections
+   * are loaded, so a reload would unmount the panel and lose the collection it manages, its settings draft
+   * and the result it was showing.
+   */
+  let collectionsLoaded = false;
   let searching = false;
   let query = '';
   let mode: SearchMode = 'HYBRID';
   let activeMode: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN' = 'SEARCH';
-  let adminTab: 'LLM' | 'IMPORT' = 'LLM';
+  let adminTab: 'COLLECTIONS' | 'LLM' = 'COLLECTIONS';
   let mediaType = '';
   let pathContains = '';
   let textContains = '';
@@ -66,6 +78,11 @@
   let loadingSource = false;
   let sourceError: string | null = null;
   let sourceGeneration = 0;
+  /**
+   * The collection the open viewer reads from. It is the collection of the hit that opened it, not the
+   * workspace selection: Admin can open a document in a collection the workspace is not showing.
+   */
+  let sourceCollectionId = '';
   let sourceSheet: HTMLElement | null = null;
   let sourceOpener: HTMLElement | null = null;
   let investigateConversations: InvestigationSummary[] = [];
@@ -300,10 +317,14 @@
   }
 
   async function refresh(): Promise<void> {
-    loadingCollections = true;
+    loadingCollections = !collectionsLoaded;
     try {
       collections = await listCollections();
+      collectionsLoaded = true;
       if (!collections.some((collection) => collection.id === selectedCollectionId)) {
+        // The selection is gone from the archive, so the workspace moves to the first collection left.
+        // Results bound to the collection that vanished are unreadable and must not survive the move.
+        if (selectedCollectionId !== '') invalidateResults();
         selectedCollectionId = collections[0]?.id ?? '';
       }
       collectionError = null;
@@ -345,16 +366,17 @@
     const generation = ++sourceGeneration;
     sourceOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     selectedHit = hit;
+    sourceCollectionId = hit.collectionId;
     source = null;
     sourceText = '';
     sourceError = null;
     loadingSource = true;
     try {
-      const pagePromise = readSource(selectedCollectionId, hit.unitId);
+      const pagePromise = readSource(sourceCollectionId, hit.unitId);
       await tick();
       sourceSheet?.focus();
       const page = await pagePromise;
-      if (generation !== sourceGeneration || hit.collectionId !== selectedCollectionId) return;
+      if (generation !== sourceGeneration || hit.collectionId !== sourceCollectionId) return;
       source = page;
       sourceText = page.text;
     } catch (failure) {
@@ -371,8 +393,8 @@
     loadingSource = true;
     sourceError = null;
     try {
-      const page = await readSource(selectedCollectionId, hit.unitId, source.offset + source.text.length);
-      if (generation !== sourceGeneration || hit.collectionId !== selectedCollectionId) return;
+      const page = await readSource(sourceCollectionId, hit.unitId, source.offset + source.text.length);
+      if (generation !== sourceGeneration || hit.collectionId !== sourceCollectionId) return;
       source = page;
       sourceText += page.text;
     } catch (failure) {
@@ -382,12 +404,22 @@
     }
   }
 
-  function invalidateSearch(): void {
+  /**
+   * The results a search drew, dropped without touching the viewer. A collection that left the archive
+   * has no readable content, so its rows have to go before the workspace selector above them moves to
+   * whatever collection is listed first: admitting a collection deletion refreshes this list at once,
+   * while the deletion's own completion event only arrives later, once the server reports it done.
+   */
+  function invalidateResults(): void {
     searchGeneration += 1;
     searching = false;
     hits = [];
     hasSearched = false;
     searchError = null;
+  }
+
+  function invalidateSearch(): void {
+    invalidateResults();
     clearSelectedSource();
   }
 
@@ -417,7 +449,7 @@
   }
 
   function handleAdminTabKeydown(event: KeyboardEvent): void {
-    const tabs: ('LLM' | 'IMPORT')[] = ['LLM', 'IMPORT'];
+    const tabs: ('COLLECTIONS' | 'LLM')[] = ['COLLECTIONS', 'LLM'];
     const current = tabs.indexOf(adminTab);
     let next = current;
     if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
@@ -438,6 +470,7 @@
     loadingSource = false;
     sourceError = null;
     sourceOpener = null;
+    sourceCollectionId = '';
   }
 
   function handleSourceKeydown(event: KeyboardEvent): void {
@@ -506,15 +539,95 @@
     });
   }
 
+  /**
+   * Open one managed document from Admin at the first unit its detail named, in the collection Admin has
+   * selected there. The panel supplies the two ids; the viewer and its state stay this page's.
+   */
+  function openManagedDocument(documentId: string, sourceId: string): void {
+    void openSource({
+      collectionId: managedCollectionId,
+      documentId,
+      title: '',
+      unitId: sourceId,
+      chunkOrdinal: 0,
+      text: '',
+      highlighted: null,
+      locator: null,
+      locatorLabel: 'Extracted content',
+      matchedBy: [],
+    });
+  }
+
   function describe(failure: unknown): string {
     if (failure instanceof ApiError) return failure.message;
     return failure instanceof Error ? failure.message : 'Something went wrong.';
   }
 
-  async function handleCollectionsChanged(selectedId?: string): Promise<void> {
+  /**
+   * Admin collection changes refresh the workspace's collection selector; the workspace's own
+   * selected collection is untouched, so an active Ask or Investigate conversation keeps its collection.
+   */
+  async function handleManagedCollectionsChanged(selectedId?: string): Promise<void> {
     await refresh();
-    if (selectedId !== undefined && collections.some((collection) => collection.id === selectedId)) {
-      selectedCollectionId = selectedId;
+    if (selectedId !== undefined) managedCollectionId = selectedId;
+  }
+
+  /** Selecting a collection for management never changes the workspace collection. */
+  function selectManagedCollection(id: string): void {
+    managedCollectionId = id;
+  }
+
+  /**
+   * A document Admin deleted is gone from the archive, so the viewer open on it must close rather than
+   * keep showing content that no longer exists. Saved source links report unavailable content on their
+   * own, because the source route answers 404 once the unit is gone.
+   */
+  function handleManagedDocumentDeleted(collectionId: string, documentId: string): void {
+    if (sourceCollectionId !== collectionId || selectedHit?.documentId !== documentId) return;
+    closeSourceSheetWithoutFocus();
+  }
+
+  /**
+   * Admin asked for one document to be read again from the copy InfoScry holds.
+   *
+   * The page owns the managed collection, so it makes the request; the panel is handed back a result it can
+   * show. The server decides per document, so a refusal is a normal answer with its own sentence rather than
+   * a failed request, and the retry keeps the document's identity either way.
+   */
+  async function retryManagedDocument(documentId: string): Promise<RetryAttempt> {
+    const admission = await retryDocuments(managedCollectionId, { documentIds: [documentId] });
+    const jobId = admission.acceptedJobIds[0];
+    if (jobId !== undefined) return { accepted: true, jobId };
+    return {
+      accepted: false,
+      reason: admission.rejected[0]?.reason ?? 'The server did not accept this retry.',
+    };
+  }
+
+  /**
+   * Admin asked for every eligible document of the managed collection to be read again.
+   *
+   * The request asks for `allEligible` rather than listing the ids the table happens to show: which documents
+   * that is, across every page, is the server's decision, and its answer names the attempts it queued and the
+   * documents it refused. The panel shows that answer; the work itself belongs to the server, so a navigation,
+   * a disconnect or a restart does not lose it.
+   */
+  async function retryAllManagedDocuments(): Promise<RetryAdmission> {
+    return retryDocuments(managedCollectionId, { allEligible: true });
+  }
+
+  /**
+   * A collection Admin deleted is gone from the archive, so nothing bound to it may stay: the viewer
+   * reading its documents, the workspace results drawn from it and the Admin selection itself. The
+   * lists and the Ask/Investigate histories are then re-read from the server.
+   */
+  async function handleManagedCollectionDeleted(collectionId: string): Promise<void> {
+    if (sourceCollectionId === collectionId) closeSourceSheet();
+    if (managedCollectionId === collectionId) managedCollectionId = '';
+    const wasWorkspaceSelection = selectedCollectionId === collectionId;
+    if (wasWorkspaceSelection) invalidateSearch();
+    await refresh();
+    if (wasWorkspaceSelection) {
       await loadInvestigate();
       await loadAsk();
     }
@@ -603,10 +716,10 @@
       {:else if activeMode === 'ADMIN'}
         <div class="sidebar-note">
           <span class="eyebrow">ADMINISTRATION</span>
-          {#if adminTab === 'LLM'}
-            <p>Configure the LLM profiles Ask and Investigate can use. API keys stay in environment variables.</p>
+          {#if adminTab === 'COLLECTIONS'}
+            <p>Create or select a collection and add local files or folders to it. Choosing paths opens a native dialog on this machine.</p>
           {:else}
-            <p>Import local files and folders into a collection. Choosing paths opens a native dialog on this machine.</p>
+            <p>Configure the LLM profiles Ask and Investigate can use. API keys stay in environment variables.</p>
           {/if}
         </div>
       {:else}
@@ -704,6 +817,14 @@
       <div id="panel-admin" role="tabpanel" aria-labelledby="tab-admin" hidden={activeMode !== 'ADMIN'}>
         <div class="admin-tabs" role="tablist" aria-label="Administration section" tabindex="-1" onkeydown={handleAdminTabKeydown}>
           <button
+            id="admin-tab-collections"
+            role="tab"
+            aria-selected={adminTab === 'COLLECTIONS'}
+            aria-controls="admin-panel-collections"
+            tabindex={adminTab === 'COLLECTIONS' ? 0 : -1}
+            onclick={() => (adminTab = 'COLLECTIONS')}
+          >Collections</button>
+          <button
             id="admin-tab-llm"
             role="tab"
             aria-selected={adminTab === 'LLM'}
@@ -711,18 +832,31 @@
             tabindex={adminTab === 'LLM' ? 0 : -1}
             onclick={() => (adminTab = 'LLM')}
           >LLM profiles</button>
-          <button
-            id="admin-tab-import"
-            role="tab"
-            aria-selected={adminTab === 'IMPORT'}
-            aria-controls="admin-panel-import"
-            tabindex={adminTab === 'IMPORT' ? 0 : -1}
-            onclick={() => (adminTab = 'IMPORT')}
-          >Import</button>
         </div>
         <div class="admin-panels">
+          <div id="admin-panel-collections" role="tabpanel" aria-labelledby="admin-tab-collections" hidden={adminTab !== 'COLLECTIONS'}>
+            {#if activeMode === 'ADMIN'}
+              <!--
+                Mounted with the Admin view rather than kept hidden like the LLM panel: it lists the
+                same collection names as the workspace selector, and a second invisible copy would
+                make every text lookup for a collection name ambiguous.
+              -->
+              <CollectionsPanel
+                collections={collections}
+                selectedId={managedCollectionId}
+                loading={loadingCollections}
+                error={collectionError}
+                onSelect={selectManagedCollection}
+                onCollectionsChanged={handleManagedCollectionsChanged}
+                onOpenDocument={openManagedDocument}
+                onCollectionDeleted={handleManagedCollectionDeleted}
+                onDocumentDeleted={handleManagedDocumentDeleted}
+                onRetryDocument={retryManagedDocument}
+                onRetryAllDocuments={retryAllManagedDocuments}
+              />
+            {/if}
+          </div>
           <div id="admin-panel-llm" role="tabpanel" aria-labelledby="admin-tab-llm" hidden={adminTab !== 'LLM'}><LlmAdminPanel /></div>
-          <div id="admin-panel-import" role="tabpanel" aria-labelledby="admin-tab-import" hidden={adminTab !== 'IMPORT'}><ImportPanel collectionId={selectedCollectionId} onCollectionsChanged={handleCollectionsChanged} /></div>
         </div>
       </div>
 

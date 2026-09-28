@@ -7,6 +7,7 @@ import infoscry.domain.CollectionLifecycle
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.CollectionStore
 import infoscry.storage.Database
+import infoscry.storage.DeletionKind
 import infoscry.storage.DeletionOperation
 import infoscry.storage.DeletionPhase
 import infoscry.storage.DeletionStore
@@ -21,6 +22,13 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 /**
  * Removes a collection's search entries. Task 16 supplies the Lucene implementation; until an index
@@ -47,13 +55,40 @@ fun interface CollectionIndexRemover {
  * an operator needs in order to inspect the state that blocked the deletion.
  */
 class DeletionRecoveryBlockedException(val operations: List<DeletionOperation>) : IllegalStateException(
-    "collection deletion cannot be recovered safely: " +
+    "an unfinished deletion cannot be recovered safely: " +
         operations.joinToString("; ") { operation ->
-            "collection ${operation.collectionId.value} is ${operation.phase} " +
-                "(${operation.lastError ?: "no error recorded"})"
+            "${operation.kind.name.lowercase()} " +
+                "${operation.targets.joinToString { it.documentId.value }.ifEmpty { operation.collectionId.value }} " +
+                "is ${operation.phase} (${operation.lastError ?: "no error recorded"})"
         } + ". Mutating commands are refused until the parked files are resolved; " +
         "nothing has been discarded.",
-)
+) {
+
+    /**
+     * The sentence a client may see: the same refusal, with the error *code* instead of the recorded
+     * message.
+     *
+     * The message above is for whoever reads the log, and it names managed and parked directories inside
+     * the data directory. None of that belongs on the wire — a client is told which deletion stopped and
+     * what it stopped on, and [DeletionOperation.errorCode] is the stable vocabulary for the rest.
+     */
+    val clientMessage: String =
+        "an unfinished deletion cannot be recovered safely: " +
+            operations.joinToString("; ") { operation ->
+                "${operation.kind.name.lowercase()} " +
+                    "${operation.targets.joinToString { it.documentId.value }.ifEmpty { operation.collectionId.value }} " +
+                    "is ${operation.phase.name} (${operation.errorCode ?: "no error code recorded"})"
+            } + ". Mutating commands are refused until the parked files are resolved; " +
+            "nothing has been discarded. See the InfoScry log for the detail."
+}
+
+/**
+ * Continuing a deletion could lose files: what the record says and what is on disk disagree, so the
+ * operation stops where it is and mutations are refused until an operator resolves it.
+ *
+ * [errorCode] is the part a client may see; [message] keeps the paths an operator needs in the log.
+ */
+class UnsafeDeletionRecoveryException(val errorCode: String, message: String) : IllegalStateException(message)
 
 /** What a startup roll-forward did: which operations finished, and which are stuck and why. */
 data class DeletionRecoveryReport(
@@ -92,19 +127,33 @@ class CollectionService(
     private val deletions: DeletionStore,
     private val coordinator: MutationCoordinator,
     private val index: CollectionIndexRemover = CollectionIndexRemover.NONE,
-) {
+    // Shared with document deletion: an unsafe state of either kind refuses the same mutations.
+    private val blockers: DeletionBlockers = DeletionBlockers(),
+) : AutoCloseable {
 
-    @Volatile
-    private var blocked: List<DeletionOperation> = emptyList()
+    /**
+     * Owns the deletions this process admitted and has not finished.
+     *
+     * Deliberately not the request's coroutine: a deletion outlives the HTTP response that admitted it,
+     * so a caller that goes away — or a response that never arrives — must not be able to cancel it.
+     * What is still unfinished when the process stops stays durable for [recoverDeletions].
+     */
+    private val deletionsInProgress = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** The background roll-forward of the operation this process admitted last, if any. */
+    private var runningDeletion: kotlinx.coroutines.Job? = null
 
     /** Deletions that could not be recovered; while non-empty, every mutation is refused. */
-    val blockedDeletions: List<DeletionOperation> get() = blocked
+    val blockedDeletions: List<DeletionOperation> get() = blockers.operations
 
     // ---- Reads. No permit: they touch neither the managed files nor the index writer. ----
 
-    /** The usable collections. A collection mid-deletion is not one of them. */
+    /**
+     * The usable collections, each carrying how many documents it holds. A collection mid-deletion
+     * is not one of them.
+     */
     fun list(): List<Collection> =
-        collections.list().filter { it.lifecycle == CollectionLifecycle.ACTIVE }
+        collections.listWithDocumentCounts().filter { it.lifecycle == CollectionLifecycle.ACTIVE }
 
     fun get(id: CollectionId): Collection? =
         collections.get(id)?.takeIf { it.lifecycle == CollectionLifecycle.ACTIVE }
@@ -165,14 +214,119 @@ class CollectionService(
             collections.updateOcrLanguages(id, ocrLanguages)
         }
 
+    // ---- Deletion reads ----
+
+    /**
+     * One deletion operation by its identifier, terminal ones included, or null when no such operation
+     * exists.
+     *
+     * It answers after the collection's row is gone, because the record outlives the collection: a
+     * caller that was told "this deletion is running" has to be able to read how it ended.
+     */
+    fun deletionOperation(id: String): DeletionOperation? = deletions.get(id)
+
+    /**
+     * The deletions that still need work, of either kind, oldest first: what a reopened Admin shows as
+     * in progress. The reads are kind-agnostic because the operation read is the one surface both kinds
+     * share.
+     */
+    fun unfinishedDeletions(): List<DeletionOperation> = deletions.listUnfinished()
+
     // ---- Deletion ----
 
     /**
-     * Deletes one collection and everything InfoScry holds for it. External source files are not
-     * touched: they were never InfoScry's to remove.
+     * Deletes one collection and everything InfoScry holds for it, in the caller's coroutine, and
+     * answers with the finished operation. External source files are not touched: they were never
+     * InfoScry's to remove.
+     *
+     * The API admits through [requestDeletion] instead, because a response must not wait for the whole
+     * deletion. This form is what a caller that has to know the deletion finished uses — and what the
+     * tests that interrupt a real deletion at a chosen instant drive.
      */
     suspend fun deleteConfirmed(collectionId: CollectionId, confirmName: String): DeletionOperation =
         deleteConfirmed(collectionId, confirmName) { }
+
+    /**
+     * Admits one deletion durably and returns as soon as that admission is recorded, leaving the
+     * destructive work to a coroutine this service owns.
+     *
+     * This is what the API answers with: the tombstone, the cancellation requests and the operation
+     * record are durable before the caller is told anything, so a lost response, a disconnected caller,
+     * or this process being killed cannot lose the deletion — what is left of it is finished by the
+     * roll-forward started here or by [recoverDeletions] at the next startup.
+     *
+     * A deletion already admitted for this collection is that operation, not a second one: a repeated
+     * request answers with the same id and phase, which is what makes a repeated confirmation
+     * idempotent. The confirmation is still checked while the collection's row exists.
+     */
+    suspend fun requestDeletion(collectionId: CollectionId, confirmName: String): DeletionOperation {
+        requireMutationsAllowed()
+        val existing = deletions.unfinishedFor(collectionId).firstOrNull()
+        if (existing != null) {
+            collections.get(collectionId)?.let { collection -> requireConfirmation(collection.name, confirmName) }
+            return existing
+        }
+
+        val admitted = CompletableDeferred<DeletionOperation>()
+        runningDeletion = deletionsInProgress.launch {
+            try {
+                coordinator.withExclusiveMaintenance("delete collection ${collectionId.value}") {
+                    requireMutationsAllowed()
+                    val operation = beginDeletion(collectionId, confirmName)
+                    // The caller's answer is the durable admission, not the finished deletion: the
+                    // phases below take minutes and nothing about them belongs to this request.
+                    admitted.complete(operation)
+                    finishDeletion(operation)
+                }
+            } catch (failure: Throwable) {
+                // Before admission this is the caller's failure (a taken name, a maintenance run, an
+                // unknown collection) and travels as one; after it, the caller already has its answer
+                // and the operation stays unfinished for the next attempt.
+                admitted.completeExceptionally(failure)
+                if (failure is CancellationException) throw failure
+            }
+        }
+        return admitted.await()
+    }
+
+    /**
+     * Runs what is left of [operation] and records why it stopped, if it did.
+     *
+     * Never throws: this runs after the caller's answer, so a failure is a state to record rather than
+     * something to report. The phase still says what is true on disk, and the next startup resumes it.
+     */
+    private suspend fun finishDeletion(operation: DeletionOperation) {
+        try {
+            rollForward(operation)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            recordFailure(operation, failure)
+        }
+    }
+
+    /**
+     * Records why [operation] could not continue, and refuses mutations when the state is unsafe.
+     *
+     * A failure that only stopped a phase is work to retry; a disagreement between the record and the
+     * disk is not, and it is the one that must stop every other mutating command until an operator has
+     * looked at it — exactly as a blocked startup recovery does.
+     */
+    private fun recordFailure(operation: DeletionOperation, failure: Exception) {
+        val code = if (failure is UnsafeDeletionRecoveryException) failure.errorCode else DELETION_FAILED_CODE
+        val message = failure.message ?: failure::class.simpleName ?: "unknown failure"
+        runCatching { deletions.recordError(operation.id, code, message) }
+        if (code == UNSAFE_RECOVERY_CODE) {
+            val current = runCatching { deletions.get(operation.id) }.getOrNull() ?: operation
+            blockers.record(current)
+        }
+    }
+
+    /** Stops deletions this process was running; what is left of them stays durable for the next start. */
+    override fun close() {
+        deletionsInProgress.cancel()
+        runBlocking { runningDeletion?.join() }
+    }
 
     /**
      * [deleteConfirmed] with the observation seam the deletion-recovery harness stops a child process
@@ -204,7 +358,7 @@ class CollectionService(
         val stuck = mutableListOf<DeletionOperation>()
 
         coordinator.withExclusiveMaintenance("recover collection deletions") {
-            for (operation in deletions.listUnfinished()) {
+            for (operation in deletions.listUnfinished(DeletionKind.COLLECTION)) {
                 try {
                     recovered += rollForward(operation)
                 } catch (cancelled: CancellationException) {
@@ -213,14 +367,13 @@ class CollectionService(
                     // The phase still describes what is true on disk, so the operation stays where it
                     // is and the next attempt retries the same step. Recording the reason is best
                     // effort: if the database is the thing that failed, the phase alone carries it.
-                    val message = failure.message ?: failure::class.simpleName ?: "unknown failure"
-                    runCatching { deletions.recordError(operation.id, message) }
+                    recordFailure(operation, failure)
                     stuck += deletions.get(operation.id) ?: operation
                 }
             }
         }
 
-        blocked = stuck
+        blockers.replace(DeletionKind.COLLECTION, stuck)
         return DeletionRecoveryReport(recovered = recovered, blocked = stuck)
     }
 
@@ -233,9 +386,7 @@ class CollectionService(
     internal fun beginDeletion(collectionId: CollectionId, confirmName: String): DeletionOperation {
         val collection = collections.get(collectionId)
             ?: throw NoSuchElementException("no collection with id ${collectionId.value}")
-        if (collection.name != confirmName.trim()) {
-            throw CollectionConfirmationMismatchException(collection.name, confirmName)
-        }
+        requireConfirmation(collection.name, confirmName)
         deletions.unfinishedFor(collectionId).firstOrNull()?.let { return it }
 
         val now = Instants.now()
@@ -376,14 +527,16 @@ class CollectionService(
         val trashExists = Files.exists(trash)
 
         if (managedExists && trashExists) {
-            throw IllegalStateException(
+            throw UnsafeDeletionRecoveryException(
+                UNSAFE_RECOVERY_CODE,
                 "both the managed directory $managed and its parked copy $trash exist for collection " +
                     "${operation.collectionId.value}; refusing to delete either before an operator " +
                     "decides which one holds the documents",
             )
         }
         if (!managedExists && !trashExists && operation.managedOriginalsExisted) {
-            throw IllegalStateException(
+            throw UnsafeDeletionRecoveryException(
+                UNSAFE_RECOVERY_CODE,
                 "the managed directory for collection ${operation.collectionId.value} is missing " +
                     "from both $managed and $trash, but the deletion record says it held managed " +
                     "originals; refusing to finish the deletion and lose them silently",
@@ -391,13 +544,26 @@ class CollectionService(
         }
     }
 
-    /** Refuses unrelated settings writes too when startup deletion recovery is blocked. */
-    fun requireMutationsAllowed() {
-        if (blocked.isNotEmpty()) throw DeletionRecoveryBlockedException(blocked)
+    /** The exact name is the confirmation; the store's own check is what a refused deletion reports. */
+    private fun requireConfirmation(collectionName: String, confirmName: String) {
+        if (collectionName != confirmName.trim()) {
+            throw CollectionConfirmationMismatchException(collectionName, confirmName)
+        }
     }
 
-    private companion object {
+    /** Refuses unrelated settings writes too when startup deletion recovery is blocked. */
+    fun requireMutationsAllowed() {
+        blockers.requireMutationsAllowed()
+    }
+
+    internal companion object {
         /** Distinguishes parked directories from collection directories in the same parent. */
         const val TRASH_PREFIX = ".deleted-"
+
+        /** The record and the disk disagree; files are preserved and mutations are refused. */
+        const val UNSAFE_RECOVERY_CODE = "UNSAFE_RECOVERY"
+
+        /** A phase could not be completed; the operation stays at its durable phase for a retry. */
+        const val DELETION_FAILED_CODE = "DELETION_FAILED"
     }
 }

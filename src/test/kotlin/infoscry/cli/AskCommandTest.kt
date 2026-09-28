@@ -14,6 +14,9 @@ class AskCommandTest {
     @BeforeTest
     fun createDataDirectory() {
         directory = Files.createTempDirectory("infoscry-ask-cli")
+        // A new archive has no automatic Default, and this class asks about a missing profile rather
+        // than a missing collection, so the collection the request names is created explicitly.
+        CliProcess.run("--data-dir", directory.toString(), "collection", "create", "Default")
     }
 
     @AfterTest

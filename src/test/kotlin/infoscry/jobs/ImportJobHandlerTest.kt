@@ -5,11 +5,13 @@ import infoscry.domain.CollectionId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.domain.JobType
 import infoscry.domain.SourceLocation
+import infoscry.domain.UnitKind
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.DocumentExtractor
 import infoscry.extract.DOCUMENT_REFUSED_KEY
@@ -209,6 +211,61 @@ class ImportJobHandlerTest {
                 run.items.map { Path.of(it.sourcePath).fileName.toString() },
             )
             assertEquals(3, run.items.map { it.itemKey }.distinct().size)
+        }
+    }
+
+    @Test
+    fun `the file an import names advances with the files it works through`() {
+        withHarness { harness ->
+            val first = harness.writeText("alpha.txt", "first\n")
+            val second = harness.writeText("bravo.txt", "second\n")
+
+            val run = harness.import(listOf(first, second), harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            // The files are worked through in their stable order, so the last one named is the last one
+            // read, and what it names is the file's own name rather than the path it was selected from.
+            assertEquals("bravo.txt", run.job.currentItem)
+            assertTrue(
+                !run.job.currentItem!!.contains("/"),
+                "the import must report a file's name, never the path it was selected from",
+            )
+        }
+    }
+
+    @Test
+    fun `a path with another platform's separator still names only the file`() {
+        withHarness { harness ->
+            // A Windows-style path typed into the manual fallback: on macOS it is one segment, so a name
+            // taken from the platform's own separator rules would cross as the whole path.
+            val pasted = Path.of("C:\\Users\\someone\\private\\report.mobi")
+
+            val run = harness.import(listOf(pasted), harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals("report.mobi", run.job.currentItem)
+        }
+    }
+
+    @Test
+    fun `an import names the file it is working on while it works on it`() {
+        withHarness { harness ->
+            val source = harness.writeText("report.txt", "Ordinary text\n")
+            val parked = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+
+            AppContext.open(harness.dataDir).use { context ->
+                val job = harness.enqueueForTest(context, listOf(source))
+                harness.attach(context, harness.storedPipeline(context, HeldUnits(parked, release)))
+
+                // The extractor is parked inside this file, so the durable row is read in the middle of
+                // the file's own work rather than at the end of the attempt.
+                runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { parked.await() } }
+                assertEquals("report.txt", context.jobs.get(job.id)!!.currentItem)
+
+                release.complete(Unit)
+                assertEquals(JobState.COMPLETE, harness.awaitJob(context, job.id).state)
+            }
         }
     }
 
@@ -626,6 +683,46 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a page read by ocr says so, and says so only once it is committed`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "scanned page\n")
+            val parked = CompletableDeferred<Unit>()
+
+            // The attempt announces its total, commits its first page -- read by a tool -- and then parks.
+            AppContext.open(harness.dataDir).use { context ->
+                harness.enqueueForTest(context, listOf(source.toRealPath()))
+                harness.attach(
+                    context,
+                    harness.storedPipeline(
+                        context,
+                        ParkedUnits(parked, units = 3, method = ExtractionMethod.OCR, announces = true),
+                    ),
+                )
+                runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { parked.await() } }
+            }
+
+            AppContext.open(harness.dataDir).use { context ->
+                val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
+                assertEquals(
+                    DocumentStatus.OCR,
+                    document.status,
+                    "the tool-read page is durable before the document claims to be reading with OCR",
+                )
+                val progress = context.content.documentProgress(listOf(document.id)).getValue(document.id)
+                assertEquals(1, progress.processedUnits)
+                assertEquals(3, progress.totalUnits, "the announced total is the denominator the reader sees")
+                assertEquals(1, progress.ocrUnits)
+                assertEquals(UnitKind.LINE, progress.unitKind)
+                assertEquals(
+                    listOf(0),
+                    context.content.listUnits(document.id, -1, 10).map { it.ordinal },
+                    "the page committed before the park is the one the progress counts",
+                )
+            }
+        }
+    }
+
+    @Test
     fun `a killed attempt keeps its committed units and the resume reads only the rest`() {
         withHarness { harness ->
             val source = harness.writeText("long.txt", "Ordinary text\n")
@@ -714,9 +811,35 @@ internal data class ImportRun(
 )
 
 /**
- * A temporary data directory with the default collection, and the ability to run real import attempts
- * against it. Either import opens and closes the data directory, so a second call is a restart in the
- * sense that matters: a new process over the same durable state.
+ * One retry attempt's durable result.
+ *
+ * There are no import items: a retry addresses documents that already exist, so the document's own row is
+ * the per-document record of what happened.
+ */
+internal data class RetryRun(val job: Job, val documents: Map<DocumentId, Document>)
+
+/**
+ * Seeds a collection with a fixed identifier.
+ *
+ * Migration 013 retires the automatic Default, and tests that name `default` in job payloads or
+ * assertions still need the row to exist. The collection store generates its own id, so this writes the
+ * row a person would have created and keeps [id] as the test already names it.
+ */
+internal fun AppContext.seedCollectionWithId(id: String, name: String) {
+    database.transaction { connection ->
+        connection.createStatement().use { statement ->
+            statement.execute(
+                "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                    "VALUES ('$id', '$name', 'eng', 'ACTIVE', '2026-09-27T07:00:00Z', '2026-09-27T07:00:00Z')",
+            )
+        }
+    }
+}
+
+/**
+ * A temporary data directory with a Default-identified collection, and the ability to run real import
+ * attempts against it. Either import opens and closes the data directory, so a second call is a restart
+ * in the sense that matters: a new process over the same durable state.
  */
 internal class Harness(val directory: Path) : AutoCloseable {
 
@@ -724,6 +847,13 @@ internal class Harness(val directory: Path) : AutoCloseable {
     val sourcesDir: Path = Files.createDirectories(directory.resolve("sources"))
 
     val dataDir = Files.createDirectories(directory.resolve("data"))
+
+    init {
+        // A new archive has no automatic Default collection, and every import here names `default`
+        // explicitly — its managed library path is `library/default/...` too. Seed the row a person
+        // would have created, keeping that fixed id so the payloads and assertions can name it.
+        AppContext.open(dataDir).use { context -> context.seedCollectionWithId("default", "Default") }
+    }
 
     fun writeText(name: String, content: String): Path {
         val file = sourcesDir.resolve(name)
@@ -874,6 +1004,50 @@ internal class Harness(val directory: Path) : AutoCloseable {
     internal fun enqueueForTest(context: AppContext, sources: List<Path>, recursive: Boolean = false): Job =
         enqueue(context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"), recursive)
 
+    /**
+     * Queues a retry for documents the archive already holds, without attaching a worker.
+     *
+     * A retry is a job kind of its own — it addresses document identifiers and never copies bytes — so a
+     * test that drives one queues that kind rather than an import.
+     */
+    internal fun enqueueRetry(
+        context: AppContext,
+        documentIds: List<DocumentId>,
+        settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
+        collectionId: CollectionId = CollectionId("default"),
+    ): Job = context.jobs.enqueue(
+        type = JobType.RETRY,
+        collectionId = collectionId.takeIf { context.collections.get(it) != null },
+        payload = RetryJobPayload(
+            collectionId = collectionId.value,
+            documentIds = documentIds.map { it.value },
+            settings = settings,
+        ).encode(),
+        total = documentIds.size,
+    )
+
+    /** One retry through the durable pipeline, from a fresh process over the same data directory. */
+    fun retry(
+        documentIds: List<DocumentId>,
+        extractor: DocumentExtractor,
+        settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
+        embedder: DocumentEmbedder = TestDocumentEmbedder(),
+        maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
+        collectionId: CollectionId = CollectionId("default"),
+    ): RetryRun = AppContext.open(dataDir).use { context ->
+        val job = enqueueRetry(context, documentIds, settings, collectionId)
+        attach(
+            context,
+            storedPipeline(context, extractor),
+            embedder = embedder,
+            maxChunksPerDocument = maxChunksPerDocument,
+        )
+        RetryRun(
+            job = awaitJob(context, job.id),
+            documents = context.documents.listByCollection(collectionId, limit = 100).associateBy { it.id },
+        )
+    }
+
     /** Waits for [jobId] to reach a terminal state, which is what a restarted process has to do. */
     internal fun awaitJob(context: AppContext, jobId: JobId): Job = runBlocking { awaitTerminal(context, jobId) }
 
@@ -949,6 +1123,7 @@ internal class RecordingUnits(
                                 locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
                                 extractedText = "unit $index",
                                 searchText = "unit $index",
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )
@@ -971,11 +1146,20 @@ internal class RecordingUnits(
 internal class ParkedUnits(
     private val parked: CompletableDeferred<Unit>,
     private val units: Int = 3,
+    /** How the first unit was read; an OCR unit is what puts the document in its OCR phase. */
+    private val method: ExtractionMethod = ExtractionMethod.DIRECT_TEXT,
+    /** Whether the extractor announces its total before it starts, as a real one does when it can. */
+    private val announces: Boolean = false,
 ) : DocumentExtractor {
 
     override val supportedMediaTypes: Set<String> = setOf("text/plain")
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        if (announces) {
+            input.boundary.unit {
+                emit(ExtractionEvent.Progress(unitKind = UnitKind.LINE, totalUnits = units))
+            }
+        }
         val first = "unit-0"
         if (!input.isCommitted(first)) {
             input.boundary.unit {
@@ -987,6 +1171,7 @@ internal class ParkedUnits(
                             locator = SourceLocation.TextLines(start = 1, end = 1),
                             extractedText = "unit 0",
                             searchText = "unit 0",
+                            method = method,
                         ),
                     ),
                 )
@@ -995,6 +1180,49 @@ internal class ParkedUnits(
         parked.complete(Unit)
         // Where the process dies: a real child tool would be working here for minutes.
         CompletableDeferred<Unit>().await()
+        input.boundary.unit { emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = units)) }
+    }
+}
+
+/**
+ * An extractor that holds its document between two units until a test releases it.
+ *
+ * The wait is deliberately *outside* `input.boundary.unit`: the shared mutation permit is free while the
+ * attempt sits there, exactly as it is while a real extractor renders its next page, so a deletion can be
+ * admitted while the import that owns the document is still running.
+ */
+internal class HeldUnits(
+    private val parked: CompletableDeferred<Unit>,
+    private val release: CompletableDeferred<Unit>,
+    private val units: Int = 3,
+) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        repeat(units) { index ->
+            val key = "unit-$index"
+            if (!input.isCommitted(key)) {
+                input.boundary.unit {
+                    emit(
+                        ExtractionEvent.UnitReady(
+                            key = key,
+                            ordinal = index,
+                            unit = ContentUnitDraft(
+                                locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
+                                extractedText = "unit $index",
+                                searchText = "unit $index",
+                                method = ExtractionMethod.DIRECT_TEXT,
+                            ),
+                        ),
+                    )
+                }
+            }
+            if (index == 0) {
+                parked.complete(Unit)
+                release.await()
+            }
+        }
         input.boundary.unit { emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = units)) }
     }
 }
@@ -1031,6 +1259,7 @@ internal class FailedUnitsThenFinish(
                                 locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
                                 extractedText = "unit $index",
                                 searchText = "unit $index",
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )
@@ -1066,6 +1295,7 @@ internal class RefusingUnits(private val unitsBeforeRefusing: Int) : DocumentExt
                                 locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
                                 extractedText = "unit $index",
                                 searchText = "unit $index",
+                                method = ExtractionMethod.DIRECT_TEXT,
                             ),
                         ),
                     )

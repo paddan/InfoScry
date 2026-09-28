@@ -4,6 +4,8 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -142,7 +144,18 @@ class Database(val path: Path) : AutoCloseable {
  * Timestamps are written by the persistence boundary, so the domain stays free of a clock and of a
  * platform date type. Every instant is an ISO-8601 UTC string, which sorts lexicographically in the
  * same order it occurred.
+ *
+ * The fraction is always three digits, including for a whole second: the default [Instant.toString]
+ * drops a zero fraction, and then `2026-01-01T00:00:00Z` compares greater than
+ * `2026-01-01T00:00:00.123Z` because `Z` sorts above `.`. Rows ordered by such a string would put a
+ * whole second after its own fractions, which a listing that writes rows in a tight loop does hit.
  */
 object Instants {
-    fun now(): String = Instant.now().toString()
+    fun now(): String = format(Instant.now())
+
+    /** Formats one instant in the fixed-width form [now] writes; a test pins the whole-second case. */
+    internal fun format(instant: Instant): String = ISO_MILLIS.format(instant)
+
+    private val ISO_MILLIS: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
 }

@@ -1,7 +1,9 @@
 package infoscry.extract
 
 import infoscry.domain.DocumentId
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
+import infoscry.domain.UnitKind
 import infoscry.fixtures.PdfFixtureGenerator
 import infoscry.fixtures.PdfFixtureGenerator.MIXED_NAME
 import infoscry.fixtures.PdfFixtureGenerator.MIXED_SCANNED_PAGES
@@ -236,11 +238,42 @@ class PdfExtractorTest {
         assertEquals("c".repeat(64), ocred.unit.artifactSha256)
         assertEquals(88.5, ocred.unit.meanConfidence)
         assertEquals(
+            ExtractionMethod.OCR,
+            ocred.unit.method,
+            "the page the tool read says so itself, rather than being recognised by its confidence",
+        )
+        assertEquals(
             null,
             parsed.unit.artifactRelativePath,
             "a page with its own text layer claimed an artifact it never wrote",
         )
         assertEquals(null, parsed.unit.meanConfidence)
+        assertEquals(
+            ExtractionMethod.DIRECT_TEXT,
+            parsed.unit.method,
+            "a parser's page and a recognised page are two methods, whatever their confidences",
+        )
+    }
+
+    // ---- What the document says about itself before it is read ----------------------------------------
+
+    @Test
+    fun `a pdf announces its page count and its unit kind before it reads a page`() {
+        val events = collect(PdfExtractor(OcrSpy().seam), inputFor(fixture(MIXED_NAME), probe()), probe())
+
+        val announced = events.filterIsInstance<ExtractionEvent.Progress>().single()
+        assertEquals(UnitKind.PAGE, announced.unitKind)
+        assertEquals(
+            events.filterIsInstance<ExtractionEvent.Finished>().single().totalUnits,
+            announced.totalUnits,
+            "the announced total is the page count the finished pass reports, not a guess about the rest",
+        )
+        assertTrue(MIXED_SCANNED_PAGES.size < announced.totalUnits, "the fixture has pages beyond the scans")
+        assertEquals(
+            events.first(),
+            announced,
+            "the total is announced before anything is read, so progress has a denominator from the start",
+        )
     }
 
     // ---- A page whose own text cannot be read is handed over, not failed ------------------------------
@@ -440,7 +473,11 @@ class PdfExtractorTest {
         val events = collect(PdfExtractor(spy.seam), inputFor(path, probe()), probe())
 
         assertEquals(emptyList(), units(events))
-        assertEquals(0, (events.single() as ExtractionEvent.Finished).totalUnits)
+        assertEquals(
+            0,
+            events.filterIsInstance<ExtractionEvent.Finished>().single().totalUnits,
+            "a document with no pages finishes with a total of zero, announced beside the one it started with",
+        )
         assertTrue(spy.pages.isEmpty())
     }
 

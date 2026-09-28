@@ -4,18 +4,16 @@ import infoscry.AppContext
 import infoscry.chunk.Chunker
 import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.E5Embedder
-import infoscry.embedding.EmbeddingException
 import infoscry.embedding.GpuRuntime
-import infoscry.embedding.GpuUnavailableException
 import infoscry.embedding.ModelManager
-import infoscry.search.DocumentRow
+import infoscry.embedding.GpuUnavailableException
 import infoscry.search.LuceneIndex
 import infoscry.search.ReindexService
-import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Document
+import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.JobType
 import infoscry.domain.Job
@@ -24,18 +22,14 @@ import infoscry.extract.DOCUMENT_TOO_LARGE_CODE
 import infoscry.extract.DOCUMENT_UNREADABLE_CODE
 import infoscry.extract.ENCRYPTED_DOCUMENT_CODE
 import infoscry.extract.OCR_FAILED_CODE
-import infoscry.extract.ExtractionEvent
-import infoscry.extract.ExtractionFingerprint
-import infoscry.extract.ExtractionInput
 import infoscry.extract.ExtractionSettings
 import infoscry.extract.TesseractOcr
-import infoscry.extract.UnitBoundary
-import infoscry.extract.UnsupportedMediaTypeException
 import infoscry.library.ManagedImportOutcome
 import infoscry.library.ManagedLibrary
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
+import infoscry.storage.DocumentBeingDeletedException
 import infoscry.storage.DocumentStore
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
@@ -62,23 +56,66 @@ import org.slf4j.LoggerFactory
  * - **An interrupted attempt resumes instead of starting over.** The item records the managed document as
  *   soon as the bytes are in place, and the extractor is handed the units an earlier attempt committed
  *   under the same fingerprint, so a restart does not redo OCR that already succeeded.
- * - **Reading is not enough to call a document done.** Extraction is one unit at a time through
- *   [UnitBoundary], which holds the mutation permit while a unit is produced and committed, and a document
- *   is left in `EXTRACTING`: indexing and embedding decide when it is complete, and they are somebody
- *   else's task.
+ * - **Reading is not enough to call a document done.** Extraction is one unit at a time through the shared
+ *   boundary [`DocumentIngest`] holds, so the mutation permit covers exactly that unit, and a document is
+ *   left in `EXTRACTING`: indexing and embedding decide when it is complete, and they are somebody else's
+ *   task.
  */
-class ImportJobHandler(
-    private val paths: AppPaths,
+class ImportJobHandler internal constructor(
     private val collections: CollectionStore,
     private val documents: DocumentStore,
     private val library: ManagedLibrary,
     private val items: ImportItemStore,
-    private val pipeline: ImportPipeline,
-    private val content: ContentStore,
-    private val chunker: Chunker,
-    private val index: () -> LuceneIndex,
-    private val documentEmbedder: () -> DocumentEmbedder?,
-    private val maxChunksPerDocument: Int,
+    /**
+     * Where an attached managed copy is read into searchable content. Shared with the retry attempt, so
+     * "read this document's bytes again" cannot mean two different things depending on how the document was
+     * reached — only whether failed units are revisited differs, and the caller says which it wants.
+     */
+    private val ingest: DocumentIngest,
+    /**
+     * The instant between a file's last document write and its per-item result, called once per file.
+     *
+     * That instant is where a document deletion can still race the item write: the file's document is
+     * already written, and the deletion's durable disposition may already have marked the item cancelled
+     * and removed the document's row. It is a seam because only a test can hold an attempt exactly there
+     * — it lands a deletion in the window and proves the item write obeys the disposition instead of
+     * failing the job. No production caller passes it.
+     */
+    private val afterIngestion: suspend () -> Unit = {},
+    /**
+     * The instant between a file's item being read and its bytes being copied, called once per file.
+     *
+     * It is the window a deletion admission needs to be landed in to test the interleaving this handler
+     * has to survive: the item was read as pending, and admission cancels it by source path while the
+     * copy is still ahead. Only a test can hold the attempt exactly there. No production caller passes it.
+     */
+    private val beforeCopy: suspend () -> Unit = {},
+    /**
+     * The instant between a file's attach and its reading, called once per file.
+     *
+     * It is the window the verifier's interleaving needs: the file's document has been copied and attached
+     * (so a document exists for the path), the deletion is admitted, and the reading that follows would
+     * publish what the deletion decided against. Only a test can hold the attempt exactly there. No
+     * production caller passes it.
+     */
+    private val afterAttach: suspend () -> Unit = {},
+    /**
+     * The instant between a file's copy committing and its attach, called once per file.
+     *
+     * It is the crash window a document deletion has to survive: a document exists for the file's path and
+     * the item has not been attached to it yet, and the deletion can be admitted exactly there. Only a test
+     * can hold an attempt at that instant. No production caller passes it.
+     */
+    private val afterCopy: suspend () -> Unit = {},
+    /**
+     * Removes a document this attempt created itself, when the deletion cancelled the file it was copied
+     * for.
+     *
+     * It is a seam because removing it spans what the handler does not own — the search index, the row and
+     * its cascade, and the bytes on disk — and the composition root is what wires those together. The
+     * implementation never touches another item, another document or another collection.
+     */
+    private val discardCreatedDocument: suspend (CollectionId, DocumentId) -> Unit = { _, _ -> },
 ) : JobHandler {
 
     override suspend fun handle(job: Job, stage: JobStage) {
@@ -98,7 +135,14 @@ class ImportJobHandler(
 
         var completed = 0
         for (source in sources) {
-            process(job, collection, payload.settings, source, stage)
+            try {
+                process(job, collection, payload.settings, source, stage)
+            } catch (deleted: DocumentBeingDeletedException) {
+                // One document was removed while this file was being worked on. That is only this file's
+                // outcome: its item is durably marked CANCELLED so no later attempt copies the deleted
+                // document again, and the remaining files of the import keep running.
+                stage.run(STAGE_RECORD) { items.cancelTargeting(job.id, deleted.documentId) }
+            }
             completed++
             stage.reportProgress(completed, sources.size)
         }
@@ -117,293 +161,76 @@ class ImportJobHandler(
         source: ImportSource,
         stage: JobStage,
     ) {
+        // The file's own name, reported before anything is done with it, so a reader watching the import
+        // sees which of the selected files the wait belongs to. Only the name: the path it was selected
+        // from is the archive's own bookkeeping and never crosses the API boundary.
+        stage.reportCurrentItem(sourceNameOf(source.path))
         val item = stage.run(STAGE_QUEUE) { items.queue(job.id, source.key, source.path.toString()) }
+        // The durable disposition, read before anything else is done: a file whose document was deleted
+        // is skipped on this attempt and on every resume, which is what stops the deleted target from
+        // being copied again from an old source item.
+        if (item.outcome == ImportItemOutcome.CANCELLED) return
         if (isAlreadyImported(item)) return
+
+        // Where a deletion and this file interleave: the item is read, the bytes are not copied yet. Nothing
+        // below trusts that read — the durable row is read again under the permit that copies and under the
+        // permit that attaches — so this seam exists only to put a test's deletion exactly here.
+        beforeCopy()
 
         // The item's stored document is consulted before the source path is: an earlier attempt may have put
         // the bytes in the managed library before the user moved or deleted the file, and that stored copy
         // is what the resume has to read.
         val attached = attachDocument(job, collection, source, item, stage) ?: return
         val document = attached.document
-        val fingerprint = ExtractionFingerprint.of(document.sha256, settings)
 
-        val mediaType = pipeline.detector.detect(attached.managedPath)
-        val extractor = try {
-            pipeline.registry.select(mediaType.value)
-        } catch (unsupported: UnsupportedMediaTypeException) {
-            recordFailure(
-                job = job,
-                source = source,
-                stage = stage,
-                document = document,
-                code = unsupported.code,
-                message = "the pipeline has no extractor for ${mediaType.value}",
-            )
-            return
-        }
+        // Where a deletion and this file interleave once the file's document exists: the bytes are in the
+        // managed library and the item names them, and the reading has not begun. The deletion owns the
+        // path, so what it decides below decides for this file too.
+        afterAttach()
 
-        if (!pipeline.sink.storesUnits) {
-            // No durable unit store exists yet, so the extraction phase is an explicit no-op: the document
-            // is stored, detected, and left in EXTRACTING rather than being reported as readable.
-            stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.EXTRACTING) }
-            stage.run(STAGE_RECORD) {
+        val result = ingest.ingest(
+            collection = collection,
+            settings = settings,
+            document = document,
+            managedPath = attached.managedPath,
+            stage = stage,
+            // An import resumes rather than retries: a unit an earlier attempt already failed is a known
+            // result and is skipped, which is what the sink's `committedKeys` answers. An explicit Retry asks
+            // for the opposite and reaches the same code through the retry handler.
+            revisitFailedUnits = false,
+            onFailure = { code, message -> recordFailure(job, source, stage, document, code, message) },
+        )
+        // A document deletion can land here: the file's document is written and its item is not. Nothing
+        // below may fail the attempt because of that — the item writes obey the deletion's disposition
+        // (see `ImportItemStore`), so this file ends cancelled and the rest of the import keeps running.
+        afterIngestion()
+        when (result) {
+            IngestResult.Complete -> stage.run(STAGE_RECORD) {
                 items.record(job.id, source.key, attached.outcome, document.id)
             }
-            return
-        }
 
-        stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.EXTRACTING) }
-
-        val input = ExtractionInput(
-            documentId = document.id,
-            managedPath = attached.managedPath,
-            artifactRoot = paths.artifactsDir(collection.id, document.id),
-            settings = settings,
-            fingerprint = fingerprint,
-            committedUnitKeys = pipeline.sink.committedKeys(document.id, fingerprint),
-            boundary = StageBoundary(stage),
-            originalFilename = document.originalFilename,
-        )
-
-        var finished = false
-        var lastFailureCode: String? = null
-        try {
-            // The collector commits inside the boundary's permit: a flow is collected inline, so `emit` does
-            // not return until the sink has stored that unit, and the permit is still held while it does.
-            // The events are read on the way past because the document's own outcome depends on them: only a
-            // flow that reported it delivered everything may be called extracted.
-            pipeline.registry.extract(input, mediaType.value).collect { event ->
-                when (event) {
-                    is ExtractionEvent.Finished -> finished = true
-                    is ExtractionEvent.UnitFailed -> lastFailureCode = event.code
-                    is ExtractionEvent.UnitReady -> Unit
+            IngestResult.NoUnitStore -> {
+                // No durable unit store exists, so the extraction phase is an explicit no-op: the document
+                // is stored, detected, and left in EXTRACTING rather than being reported as readable.
+                stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.EXTRACTING) }
+                stage.run(STAGE_RECORD) {
+                    items.record(job.id, source.key, attached.outcome, document.id)
                 }
-                pipeline.sink.deliver(document.id, fingerprint, event)
             }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (notActive: CollectionNotActiveException) {
-            // The collection is being deleted. That is not this file's problem: the job is over and the
-            // runner records it as such.
-            throw notActive
-        } catch (failure: Exception) {
-            recordFailure(
-                job = job,
-                source = source,
-                stage = stage,
-                document = document,
-                code = codeFor(failure),
-                message = failure.message ?: "the extractor failed without a message",
-            )
-            return
+
+            // The failure is recorded per item inside the reporter; nothing further may overwrite the item's
+            // outcome with `attached.outcome`, which would turn a failed document into an "imported" one that
+            // a later resume walked past.
+            IngestResult.Failed -> Unit
         }
 
-        if (!finished) {
-            // The extractor stopped without saying it delivered everything: a refusal it recognised before
-            // it had a unit to name, or an abort in the middle. What it did commit stays committed — a page
-            // read before the abort is still evidence — but the document is reported as failed rather than as
-            // extracted with warnings, because nothing about it is complete enough to search.
-            val code = lastFailureCode
-                ?: content.loadCheckpoints(document.id, fingerprint).lastOrNull { !it.succeeded }?.errorCode
-                ?: EXTRACTION_FAILED
-            recordFailure(job, source, stage, document, code = code, message = messageFor(code))
-            return
-        }
-
-        chunkContent(document, stage)
-        if (!embedAndIndex(job, collection, document, source, stage)) {
-            // The failure is recorded per item inside embedAndIndex; nothing further may overwrite the
-            // item's outcome with `attached.outcome` (which would turn a failed document into an
-            // "imported" one that a later resume walked past).
-            return
-        }
-        stage.run(STAGE_RECORD) { items.record(job.id, source.key, attached.outcome, document.id) }
-    }
-
-    /**
-     * Turns the document's persisted chunks into vectors and publishes them to the search index.
-     *
-     * This is where ingestion stops being "read this file" and becomes "make it searchable". Embedding
-     * runs chunk by chunk inside the mutation permit (the expensive half, and the half that may need the
-     * accelerator); the index publication is a single replacement of the document's chunks followed by one
-     * commit, done under its own permit after a final lifecycle recheck, and only then is the document
-     * marked complete. Cancel before that commit and nothing is durable: the resume replays from the
-     * persisted chunks without re-reading the source or re-running OCR.
-     */
-    private suspend fun embedAndIndex(
-        job: Job,
-        collection: Collection,
-        document: Document,
-        source: ImportSource,
-        stage: JobStage,
-    ): Boolean {
-        val embedder = documentEmbedder()
-        if (embedder == null) {
-            recordFailure(
-                job = job,
-                source = source,
-                stage = stage,
-                document = document,
-                code = ModelManager.MODEL_NOT_INSTALLED_CODE,
-                message = ModelManager.installRemedy(),
-            )
-            return false
-        }
-
-        try {
-            // The index publishes a single replacement per document, so every row lives in one in-memory
-            // list until the commit. A document's rows are bounded by its chunks; the ceiling turns "however
-            // large a real archive can get" into a documented limit a later resume can out-grow. It is
-            // checked inside the failure mapping so an over-ceiling document is recorded per item with an
-            // actionable code, and before any embedding work or index publication.
-            val chunkCount = content.chunkCount(document.id)
-            if (chunkCount > maxChunksPerDocument) {
-                throw EmbeddingException(
-                    INDEX_TOO_LARGE,
-                    "the document has $chunkCount chunks, which exceeds the " +
-                        "$maxChunksPerDocument that an import may publish in one index transaction",
-                )
-            }
-
-            stage.run(STAGE_EMBED) { documents.updateStatus(document.id, DocumentStatus.EMBEDDING) }
-            val rows = ArrayList<DocumentRow>(chunkCount)
-            var afterOrdinal = -1
-            while (true) {
-                val units = content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
-                if (units.isEmpty()) break
-                units.forEach { unit ->
-                    val chunks = content.chunksOf(unit.id)
-                    chunks.chunked(EMBED_BATCH).forEach { batch ->
-                        val vectors = stage.run(STAGE_EMBED) {
-                            embedder.embedDocuments(batch.map { it.text })
-                        }
-                        require(vectors.size == batch.size) {
-                            "the embedder returned ${vectors.size} vectors for ${batch.size} passages"
-                        }
-                        batch.forEachIndexed { index, chunk ->
-                            rows += DocumentRow(
-                                collectionId = collection.id,
-                                documentId = document.id,
-                                unitId = unit.id,
-                                locator = unit.locator,
-                                locatorLabel = unit.locator.describe(),
-                                chunk = chunk,
-                                vector = vectors[index],
-                            )
-                        }
-                    }
-                    afterOrdinal = unit.ordinal
-                }
-                if (units.size < CHUNK_BATCH) break
-            }
-
-            if (rows.isEmpty()) {
-                // Nothing to index means an extraction pass with no units, which the chunking stage
-                // would already have refused as a refusal rather than a finished pass. This guard keeps
-                // the record honest instead of silently publishing an empty replacement.
-                throw EmbeddingException(EMBEDDING_FAILED, "the document produced no searchable chunks")
-            }
-
-            stage.run(STAGE_INDEX) { documents.updateStatus(document.id, DocumentStatus.INDEXING) }
-            stage.run(STAGE_INDEX) {
-                // Recheck under the permit before publication: the collection may have been tombstoned
-                // while this document was being embedded, and publishing into a deleted collection would
-                // leave index entries nothing else could account for.
-                val live = collections.get(collection.id)
-                    ?: throw CollectionNotActiveException(collection.id)
-                if (live.lifecycle != CollectionLifecycle.ACTIVE) {
-                    throw CollectionNotActiveException(collection.id)
-                }
-                index().replaceDocument(rows)
-            }
-            stage.run(STAGE_RECORD) {
-                val failedUnits = content.extractionMarker(document.id)?.failedUnits ?: 0
-                val status = if (failedUnits > 0) DocumentStatus.COMPLETE_WITH_WARNINGS else DocumentStatus.COMPLETE
-                documents.updateStatus(document.id, status)
-            }
-            return true
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (notActive: CollectionNotActiveException) {
-            throw notActive
-        } catch (failure: Exception) {
-            val code = when (failure) {
-                is GpuUnavailableException -> GpuRuntime.GPU_UNAVAILABLE_CODE
-                is EmbeddingException -> failure.code
-                else -> EMBEDDING_FAILED
-            }
-            recordFailure(
-                job = job,
-                source = source,
-                stage = stage,
-                document = document,
-                code = code,
-                message = failure.message ?: "the document could not be embedded",
-            )
-            return false
-        }
-    }
-
-    /**
-     * Splits every unit of a finished extraction into embeddable chunks, one bounded unit per stage.
-     *
-     * The pass reads the units back out of the store rather than chunking them as they are extracted, which
-     * is what lets re-chunking happen without re-reading the document: another tokenizer or another passage
-     * budget rebuilds the chunks from the text that is already there and touches neither the text nor the OCR
-     * checkpoints.
-     *
-     * It runs unit by unit on purpose. A document can hold tens of thousands of units, and one list of them
-     * would be both a memory cost and a permit held for a whole document — and the exclusive side of the
-     * mutation gate has no timeout, so that hold would stop every other writer in the process.
-     */
-    private suspend fun chunkContent(document: Document, stage: JobStage) {
-        val version = chunker.version
-        val tokenizerId = chunker.counterId
-        val maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS
-        val overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS
-        if (!content.needsChunking(document.id, version, tokenizerId, maxSequenceTokens, overlapTokens)) return
-
-        stage.run(STAGE_CHUNK) { documents.updateStatus(document.id, DocumentStatus.CHUNKING) }
-        var afterOrdinal = -1
-        var walked = 0
-        while (true) {
-            val batch = content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
-            if (batch.isEmpty()) break
-            batch.forEach { unit ->
-                val plan = chunker.chunk(unit, maxSequenceTokens, overlapTokens)
-                stage.run(STAGE_CHUNK) {
-                    content.replaceUnitChunks(
-                        unitId = unit.id,
-                        drafts = plan.drafts,
-                        chunkerVersion = version,
-                        tokenizerId = tokenizerId,
-                        maxSequenceTokens = maxSequenceTokens,
-                        overlapTokens = overlapTokens,
-                    )
-                }
-                if (plan.headerDropped) {
-                    LOGGER.atWarn()
-                        .addKeyValue(COMPONENT_FIELD, IMPORT_COMPONENT)
-                        .addKeyValue(DOCUMENT_FIELD, document.id.value)
-                        .addKeyValue(ORDINAL_FIELD, unit.ordinal)
-                        .log("a repeated header left no room for a body, so the unit was chunked without it")
-                }
-                afterOrdinal = unit.ordinal
-                walked++
-            }
-            if (batch.size < CHUNK_BATCH) break
-        }
-        // Only now is the document chunked: a marker written per unit would let a pass that died halfway look
-        // like a pass that finished.
-        stage.run(STAGE_CHUNK) {
-            content.finishChunking(
-                documentId = document.id,
-                chunkerVersion = version,
-                tokenizerId = tokenizerId,
-                maxSequenceTokens = maxSequenceTokens,
-                overlapTokens = overlapTokens,
-                unitCount = walked,
-            )
+        // The disposition, read once more now the reading has finished: a deletion admitted while this file
+        // was being read cancels it, and a document this attempt created for the cancelled file may not stay
+        // live — reading a file the deletion decided against and then publishing it is the same resurrection
+        // by another route. A document that already existed (`duplicate`) is never removed: it belongs to
+        // whatever imported it first, and this attempt only found it.
+        if (!attached.duplicate && cancelledSinceRead(job, source, stage)) {
+            discard(collection.id, document.id)
         }
     }
 
@@ -425,8 +252,13 @@ class ImportJobHandler(
         // the stored bytes rather than reading a source file the user may have moved since.
         val owned = item.documentId?.let { documents.get(it) }
         if (owned != null) {
+            if (documents.isDeletionTarget(owned.id)) return cancelTargeting(job, stage, owned.id)
             val managedPath = library.managedPathOf(owned)
             if (Files.exists(managedPath)) {
+                // The item was read before this file was reached, and the deletion may have cancelled it in
+                // between: reading the stored bytes of a cancelled file would put the deleted path back into
+                // the index just as surely as copying them would.
+                if (cancelledSinceRead(job, source, stage)) return null
                 return Attached(owned, managedPath, duplicate = true, item = item)
             }
             // The documented crash window: a row whose bytes never landed. The row is the stale half, and
@@ -443,8 +275,28 @@ class ImportJobHandler(
             return null
         }
 
-        val imported = try {
-            stage.run(STAGE_COPY) { library.importFile(collection.id, source.path) }
+        // The item read at the start of this file is a snapshot, and the deletion cancels the item by source
+        // path: the durable row is therefore read *inside the copy's own permit*, immediately before the
+        // bytes are read. Admission cannot commit while that permit is held, so the copy below is decided by
+        // a disposition that is still true, and a cancelled file is never copied at all.
+        val copy = try {
+            stage.run(STAGE_COPY) {
+                if (cancelledSinceReadInPermit(job, source)) {
+                    null
+                } else {
+                    library.importFile(
+                        collectionId = collection.id,
+                        source = source.path,
+                        // The link between this file and what it made is written by the copy's own commit, so
+                        // it survives everything that can happen next: a refused attach, a kill, or a deletion
+                        // admitted the moment the copy returns. Without it the document a copy created would be
+                        // findable by nobody but this attempt's own in-memory state.
+                        onDocumentCreated = { connection, documentId ->
+                            items.noteCreatedDocument(connection, job.id, source.key, documentId)
+                        },
+                    )
+                }
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (notActive: CollectionNotActiveException) {
@@ -464,11 +316,40 @@ class ImportJobHandler(
             )
             return null
         }
+        // The deletion cancelled the file while it waited for the permit: nothing was copied and there is
+        // nothing to attach, read or report.
+        val imported = copy ?: return null
+
+        // The one instant where a document exists for this path and this file has not yet claimed it in its
+        // own bookkeeping: a deletion admitted here cancels the item, and the attach below is refused. The
+        // copy transaction already wrote the durable link, which is what lets the deletion still account for
+        // this document; this seam is where a test puts it. Nothing in production passes it.
+        afterCopy()
 
         val updated = stage.run(STAGE_QUEUE) {
-            items.attachDocument(job.id, source.key, imported.document.id)
+            items.attachDocument(
+                jobId = job.id,
+                itemKey = source.key,
+                documentId = imported.document.id,
+                // The copy's own answer: a deletion of this path may only remove what this file *made*.
+                createdByThisCopy = imported.outcome == ManagedImportOutcome.CREATED,
+            )
         }
         val duplicate = imported.outcome == ManagedImportOutcome.DUPLICATE
+        // A deletion can also land *while* the bytes are being copied, and the row just read back is what
+        // says whether it did: the attach itself refuses to write to an item admission dispositioned. An item
+        // the deletion cancelled is not attached, not ingested and not reported as imported, and a document
+        // this attempt created for it is removed again rather than left to be read and published — the copy
+        // finished after the deletion decided against the file, so the file leaves nothing behind.
+        if (updated.outcome == ImportItemOutcome.CANCELLED) {
+            if (!duplicate) discard(collection.id, imported.document.id)
+            return null
+        }
+        // The bytes already existed (a duplicate) and belong to a document that is being removed: the
+        // item is dispositioned rather than attached to it, and the parked directory is the deletion's to
+        // purge. The guard is re-read here because the copy and the deletion can race, which is exactly
+        // the window this check closes.
+        if (documents.isDeletionTarget(imported.document.id)) return cancelTargeting(job, stage, imported.document.id)
         if (duplicate && imported.document.status in FINISHED_STATUSES) {
             stage.run(STAGE_QUEUE) {
                 items.record(job.id, source.key, ImportItemOutcome.DUPLICATE, imported.document.id)
@@ -476,6 +357,47 @@ class ImportJobHandler(
             return null
         }
         return Attached(imported.document, imported.managedPath, duplicate, updated)
+    }
+
+    /**
+     * Dispositions one file as `CANCELLED` because its document is being deleted, and ends the file.
+     *
+     * The item's own row is the durable record, so a later attempt skips the file even when the document
+     * row is already gone and the item's reference to it has been cleared.
+     */
+    private suspend fun cancelTargeting(job: Job, stage: JobStage, documentId: DocumentId?): Nothing? {
+        if (documentId != null) stage.run(STAGE_RECORD) { items.cancelTargeting(job.id, documentId) }
+        return null
+    }
+
+    /**
+     * Whether the deletion has cancelled this file since it was read, as its own bounded stage.
+     *
+     * The item a file's processing was handed is a snapshot from before the file was reached, and admission
+     * cancels the item by source path. This is the read that has to happen again as late as possible: in
+     * the copy's own permit for the copy (see `attachDocument`), and under a bounded stage of its own for
+     * the attach, for the stored bytes of a resumed file and for the result. Admission cannot commit while
+     * such a permit is held, so a read taken inside one is a disposition that is still true when the work
+     * it guards begins.
+     */
+    private suspend fun cancelledSinceRead(job: Job, source: ImportSource, stage: JobStage): Boolean =
+        stage.run(STAGE_QUEUE) { cancelledSinceReadInPermit(job, source) }
+
+    /** The disposition as it stands right now; the caller must already hold a permit. */
+    private fun cancelledSinceReadInPermit(job: Job, source: ImportSource): Boolean =
+        items.find(job.id, source.key)?.outcome == ImportItemOutcome.CANCELLED
+
+    /**
+     * Removes the document this attempt created, because the deletion cancelled the file it was copied for.
+     *
+     * Only this attempt's own copy is removed. A document that already existed belongs to whatever imported
+     * it first, and a document the deletion targeted belongs to that deletion's own machine, which is already
+     * parking and purging it — two removals racing would undo each other's work. Nothing else is touched: not
+     * another item, not another document, not another collection.
+     */
+    private suspend fun discard(collectionId: CollectionId, documentId: DocumentId) {
+        if (documents.isDeletionTarget(documentId)) return
+        discardCreatedDocument(collectionId, documentId)
     }
 
     private suspend fun recordFailure(
@@ -496,7 +418,7 @@ class ImportJobHandler(
                 errorMessage = message,
             )
             if (document != null) {
-                documents.updateStatus(document.id, DocumentStatus.FAILED, code, message)
+                documents.updateStatus(document.id, statusForFailureCode(code), code, message)
             }
         }
     }
@@ -518,17 +440,19 @@ class ImportJobHandler(
             get() = if (duplicate) ImportItemOutcome.DUPLICATE else ImportItemOutcome.IMPORTED
     }
 
+    /** One file to import, identified by the path it resolves to. */
     /**
-     * One unit of extraction, under the same permit discipline as every other mutation: the stage asserts
-     * that the attempt may still continue, and the permit is released when the unit's event has been
-     * delivered and committed.
+     * The file's own last segment, whichever platform's separator its path carries.
+     *
+     * [Path.fileName] follows the platform's separator rules, so on macOS a Windows-style path typed into
+     * the manual fallback would be reported whole. The API's promise is the file's name and never the
+     * directories it sits in, so both separators are honoured — the same derivation the item view uses.
      */
-    private class StageBoundary(private val stage: JobStage) : UnitBoundary {
-
-        override suspend fun <T> unit(block: suspend () -> T): T = stage.run(STAGE_EXTRACT) { block() }
+    private fun sourceNameOf(path: Path): String {
+        val text = path.toString()
+        return text.substringAfterLast('/').substringAfterLast('\\').takeIf(String::isNotEmpty) ?: text
     }
 
-    /** One file to import, identified by the path it resolves to. */
     private data class ImportSource(val key: String, val path: Path, val exists: Boolean)
 
     /**
@@ -603,19 +527,22 @@ class ImportJobHandler(
         return found.sortedBy { it.toString() }
     }
 
-    /**
-     * How an extractor failure is reported to the user.
-     *
-     * Only the failure the extractor itself classifies is inferred here. Everything else stays a failure
-     * with its own message, so a defect inside an extractor cannot be dressed up as a problem with the
-     * user's request; a code for a result the pipeline expected is declared by whatever produces it.
-     */
-    private fun codeFor(failure: Exception): String = when (failure) {
-        is UnsupportedMediaTypeException -> failure.code
-        else -> EXTRACTION_FAILED
-    }
-
     companion object {
+
+        /**
+         * The status a whole-document failure leaves behind.
+         *
+         * A missing tool is not a broken document: the bytes, the collection and the archive are all fine
+         * and one thing has to be installed. That gets `NEEDS_TOOL`, so a listing can say what the document
+         * needs and Retry can honestly offer to read it again once the tool is there. Everything else is
+         * `FAILED`, because the document itself is what could not be read.
+         */
+        internal fun statusForFailureCode(code: String): DocumentStatus =
+            if (code == TesseractOcr.NEEDS_TESSERACT_CODE || code == CalibreConverter.NEEDS_CALIBRE_CODE) {
+                DocumentStatus.NEEDS_TOOL
+            } else {
+                DocumentStatus.FAILED
+            }
 
         /**
          * What a refusal code means to the person who has to act on it.
@@ -638,9 +565,9 @@ class ImportJobHandler(
 
             UNSUPPORTED_MEDIA_TYPE -> "the pipeline has no extractor for this kind of file"
 
-            EMBEDDING_FAILED -> "the document could not be embedded and published to the search index"
+            DocumentIngest.EMBEDDING_FAILED -> "the document could not be embedded and published to the search index"
 
-            INDEX_TOO_LARGE ->
+            DocumentIngest.INDEX_TOO_LARGE ->
                 "the document has more passages than one import may publish; import it in smaller pieces"
 
             DOCUMENT_TOO_LARGE_CODE ->
@@ -671,23 +598,11 @@ class ImportJobHandler(
         /** Where a verified CoreML session writes its one profile, under the data directory's temp root. */
         private const val STAGE_QUEUE = "queue"
         private const val STAGE_COPY = "copy"
-        private const val STAGE_EXTRACT = "extract"
-        private const val STAGE_CHUNK = "chunk"
-        private const val STAGE_EMBED = "embed"
-        private const val STAGE_INDEX = "index"
         private const val STAGE_RECORD = "record"
-        private const val EMBEDDING_FAILED = "EMBEDDING_FAILED"
         private const val SOURCE_MISSING = "SOURCE_MISSING"
         private const val SOURCE_UNREADABLE = "SOURCE_UNREADABLE"
         private const val COPY_FAILED = "COPY_FAILED"
-        private const val EXTRACTION_FAILED = "EXTRACTION_FAILED"
         private const val GONE_MESSAGE = "the file was gone before the import reached it"
-
-        /** How many units one read of the chunking walk takes, so a large document stays interruptible. */
-        private const val CHUNK_BATCH = 64
-
-        /** How many chunks one embedding step holds at once, so a long document stays interruptible. */
-        private const val EMBED_BATCH = 64
 
         /**
          * The largest document one import may publish in a single index transaction.
@@ -701,14 +616,10 @@ class ImportJobHandler(
          */
         const val MAX_CHUNKS_PER_DOCUMENT: Int = 50_000
 
-        /** The document was refused before embedding because it exceeds [MAX_CHUNKS_PER_DOCUMENT]. */
-        private const val INDEX_TOO_LARGE = "INDEX_TOO_LARGE"
         private const val UNSUPPORTED_MEDIA_TYPE = "UNSUPPORTED_MEDIA_TYPE"
 
         private const val COMPONENT_FIELD = "component"
         private const val DOCUMENT_FIELD = "document_id"
-        private const val ORDINAL_FIELD = "unit_ordinal"
-        private const val IMPORT_COMPONENT = "import"
 
         /** A document with this status has nothing left to extract. */
         private val FINISHED_STATUSES = setOf(
@@ -743,19 +654,54 @@ class ImportJobHandler(
             // A document may hold at most this many chunks in a single index transaction's in-memory rows.
             maxChunksPerDocument: Int = MAX_CHUNKS_PER_DOCUMENT,
             reindexService: (AppContext) -> ReindexService = ::productionReindexService,
+            // The instant between a file's last document write and its per-item result, for the test that
+            // lands a document deletion exactly there. Nothing in production passes it.
+            afterIngestion: suspend () -> Unit = {},
+            // The instant between a file's item being read and its bytes being copied, for the test that
+            // lands a deletion exactly there. Nothing in production passes it.
+            beforeCopy: suspend () -> Unit = {},
+            // The instant between a file's attach and its reading, for the test that lands a deletion
+            // exactly there. Nothing in production passes it.
+            afterAttach: suspend () -> Unit = {},
+            // The instant between a file's copy committing and its attach, for the test that lands a
+            // deletion exactly there. Nothing in production passes it.
+            afterCopy: suspend () -> Unit = {},
         ): JobRunner {
-            val handler = ImportJobHandler(
+            // One reader of managed copies, shared by both attempts: an import reaches its document by
+            // copying a source file, a retry through an identifier it already had, and from there on the
+            // reading is the same work.
+            val ingest = DocumentIngest(
                 paths = context.paths,
                 collections = context.collections,
                 documents = context.documents,
-                library = context.library,
-                items = context.importItems,
                 pipeline = pipeline,
                 content = context.content,
                 chunker = chunker,
                 index = { context.index() },
                 documentEmbedder = documentEmbedder,
                 maxChunksPerDocument = maxChunksPerDocument,
+            )
+            val handler = ImportJobHandler(
+                collections = context.collections,
+                documents = context.documents,
+                library = context.library,
+                items = context.importItems,
+                ingest = ingest,
+                afterIngestion = afterIngestion,
+                beforeCopy = beforeCopy,
+                afterAttach = afterAttach,
+                afterCopy = afterCopy,
+                discardCreatedDocument = { collectionId, documentId ->
+                    discardCreatedDocument(context, collectionId, documentId)
+                },
+            )
+            val retryHandler = RetryJobHandler(
+                collections = context.collections,
+                documents = context.documents,
+                jobs = context.jobs,
+                library = context.library,
+                mutations = context.mutations,
+                ingest = ingest,
             )
             val runner = JobRunner(
                 store = context.jobs,
@@ -764,6 +710,7 @@ class ImportJobHandler(
                 handler = DispatchingJobHandler(
                     mapOf(
                         JobType.IMPORT to handler,
+                        JobType.RETRY to retryHandler,
                         JobType.REINDEX to ReindexJobHandler(reindexService(context)),
                     ),
                 ),
@@ -771,6 +718,56 @@ class ImportJobHandler(
             context.attachJobRunner(runner)
             runner.start()
             return runner
+        }
+
+        /**
+         * Removes a document an attempt created itself, after a deletion cancelled the file it was copied
+         * for.
+         *
+         * The order is deliberate. The search entries go first, so a file cancelled after it was published
+         * stops being findable; then the row, whose cascade owns the units, chunks, checkpoints and progress;
+         * then the bytes and artifacts this attempt laid down. Every step is idempotent, and every step is
+         * best effort: the file is cancelled already, and a cleanup that could not finish may not fail the
+         * rest of an import. What could not be removed is logged rather than swallowed silently.
+         *
+         * The document is this attempt's own: nothing has cited it, and the item that would have named it is
+         * cancelled. No other document, item or collection is touched — a document a deletion targeted is the
+         * deletion machine's to remove, and the caller never gets here for one.
+         */
+        private suspend fun discardCreatedDocument(
+            context: AppContext,
+            collectionId: CollectionId,
+            documentId: DocumentId,
+        ) {
+            runCatching { context.index().deleteDocument(documentId) }.onFailure { failure ->
+                LOGGER.atWarn()
+                    .addKeyValue(DOCUMENT_FIELD, documentId.value)
+                    .setCause(failure)
+                    .log("a cancelled file's search entries could not be removed")
+            }
+            runCatching { context.documents.delete(documentId) }.onFailure { failure ->
+                LOGGER.atWarn()
+                    .addKeyValue(DOCUMENT_FIELD, documentId.value)
+                    .setCause(failure)
+                    .log("a cancelled file's document row could not be removed")
+            }
+            removeTree(context.paths.documentDir(collectionId, documentId), documentId)
+            removeTree(context.paths.artifactsDir(collectionId, documentId), documentId)
+        }
+
+        /** Removes one of a cancelled file's directories, tolerating a tree that is already gone. */
+        private fun removeTree(directory: Path, documentId: DocumentId) {
+            if (!Files.isDirectory(directory)) return
+            runCatching {
+                Files.walk(directory).use { entries ->
+                    entries.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+                }
+            }.onFailure { failure ->
+                LOGGER.atWarn()
+                    .addKeyValue(DOCUMENT_FIELD, documentId.value)
+                    .setCause(failure)
+                    .log("a cancelled file's directory could not be removed")
+            }
         }
 
         /**

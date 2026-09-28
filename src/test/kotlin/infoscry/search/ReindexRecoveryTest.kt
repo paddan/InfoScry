@@ -12,6 +12,7 @@ import infoscry.domain.DocumentStatus
 import infoscry.domain.SourceLocation
 import infoscry.chunk.Chunker
 import infoscry.chunk.ChunkDraft
+import infoscry.domain.ExtractionMethod
 import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.E5Embedder
 import infoscry.embedding.QueryEmbedder
@@ -555,6 +556,7 @@ class ReindexRecoveryTest {
                     locator = SourceLocation.TextLines(ordinal + 1, ordinal + 1),
                     extractedText = paragraph,
                     searchText = paragraph,
+                    method = ExtractionMethod.DIRECT_TEXT,
                 ),
                 artifactRoot = context.paths.libraryDir,
             )

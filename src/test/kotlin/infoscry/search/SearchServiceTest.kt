@@ -9,6 +9,7 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.embedding.QueryEmbedder
 import infoscry.extract.ContentUnitDraft
@@ -644,6 +645,8 @@ class SearchServiceTest {
                 locator = SourceLocation.PdfPage(1),
                 extractedText = "scanned text",
                 searchText = "scanned text",
+                // A scan read by the tool: the confidence beside it is the tool's answer, not the method.
+                method = ExtractionMethod.OCR,
                 meanConfidence = 0.9,
             ),
             artifactRoot = paths.libraryDir,

@@ -100,6 +100,20 @@ class JobStage internal constructor(
     }
 
     /**
+     * Names the file the attempt is holding right now, as the name its reader knows it by.
+     *
+     * A stage and its counters say how far an import has come, not what the wait is for: the file's own
+     * name is what a person watching an import wants beside them. The name is the file's last segment and
+     * never the path it was selected from, because the selected paths are the archive's own bookkeeping.
+     */
+    suspend fun reportCurrentItem(name: String?) {
+        mutations.awaitMutation {
+            assertAttemptMayContinue()
+            store.progress(jobId, currentItem = name)
+        }
+    }
+
+    /**
      * Reports progress from inside exclusive maintenance, and rechecks the attempt while there.
      *
      * The maintenance owner — the reindex job — cannot use [reportProgress], because waiting for

@@ -1,5 +1,6 @@
 package infoscry.extract
 
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import java.awt.Dimension
 import java.awt.Graphics2D
@@ -326,6 +327,7 @@ class SpreadsheetExtractor(
                 locator = locator,
                 extractedText = normalisedExtracted.extracted,
                 searchText = normalisedSearch.search,
+                method = ExtractionMethod.DIRECT_TEXT,
             )
         }
     }
@@ -457,6 +459,7 @@ class PresentationExtractor(private val format: OfficeFormat) : DocumentExtracto
                 locator = locator,
                 extractedText = normalised.extracted,
                 searchText = normalised.search,
+                method = ExtractionMethod.DIRECT_TEXT,
                 artifactRelativePath = preview?.relativePath,
                 artifactSha256 = preview?.sha256,
             )
@@ -692,7 +695,7 @@ private fun wordUnits(blocks: List<WordBlock>): List<OfficeUnit> {
         val key = "section:${units.size}"
         units.add(OfficeUnit(key = key, ordinal = units.size, locator = locator) {
             val normalised = TextNormalizer.normalize(text)
-            ContentUnitDraft(locator, normalised.extracted, normalised.search)
+            ContentUnitDraft(locator, normalised.extracted, normalised.search, ExtractionMethod.DIRECT_TEXT)
         })
         texts = mutableListOf()
     }

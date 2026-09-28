@@ -28,6 +28,8 @@ class JobRoutesTest {
     fun startServer() {
         dataDir = Files.createTempDirectory("infoscry-job-routes")
         harness = ApiTestServer(dataDir)
+        // A new archive has no automatic Default; the accepted-import test needs one that exists.
+        runBlocking { harness.context.collectionService.create("Default") }
     }
 
     @AfterTest
@@ -64,7 +66,7 @@ class JobRoutesTest {
             assertFalse(body.contains("errorMessage"), "raw failure details must not cross the API boundary: $body")
             val jobWire = findJob(body).jsonObject
             assertTrue(
-                jobWire.keys.all { it in setOf("id", "type", "state", "createdAt", "updatedAt", "collectionId", "stage", "completed", "total", "errorCode", "cancelRequested") },
+                jobWire.keys.all { it in setOf("id", "type", "state", "createdAt", "updatedAt", "collectionId", "stage", "currentItem", "completed", "total", "errorCode", "cancelRequested") },
                 "job wire fields must stay within the documented allowlist: ${jobWire.keys}",
             )
             assertEquals("JOB_FAILED", jobWire["errorCode"]?.toString()?.trim('"'))
@@ -72,7 +74,25 @@ class JobRoutesTest {
     }
 
     @Test
-    fun `job item responses carry the source path and the sentence the code means, not the stored text`() = runBlocking {
+    fun `a running job names the file it is working on, and the name is not the path it came from`() = runBlocking {
+        val privatePath = "/private/evidence/quarterly-report.pdf"
+        val job = harness.context.jobs.enqueue(
+            JobType.IMPORT,
+            payload = """{"paths":["$privatePath"]}""",
+            total = 2,
+        )
+        harness.context.jobs.claim(job.id)
+        harness.context.jobs.progress(job.id, stage = "copy", completed = 1, currentItem = "quarterly-report.pdf")
+
+        val body = harness.get("/api/jobs/${job.id.value}").bodyAsText()
+
+        val jobWire = Json.parseToJsonElement(body).jsonObject["job"]!!.jsonObject
+        assertEquals("quarterly-report.pdf", jobWire["currentItem"]?.toString()?.trim('"'))
+        assertFalse(body.contains(privatePath), "the job route must omit the selected path: $body")
+    }
+
+    @Test
+    fun `job item responses name the source file and the sentence the code means, with no source path`() = runBlocking {
         val privatePath = "/private/evidence/quarterly-report.pdf"
         val excerpt = "CONFIDENTIAL document excerpt"
         val job = harness.context.jobs.enqueue(JobType.IMPORT)
@@ -89,8 +109,11 @@ class JobRoutesTest {
         val body = response.bodyAsText()
 
         assertEquals(HttpStatusCode.OK, response.status, body)
-        assertTrue(body.contains(privatePath), "item responses must include the source path: $body")
-        assertTrue(body.contains("sourcePath"), "the item wire type must expose sourcePath: $body")
+        // The absolute path the file was selected from is the archive's own bookkeeping: the durable
+        // import history is a management read, so only the file's name crosses.
+        assertFalse(body.contains(privatePath), "item responses must not carry the selected path: $body")
+        assertFalse(body.contains("sourcePath"), "the item wire type must not expose sourcePath: $body")
+        assertTrue(body.contains("sourceName"), "the item wire type must expose sourceName: $body")
         assertTrue(body.contains("errorMessage"), "the item wire type must expose errorMessage: $body")
         // The stored message is a diagnostic for the machine that ran the import: it can carry a document's
         // own text, so it stays on this side of the boundary and the code's sentence is served instead.
@@ -98,12 +121,12 @@ class JobRoutesTest {
         assertFalse(body.contains("Could not parse"), "the stored message's own words must not cross: $body")
         val itemWire = Json.parseToJsonElement(body).jsonObject["items"]!!.jsonArray.single().jsonObject
         assertTrue(
-            itemWire.keys.all { it in setOf("id", "jobId", "documentId", "sourcePath", "sourceName", "outcome", "errorCode", "errorMessage", "createdAt", "updatedAt") },
+            itemWire.keys.all { it in setOf("id", "jobId", "documentId", "sourceName", "outcome", "errorCode", "errorMessage", "createdAt", "updatedAt") },
             "item wire fields must stay within the documented allowlist: ${itemWire.keys}",
         )
         assertEquals("UNSUPPORTED_MEDIA_TYPE", itemWire["errorCode"]?.toString()?.trim('"'))
+        // The name is the path's own last segment, so a folder import still names the file that failed.
         assertEquals("quarterly-report.pdf", itemWire["sourceName"]?.toString()?.trim('"'))
-        assertEquals(privatePath, itemWire["sourcePath"]?.toString()?.trim('"'))
         assertEquals(
             "the pipeline has no extractor for this kind of file",
             itemWire["errorMessage"]?.toString()?.trim('"'),
@@ -127,7 +150,7 @@ class JobRoutesTest {
         assertFalse(body.contains("errorMessage"), "raw failure details must not cross the API boundary: $body")
         val jobWire = Json.parseToJsonElement(body).jsonObject["job"]!!.jsonObject
         assertTrue(
-            jobWire.keys.all { it in setOf("id", "type", "state", "createdAt", "updatedAt", "collectionId", "stage", "completed", "total", "errorCode", "cancelRequested") },
+            jobWire.keys.all { it in setOf("id", "type", "state", "createdAt", "updatedAt", "collectionId", "stage", "currentItem", "completed", "total", "errorCode", "cancelRequested") },
             "accepted job fields must stay within the documented allowlist: ${jobWire.keys}",
         )
     }

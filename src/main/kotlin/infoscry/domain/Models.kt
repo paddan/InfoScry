@@ -28,6 +28,40 @@ enum class DocumentStatus {
     NEEDS_TOOL,
 }
 
+/**
+ * How one unit's text was read.
+ *
+ * The distinction is the extractor's own statement about its work, not something read back off a unit's
+ * confidence: a parser that read a page's text layer and a tool that recognised a scanned page are two
+ * methods, and a confidence value is neither of them. It is persisted beside the unit so "how much of this
+ * document was read by OCR" is answerable without guessing.
+ */
+@Serializable
+enum class ExtractionMethod {
+    /** The document's own container had the text: a parser read it. */
+    DIRECT_TEXT,
+
+    /** The text was recognised from a raster by the OCR tool. */
+    OCR,
+}
+
+/**
+ * What one unit of a document is, in the words a reader counts it in.
+ *
+ * It exists so progress can be honest about its own scope: a page count is a count of pages, a Word
+ * document's units are sections, a workbook's are sheets. The label a reader sees is chosen by the UI from
+ * this name, so the product copy stays in one place.
+ */
+@Serializable
+enum class UnitKind {
+    PAGE,
+    SECTION,
+    SLIDE,
+    SHEET,
+    LINE,
+    IMAGE,
+}
+
 /** A collection is usable while `ACTIVE`; `DELETING` rejects new work and reads. */
 @Serializable
 enum class CollectionLifecycle {
@@ -42,6 +76,14 @@ enum class JobType {
 
     /** Rebuilds the search index from the persisted text, so citations and vectors agree again. */
     REINDEX,
+
+    /**
+     * Reads existing managed documents again from their stored bytes, retaining their identities.
+     *
+     * It is a kind of its own rather than an import because a retry addresses document identifiers that
+     * already exist and must never be classified as a duplicate of itself — see `RetryJobHandler`.
+     */
+    RETRY,
 }
 
 /**
@@ -70,6 +112,12 @@ data class Collection(
     val updatedAt: String,
     val description: String? = null,
     val lifecycle: CollectionLifecycle = CollectionLifecycle.ACTIVE,
+    /**
+     * How many documents the collection holds. A derived listing value, counted from the document
+     * rows when a collection is listed for display; it is never persisted on the collection and is
+     * `0` for a collection that was not counted (for example one read back by id).
+     */
+    val documentCount: Int = 0,
 ) {
     init {
         require(name.isNotBlank()) { "Collection.name must not be blank" }
@@ -130,6 +178,13 @@ data class ContentUnit(
     val artifactRelativePath: String? = null,
     val artifactSha256: String? = null,
     val meanConfidence: Double? = null,
+    /**
+     * How this unit's text was read, or `null` for a unit committed before the pipeline recorded it.
+     *
+     * Absent is not "direct text": a legacy unit's method is unknown, and a count that showed it as zero
+     * (or folded it into direct text) would invent a history the archive does not have.
+     */
+    val extractionMethod: ExtractionMethod? = null,
 ) {
     init {
         require(ordinal >= 0) { "ContentUnit.ordinal must not be negative, was $ordinal" }
@@ -208,6 +263,11 @@ data class Job(
     val updatedAt: String,
     val collectionId: CollectionId? = null,
     val stage: String? = null,
+    /**
+     * The file the attempt is working on now, as its own name — never the path it was selected from.
+     * A job that reads one file at a time reports the one it holds; the others leave it `null`.
+     */
+    val currentItem: String? = null,
     val completed: Int = 0,
     val total: Int = 0,
     @Transient val payload: String? = null,

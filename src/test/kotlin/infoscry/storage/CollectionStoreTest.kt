@@ -35,12 +35,9 @@ class CollectionStoreTest {
     }
 
     @Test
-    fun `migration seeds a usable default collection`() {
-        val default = store.get(CollectionStore.DEFAULT_ID)
-
-        assertEquals("Default", default?.name)
-        assertEquals("eng", default?.ocrLanguages)
-        assertEquals(CollectionLifecycle.ACTIVE, default?.lifecycle)
+    fun `a new archive holds no collection for the store to list`() {
+        assertEquals(emptyList(), store.list().map { it.name })
+        assertNull(store.get(CollectionStore.DEFAULT_ID), "the legacy seed is retired, not recreated")
     }
 
     @Test
@@ -68,7 +65,7 @@ class CollectionStoreTest {
         assertFailsWith<IllegalArgumentException> { store.create("") }
         assertFailsWith<IllegalArgumentException> { store.create("Acme", ocrLanguages = " ") }
 
-        assertEquals(listOf("Default"), store.list().map { it.name })
+        assertEquals(emptyList(), store.list().map { it.name })
     }
 
     @Test
@@ -77,9 +74,8 @@ class CollectionStoreTest {
 
         assertFailsWith<DuplicateCollectionNameException> { store.create("nightfall") }
         assertFailsWith<DuplicateCollectionNameException> { store.create("NIGHTFALL") }
-        assertFailsWith<DuplicateCollectionNameException> { store.create("Default") }
 
-        assertEquals(2, store.list().size)
+        assertEquals(1, store.list().size)
     }
 
     @Test
@@ -87,8 +83,8 @@ class CollectionStoreTest {
         val alpha = store.create("Alpha")
         val beta = store.create("Beta")
 
-        assertEquals(listOf("Alpha", "Beta", "Default"), store.list().map { it.name })
-        assertEquals(listOf(alpha.id, beta.id, CollectionStore.DEFAULT_ID), store.list().map { it.id })
+        assertEquals(listOf("Alpha", "Beta"), store.list().map { it.name })
+        assertEquals(listOf(alpha.id, beta.id), store.list().map { it.id })
     }
 
     @Test
@@ -97,16 +93,17 @@ class CollectionStoreTest {
     }
 
     @Test
-    fun `rename updates the name and timestamp and allows renaming the default collection`() {
-        val before = store.get(CollectionStore.DEFAULT_ID)!!
+    fun `rename updates the name and timestamp and keeps the collection's identity`() {
+        val original = store.create("Case")
         Thread.sleep(2) // timestamps are millisecond-resolution; let the clock tick so a rewrite is visible
 
-        val renamed = store.rename(CollectionStore.DEFAULT_ID, "  Everything  ")
+        val renamed = store.rename(original.id, "  Everything  ")
 
         assertEquals("Everything", renamed.name)
-        assertEquals(before.createdAt, renamed.createdAt)
-        assertNotEquals(before.updatedAt, renamed.updatedAt)
-        assertEquals("Everything", store.get(CollectionStore.DEFAULT_ID)?.name)
+        assertEquals(original.id, renamed.id)
+        assertEquals(original.createdAt, renamed.createdAt)
+        assertNotEquals(original.updatedAt, renamed.updatedAt)
+        assertEquals("Everything", store.get(original.id)?.name)
     }
 
     @Test

@@ -1,6 +1,7 @@
 package infoscry.extract
 
 import infoscry.domain.DocumentId
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import java.nio.file.Files
 import java.nio.file.Path
@@ -157,6 +158,7 @@ internal class RecordingExtractor(
                     locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
                     extractedText = "text $index",
                     searchText = "text $index",
+                    method = ExtractionMethod.DIRECT_TEXT,
                 ),
             )
             emitted += ready

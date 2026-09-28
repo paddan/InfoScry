@@ -2,7 +2,6 @@
   import { onDestroy } from 'svelte';
   import {
     ApiError,
-    createCollection,
     enqueueImport,
     getImportItems,
     getJob,
@@ -11,21 +10,20 @@
     type JobApiView,
     type JobState,
   } from './api';
+  import { importItemOutcomeLabel } from './importOutcome';
+  import { importProgressText } from './importProgress';
 
   export let collectionId: string;
-  export let onCollectionsChanged: (selectedId?: string) => Promise<void> | void;
+  /** The collection the paths are added to, shown so the destination is explicit before submission. */
+  export let collectionName: string;
 
   let selectedPaths: string[] = [];
   let recursive = false;
   let picking = false;
   let pickerUnavailable = false;
   let manualPath = '';
-  let newCollectionName = '';
-  let newCollectionDescription = '';
-  let creatingCollection = false;
   let importing = false;
   let error: string | null = null;
-  let creatingError: string | null = null;
   let job: JobApiView | null = null;
   let items: ImportItemApiView[] = [];
   let importGeneration = 0;
@@ -86,26 +84,6 @@
     selectedPaths = selectedPaths.filter((candidate) => candidate !== path);
   }
 
-  async function createCollectionForm(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    const name = newCollectionName.trim();
-    if (name === '' || creatingCollection) return;
-    creatingCollection = true;
-    creatingError = null;
-    try {
-      const created = await createCollection(name, newCollectionDescription.trim() === ''
-        ? undefined
-        : newCollectionDescription.trim());
-      newCollectionName = '';
-      newCollectionDescription = '';
-      await onCollectionsChanged(created.id);
-    } catch (failure) {
-      creatingError = describe(failure);
-    } finally {
-      creatingCollection = false;
-    }
-  }
-
   function sleep(milliseconds: number): Promise<void> {
     return new Promise((resolve) => {
       endPollWait = () => {
@@ -147,8 +125,9 @@
     }
   }
 
+  /** What one selected file is called: the server sends its name, never the path it was selected from. */
   function sourceLabel(item: ImportItemApiView): string {
-    return item.sourcePath ?? item.sourceName ?? item.id;
+    return item.sourceName ?? item.id;
   }
 
   function errorDetail(item: ImportItemApiView): string {
@@ -159,12 +138,18 @@
 
   function jobStatus(): string {
     if (importing && job !== null) {
-      const stage = job.stage ? ` — ${job.stage}` : '';
-      const count = job.total > 0 ? ` (${job.completed} of ${job.total} items)` : '';
-      return `Importing…${stage}${count}`;
+      // The line names the file being imported and the stage a reader can act on: `Importing report.pdf
+      // — Copying · 3 of 12 files`. The stage and the file's name are the server's; the words are ours.
+      return importProgressText({
+        state: job.state,
+        stage: job.stage,
+        currentItem: job.currentItem,
+        filesCompleted: job.completed,
+        filesTotal: job.total,
+      });
     }
     if (job !== null && TERMINAL_STATES.includes(job.state)) {
-      if (job.state === 'COMPLETE') return `Import complete. ${items.length} item${items.length === 1 ? '' : 's'}.`;
+      if (job.state === 'COMPLETE') return `Import complete. ${items.length} file${items.length === 1 ? '' : 's'}.`;
       if (job.state === 'CANCELLED') return 'Import cancelled.';
       return `Import failed${job.errorCode ? ` (${job.errorCode})` : ''}.`;
     }
@@ -184,6 +169,7 @@
 </script>
 
 <section class="import-panel" aria-label="Import local files">
+  {#if collectionName !== ''}<p class="destination">Adding documents to <strong>{collectionName}</strong>.</p>{/if}
   {#if error !== null}<p role="alert">{error}</p>{/if}
   {#if importing && job !== null}
     <div class="progress">
@@ -236,26 +222,6 @@
     {/if}
   </div>
 
-  <details class="new-collection">
-    <summary>New collection</summary>
-    <form onsubmit={createCollectionForm} class="collection-form">
-      {#if creatingError !== null}<p role="alert">{creatingError}</p>{/if}
-      <div class="field">
-        <label for="new-collection-name">Name</label>
-        <input id="new-collection-name" bind:value={newCollectionName} required />
-      </div>
-      <div class="field">
-        <label for="new-collection-description">Description</label>
-        <input id="new-collection-description" bind:value={newCollectionDescription} />
-      </div>
-      <div class="actions">
-        <button type="submit" class="primary" disabled={creatingCollection || newCollectionName.trim() === ''}>
-          {creatingCollection ? 'Creating…' : 'Create'}
-        </button>
-      </div>
-    </form>
-  </details>
-
   <div class="import-row">
     <button type="button" class="primary" onclick={startImport} disabled={importing || collectionId === '' || selectedPaths.length === 0}>
       {importing ? 'Importing…' : 'Import'}
@@ -278,7 +244,7 @@
         {#each items as item (item.id)}
           <tr>
             <td>{sourceLabel(item)}</td>
-            <td>{item.outcome}</td>
+            <td>{importItemOutcomeLabel(item)}</td>
             <td>{errorDetail(item)}</td>
           </tr>
         {/each}
@@ -289,6 +255,8 @@
 
 <style>
   .import-panel { max-width: 52rem; display: grid; gap: 1.15rem; align-content: start; }
+  .destination { margin: 0; }
+  .destination strong { color: #f3e6d1; }
   .picker-row { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
   .check-label { display: flex; align-items: center; gap: 0.5rem; }
   .check-label input { accent-color: #c4a77d; }
@@ -302,10 +270,6 @@
   .paths li span { overflow-wrap: anywhere; font-size: 0.85rem; }
   .paths li button { padding: 0.15rem 0.55rem; line-height: 1.2; }
   .eyebrow { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; }
-  .new-collection { border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; }
-  .new-collection summary { color: #c4c8c6; font-size: 0.85rem; cursor: pointer; padding: 0.75rem 0.9rem; }
-  .collection-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 1rem; padding: 0 0.9rem 0.9rem; }
-  .field { display: grid; gap: 0.35rem; align-content: start; }
   label { color: #b8bcbb; font-size: 0.82rem; }
   input:not([type='checkbox']) {
     min-width: 0;
@@ -315,7 +279,6 @@
     padding: 0.62rem 0.72rem;
     color: #e8e9e7;
   }
-  .actions { grid-column: 1 / -1; }
   .import-row { display: flex; align-items: center; gap: 0.6rem; }
   .import-row .hint { margin: 0; color: #929997; font-size: 0.8rem; }
   .progress { display: grid; gap: 0.45rem; }
@@ -331,7 +294,4 @@
   .results th { color: #929997; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
   .results td:first-child { overflow-wrap: anywhere; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 36rem) {
-    .collection-form { grid-template-columns: minmax(0, 1fr); }
-  }
 </style>

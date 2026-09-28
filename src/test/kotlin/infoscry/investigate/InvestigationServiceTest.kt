@@ -6,6 +6,7 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
@@ -1673,7 +1674,12 @@ class InvestigationServiceTest {
             fingerprint = fingerprint,
             key = key,
             ordinal = ordinal,
-            draft = ContentUnitDraft(locator = SourceLocation.TextLines(1, 2), extractedText = text, searchText = text),
+            draft = ContentUnitDraft(
+                locator = SourceLocation.TextLines(1, 2),
+                extractedText = text,
+                searchText = text,
+                method = ExtractionMethod.DIRECT_TEXT,
+            ),
             artifactRoot = directory.resolve("artifacts"),
         )
         return commit.unit.id
