@@ -172,6 +172,28 @@ class SearchServiceTest {
     }
 
     @Test
+    fun `a passage with no word is not a result even when the index holds it`() {
+        val collection = collections.create("Default-collection")
+        val document = insertDocument(collection.id, "image-only.txt", "text/plain")
+        openService(embedder = { FixedQueryEmbedder() }).let { (service, index) ->
+            try {
+                // Written straight into the index: a generation built before the chunking rule can hold a
+                // wordless passage, and the search boundary has to drop it rather than surface it.
+                runBlocking { indexChunk(index, collection.id, document.id, "Â") }
+
+                val keyword = service.search("Â", mode = SearchMode.KEYWORD)
+                assertEquals(0, keyword.hits.size, "a wordless passage must not be a keyword result")
+                assertEquals(0, keyword.staleFiltered, "a wordless passage is not stale")
+
+                val semantic = service.search("watergate", mode = SearchMode.SEMANTIC)
+                assertEquals(0, semantic.hits.size, "a wordless passage must not be a semantic result")
+            } finally {
+                index.close()
+            }
+        }
+    }
+
+    @Test
     fun `keyword search finds, highlights and safely escapes the matched text`() {
         val collection = collections.create("Default-collection")
         val document = insertDocument(collection.id, "report.txt", "text/plain")

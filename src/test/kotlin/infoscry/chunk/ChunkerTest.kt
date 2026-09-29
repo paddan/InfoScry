@@ -146,6 +146,25 @@ class ChunkerTest {
     }
 
     @Test
+    fun `a unit with no word produces no chunks`() {
+        // "Â" is what a page whose only content is a doubled-encoded non-breaking space reads as, and a
+        // bare numeral is what a chapter-marker page reads as. Neither can carry evidence, and embedding
+        // either would put a vector close to every query's into the index.
+        assertTrue(chunker().chunk(unitOf("Â")).drafts.isEmpty())
+        assertTrue(chunker().chunk(unitOf(" — 2. — ")).drafts.isEmpty())
+    }
+
+    @Test
+    fun `a word is a run of at least two letters or digits`() {
+        assertFalse(hasSearchableWord("Â"))
+        assertFalse(hasSearchableWord("a"))
+        assertFalse(hasSearchableWord("1 2"), "two separate one-digit runs are not a word")
+        assertTrue(hasSearchableWord("12"), "a two-digit number is a run")
+        assertTrue(hasSearchableWord("Â 12 Â"), "one real run is enough beside artifacts")
+        assertTrue(hasSearchableWord("watergate"))
+    }
+
+    @Test
     fun `a spreadsheet unit repeats its header in every chunk and pays for it`() {
         // One long unbroken run of cells below the header, so the boundary is decided by the passage budget
         // rather than by a line break: that is the only way the header's own cost is visible as a shorter

@@ -78,7 +78,10 @@ tokenizer, query/passage prefixes and execution-provider options.
 
 Every complete embedding input must fit within 512 tokens using that tokenizer,
 including prefixes, special tokens and repeated headers. Passages are never
-silently truncated.
+silently truncated. A passage with no word at all — a page whose whole reading
+is a doubled-encoding artifact or a bare chapter numeral — is not chunked,
+embedded or indexed: it cannot carry evidence, and its vector would sit close to
+every query's.
 
 The v1 runtime is macOS arm64 with Apple GPU execution through CoreML and ONNX
 Runtime. CPU-only embedding fallback is refused. GPU readiness requires evidence

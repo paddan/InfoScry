@@ -1,5 +1,6 @@
 package infoscry.search
 
+import infoscry.chunk.hasSearchableWord
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.ContentUnitId
@@ -27,7 +28,8 @@ import org.slf4j.LoggerFactory
  * and narrowing the Lucene query to them, never by filtering results after ranking. Then the fused hits
  * are re-checked against the database, because an index can hold rows whose document or collection the
  * database no longer wants searchable (a deleted document, a tombstoned collection) — those rows are
- * dropped at this boundary, never surfaced.
+ * dropped at this boundary, never surfaced. A row that cannot carry a word is dropped here too: a
+ * generation indexed before the chunking rule can still hold one.
  *
  * The query embedder is the search-side twin of the import stage's document embedder: resolved lazily
  * and only for a semantic or hybrid request, so keyword search and source reads never wait on the model
@@ -181,6 +183,10 @@ class SearchService(
         var stale = 0
         val hits = buildList {
             for (fusedHit in fused) {
+                // A wordless passage is not a result and is not stale either: it is what an older
+                // generation wrote for a page that carries no text, and dropping it here is what keeps
+                // such a generation usable until the rule reaches it through a rebuild.
+                if (!hasSearchableWord(fusedHit.hit.text)) continue
                 val resolved = resolveHit(fusedHit, queryText)
                 if (resolved == null) {
                     stale++
