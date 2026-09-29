@@ -23,10 +23,11 @@ delete button on its row after confirming. The last conversation I had open for 
 collection comes back when I reload or switch collections; with nothing
 remembered, the view starts in an empty compose state.
 
-Opening a citation no longer takes the right-hand column: the source viewer
-becomes a sheet that slides in over the history column and closes with Escape, a
-close button, or by clicking outside it, returning focus to the citation that
-opened it. The answer and its citations stay visible on the left the whole time.
+Opening a citation shows a wide source viewer on the right. On a wide screen,
+Search, Ask or Investigate stays visible in a narrower left reading area; the
+viewer covers the history column while open. On a compact screen it covers the
+content area but leaves the sidebar clear. It closes with Escape, a close button,
+or by clicking outside it, returning focus to the citation that opened it.
 
 ## User Stories
 
@@ -217,15 +218,16 @@ opened it. The answer and its citations stay visible on the left the whole time.
 
 ### Source viewer
 
-- The source viewer becomes a fixed sheet anchored to the right edge, layered over
-  the history column rather than joining the content grid. The content grid keeps
-  its single-column layout; the previous two-column "with source" layout is
-  removed.
+- The source viewer is a wide fixed sheet anchored to the right edge. On wide
+  screens, the active Search, Ask or Investigate panel uses the remaining left
+  area; the history column sits behind the viewer. On compact screens, the
+  viewer covers the content area while leaving the sidebar uncovered.
 - The sheet carries dialog semantics, is announced as modal, and closes on
   Escape, on its close button, and on a click outside it.
 - Focus moves into the sheet when it opens and returns to the citation that opened
   it when it closes.
-- The sheet is sized so it never covers the workspace sidebar.
+- The sheet is sized so it never covers the workspace sidebar except on mobile,
+  where the sidebar is above the content and the viewer fills the viewport.
 
 ## Testing Decisions
 
@@ -280,10 +282,10 @@ cover:
 - The panel tests drop their assertions on the removed history dropdowns and keep
   their coverage of a stored answer and a stored conversation.
 
-**Manual browser pass.** Layout, the sheet's placement over the history column,
-that it never covers the sidebar, focus behaviour under a real keyboard, and
-scrolling are not provable under the DOM test environment. They are checked by
-hand in the browser before the work is called done, and reported as such.
+**Browser and manual checks.** Chromium acceptance measures the Search panel and
+source preview at wide and compact viewport widths. DOM tests cover source
+opening from Search, Ask and Investigate. Human keyboard, screen-reader and
+visual checks of the complete source viewer remain open.
 
 **Gate.** The JVM suite and the frontend suite run together through the project's
 `check` task, which already drives the frontend tests; the frontend type and

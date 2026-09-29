@@ -78,10 +78,11 @@ tokenizer, query/passage prefixes and execution-provider options.
 
 Every complete embedding input must fit within 512 tokens using that tokenizer,
 including prefixes, special tokens and repeated headers. Passages are never
-silently truncated. A passage with no word at all — a page whose whole reading
-is a doubled-encoding artifact or a bare chapter numeral — is not chunked,
-embedded or indexed: it cannot carry evidence, and its vector would sit close to
-every query's.
+silently truncated. Blank pages and a page consisting only of the known `Â`
+doubled-encoding artifact are not chunked, embedded or indexed. Single letters,
+numbers, formulas and non-Latin text remain searchable. Chunker version 3
+rebuilds chunks saved under the earlier two-character rule during reindex; the
+extraction checkpoint and source reading stay unchanged.
 
 The v1 runtime is macOS arm64 with Apple GPU execution through CoreML and ONNX
 Runtime. CPU-only embedding fallback is refused. GPU readiness requires evidence

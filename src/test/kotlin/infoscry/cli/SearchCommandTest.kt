@@ -92,6 +92,19 @@ class SearchCommandTest {
     }
 
     @Test
+    fun `a local search refuses invalid dates without echoing their value`() {
+        val result = CliProcess.run(
+            "search", "--data-dir", dataDir.toString(), "--collection", "Default",
+            "--from", "private-date-value", "--json", "report",
+        )
+
+        assertNotEquals(0, result.exitCode)
+        assertContains(result.stdout + result.stderr, "from must be an ISO date or ISO instant")
+        assertFalse((result.stdout + result.stderr).contains("private-date-value"))
+        assertFalse(result.stderr.contains(" at "), "the CLI printed a stack trace: ${result.stderr}")
+    }
+
+    @Test
     fun `a server answers a search and keeps running after the command returns`() {
         val server = CliProcess.startRunning("serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
         try {
@@ -109,6 +122,24 @@ class SearchCommandTest {
             // The server is still serving: a later read that needs it succeeds.
             val probe = CliProcess.run("--data-dir", dataDir.toString(), "jobs", "--json")
             assertEquals(0, probe.exitCode, "the server no longer answers: ${probe.stderr}")
+        } finally {
+            server.terminate()
+        }
+    }
+
+    @Test
+    fun `a server-owned search accepts inclusive date-only bounds`() {
+        val server = CliProcess.startRunning("serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
+        try {
+            server.awaitStdoutLine("{")
+            val result = CliProcess.run(
+                "search", "--data-dir", dataDir.toString(), "--collection", "Default",
+                "--from", "2026-03-01", "--until", "2026-03-01", "--mode", "keyword", "--json", "report",
+            )
+
+            assertEquals(0, result.exitCode, "stderr=${result.stderr}")
+            val response = ApiJson.decodeFromString<SearchResponse>(result.stdout.lines().last { it.trim().startsWith("{") })
+            assertTrue(response.hits.isEmpty())
         } finally {
             server.terminate()
         }

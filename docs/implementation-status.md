@@ -13,7 +13,7 @@ application suites.
 |---|---|
 | Local runtime | Backend, CLI and static web reader; foreground loopback server |
 | Import | Managed copies, per-collection deduplication, extraction/OCR checkpoints and persistent jobs |
-| Search | Keyword, semantic and hybrid retrieval, live as the reader types; hybrid withholds semantic-only hits for a query with no lexical foothold; recoverable reindexing |
+| Search | Keyword, semantic and hybrid retrieval, live as the reader types; advanced filters rerun the current query; validated retrieval refills stale or artifact-heavy results; inclusive import dates and safe excerpt highlighting; recoverable reindexing |
 | Collections | Creation, settings, paged document browsing, progress, durable import history, retries and recoverable deletion |
 | LLM profiles | CLI/Admin management, role defaults, provider presets and model catalog |
 | Ask | Streaming answers with validated citations and saved answer history |
@@ -41,6 +41,13 @@ review evidence and [acceptance ticket](tickets/collections-management/12-integr
 for the exact gate criteria. Counts above are historical snapshots, not fixed
 expected totals.
 
+On 2026-09-29 the Search repair and wider source preview passed `./gradlew check`
+with 1,059 JVM tests and 210 frontend Vitest tests, `npm run check` with zero
+errors or warnings, and all 17 `externalTest` tests, including the Search
+Chromium flow. The full normal suite took 12 minutes 55 seconds; its cancelled
+provider-stream fixtures deliberately hold a local HTTP response for 60 seconds.
+This run did not repeat real CoreML testing.
+
 ## What browser acceptance proves
 
 **Collections:** eight scenarios exercise empty start, creation, folder import
@@ -54,6 +61,11 @@ retained-evidence follow-ups, source opening, reload/reopen, citation correction
 HTTP rejection, empty evidence, research limits, repeated-call limits and
 cancellation recovery. They use a local fake provider. See the
 [Investigate report](tickets/investigate-follow-up-and-efficiency/STATUS.md).
+
+**Search:** a Chromium scenario exercises live advanced filters, a delayed
+older response, inclusive date bounds, a single-digit query, mode changes and
+safe highlighted source text. It uses the built reader, local server, temporary
+archive and a deterministic local query embedder.
 
 These tests drive the real built reader and local server. They establish
 workflow and persistence behavior within their test setup. The original

@@ -80,6 +80,18 @@ class SearchRoutesTest {
     }
 
     @Test
+    fun `invalid and reversed search date filters return actionable bad requests without echoing input`() = runBlocking {
+        val invalid = harness.get("/api/search?collection=Default&q=nightfall&from=private-input")
+        assertEquals(HttpStatusCode.BadRequest, invalid.status, invalid.bodyAsText())
+        assertContains(invalid.bodyAsText(), "from must be an ISO date or ISO instant")
+        assertFalse(invalid.bodyAsText().contains("private-input"))
+
+        val reversed = harness.get("/api/search?collection=Default&q=nightfall&from=2026-03-02&until=2026-03-01")
+        assertEquals(HttpStatusCode.BadRequest, reversed.status, reversed.bodyAsText())
+        assertContains(reversed.bodyAsText(), "from must be on or before until")
+    }
+
+    @Test
     fun `a search against an unknown collection is refused as not found`() = runBlocking {
         val response = harness.get("/api/search?collection=nobody&q=nightfall")
 

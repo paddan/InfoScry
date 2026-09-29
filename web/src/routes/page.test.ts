@@ -216,9 +216,77 @@ describe('app shell', () => {
     const search = calls.find((entry) => entry.url.startsWith('/api/search'));
     expect(search?.url).toContain('mode=KEYWORD');
     expect(search?.url).toContain('path=reports');
-    expect(search?.url).toContain('from=2026-01-01T00%3A00%3A00.000000000Z');
-    expect(search?.url).toContain('until=2026-06-30T23%3A59%3A59Z');
+    expect(search?.url).toContain('from=2026-01-01T00%3A00%3A00.000Z');
+    expect(search?.url).toContain('until=2026-06-30T23%3A59%3A59.999Z');
     expect(search?.url).toContain('ocrOnly=true');
+  });
+
+  it('retires a pending search when a filter changes and sends the new filter', async () => {
+    let finishOld!: (response: Response) => void;
+    let requestCount = 0;
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => {
+        requestCount += 1;
+        if (requestCount === 1) return new Promise<Response>((resolve) => { finishOld = resolve; });
+        return jsonResponse({ hits: [hit('Default', 'Filtered page')], staleFiltered: 0 });
+      },
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'budget' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await fireEvent.click(screen.getByText('Advanced search filters'));
+    await fireEvent.input(screen.getByLabelText('Path contains'), { target: { value: 'reports/' } });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(await screen.findByText('Filtered page')).toBeTruthy();
+    expect(calls.filter((call) => call.url.startsWith('/api/search')).at(-1)?.url)
+      .toContain('path=reports%2F');
+    finishOld(jsonResponse({ hits: [hit('Default', 'Old unfiltered page')], staleFiltered: 0 }));
+    expect(screen.queryByText('Old unfiltered page')).toBeNull();
+  });
+
+  it('reruns an existing query after an advanced filter changes', async () => {
+    let requestCount = 0;
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => {
+        requestCount += 1;
+        return jsonResponse({ hits: [hit('Default', requestCount === 1 ? 'All documents' : 'Complete only')], staleFiltered: 0 });
+      },
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'budget' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('All documents')).toBeTruthy();
+    await fireEvent.click(screen.getByText('Advanced search filters'));
+    await fireEvent.change(screen.getByLabelText('Document status'), { target: { value: 'COMPLETE' } });
+
+    expect(await screen.findByText('Complete only')).toBeTruthy();
+    expect(calls.filter((call) => call.url.startsWith('/api/search'))).toHaveLength(2);
+    expect(calls.filter((call) => call.url.startsWith('/api/search')).at(-1)?.url).toContain('status=COMPLETE');
+  });
+
+  it('renders escaped server highlights as marks without activating source HTML', async () => {
+    const highlighted = {
+      ...hit('Default', 'Page 4'),
+      text: 'budget <script>alert(1)</script>',
+      highlighted: '<mark>budget</mark> &lt;script&gt;alert(1)&lt;/script&gt;',
+    };
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [highlighted], staleFiltered: 0 }),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'budget' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByText('budget', { selector: 'mark' })).toBeTruthy();
+    expect(document.querySelector('.result script')).toBeNull();
+    expect(document.querySelector('.result')?.textContent).toContain('<script>alert(1)</script>');
   });
 
   it('keeps a streamed Ask panel mounted and running while another mode is selected', async () => {
@@ -661,7 +729,7 @@ describe('app shell', () => {
     expect(document.querySelector('script')).toBeNull();
   });
 
-  it('announces the open source viewer as a modal dialog without changing the content layout', async () => {
+  it('reserves a right-hand preview area while keeping Search visible beside the modal source viewer', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
       search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
@@ -678,8 +746,7 @@ describe('app shell', () => {
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     expect(dialog.getAttribute('aria-labelledby')).toBe('source-heading');
     expect(dialog.getAttribute('tabindex')).toBe('-1');
-    // The sheet overlays the columns instead of reflowing the grid, and the results stay on screen.
-    expect(document.querySelector('.content-layout')?.classList.contains('with-source')).toBe(false);
+    expect(document.querySelector('.app-shell')?.classList.contains('source-open')).toBe(true);
     expect(screen.getByRole('list', { name: 'Search results' })).toBeTruthy();
     expect(await screen.findByText('Extracted page text')).toBeTruthy();
   });
@@ -1076,6 +1143,7 @@ describe('app shell', () => {
     expect(screen.getByText('Estimated cost: $0.0020')).toBeTruthy();
     await fireEvent.click(citation);
     expect(await screen.findByText('Ask source body')).toBeTruthy();
+    expect(document.querySelector('.app-shell')?.classList.contains('source-open')).toBe(true);
     expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-ask?offset=0&limit=16384')).toBe(true);
     const askCall = calls.find((call) => call.url === '/api/ask');
     expect(JSON.parse(String(askCall?.init?.body))).toEqual({ collection: 'default', question: 'What happened?', profile: 'Local' });
@@ -1215,6 +1283,7 @@ describe('app shell', () => {
       list: () => jsonResponse({ collections: [collection('Default')] }),
       investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
       investigation: () => jsonResponse({ investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it [S2]') }),
+      source: () => jsonResponse(sourcePage('Investigate source body', 0, 23)),
     });
 
     render(Page);
@@ -1230,6 +1299,9 @@ describe('app shell', () => {
     expect(screen.getByText(/Estimated cost/).textContent).toContain('$0.0001');
     expect(calls.some((call) => call.url === '/api/collections/default/investigations/conv-1')).toBe(true);
     expect(screen.getByRole('button', { name: 'The treaty', current: true })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Open source S2, Page 8' }));
+    expect(await screen.findByText('Investigate source body')).toBeTruthy();
+    expect(document.querySelector('.app-shell')?.classList.contains('source-open')).toBe(true);
   });
 
   it('clears the panel to its empty compose state with the New conversation button', async () => {

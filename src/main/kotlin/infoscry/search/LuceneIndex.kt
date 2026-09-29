@@ -420,6 +420,13 @@ class LuceneIndex private constructor(
         toHits(searcher, searcher.search(query, limit))
     }
 
+    /** Number of possible vector rows in the same collection/document scope used by [searchVector]. */
+    fun vectorCandidateCount(collectionId: CollectionId?, documentIds: Set<String>? = null): Int =
+        readSearcher { searcher ->
+            val filter = scopeFilter(collectionId, documentIds)
+            if (filter == null) searcher.indexReader.numDocs() else searcher.count(filter)
+        }
+
     /** How many chunks [documentId] currently has in the index, for the idempotency guarantees. */
     fun chunkCount(collectionId: CollectionId, documentId: DocumentId): Int = readSearcher { searcher ->
         val query = BooleanQuery.Builder().apply {

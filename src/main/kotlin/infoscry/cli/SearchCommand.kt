@@ -19,6 +19,7 @@ import infoscry.logging.LoggingBootstrap
 import infoscry.search.SearchMode
 import infoscry.search.SearchOutcome
 import infoscry.search.SearchUnavailableException
+import infoscry.search.InvalidSearchFilterException
 import infoscry.server.ApiJson
 import infoscry.server.PRODUCT_NAME
 import java.nio.file.Files
@@ -75,9 +76,9 @@ class SearchCommand : CliktCommand(name = "search") {
         help = "Restrict to documents whose title, author or language probe contains this",
     )
 
-    private val importedFrom by option("--from", help = "Restrict to documents imported from this instant")
+    private val importedFrom by option("--from", help = "Restrict to documents imported from this ISO date or instant")
 
-    private val importedUntil by option("--until", help = "Restrict to documents imported until this instant")
+    private val importedUntil by option("--until", help = "Restrict to documents imported through this ISO date or instant")
 
     private val statuses by option("--status", help = "Restrict to a document status; repeatable").multiple()
 
@@ -105,6 +106,8 @@ class SearchCommand : CliktCommand(name = "search") {
             throw CliFailure("search was refused ${refused.code}: ${refused.remedy}", refused)
         } catch (remote: RemoteApiFailure) {
             throw CliFailure(remote.message.orEmpty(), remote)
+        } catch (invalid: InvalidSearchFilterException) {
+            throw CliFailure("search filter is invalid: ${invalid.message}", invalid)
         }
         report(outcome, options)
     }

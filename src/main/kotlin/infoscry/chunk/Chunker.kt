@@ -61,7 +61,7 @@ data class ChunkPlan(val drafts: List<ChunkDraft>, val headerDropped: Boolean)
  * - **Every searchable character of the unit is in some chunk.** A walk that stopped at the first passage
  *   that did not fit, or that dropped a tail too short to fill one, would lose text that a search can then
  *   never find. Overlap makes consecutive chunks share text; coverage makes their union the unit — minus
- *   the passages [hasSearchableWord] refuses, which cannot carry evidence and are not embedded at all.
+ *   blank pages and the isolated known `Â` artifact, which cannot carry evidence and are not embedded.
  *
  * Where the text offers a line or paragraph break near the budget, the chunk ends there, because a passage
  * cut mid-sentence reads badly in a snippet and mid-word embeds worse. The break is only taken when it keeps
@@ -270,7 +270,7 @@ class Chunker(
          * What produced a chunk's boundaries. It is stored with them, so a change to the arithmetic
          * re-chunks rather than mixing two rules in one index.
          */
-        const val CHUNKER_VERSION: String = "2"
+        const val CHUNKER_VERSION: String = "3"
 
         /** The model's passage budget: what a complete input may spend, prefix and special tokens included. */
         const val DEFAULT_MAX_SEQUENCE_TOKENS: Int = 512
@@ -281,25 +281,14 @@ class Chunker(
 }
 
 /**
- * Whether [text] contains a word at all: a run of at least [MIN_WORD_LENGTH] letters or digits.
+ * Whether [text] carries any searchable content. Single letters, digits, formulas and non-Latin text can
+ * all be evidence; only blank text and the isolated known doubled-encoding artifact `Â` are rejected.
  *
- * A passage without one cannot be evidence and cannot be embedded as any. A PDF or EPUB page whose whole
- * reading is a doubled-encoding artifact ("Â", a non-breaking space read twice) or a bare numeral ("2.")
- * produces a vector that sits close to every query's, so it surfaces as a hit for searches it has nothing
- * to do with. The extraction keeps such a reading — it is the faithful reading of the page — and only the
- * retrieval side declines to carry it: no chunk, no vector, no row.
+ * Extraction stays faithful to the page. Chunker version 3 changes the indexing policy, so reindexing
+ * regenerates chunks saved under the earlier two-character heuristic.
  */
 internal fun hasSearchableWord(text: String): Boolean {
-    var run = 0
-    for (character in text) {
-        if (character.isLetterOrDigit()) {
-            if (++run >= MIN_WORD_LENGTH) return true
-        } else {
-            run = 0
-        }
-    }
-    return false
+    val compact = text.filterNot(Char::isWhitespace)
+    return compact.isNotEmpty() && compact != "Â" &&
+        text.codePoints().anyMatch { Character.isLetterOrDigit(it) }
 }
-
-/** The shortest run of letters or digits that counts as a word. */
-private const val MIN_WORD_LENGTH: Int = 2

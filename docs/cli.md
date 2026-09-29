@@ -72,6 +72,10 @@ infoscry search --collection Notes --from 2026-01-01 --until 2026-03-01 "note"
 infoscry search --collection Notes --status COMPLETE --json "summary"
 ```
 
+`--from` and `--until` accept an ISO date or an ISO instant with a time zone. A date is inclusive for
+the whole day, so `--until 2026-03-01` includes documents imported through the final millisecond of
+March 1. Blank optional path, text, and date values are ignored.
+
 Options: `--collection`, `--mode` (`keyword`, `semantic`, `hybrid`),
 `--media-type` (repeatable), `--path`, `--text`, `--from`, `--until`,
 `--status` (repeatable; `QUEUED`, `COPYING`, `EXTRACTING`, `OCR`, `CHUNKING`,
@@ -160,4 +164,3 @@ infoscry logs --job <job-id> --component ingest
 Options: `--follow`, `--level` (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`;
 default `INFO`), `--job`, `--component`, `--since` (e.g. `30m`, `12h`, `7d`),
 `--data-dir`.
-

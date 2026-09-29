@@ -5,6 +5,12 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.SourceLocation
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 /**
  * The three retrieval modes.
@@ -33,7 +39,8 @@ enum class SearchMode {
  * pre-selecting matching documents from SQLite **before** Lucene retrieval, never as a post-filter over
  * results.
  *
- * Dates are ISO-8601 UTC strings (the persistence boundary's format), so they compare lexicographically.
+ * Date strings accept ISO dates or offset-bearing ISO instants. [normalized] converts them to the
+ * millisecond UTC format stored by SQLite before criteria reach persistence.
  */
 data class SearchFilters(
     val collectionId: CollectionId? = null,
@@ -55,6 +62,58 @@ data class SearchFilters(
             importedUntil != null ||
             statuses.isNotEmpty() ||
             ocrOnly
+}
+
+/** Returns a persistence-ready copy; dates include whole-day semantics and blank optional text is absent. */
+fun SearchFilters.normalized(): SearchFilters {
+    val from = importedFrom.blankAsNull()?.let { parseDateBound(it, "from", lower = true) }
+    val until = importedUntil.blankAsNull()?.let { parseDateBound(it, "until", lower = false) }
+    if (from != null && until != null && from.instant > until.instant) {
+        throw InvalidSearchFilterException("from must be on or before until")
+    }
+    return copy(
+        filenameOrPathContains = filenameOrPathContains.blankAsNull(),
+        titleAuthorOrLanguageContains = titleAuthorOrLanguageContains.blankAsNull(),
+        importedFrom = from?.formatted,
+        importedUntil = until?.formatted,
+    )
+}
+
+class InvalidSearchFilterException(message: String) : IllegalArgumentException(message)
+
+private fun String?.blankAsNull(): String? = this?.takeUnless(String::isBlank)
+
+private data class DateBound(val instant: Instant, val formatted: String)
+
+private fun parseDateBound(value: String, name: String, lower: Boolean): DateBound {
+    val instant = try {
+        val date = LocalDate.parse(value, DateTimeFormatter.ISO_LOCAL_DATE)
+        (if (lower) date.atStartOfDay() else date.atTime(LocalTime.MAX)).toInstant(ZoneOffset.UTC)
+    } catch (_: Exception) {
+        try {
+            OffsetDateTime.parse(value, DateTimeFormatter.ISO_DATE_TIME).toInstant()
+        } catch (_: Exception) {
+            throw InvalidSearchFilterException("$name must be an ISO date or ISO instant")
+        }
+    }
+    val nanos = instant.nano
+    val floorMillis = nanos / 1_000_000
+    val ceilInstant = try {
+        if (lower && nanos % 1_000_000 != 0) {
+            instant.epochSecond.let { Instant.ofEpochSecond(it, ((floorMillis + 1) * 1_000_000).toLong()) }
+        } else {
+            Instant.ofEpochSecond(instant.epochSecond, (floorMillis * 1_000_000).toLong())
+        }
+    } catch (_: Exception) {
+        throw InvalidSearchFilterException("$name must be an ISO date or ISO instant")
+    }
+    val formatted = try {
+        DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'")
+            .withZone(ZoneOffset.UTC).format(ceilInstant)
+    } catch (_: Exception) {
+        throw InvalidSearchFilterException("$name must be an ISO date or ISO instant")
+    }
+    return DateBound(instant, formatted)
 }
 
 /**

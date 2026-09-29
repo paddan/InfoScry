@@ -15,7 +15,8 @@ import infoscry.logging.LogFields
 import infoscry.storage.CollectionStore
 import infoscry.storage.DocumentCriterion
 import infoscry.storage.DocumentStore
-import java.util.Locale
+import com.ibm.icu.lang.UCharacter
+import com.ibm.icu.text.Normalizer2
 import kotlinx.serialization.json.Json
 import org.apache.lucene.search.IndexSearcher
 import org.slf4j.LoggerFactory
@@ -28,8 +29,8 @@ import org.slf4j.LoggerFactory
  * and narrowing the Lucene query to them, never by filtering results after ranking. Then the fused hits
  * are re-checked against the database, because an index can hold rows whose document or collection the
  * database no longer wants searchable (a deleted document, a tombstoned collection) — those rows are
- * dropped at this boundary, never surfaced. A row that cannot carry a word is dropped here too: a
- * generation indexed before the chunking rule can still hold one.
+ * dropped at this boundary, never surfaced. Blank and known artifact-only rows are dropped here too:
+ * a generation indexed before the chunking rule can still hold one.
  *
  * The query embedder is the search-side twin of the import stage's document embedder: resolved lazily
  * and only for a semantic or hybrid request, so keyword search and source reads never wait on the model
@@ -66,12 +67,13 @@ class SearchService(
         filters: SearchFilters = SearchFilters(),
         requireLexicalAnchor: Boolean = false,
     ): SearchOutcome {
+        val normalizedFilters = filters.normalized()
         if (queryText.isBlank()) return SearchOutcome(emptyList(), 0)
 
         // Criteria restrict the Lucene query itself. An empty candidate set means an empty result — the
         // index is not touched at all.
-        val documentIds: Set<String>? = if (filters.hasDocumentCriteria) {
-            documents.findIds(filters.toCriterion()).map { it.value }.toSet()
+        val documentIds: Set<String>? = if (normalizedFilters.hasDocumentCriteria) {
+            documents.findIds(normalizedFilters.toCriterion()).map { it.value }.toSet()
         } else {
             null
         }
@@ -84,34 +86,37 @@ class SearchService(
             )
         }
 
-        val keywordHits = when (mode) {
-            SearchMode.KEYWORD, SearchMode.HYBRID ->
+        val keyword = when (mode) {
+            SearchMode.KEYWORD, SearchMode.HYBRID -> validatedCandidates(SearchMode.KEYWORD, queryText) { limit ->
                 searchRefusingOverbroad {
-                    index().searchKeyword(filters.collectionId, queryText, documentIds, TOP_PER_BRANCH)
+                    index().searchKeyword(normalizedFilters.collectionId, queryText, documentIds, limit)
                 }
-
-            SearchMode.SEMANTIC -> emptyList()
-        }
-
-        val semanticHits = when (mode) {
-            SearchMode.SEMANTIC -> semanticSearch(queryText, filters, documentIds)
-
-            SearchMode.HYBRID -> if (semanticsApply(queryText, keywordHits, filters, documentIds, requireLexicalAnchor)) {
-                semanticSearch(queryText, filters, documentIds)
-            } else {
-                emptyList()
             }
-
-            SearchMode.KEYWORD -> emptyList()
+            SearchMode.SEMANTIC -> ValidatedCandidates.empty()
         }
 
+        val semantic = when (mode) {
+            SearchMode.SEMANTIC -> semanticSearch(queryText, normalizedFilters, documentIds)
+            SearchMode.HYBRID -> if (semanticsApply(
+                    queryText,
+                    keyword.rawCandidates,
+                    normalizedFilters,
+                    documentIds,
+                    requireLexicalAnchor,
+                )
+            ) semanticSearch(queryText, normalizedFilters, documentIds) else ValidatedCandidates.empty()
+            SearchMode.KEYWORD -> ValidatedCandidates.empty()
+        }
         val fused = when (mode) {
-            SearchMode.HYBRID -> reciprocalRankFusion(keywordHits, semanticHits, top = FUSION_TOP)
-            SearchMode.KEYWORD -> keywordHits.map { FusedSearchHit(it, setOf(SearchMode.KEYWORD), 0.0) }
-            SearchMode.SEMANTIC -> semanticHits.map { FusedSearchHit(it, setOf(SearchMode.SEMANTIC), 0.0) }
+            SearchMode.HYBRID -> reciprocalRankFusion(keyword.hits, semantic.hits, top = FUSION_TOP)
+            SearchMode.KEYWORD -> keyword.hits.take(TOP_PER_BRANCH)
+                .map { FusedSearchHit(it, setOf(SearchMode.KEYWORD), 0.0) }
+            SearchMode.SEMANTIC -> semantic.hits.take(TOP_PER_BRANCH)
+                .map { FusedSearchHit(it, setOf(SearchMode.SEMANTIC), 0.0) }
         }
 
-        return publish(fused, queryText)
+        val resolved = keyword.resolved + semantic.resolved.filterKeys { it !in keyword.resolved }
+        return publish(fused, queryText, resolved, (keyword.staleKeys + semantic.staleKeys).size)
     }
 
     /**
@@ -136,7 +141,7 @@ class SearchService(
         queryText: String,
         filters: SearchFilters,
         documentIds: Set<String>?,
-    ): List<IndexHit> {
+    ): ValidatedCandidates {
         val status = index().schemaStatus
         if (status !is SchemaStatus.Ready) {
             throw SearchUnavailableException(
@@ -156,8 +161,11 @@ class SearchService(
         } catch (failure: EmbeddingException) {
             throw SearchUnavailableException(failure.code, failure.message ?: "the query could not be embedded")
         }
-        return searchRefusingOverbroad {
-            index().searchVector(filters.collectionId, vector, documentIds, TOP_PER_BRANCH)
+        val candidateCount = index().vectorCandidateCount(filters.collectionId, documentIds)
+        return validatedCandidates(SearchMode.SEMANTIC, queryText, candidateCount) { limit ->
+            searchRefusingOverbroad {
+                index().searchVector(filters.collectionId, vector, documentIds, limit)
+            }
         }
     }
 
@@ -179,24 +187,89 @@ class SearchService(
         return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds)
     }
 
-    private fun publish(fused: List<FusedSearchHit>, queryText: String): SearchOutcome {
-        var stale = 0
-        val hits = buildList {
-            for (fusedHit in fused) {
-                // A wordless passage is not a result and is not stale either: it is what an older
-                // generation wrote for a page that carries no text, and dropping it here is what keeps
-                // such a generation usable until the rule reaches it through a rebuild.
-                if (!hasSearchableWord(fusedHit.hit.text)) continue
-                val resolved = resolveHit(fusedHit, queryText)
-                if (resolved == null) {
-                    stale++
-                } else {
-                    add(resolved)
+    /**
+     * Validate before branch rank fusion, so bad rows cannot consume one of the visible result slots.
+     * Lucene returns the current top N rather than pages. Grow N geometrically and inspect only newly
+     * exposed candidates until the original 50-result branch is full or Lucene is exhausted. Thus the
+     * ordinary path validates at most 50 rows, while a legacy artifact-heavy index can refill correctly.
+     * Vector searches also compare returned hits with the scoped vector count because Lucene's approximate
+     * KNN may return fewer than k before it has exhausted the matching vectors.
+     */
+    private fun validatedCandidates(
+        mode: SearchMode,
+        queryText: String,
+        expectedCandidateCount: Int? = null,
+        retrieve: (Int) -> List<IndexHit>,
+    ): ValidatedCandidates {
+        val checked = mutableMapOf<HitKey, CandidateValidation>()
+        var requested = TOP_PER_BRANCH
+        var candidates = retrieve(requested)
+        while (true) {
+            var rankedValid = 0
+            for (hit in candidates) {
+                val key = hit.searchKey()
+                val validation = checked.getOrPut(key) {
+                    // A blank or known artifact passage is not a result and is not stale.
+                    if (!hasSearchableWord(hit.text)) CandidateValidation()
+                    else {
+                        val published = resolveHit(FusedSearchHit(hit, setOf(mode), 0.0), queryText)
+                        CandidateValidation(published, stale = published == null)
+                    }
                 }
+                if (validation.resolved != null) rankedValid++
+                if (rankedValid >= TOP_PER_BRANCH) break
             }
+            val exhausted = if (expectedCandidateCount == null) {
+                candidates.size < requested
+            } else {
+                candidates.size >= expectedCandidateCount
+            }
+            if (rankedValid >= TOP_PER_BRANCH || exhausted || requested == Int.MAX_VALUE) break
+            requested = (requested.toLong() * 2).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            candidates = retrieve(requested)
         }
-        return SearchOutcome(hits, stale)
+        val valid = candidates.asSequence().mapNotNull { hit ->
+            checked[hit.searchKey()]?.takeIf { it.resolved != null }?.let { hit }
+        }.take(TOP_PER_BRANCH).toList()
+        val resolved = checked.mapNotNull { (key, value) -> value.resolved?.let { key to it } }.toMap()
+        val stale = checked.filterValues { it.stale }.keys
+        return ValidatedCandidates(valid, resolved, stale, candidates)
     }
+
+    private fun publish(
+        fused: List<FusedSearchHit>,
+        queryText: String,
+        resolved: Map<HitKey, SearchHit>,
+        staleCount: Int,
+    ): SearchOutcome = SearchOutcome(
+        hits = fused.mapNotNull { fusedHit ->
+            val key = fusedHit.hit.searchKey()
+            val hit = resolved[key] ?: return@mapNotNull null
+            hit.copy(
+                matchedBy = fusedHit.matchedBy,
+                highlighted = if (SearchMode.KEYWORD in fusedHit.matchedBy) {
+                    hit.highlighted ?: highlight(hit.text, queryText)
+                } else null,
+            )
+        },
+        staleFiltered = staleCount,
+    )
+
+    private data class ValidatedCandidates(
+        val hits: List<IndexHit>,
+        val resolved: Map<HitKey, SearchHit>,
+        val staleKeys: Set<HitKey>,
+        val rawCandidates: List<IndexHit>,
+    ) {
+        companion object {
+            fun empty() = ValidatedCandidates(emptyList(), emptyMap(), emptySet(), emptyList())
+        }
+    }
+
+    private data class CandidateValidation(
+        val resolved: SearchHit? = null,
+        val stale: Boolean = false,
+    )
 
     /**
      * Validates one fused hit against the live database and decodes its stored locator into a citable
@@ -239,34 +312,81 @@ class SearchService(
         )
     }
 
-    /**
-     * Marks the query's terms in [text] with `<mark>`, HTML-escaping the rest so a search pane can
-     * render the fragment as safe markup. Terms come from the query's words; a term absent from the text
-     * leaves the text unmarked rather than emitting a partial tag.
-     */
+    /** Marks matched source tokens in one pass, escaping every untrusted segment independently. */
     private fun highlight(text: String, queryText: String): String? {
         val terms = queryTerms(queryText)
         if (terms.isEmpty()) return null
-        val escaped = escapeHtml(text)
-        var result = escaped
-        var marked = false
-        for (term in terms) {
-            val target = "<mark>${escapeHtml(term)}</mark>"
-            val replaced = result.replace(Regex(Regex.escape(term), RegexOption.IGNORE_CASE), target)
-            if (replaced != result) {
-                result = replaced
-                marked = true
+        val spans = mutableListOf<IntRange>()
+        var tokenStart = -1
+        var offset = 0
+        while (offset < text.length) {
+            val codePoint = text.codePointAt(offset)
+            val end = offset + Character.charCount(codePoint)
+            if (isWordCodePoint(codePoint)) {
+                if (tokenStart < 0) tokenStart = offset
+            } else if (tokenStart >= 0) {
+                if (foldForHighlight(text.substring(tokenStart, offset)).let { token -> terms.any(token::contains) }) {
+                    spans += tokenStart until offset
+                }
+                tokenStart = -1
             }
+            offset = end
         }
-        return result.takeIf { marked }
+        if (tokenStart >= 0 && foldForHighlight(text.substring(tokenStart)).let { token -> terms.any(token::contains) }) {
+            spans += tokenStart until text.length
+        }
+        if (spans.isEmpty()) return null
+
+        return buildString {
+            var cursor = 0
+            for (span in spans) {
+                val start = span.first
+                val endExclusive = span.last + 1
+                append(escapeHtml(text.substring(cursor, start)))
+                append("<mark>")
+                append(escapeHtml(text.substring(start, endExclusive)))
+                append("</mark>")
+                cursor = endExclusive
+            }
+            append(escapeHtml(text.substring(cursor)))
+        }
     }
 
-    private fun queryTerms(queryText: String): List<String> =
-        queryText.lowercase(Locale.ROOT)
-            .replace("\"", " ")
-            .split(Regex("[^a-z0-9äöüß]+"))
-            .filter { it.isNotBlank() }
-            .distinct()
+    private fun queryTerms(queryText: String): List<String> = buildList {
+        var start = -1
+        var offset = 0
+        while (offset < queryText.length) {
+            val codePoint = queryText.codePointAt(offset)
+            val end = offset + Character.charCount(codePoint)
+            if (isWordCodePoint(codePoint)) {
+                if (start < 0) start = offset
+            } else if (start >= 0) {
+                add(foldForHighlight(queryText.substring(start, offset)))
+                start = -1
+            }
+            offset = end
+        }
+        if (start >= 0) add(foldForHighlight(queryText.substring(start)))
+    }.filter(String::isNotBlank).distinct()
+
+    /** ICU folding approximates Lucene's ICUFoldingFilter, including accents such as å/ä/ö. */
+    private fun foldForHighlight(value: String): String = UCharacter.foldCase(
+        Normalizer2.getNFKDInstance().normalize(value),
+        true,
+    ).filterNot { character ->
+        when (Character.getType(character)) {
+            Character.NON_SPACING_MARK.toInt(), Character.COMBINING_SPACING_MARK.toInt(),
+            Character.ENCLOSING_MARK.toInt() -> true
+            else -> false
+        }
+    }
+
+    private fun isWordCodePoint(codePoint: Int): Boolean = Character.isLetterOrDigit(codePoint) ||
+        when (Character.getType(codePoint)) {
+            Character.NON_SPACING_MARK.toInt(), Character.COMBINING_SPACING_MARK.toInt(),
+            Character.ENCLOSING_MARK.toInt() -> true
+            else -> false
+        }
 
     private fun escapeHtml(text: String): String =
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -311,6 +431,8 @@ class SearchService(
         private val LOCATOR_JSON = Json { ignoreUnknownKeys = true }
     }
 }
+
+private fun IndexHit.searchKey(): HitKey = HitKey(collectionId, documentId, unitId, chunkOrdinal)
 
 private val LOGGER = LoggerFactory.getLogger("infoscry.search")
 

@@ -84,7 +84,7 @@ Svelte/TypeScript diagnostics.
 ```
 
 `externalTest` includes real Tesseract OCR and Chromium browser acceptance for
-Investigate and Collections. Browser tests use a local server, temporary archive
+Collections, Search and Investigate. Browser tests use a local server, temporary archive
 and local fake provider or extraction pipeline. Playwright and its Chromium
 runtime must be available to run them; the acceptance harnesses report a missing
 browser dependency as a failure.

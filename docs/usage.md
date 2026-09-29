@@ -87,8 +87,10 @@ unavailable content.
 
 Select a collection in the workspace and enter a query in **Search**. Results
 appear as you type, in the selected mode; press Enter or **Search** to run the
-query immediately. Changing the mode or collection searches the current query
-again.
+query immediately. Changing the mode, collection, or any advanced filter
+searches the current query again; typing in path or metadata filters is briefly
+debounced. Matched words are highlighted in the result excerpt, with source text
+escaped before display.
 
 | Mode | Use |
 |---|---|
@@ -104,8 +106,15 @@ nearest-neighbour mode: it always returns the closest passages, even for a query
 whose words the archive has never seen.
 
 Refine results with file type, path, metadata text, import dates, document status
-or OCR-only filtering. Open a result to read its source. Semantic and hybrid
+or OCR-only filtering. Import dates accept inclusive calendar days in the web
+interface; the `infoscry search` CLI also accepts ISO instants. Open a result to
+read its source. Semantic and hybrid
 retrieval require the local embedding model and supported GPU runtime.
+
+If an archive was indexed before chunker version 3, run `infoscry reindex --wait`
+to add short text such as single letters, digits and formulas that the earlier
+chunking rule omitted. Existing extraction checkpoints and source files are
+preserved.
 
 ## Configure LLM profiles
 

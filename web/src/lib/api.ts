@@ -359,8 +359,8 @@ export async function searchCollection(collection: string, query: string, mode: 
   if (filters.mediaType?.trim()) parameters.append('mediaType', filters.mediaType.trim());
   if (filters.path?.trim()) parameters.set('path', filters.path.trim());
   if (filters.text?.trim()) parameters.set('text', filters.text.trim());
-  if (filters.from) parameters.set('from', `${filters.from}T00:00:00.000000000Z`);
-  if (filters.until) parameters.set('until', `${filters.until}T23:59:59Z`);
+  if (filters.from) parameters.set('from', `${filters.from}T00:00:00.000Z`);
+  if (filters.until) parameters.set('until', `${filters.until}T23:59:59.999Z`);
   if (filters.status) parameters.append('status', filters.status);
   if (filters.ocrOnly) parameters.set('ocrOnly', 'true');
   const response = await fetch(`/api/search?${parameters.toString()}`);

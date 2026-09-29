@@ -213,6 +213,151 @@ class SearchServiceTest {
     }
 
     @Test
+    fun `highlighting marks all original terms without corrupting mark tags and handles Swedish text`() {
+        val collection = collections.create("highlight-regression")
+        val document = insertDocument(collection.id, "highlight.txt", "text/plain")
+        val (service, index) = openService(absentEmbedder())
+        try {
+            runBlocking { indexChunk(index, collection.id, document.id, "mark budget ÅNGSTRÖM A\u030angstro\u0308m <budget> & mark") }
+
+            val twoTerms = service.search("budget mark", mode = SearchMode.KEYWORD).hits.single().highlighted
+            assertEquals("<mark>mark</mark> <mark>budget</mark> ÅNGSTRÖM A\u030angstro\u0308m &lt;<mark>budget</mark>&gt; &amp; <mark>mark</mark>", twoTerms)
+            val swedish = service.search("angstrom", mode = SearchMode.KEYWORD).hits.single().highlighted
+            assertContains(swedish.orEmpty(), "<mark>ÅNGSTRÖM</mark>")
+            assertContains(swedish.orEmpty(), "<mark>A\u030angstro\u0308m</mark>")
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
+    fun `semantic retrieval refills past fifty legacy artifact vectors`() {
+        val collection = collections.create("semantic-refill")
+        openService(embedder = { QueryEmbedder { vectorFor("Â") } }).let { (service, index) ->
+            try {
+                repeat(51) { number ->
+                    val artifact = insertDocument(collection.id, "artifact-$number.txt", "text/plain")
+                    runBlocking { indexChunk(index, collection.id, artifact.id, "Â") }
+                }
+                val valid = insertDocument(collection.id, "valid.txt", "text/plain")
+                runBlocking { indexChunk(index, collection.id, valid.id, "watergate") }
+
+                val outcome = service.search(
+                    "watergate",
+                    mode = SearchMode.SEMANTIC,
+                    filters = SearchFilters(collectionId = collection.id),
+                )
+
+                assertTrue(outcome.hits.any { it.documentId == valid.id }, "the first 50 filtered vectors must not starve the valid 52nd candidate")
+                assertEquals(0, outcome.staleFiltered)
+            } finally {
+                index.close()
+            }
+        }
+    }
+
+    @Test
+    fun `semantic refill reaches a valid chunk after more than one thousand artifacts`() {
+        val collection = collections.create("deep-semantic-refill")
+        val document = insertDocument(collection.id, "legacy.txt", "text/plain")
+        val texts = List(1_001) { "Â" } + "watergate"
+        val (service, index) = openService(embedder = { QueryEmbedder { vectorFor("Â") } })
+        try {
+            runBlocking { indexChunks(index, collection.id, document.id, texts) }
+            assertEquals(1_002, index.chunkCount(collection.id, document.id))
+            val raw = index.searchVector(collection.id, vectorFor("Â"), limit = 1_600)
+            assertEquals(1_002, raw.size, "the raw vector query should return every indexed chunk at k above the index size")
+            assertTrue(raw.any { it.chunkOrdinal == 1_001 }, "Lucene should include the valid vector in its raw nearest-neighbor candidates")
+
+            val outcome = service.search(
+                "watergate",
+                mode = SearchMode.SEMANTIC,
+                filters = SearchFilters(collectionId = collection.id),
+            )
+
+            assertEquals(1_001, outcome.hits.single().chunkOrdinal)
+            assertEquals(0, outcome.staleFiltered)
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
+    fun `hybrid filters stale candidates before its top thirty fusion cut and keeps both badges`() {
+        val collection = collections.create("hybrid-refill")
+        val (service, index) = openService(embedder = { QueryEmbedder { vectorFor("budget") } })
+        try {
+            repeat(31) { number ->
+                val stale = insertDocument(collection.id, "stale-$number.txt", "text/plain")
+                runBlocking { indexChunk(index, collection.id, stale.id, "budget budget budget budget") }
+                documents.delete(stale.id)
+            }
+            val valid = insertDocument(collection.id, "valid.txt", "text/plain")
+            runBlocking { indexChunk(index, collection.id, valid.id, "budget") }
+
+            val outcome = service.search("budget", mode = SearchMode.HYBRID)
+
+            assertEquals(valid.id, outcome.hits.first().documentId)
+            assertEquals(setOf(SearchMode.KEYWORD, SearchMode.SEMANTIC), outcome.hits.first().matchedBy)
+            assertEquals(31, outcome.staleFiltered, "stale rows shared by branches are counted once")
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
+    fun `a single digit remains a publishable keyword result`() {
+        val collection = collections.create("single-digit-search")
+        val document = insertDocument(collection.id, "chapter.txt", "text/plain")
+        val (service, index) = openService(absentEmbedder())
+        try {
+            runBlocking { indexChunk(index, collection.id, document.id, "7") }
+
+            val outcome = service.search("7", mode = SearchMode.KEYWORD)
+
+            assertEquals(listOf(document.id), outcome.hits.map { it.documentId })
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
+    fun `service applies blank dates as absent and date-only until through the final millisecond`() {
+        val collection = collections.create("date-boundary")
+        val document = insertDocument(collection.id, "last-moment.txt", "text/plain")
+        database.transaction { connection ->
+            connection.prepareStatement("UPDATE documents SET created_at = ? WHERE id = ?").use { statement ->
+                statement.setString(1, "2026-03-01T23:59:59.999Z")
+                statement.setString(2, document.id.value)
+                statement.executeUpdate()
+            }
+        }
+        val (service, index) = openService(absentEmbedder())
+        try {
+            runBlocking { indexChunk(index, collection.id, document.id, "budget") }
+
+            val outcome = service.search(
+                "budget",
+                mode = SearchMode.KEYWORD,
+                filters = SearchFilters(
+                    importedFrom = "2026-03-01T00:00:00Z",
+                    importedUntil = "  ",
+                ),
+            )
+            val dateOnly = service.search(
+                "budget",
+                mode = SearchMode.KEYWORD,
+                filters = SearchFilters(importedUntil = "2026-03-01"),
+            )
+
+            assertEquals(listOf(document.id), outcome.hits.map { it.documentId })
+            assertEquals(listOf(document.id), dateOnly.hits.map { it.documentId })
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
     fun `invalid search syntax is escaped rather than surfaced as an error`() {
         val collection = collections.create("Default-collection")
         val document = insertDocument(collection.id, "report.txt", "text/plain")
@@ -690,6 +835,30 @@ class SearchServiceTest {
                 ),
             ),
         )
+    }
+
+    private suspend fun indexChunks(
+        index: LuceneIndex,
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        texts: List<String>,
+    ) {
+        val unitId = ContentUnitId.new()
+        index.replaceDocument(texts.mapIndexed { ordinal, text ->
+            DocumentRow(
+                collectionId = collectionId,
+                documentId = documentId,
+                unitId = unitId,
+                chunk = Chunk(
+                    id = ChunkId.new(), contentUnitId = unitId, ordinal = ordinal, text = text,
+                    startOffset = ordinal, endOffset = ordinal + text.length, tokenCount = text.length,
+                    tokenStart = 0, tokenEnd = (text.length - 1).coerceAtLeast(0),
+                ),
+                locator = SourceLocation.TextLines(ordinal + 1, ordinal + 1),
+                locatorLabel = "line ${ordinal + 1}",
+                vector = vectorFor(text),
+            )
+        })
     }
 
     /** A scanned document with an OCR unit: its mean confidence is what the ocr-only filter sees. */

@@ -113,6 +113,7 @@ val externalTest = tasks.register<Test>("externalTest") {
     // The browser acceptance tests drive these scripts, so a change to one is an input.
     inputs.file(layout.projectDirectory.file("web/e2e/investigate-browser-acceptance.mjs"))
     inputs.file(layout.projectDirectory.file("web/e2e/collections-browser-acceptance.mjs"))
+    inputs.file(layout.projectDirectory.file("web/e2e/search-browser-acceptance.mjs"))
 }
 
 /*

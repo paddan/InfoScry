@@ -146,21 +146,19 @@ class ChunkerTest {
     }
 
     @Test
-    fun `a unit with no word produces no chunks`() {
-        // "Â" is what a page whose only content is a doubled-encoded non-breaking space reads as, and a
-        // bare numeral is what a chapter-marker page reads as. Neither can carry evidence, and embedding
-        // either would put a vector close to every query's into the index.
+    fun `a unit with only the known artifact produces no chunks`() {
+        // "Â" is what a page whose only content is a doubled-encoded non-breaking space reads as.
         assertTrue(chunker().chunk(unitOf("Â")).drafts.isEmpty())
-        assertTrue(chunker().chunk(unitOf(" — 2. — ")).drafts.isEmpty())
+        assertFalse(chunker().chunk(unitOf(" — 2. — ")).drafts.isEmpty())
     }
 
     @Test
-    fun `a word is a run of at least two letters or digits`() {
+    fun `short meaningful text is searchable while the known mojibake artifact is not`() {
         assertFalse(hasSearchableWord("Â"))
-        assertFalse(hasSearchableWord("a"))
-        assertFalse(hasSearchableWord("1 2"), "two separate one-digit runs are not a word")
-        assertTrue(hasSearchableWord("12"), "a two-digit number is a run")
-        assertTrue(hasSearchableWord("Â 12 Â"), "one real run is enough beside artifacts")
+        assertFalse(hasSearchableWord("..."), "punctuation without letters or digits is not passage evidence")
+        listOf("a", "x = 5", "7", "1 2", "甲", "12").forEach {
+            assertTrue(hasSearchableWord(it), "valid short text should remain searchable: $it")
+        }
         assertTrue(hasSearchableWord("watergate"))
     }
 
