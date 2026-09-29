@@ -58,7 +58,9 @@ Options: `--collection`, `--recursive`, `--wait`, `--json`, `--data-dir`.
 ## search
 
 Search one collection. `--collection` is required; the query is the
-positional argument. Default mode is hybrid.
+positional argument. Default mode is hybrid. Hybrid answers a query that shares
+no term, or term prefix, with the collection with no results; use
+`--mode semantic` for the nearest passages regardless of wording.
 
 ```bash
 infoscry search --collection Notes "quarterly report"

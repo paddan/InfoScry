@@ -136,6 +136,9 @@ private suspend fun ApplicationCall.runSearch(
             statuses = request.statuses?.map { DocumentStatus.valueOf(it) }?.toSet() ?: emptySet(),
             ocrOnly = request.ocrOnly,
         ),
+        // The web Search box is the surface where "no results" has to mean no results; the semantic-only
+        // half is admitted only for a query the archive has words for.
+        requireLexicalAnchor = true,
     )
     return SearchResponse(
         hits = outcome.hits.map { hit ->

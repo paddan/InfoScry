@@ -150,14 +150,30 @@ class SearchRoutesTest {
     @Test
     fun `hybrid search without a model is a service-unavailable carrying the install remedy`() = runBlocking {
         // The default mode is hybrid, which embeds the query; a temporary data directory has no model,
-        // so the answer is the environment class: 503 with the remedy that fixes it. The keyword half
-        // is a separate, caller-readable success, which the keyword tests above pin.
+        // so the answer is the environment class: 503 with the remedy that fixes it. The query has a
+        // lexical foothold, so it reaches the embedding half instead of being answered "nothing here
+        // says this". The keyword half is a separate, caller-readable success, which the keyword tests
+        // above pin.
+        seedUnit(document = "evidence.txt", text = "the nightfall report is sealed")
+
         val response = harness.get("/api/search?collection=Default&q=nightfall")
 
         assertEquals(HttpStatusCode.ServiceUnavailable, response.status, response.bodyAsText())
         val body = response.bodyAsText()
         assertContains(body, "MODEL_NOT_INSTALLED")
         assertContains(body, "embeddingModel")
+    }
+
+    @Test
+    fun `a hybrid query with no lexical foothold is an empty result, not the model remedy`() = runBlocking {
+        seedUnit(document = "evidence.txt", text = "the nightfall report is sealed")
+
+        // "zzzzzzzz" shares no prefix with any indexed term, so the semantic half never runs and the
+        // missing model never gets to refuse: the archive's true answer is that nothing says this.
+        val response = harness.get("/api/search?collection=Default&q=zzzzzzzz")
+
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        assertEquals("""{"hits":[],"staleFiltered":0}""", response.bodyAsText())
     }
 
     @Test

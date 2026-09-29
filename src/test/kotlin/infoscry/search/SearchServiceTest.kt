@@ -133,6 +133,45 @@ class SearchServiceTest {
     }
 
     @Test
+    fun `an anchored hybrid search answers a query with no foothold with nothing`() {
+        val collection = collections.create("Default-collection")
+        val document = insertDocument(collection.id, "report.txt", "text/plain")
+        var embeddings = 0
+        openService(
+            embedder = {
+                QueryEmbedder { query ->
+                    embeddings += 1
+                    vectorFor(query)
+                }
+            },
+        ).let { (service, index) ->
+            try {
+                runBlocking { indexChunk(index, collection.id, document.id, "watergate resignation") }
+
+                val gated = service.search(
+                    "sdkjfhsdkfhksdhfk",
+                    mode = SearchMode.HYBRID,
+                    requireLexicalAnchor = true,
+                )
+                assertEquals(0, gated.hits.size, "nonsense must not draw nearest neighbours")
+                assertEquals(0, embeddings, "a query with no foothold must not spend an embedding")
+
+                // A partial word is a foothold: the anchor is a prefix, not an exact term.
+                val partial = service.search("waterg", mode = SearchMode.HYBRID, requireLexicalAnchor = true)
+                assertEquals(1, partial.hits.size)
+                assertEquals(setOf(SearchMode.SEMANTIC), partial.hits.single().matchedBy)
+
+                // Ask and Investigate keep searching by meaning, so their hybrid calls are not gated.
+                val semanticOnly = service.search("sdkjfhsdkfhksdhfk", mode = SearchMode.HYBRID)
+                assertEquals(1, semanticOnly.hits.size)
+                assertEquals(setOf(SearchMode.SEMANTIC), semanticOnly.hits.single().matchedBy)
+            } finally {
+                index.close()
+            }
+        }
+    }
+
+    @Test
     fun `keyword search finds, highlights and safely escapes the matched text`() {
         val collection = collections.create("Default-collection")
         val document = insertDocument(collection.id, "report.txt", "text/plain")

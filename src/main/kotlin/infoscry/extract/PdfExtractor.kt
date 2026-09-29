@@ -346,6 +346,17 @@ class PdfExtractor(
                         emit(ExtractionEvent.UnitFailed(key, page - 1, OCR_FAILED_CODE))
                         return@unit
                     }
+                    // PDFBox does not treat an image it cannot decode as a failure — it logs the missing
+                    // reader and draws nothing — so a page whose image was dropped comes back as blank
+                    // paper, and OCR reads it as an empty page. Committing that would record an empty
+                    // reading of text the page really carries. The raster is only looked at when the
+                    // reading came back empty, so a page that was read pays nothing for the question.
+                    if (result.text.isBlank() && isBlankRaster(image)) {
+                        run.warnings += "page $page: its rendered raster is blank"
+                        emit(ExtractionEvent.UnitFailed(key, page - 1, PAGE_BLANK_CODE))
+                        discardRenderedImage(run, image)
+                        return@unit
+                    }
                     run.ocrPages++
                     run.confidences += result.meanConfidence
                     emitTextUnit(
@@ -413,6 +424,31 @@ class PdfExtractor(
 
     private fun unreadableCode(text: String?): String =
         if (text == null) PAGE_UNREADABLE_CODE else PAGE_RENDER_REFUSED_CODE
+
+    /**
+     * Whether the PNG a page was rendered to is blank paper.
+     *
+     * PDFBox does not treat an image it cannot decode as a failure — it logs the missing reader and draws
+     * nothing — so a page whose image was dropped renders as blank paper and OCR reads it as an empty
+     * page. This is asked only when a page's reading came back empty, so a page that was read pays nothing
+     * for the question; asking it of every page would spend a raster decode on pages that already
+     * answered.
+     */
+    private fun isBlankRaster(image: Path): Boolean {
+        val raster = try {
+            ImageIO.read(image.toFile()) ?: return false
+        } catch (failure: IOException) {
+            // A raster that cannot be read back is not called blank: this answers whether the page's image
+            // arrived, not whether this reader can re-open its own file.
+            return false
+        }
+        val row = IntArray(raster.width)
+        for (y in 0 until raster.height) {
+            raster.getRGB(0, y, raster.width, 1, row, 0, raster.width)
+            if (row.any { it and WHITE_PIXEL != WHITE_PIXEL }) return false
+        }
+        return true
+    }
 
     /**
      * Removes the working image a page was read from.
@@ -491,6 +527,9 @@ class PdfExtractor(
         /** The code a page whose raster cannot exist fails under. */
         internal const val PAGE_RENDER_REFUSED_CODE: String = "PAGE_RENDER_REFUSED"
 
+        /** The code a page whose rendered raster is blank fails under. */
+        internal const val PAGE_BLANK_CODE: String = "PAGE_BLANK"
+
         /** The code a page whose own text layer cannot be read fails under. */
         internal const val PAGE_UNREADABLE_CODE: String = "PAGE_UNREADABLE"
 
@@ -508,6 +547,9 @@ class PdfExtractor(
 
         /** The largest PDF container this extractor will open. */
         internal const val MAX_DOCUMENT_BYTES: Long = 512L * 1024 * 1024
+
+        /** Every channel of the white a rendered page's paper has. */
+        private const val WHITE_PIXEL: Int = 0xFFFFFF
 
         /** The key a PDF refused before its first unit is recorded under. */
         internal const val DOCUMENT_KEY: String = DOCUMENT_REFUSED_KEY

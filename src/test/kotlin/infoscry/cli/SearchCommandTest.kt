@@ -63,14 +63,29 @@ class SearchCommandTest {
     }
 
     @Test
-    fun `hybrid search without a model exits nonzero naming the install remedy, not a stack trace`() {
-        // The default mode is hybrid, which embeds the query; a temporary data directory has no model.
-        // The command must fail with the remedy that fixes it, in the terminal's own voice.
+    fun `a hybrid search for a query with no foothold is an empty result, not a refusal`() {
+        // The default mode is hybrid. The archive holds no word of "zzzz", so the semantic half never
+        // runs and the absent model never gets to refuse: the honest answer is that nothing matched.
         val result = CliProcess.run(
             "search", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "zzzz",
         )
 
-        assertNotEquals(0, result.exitCode, "a hybrid search without a model reported success")
+        assertEquals(0, result.exitCode, "stderr=${result.stderr}")
+        val body = result.stdout.lines().last { it.trim().startsWith("{") }
+        val response = ApiJson.decodeFromString<SearchResponse>(body)
+        assertTrue(response.hits.isEmpty(), "a query with no foothold produced hits")
+    }
+
+    @Test
+    fun `a semantic search without a model exits nonzero naming the install remedy, not a stack trace`() {
+        // Semantic mode embeds every query by design, so a temporary data directory with no model still
+        // fails with the remedy that fixes it, in the terminal's own voice — rather than with a
+        // nearest-neighbour imitation of a result.
+        val result = CliProcess.run(
+            "search", "--data-dir", dataDir.toString(), "--collection", "Default", "--mode", "semantic", "--json", "zzzz",
+        )
+
+        assertNotEquals(0, result.exitCode, "a semantic search without a model reported success")
         assertFalse(result.stderr.contains(" at "), "the CLI printed a stack trace: ${result.stderr}")
         assertContains(result.stdout + result.stderr, "MODEL_NOT_INSTALLED")
         assertContains(result.stdout + result.stderr, "embeddingModel")

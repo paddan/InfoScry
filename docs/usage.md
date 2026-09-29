@@ -85,13 +85,23 @@ unavailable content.
 
 ## Search your archive
 
-Select a collection in the workspace and enter a query in **Search**.
+Select a collection in the workspace and enter a query in **Search**. Results
+appear as you type, in the selected mode; press Enter or **Search** to run the
+query immediately. Changing the mode or collection searches the current query
+again.
 
 | Mode | Use |
 |---|---|
 | Keyword | Match words and phrases |
 | Semantic | Find passages by meaning |
 | Hybrid | Combine keyword and semantic retrieval; the default |
+
+Hybrid returns results only when the archive holds a term that one of the
+query's words begins — an exact match or a term the query is a prefix of. A
+query with no such foothold is answered with no results, rather than with the
+passages that happen to sit nearest to it. Semantic mode is the explicit
+nearest-neighbour mode: it always returns the closest passages, even for a query
+whose words the archive has never seen.
 
 Refine results with file type, path, metadata text, import dates, document status
 or OCR-only filtering. Open a result to read its source. Semantic and hybrid

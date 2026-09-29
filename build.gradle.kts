@@ -59,6 +59,12 @@ dependencies {
     // The PDF extractor: PDFBox reads one page's text layer at a time and renders only the pages that
     // OCR has to read.
     implementation(libs.pdfbox)
+    // Scanned pages are usually encoded as JPEG 2000 or JBIG2, and PDFBox ships neither decoder. Without
+    // these plugins it does not fail on such a page: it logs an error, draws nothing, and yields a blank
+    // raster, so the page is committed as OCR'd text that is empty. They are what makes a photographed
+    // page readable rather than silently missing.
+    implementation(libs.jai.imageio.jpeg2000)
+    implementation(libs.jbig2.imageio)
     // The search index: Lucene stores analyzed text, exact filters, stored citation labels, and the
     // 768-dimension vectors, with ICU analysis so a European multilingual archive tokenizes consistently.
     // QueryParser turns a user query string into a Lucene Query; the ICU module supplies ICUAnalyzer.

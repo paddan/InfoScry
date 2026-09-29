@@ -13,7 +13,7 @@ application suites.
 |---|---|
 | Local runtime | Backend, CLI and static web reader; foreground loopback server |
 | Import | Managed copies, per-collection deduplication, extraction/OCR checkpoints and persistent jobs |
-| Search | Keyword, semantic and hybrid retrieval; recoverable reindexing |
+| Search | Keyword, semantic and hybrid retrieval, live as the reader types; hybrid withholds semantic-only hits for a query with no lexical foothold; recoverable reindexing |
 | Collections | Creation, settings, paged document browsing, progress, durable import history, retries and recoverable deletion |
 | LLM profiles | CLI/Admin management, role defaults, provider presets and model catalog |
 | Ask | Streaming answers with validated citations and saved answer history |

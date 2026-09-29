@@ -164,6 +164,38 @@ describe('app shell', () => {
     expect(call?.init?.method).toBeUndefined();
   });
 
+  it('searches as the reader types, without pressing Search', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')], staleFiltered: 0 }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+
+    expect(await screen.findByText('Page 12')).toBeTruthy();
+    expect(calls.filter((entry) => entry.url.startsWith('/api/search')).map((entry) => entry.url))
+      .toEqual(['/api/search?collection=default&mode=HYBRID&q=tax+records']);
+  });
+
+  it('cancels the live search when the reader submits before the debounce fires', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 7')], staleFiltered: 0 }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'payment records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('Page 7')).toBeTruthy();
+
+    // Past the debounce window: a timer that outlived the submit would add a second request here.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(calls.filter((entry) => entry.url.startsWith('/api/search'))).toHaveLength(1);
+  });
+
   it('keeps search settings in the sidebar and serializes supported filters', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),

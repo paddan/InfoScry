@@ -11,10 +11,15 @@ import infoscry.fixtures.PdfFixtureGenerator.MIXED_TEXT_PAGES
 import infoscry.fixtures.PdfFixtureGenerator.MIXED_UNRENDERABLE_PAGE
 import infoscry.fixtures.PdfFixtureGenerator.PROTECTED_NAME
 import infoscry.fixtures.PdfFixtureGenerator.TEXT_NAME
+import java.awt.Color
+import java.awt.image.BufferedImage
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
+import javax.imageio.ImageIO
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -30,11 +35,15 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.apache.pdfbox.Loader
+import org.apache.pdfbox.cos.COSName
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
 import org.apache.pdfbox.pdmodel.common.PDRectangle
 import org.apache.pdfbox.pdmodel.encryption.AccessPermission
 import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy
+import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 import org.apache.pdfbox.rendering.PDFRenderer
 
 /**
@@ -220,6 +229,44 @@ class PdfExtractorTest {
         assertTrue(spy.pages.isEmpty(), "an image past the bound was allocated anyway")
     }
 
+    @Test
+    fun `a scan encoded as jpeg2000 is rendered instead of dropped`() {
+        // PDFBox has no JPEG 2000 decoder of its own. With none on the classpath it does not fail: it logs
+        // the missing reader and draws nothing, so the page renders blank and OCR hands back an empty
+        // reading that is committed as though the page had been read. The check is on the raster, because
+        // a blank raster is what the bug actually produces.
+        val source = directory.resolve("jpeg2000.pdf")
+        val scan = scanImage()
+        PDDocument().use { document ->
+            val page = PDPage(PDRectangle.A4)
+            document.addPage(page)
+            val image = PDImageXObject(
+                document,
+                ByteArrayInputStream(encodeJpeg2000(scan)),
+                COSName.JPX_DECODE,
+                scan.width,
+                scan.height,
+                8,
+                PDDeviceRGB.INSTANCE,
+            )
+            PDPageContentStream(document, page).use { content ->
+                content.drawImage(image, 0f, 0f, PDRectangle.A4.width, PDRectangle.A4.height)
+            }
+            document.save(source.toFile())
+        }
+
+        val raster = Loader.loadPDF(source.toFile()).use { loaded ->
+            ImageIO.read(
+                PngPageRenderer.render(PDFRenderer(loaded), 1, 150, directory).toFile(),
+            )
+        }
+
+        val inked = (0 until raster.height).sumOf { y ->
+            (0 until raster.width).count { x -> raster.getRGB(x, y) and 0xFFFFFF != 0xFFFFFF }
+        }
+        assertTrue(inked > 0, "the page's image was dropped and the page rendered blank")
+    }
+
     // ---- The OCR reading travels with its page -------------------------------------------------------
 
     @Test
@@ -354,6 +401,51 @@ class PdfExtractorTest {
     }
 
     // ---- One page that cannot be produced does not take the document with it -------------------------
+
+    @Test
+    fun `a page whose image never reached the raster fails instead of being read as empty`() {
+        // A renderer that produces blank paper, which is what PDFBox yields for an image whose decoder is
+        // missing: it logs the error and draws nothing. OCR then reads empty paper, and the page must not
+        // be committed as an empty reading of text that is really on the page.
+        val renderer = PdfPageRenderer { _, page, _, where ->
+            val blank = where.resolve("page-$page.png")
+            ImageIO.write(blankRaster(), "png", blank.toFile())
+            blank
+        }
+        val spy = OcrSpy(text = { "" })
+
+        val events = collect(
+            PdfExtractor(spy.seam, pageRenderer = renderer),
+            inputFor(fixture(MIXED_NAME), probe()),
+            probe(),
+        )
+
+        assertEquals(
+            MIXED_SCANNED_PAGES.map { "page:$it" },
+            failures(events).filter { it.code == PdfExtractor.PAGE_BLANK_CODE }.map { it.key },
+            "a page whose image was dropped was not reported as blank",
+        )
+        assertEquals(
+            MIXED_SCANNED_PAGES,
+            spy.pages.map { it.page },
+            "the pages whose rasters came out blank were not the ones read",
+        )
+    }
+
+    @Test
+    fun `a page that reads as empty but carries ink is still committed`() {
+        // The raster is only consulted when the reading came back empty, so a page whose ink OCR could not
+        // turn into text is committed as the empty reading it is rather than called blank.
+        val spy = OcrSpy(text = { "" })
+
+        val events = collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe())
+
+        assertTrue(
+            failures(events).none { it.code == PdfExtractor.PAGE_BLANK_CODE },
+            "an inked page whose reading was empty was reported as blank paper",
+        )
+        assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units(events).map { pageOf(it.key) })
+    }
 
     @Test
     fun `a page that cannot be rendered fails as a unit while every other page still delivers`() {
@@ -714,6 +806,42 @@ class PdfExtractorTest {
     }
 
     private fun fixtureDirectory(): Path = Path.of("src/test/resources/fixtures")
+
+    /** Blank paper: what a page whose image was dropped, or a page with no content at all, renders as. */
+    private fun blankRaster(): BufferedImage {
+        val image = BufferedImage(200, 200, BufferedImage.TYPE_INT_RGB)
+        val graphics = image.createGraphics()
+        try {
+            graphics.color = Color.WHITE
+            graphics.fillRect(0, 0, image.width, image.height)
+        } finally {
+            graphics.dispose()
+        }
+        return image
+    }
+
+    /** A scan-like page: dark bars on white, the shape a photographed page has. */
+    private fun scanImage(): BufferedImage {
+        val image = BufferedImage(595, 842, BufferedImage.TYPE_INT_RGB)
+        val graphics = image.createGraphics()
+        try {
+            graphics.color = Color.WHITE
+            graphics.fillRect(0, 0, image.width, image.height)
+            graphics.color = Color(0x22, 0x22, 0x22)
+            graphics.fillRect(80, 120, 420, 40)
+        } finally {
+            graphics.dispose()
+        }
+        return image
+    }
+
+    /** [image] encoded as JPEG 2000, through the ImageIO plugin PDFBox reads that format with. */
+    private fun encodeJpeg2000(image: BufferedImage): ByteArray {
+        val bytes = ByteArrayOutputStream()
+        val written = ImageIO.write(image, "JPEG2000", ImageIO.createImageOutputStream(bytes))
+        assertTrue(written, "no JPEG 2000 writer is on the classpath")
+        return bytes.toByteArray()
+    }
 
     /** A PDF that opens without a password but is still encrypted, which the extractor must refuse. */
     private fun writeOwnerProtected(target: Path): Path {

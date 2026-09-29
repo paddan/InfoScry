@@ -8,6 +8,11 @@ sqlite = "3.49.1.0"
 lucene = "10.4.0"
 tika = "3.3.2"
 pdfbox = "3.0.7"
+# PDFBox ships no decoder for the image formats scanned pages are usually encoded in, and reads them
+# from an ImageIO plugin when one is on the classpath. JPEG 2000 comes from the JAI Image I/O plugin
+# (JJ2000/BSD, pure Java); JBIG2 from PDFBox's own Apache-licensed plugin.
+jaiImageioJpeg2000 = "1.4.0"
+jbig2Imageio = "3.0.5"
 poi = "5.5.1"
 jsoup = "1.21.1"
 commonsCsv = "1.14.1"
@@ -30,6 +35,8 @@ lucene-analysis-icu = { module = "org.apache.lucene:lucene-analysis-icu", versio
 lucene-queryparser = { module = "org.apache.lucene:lucene-queryparser", version.ref = "lucene" }
 tika-core = { module = "org.apache.tika:tika-core", version.ref = "tika" }
 pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
+jai-imageio-jpeg2000 = { module = "com.github.jai-imageio:jai-imageio-jpeg2000", version.ref = "jaiImageioJpeg2000" }
+jbig2-imageio = { module = "org.apache.pdfbox:jbig2-imageio", version.ref = "jbig2Imageio" }
 poi-ooxml = { module = "org.apache.poi:poi-ooxml", version.ref = "poi" }
 poi-scratchpad = { module = "org.apache.poi:poi-scratchpad", version.ref = "poi" }
 jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }

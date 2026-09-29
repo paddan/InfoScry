@@ -7,8 +7,12 @@
 Follow [installation](installation.md) for JDK 25, Node.js/npm and the local
 runtime dependencies. Work from the repository root. Gradle uses the checked-in
 wrapper and builds one backend module; preserve the pinned dependencies.
+The [local dependency setup](installation.md#install-local-dependencies) includes
+installation commands and tool checks.
+For asdf, follow [the complete setup](asdf.md) to install the plugins and the
+checkout's Java version, select Node 24 and configure shims and `JAVA_HOME`.
 
-Set `JAVA_HOME` to JDK 25. With asdf:
+Keep the `JAVA_HOME` selected during setup. If using asdf for JDK 25:
 
 ```bash
 export JAVA_HOME="$(asdf where java)"
@@ -84,6 +88,18 @@ Investigate and Collections. Browser tests use a local server, temporary archive
 and local fake provider or extraction pipeline. Playwright and its Chromium
 runtime must be available to run them; the acceptance harnesses report a missing
 browser dependency as a failure.
+
+Install the browser runtime using the project's pinned Playwright package,
+after Gradle has installed frontend dependencies:
+
+```bash
+cd web
+npx playwright install chromium
+```
+
+This downloads Chromium for acceptance tests; it is not needed to run the app.
+See [Playwright's browser setup](https://playwright.dev/docs/browsers).
+Return to the repository root before running the Gradle checks.
 
 `gpuIntegrationTest` loads the real pinned model through CoreML on the local
 Mac. For another model directory:

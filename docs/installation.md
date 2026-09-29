@@ -8,7 +8,7 @@
 |---|---|
 | macOS arm64 with an Apple GPU | Supported local runtime; CoreML embeddings |
 | JDK 25 | Build and run the application |
-| Node.js and npm | Build the web interface |
+| Node.js 24 and npm | Build and test the web interface; the setup below uses Node 24 |
 | Tesseract and the OCR languages you use | OCR runtime dependency |
 | Calibre (optional) | E-book formats that need conversion |
 
@@ -17,14 +17,106 @@ Embeddings require GPU execution; there is no silent CPU-only fallback.
 Diagnostics, source viewing and existing keyword search remain available if
 GPU initialization fails.
 
-## Build from source
+## Install local dependencies
 
-Open a terminal in your local checkout of InfoScry. Set `JAVA_HOME` to your
-JDK 25 installation; if you use asdf, run:
+The commands below use [Homebrew](https://brew.sh/). If `brew` is not installed,
+follow its official installation instructions first and apply the printed
+shell setup. If you already manage Java or Node with another tool, keep that
+setup and check its versions instead of installing a second copy.
+
+### Java and Node.js
+
+Choose either the [asdf setup](asdf.md) for project-specific versions or the
+direct Homebrew installation below. The checkout already pins Java in
+`.tool-versions`; the asdf guide also explains selecting Node 24 and `JAVA_HOME`.
+
+Install [JDK 25](https://formulae.brew.sh/formula/openjdk@25) and
+[Node.js 24](https://formulae.brew.sh/formula/node@24), which includes npm:
 
 ```bash
-export JAVA_HOME="$(asdf where java)"
+brew install openjdk@25 node@24
+export JAVA_HOME="$(brew --prefix openjdk@25)/libexec/openjdk.jdk/Contents/Home"
+export PATH="$JAVA_HOME/bin:$(brew --prefix node@24)/bin:$PATH"
+java -version
+node --version
+npm --version
 ```
+
+Check that Java reports version 25 and Node reports version 24. These exports
+apply to the current terminal. Add them to `~/.zshrc` if you want this setup in
+future interactive sessions. If using asdf, follow the
+[asdf guide](asdf.md) instead of these Homebrew runtime exports.
+
+Gradle itself is provided by `./gradlew`. Java libraries and frontend packages
+are installed by the build; SQLite, Lucene and ONNX Runtime do not need separate
+system installations. CoreML is supplied by macOS.
+
+### Tesseract and OCR language data
+
+Install [Tesseract](https://formulae.brew.sh/formula/tesseract) and
+[additional language data](https://formulae.brew.sh/formula/tesseract-lang):
+
+```bash
+brew install tesseract tesseract-lang
+command -v tesseract
+tesseract --version
+tesseract --list-langs
+```
+
+Homebrew's base Tesseract package includes English (`eng`) and orientation data
+(`osd`). `tesseract-lang` adds other languages, including Swedish (`swe`). Check
+that `eng` and `swe` appear in the language list if you use both.
+
+Collections default to `eng`. For Swedish and English documents, save
+`swe+eng` under **Admin → Collections → OCR languages** before importing or
+retrying. Saving languages alone does not reprocess existing documents.
+
+### Calibre for e-book conversion
+
+Install [Calibre](https://formulae.brew.sh/cask/calibre) when importing formats
+that need conversion, such as MOBI/AZW-family or legacy e-books:
+
+```bash
+brew install --cask calibre
+command -v ebook-convert
+ebook-convert --version
+```
+
+InfoScry uses Calibre's `ebook-convert` command, not its graphical library.
+Homebrew exposes that command in its `bin` directory. EPUB and FictionBook
+formats are read directly by InfoScry and do not require Calibre conversion.
+
+If you installed Calibre from its macOS download instead, its command-line
+tools are inside the app bundle. Make them available in the terminal that will
+start InfoScry:
+
+```bash
+export PATH="/Applications/calibre.app/Contents/MacOS:$PATH"
+command -v ebook-convert
+ebook-convert --version
+```
+
+Adjust the path if the app is installed elsewhere; add the export to `~/.zshrc`
+to keep it for future terminal sessions. See the
+[Calibre command-line documentation](https://manual.calibre-ebook.com/generated/en/cli-index.html)
+for the macOS bundle layout.
+
+### Make tools visible to the server
+
+InfoScry launches `tesseract` and `ebook-convert` by name using the process's
+`PATH`. Start the server from the terminal where the checks above succeed.
+After changing `PATH`, stop the server with Ctrl-C and start it again from
+the updated terminal; an existing process keeps its old environment.
+
+The embedding weights are another required local dependency for semantic and
+hybrid search: install them with the `embeddingModel` task below. An LLM is
+separate and needed only for Ask and Investigate; see
+[Configure answers](#configure-answers).
+
+## Build from source
+
+Open a terminal in your local checkout of InfoScry with the dependency setup
+above active and `JAVA_HOME` pointing to JDK 25.
 
 Build the application and install the pinned embedding model:
 
@@ -114,4 +206,7 @@ stopped; use Admin while the server is running.
   [GPU verification command](development.md#hardware-and-browser-checks).
 - **OCR tool or language unavailable:** check that Tesseract and the requested
   language data are installed. Save collection OCR languages before retrying.
+- **E-book converter unavailable:** check `command -v ebook-convert` and
+  `ebook-convert --version` in the server's launch terminal. See
+  [Calibre setup](#calibre-for-e-book-conversion), then restart the server and retry.
 - **No graphical session:** the web file picker offers manual path entry.

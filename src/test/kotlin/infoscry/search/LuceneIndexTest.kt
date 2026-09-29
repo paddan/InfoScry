@@ -13,6 +13,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -145,6 +146,22 @@ class LuceneIndexTest {
             // The same query across every collection sees both documents.
             val all = index.searchKeyword(null, "budget", limit = 10)
             assertEquals(2, all.size)
+        }
+    }
+
+    @Test
+    fun `a lexical anchor is a token prefix of an indexed term in the given scope`() {
+        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+            runBlocking {
+                index.replaceDocument(chunksFor(DOCUMENT, listOf("watergate resignation")))
+            }
+
+            assertTrue(index.hasLexicalAnchor("watergate", COLLECTION))
+            assertTrue(index.hasLexicalAnchor("waterg", COLLECTION), "a word being typed must still anchor")
+            assertTrue(index.hasLexicalAnchor("resign", COLLECTION), "an inflected form must still anchor")
+            assertFalse(index.hasLexicalAnchor("sdkjfhsdkfhksdhfk", COLLECTION), "nonsense has no foothold")
+            assertFalse(index.hasLexicalAnchor("wa", COLLECTION), "a two-letter prefix is not evidence")
+            assertFalse(index.hasLexicalAnchor("watergate", OTHER_COLLECTION), "the anchor is scoped")
         }
     }
 

@@ -133,6 +133,9 @@ class SearchCommand : CliktCommand(name = "search") {
                     queryText = query,
                     mode = infoscry.server.parseSearchMode(mode),
                     filters = buildFilters(collectionId = collection.id),
+                    // The command is the same interactive surface as the web Search box: a query the
+                    // archive has never seen a word of is answered with nothing, not with neighbours.
+                    requireLexicalAnchor = true,
                 )
             }
         }

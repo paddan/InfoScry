@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import AskPanel from '../lib/AskPanel.svelte';
   import HistoryColumn from '../lib/HistoryColumn.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
@@ -72,6 +72,14 @@
   let collectionError: string | null = null;
   let searchError: string | null = null;
   let searchGeneration = 0;
+  /**
+   * How long the query field stays quiet before the workspace searches it live. Short enough that
+   * results follow the typing, long enough that a word typed at reading speed is one search, not one
+   * per keystroke.
+   */
+  const SEARCH_DEBOUNCE_MS = 250;
+  /** The pending live search, cancelled whenever the query, mode or collection changes again. */
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let selectedHit: SearchHit | null = null;
   let source: SourceContentResponse | null = null;
   let sourceText = '';
@@ -337,10 +345,22 @@
     await loadAsk();
   }
 
+  /** Runs the query now rather than waiting for the live debounce: Enter and the Search button. */
   async function search(event: SubmitEvent): Promise<void> {
     event.preventDefault();
+    cancelPendingSearch();
+    await runSearch();
+  }
+
+  /**
+   * Runs one search for the query text as it is now. The caller owns when this happens, so live typing,
+   * a submit and a mode or collection change all reach the server the same way. A response whose
+   * generation is no longer current is dropped, which is what keeps fast typing from landing an older
+   * query's results over a newer one's.
+   */
+  async function runSearch(): Promise<void> {
     const text = query.trim();
-    if (text === '' || selectedCollectionId === '' || searching) return;
+    if (text === '' || selectedCollectionId === '') return;
 
     const generation = ++searchGeneration;
     clearSelectedSource();
@@ -359,6 +379,24 @@
       if (generation === searchGeneration) searchError = describe(failure);
     } finally {
       if (generation === searchGeneration) searching = false;
+    }
+  }
+
+  /** A keystroke retires any pending or in-flight search and arms the next live one. */
+  function handleQueryInput(): void {
+    cancelPendingSearch();
+    invalidateResults();
+    if (query.trim() === '' || selectedCollectionId === '') return;
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      void runSearch();
+    }, SEARCH_DEBOUNCE_MS);
+  }
+
+  function cancelPendingSearch(): void {
+    if (searchTimer !== null) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
     }
   }
 
@@ -419,6 +457,7 @@
   }
 
   function invalidateSearch(): void {
+    cancelPendingSearch();
     invalidateResults();
     clearSelectedSource();
   }
@@ -427,6 +466,14 @@
     invalidateSearch();
     void loadInvestigate();
     void loadAsk();
+    // The query is live, so a different collection draws new results for it instead of waiting for
+    // another submit that may never come.
+    if (query.trim() !== '') void runSearch();
+  }
+
+  function changeMode(): void {
+    invalidateSearch();
+    if (query.trim() !== '') void runSearch();
   }
 
   function selectMode(modeName: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN'): void {
@@ -636,6 +683,9 @@
   onMount(() => {
     refresh();
   });
+
+  // A timer that outlives the page would fire a search against a torn-down workspace.
+  onDestroy(cancelPendingSearch);
 </script>
 
 <div class="app-shell">
@@ -673,7 +723,7 @@
         <div class="sidebar-block search-settings">
           <span class="eyebrow">SEARCH SETTINGS</span>
           <label for="mode">Search mode</label>
-          <select id="mode" bind:value={mode} onchange={invalidateSearch}>
+          <select id="mode" bind:value={mode} onchange={changeMode}>
             <option value="KEYWORD">Keyword</option>
             <option value="SEMANTIC">Semantic</option>
             <option value="HYBRID">Hybrid</option>
@@ -783,8 +833,8 @@
       <div class="search-input-row">
         <form onsubmit={search}>
           <label class="visually-hidden" for="query">Search query</label>
-          <input id="query" name="query" bind:value={query} oninput={invalidateSearch} autocomplete="off" placeholder="Search documents, names, and ideas…" required />
-          <button class="primary" type="submit" disabled={searching || query.trim() === ''}>{searching ? 'Searching…' : 'Search'}</button>
+          <input id="query" name="query" bind:value={query} oninput={handleQueryInput} autocomplete="off" placeholder="Search documents, names, and ideas…" required />
+          <button class="primary" type="submit" disabled={query.trim() === ''}>Search</button>
         </form>
       </div>
       {#if searching}
@@ -794,6 +844,9 @@
       {:else if hasSearched && hits.length === 0}
         <p role="status">No results found.</p>
       {:else if hits.length > 0}
+        <!-- The list itself is not a live region: announcing it would read every hit aloud on each
+             keystroke. The count is what a screen reader needs to know that results changed. -->
+        <p class="visually-hidden" role="status">{hits.length} {hits.length === 1 ? 'result' : 'results'}.</p>
         <ol class="results" aria-label="Search results">
           {#each hits as hit (`${hit.unitId}-${hit.chunkOrdinal}`)}
             <li>

@@ -49,11 +49,20 @@ class SearchService(
      *   read is escaped inside [LuceneIndex] rather than surfacing as an error.
      * @param mode the retrieval mode, hybrid by default.
      * @param filters what the result is restricted to, before retrieval.
+     * @param requireLexicalAnchor whether hybrid retrieval may publish semantic-only hits for a query
+     *   with no lexical foothold in the archive. The interactive Search box passes true, because the
+     *   pinned embedding model cannot answer "is this relevant": its similarity scores are deliberately
+     *   not calibrated (the E5 model card documents that they distribute between 0.7 and 1.0 and that only
+     *   their relative order means anything), so nearest neighbours exist for gibberish too. A query that
+     *   shares no token with the archive's own words is answered with nothing rather than with the
+     *   passages closest to nonsense. Ask and Investigate leave it false, because their questions are
+     *   meant to retrieve by meaning even when they share no wording with the sources.
      */
     fun search(
         queryText: String,
         mode: SearchMode = SearchMode.DEFAULT,
         filters: SearchFilters = SearchFilters(),
+        requireLexicalAnchor: Boolean = false,
     ): SearchOutcome {
         if (queryText.isBlank()) return SearchOutcome(emptyList(), 0)
 
@@ -83,7 +92,14 @@ class SearchService(
         }
 
         val semanticHits = when (mode) {
-            SearchMode.SEMANTIC, SearchMode.HYBRID -> semanticSearch(queryText, filters, documentIds)
+            SearchMode.SEMANTIC -> semanticSearch(queryText, filters, documentIds)
+
+            SearchMode.HYBRID -> if (semanticsApply(queryText, keywordHits, filters, documentIds, requireLexicalAnchor)) {
+                semanticSearch(queryText, filters, documentIds)
+            } else {
+                emptyList()
+            }
+
             SearchMode.KEYWORD -> emptyList()
         }
 
@@ -141,6 +157,24 @@ class SearchService(
         return searchRefusingOverbroad {
             index().searchVector(filters.collectionId, vector, documentIds, TOP_PER_BRANCH)
         }
+    }
+
+    /**
+     * Whether the semantic half of a hybrid search may run.
+     *
+     * A query the keyword half already matched is grounded by definition. Otherwise an interactive search
+     * asks [LuceneIndex.hasLexicalAnchor] before spending an embedding on a query the archive has never
+     * seen a word of — the answer that keeps the semantic branch from inventing matches for nonsense.
+     */
+    private fun semanticsApply(
+        queryText: String,
+        keywordHits: List<IndexHit>,
+        filters: SearchFilters,
+        documentIds: Set<String>?,
+        requireLexicalAnchor: Boolean,
+    ): Boolean {
+        if (!requireLexicalAnchor || keywordHits.isNotEmpty()) return true
+        return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds)
     }
 
     private fun publish(fused: List<FusedSearchHit>, queryText: String): SearchOutcome {

@@ -21,6 +21,7 @@ import org.apache.lucene.analysis.core.LowerCaseFilterFactory
 import org.apache.lucene.analysis.custom.CustomAnalyzer
 import org.apache.lucene.analysis.icu.ICUFoldingFilterFactory
 import org.apache.lucene.analysis.standard.StandardTokenizerFactory
+import org.apache.lucene.analysis.tokenattributes.CharTermAttribute
 import org.apache.lucene.document.Document
 import org.apache.lucene.document.Field
 import org.apache.lucene.document.IntPoint
@@ -39,6 +40,7 @@ import org.apache.lucene.search.BooleanClause
 import org.apache.lucene.search.BooleanQuery
 import org.apache.lucene.search.IndexSearcher
 import org.apache.lucene.search.KnnFloatVectorQuery
+import org.apache.lucene.search.PrefixQuery
 import org.apache.lucene.search.Query
 import org.apache.lucene.search.ScoreDoc
 import org.apache.lucene.search.SearcherFactory
@@ -358,6 +360,42 @@ class LuceneIndex private constructor(
     }
 
     /**
+     * Whether [queryText] has a lexical foothold in this index: one of its analyzed tokens is a prefix of
+     * a term the text field holds, inside the given scope.
+     *
+     * A prefix rather than an exact term, so a word still being typed ("waterg") or an inflected form
+     * ("resign" for "resignation") still counts. The answer is deliberately a boolean and not a score: it
+     * says whether the query belongs to the archive's vocabulary at all — nonsense has no foothold
+     * anywhere — and leaves ranking to the branches that rank. Probes stop at the first grounded token,
+     * and tokens shorter than [MIN_ANCHOR_PREFIX] are skipped because two letters match almost any term
+     * dictionary and would ground almost anything.
+     */
+    fun hasLexicalAnchor(
+        queryText: String,
+        collectionId: CollectionId?,
+        documentIds: Set<String>? = null,
+    ): Boolean = readSearcher { searcher ->
+        analyzeTokens(queryText)
+            .filter { it.length >= MIN_ANCHOR_PREFIX }
+            .any { token ->
+                val query = filteredBy(PrefixQuery(Term(LuceneSchema.FIELD_TEXT, token)), collectionId, documentIds)
+                searcher.search(query, 1).scoreDocs.isNotEmpty()
+            }
+    }
+
+    /** The analyzed tokens of [queryText], normalized exactly as the text field stores them. */
+    private fun analyzeTokens(queryText: String): List<String> {
+        val stream = handle.analyzer.tokenStream(LuceneSchema.FIELD_TEXT, queryText)
+        return stream.use {
+            val term = it.addAttribute(CharTermAttribute::class.java)
+            it.reset()
+            buildList {
+                while (it.incrementToken()) add(term.toString())
+            }
+        }
+    }
+
+    /**
      * Vector search over the index's embedding field.
      *
      * Returns the nearest vectors to [vector], narrowed by [collectionId] and [documentIds] when given.
@@ -560,6 +598,13 @@ class LuceneIndex private constructor(
          * broad-scope case is solved by a set query instead of a higher ceiling.
          */
         const val MAX_QUERY_TOKENS: Int = 1_000
+
+        /**
+         * How short a query token may be and still count as a lexical foothold. A two-letter prefix
+         * matches so much of any dictionary that probing it would ground almost any query, while three
+         * letters still ground a partial word like "wat" in "watergate".
+         */
+        const val MIN_ANCHOR_PREFIX: Int = 3
 
         /** The code a refusal carries when a query analyzes into more tokens than the ceiling can hold. */
         const val QUERY_TOO_LONG_CODE: String = "QUERY_TOO_LONG"

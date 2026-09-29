@@ -20,6 +20,9 @@ reader and a command-line interface.
 InfoScry is built and run locally on an Apple Silicon Mac. Start with the
 [installation guide](docs/installation.md), then follow the
 [user guide](docs/usage.md) to import documents and search your archive.
+Commands for installing Java, Node.js, Tesseract and Calibre are under
+[local dependencies](docs/installation.md#install-local-dependencies).
+[asdf setup](docs/asdf.md) covers project-specific Java and Node.js versions.
 
 Documents and archive data stay on your machine. Ask and Investigate send
 questions and selected source passages to the LLM endpoint you configure,
