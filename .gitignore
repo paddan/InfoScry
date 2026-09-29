@@ -8,3 +8,4 @@ web/build/
 web/.svelte-kit/
 web/.vitest/
 .idea/
+test documents/
