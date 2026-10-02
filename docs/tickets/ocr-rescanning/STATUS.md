@@ -274,9 +274,7 @@ One run of `./gradlew check` failed on a single pre-existing test (`SuryaOcrTest
 runtime is read again when the probe reports another`) before the identity rule was reconciled as described;
 the test was not touched and passes on the final tree.
 
-Residual, to decide with the open slice: a `NEEDS_REVIEW` document is not in
-`ImportJobHandler.FINISHED_STATUSES`, so a byte-identical duplicate import would re-ingest it rather than record
-`DUPLICATE`. It is latent today because nothing writes `content_units.page_approval` yet — only the missing
-comparison/review does. The open slice also needs the page's direct text per page, a reviewer and store-backed
-policy plus a REVIEW-stage dispatch authority in the import attempt, per-document candidate staging, and
-chunking/embedding from the candidate so pending pages stay unindexed.
+Residual, closed with the slice that followed: a `NEEDS_REVIEW` document is now a finished status for import
+purposes (`ImportJobHandler.FINISHED_STATUSES`), so a byte-identical re-import records `DUPLICATE` instead of
+re-reading a document that is waiting for a decision. The remaining work — the import's compare/review and
+publication — is measured in the ticket, together with the publication question it is gated on.
