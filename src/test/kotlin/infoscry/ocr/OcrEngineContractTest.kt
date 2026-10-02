@@ -30,6 +30,7 @@ import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.Instants
 import infoscry.storage.PageApproval
+import infoscry.storage.RevisionPageText
 import infoscry.storage.RevisionState
 import infoscry.storage.SchemaMigrator
 import java.awt.Color
@@ -543,6 +544,85 @@ class OcrEngineContractTest {
     }
 
     @Test
+    fun `a staged page rebuilds the image it was read from and refuses one whose bytes changed`() {
+        val archive = Archive(directory)
+        try {
+            val document = archive.document()
+            val sink = CandidateRevisionSink(archive.revisions, document.id, "RESCAN")
+            val engine = RecordingEngine()
+            val input = inputFor(
+                fixture("text.pdf"),
+                attemptSettings(mode = OcrImportMode.CHECK_AND_IMPROVE),
+                documentId = document.id,
+                artifactRoot = archive.artifacts,
+                boundary = PermitProbeBoundary(),
+            )
+
+            extractInto(PdfExtractor(PageOcrEngines(listOf(engine))), input, sink)
+
+            // What a page read under check-and-improve keeps is enough to get its image back, which is what a
+            // later comparison needs: the record is the reference, the hash, the dimensions and the rendering
+            // version, and the page image rebuilt from it is the one the reading was made from.
+            val staged = archive.revisions.pages(assertNotNull(sink.candidateRevisionId))
+            assertEquals(3, staged.size, "the rescan did not stage every page it read")
+            staged.zip(engine.pages).forEach { (page, read) ->
+                val source = assertNotNull(page.sourceImage, "a staged page names no image it was read from")
+                val rebuilt = rebuiltFrom(archive, document.id, page)
+
+                assertEquals(page.unitId.value, rebuilt.unitId)
+                assertEquals(page.ordinal, rebuilt.ordinal)
+                assertTrue(Files.isRegularFile(rebuilt.imagePath), "the rebuilt page names no artifact")
+                assertEquals(read.sha256, rebuilt.sha256, "the rebuilt page is not the image that was read")
+                assertEquals(source.sha256, rebuilt.sha256)
+                assertEquals(read.width, rebuilt.width)
+                assertEquals(read.height, rebuilt.height)
+                assertEquals(source.width, rebuilt.width)
+                assertEquals(source.height, rebuilt.height)
+                assertEquals(source.renderVersion, rebuilt.renderVersion)
+                assertTrue(rebuilt.isIntact(), "the rebuilt page is not the image its own hash describes")
+            }
+
+            // An image whose bytes are no longer the ones the page was read from is not that page's image, so
+            // a comparison is refused rather than shown other pixels under this page's name — and neither is
+            // a record whose artifact is gone.
+            val page = staged.first()
+            val artifact = archive.artifacts.resolve(
+                assertNotNull(page.sourceImage, "a staged page names no image it was read from").relativePath,
+            )
+            Files.write(artifact, "another image entirely".toByteArray())
+            val changed = assertFailsWith<IllegalStateException> { rebuiltFrom(archive, document.id, page) }
+            assertContains(changed.message.orEmpty(), "no longer the image that page was read from")
+
+            Files.delete(artifact)
+            assertFailsWith<IllegalStateException> { rebuiltFrom(archive, document.id, page) }
+
+            // A picture read under check-and-improve names the other root: the page *is* the managed copy, so
+            // its rebuild resolves against the directory the copy lives in rather than against the artifacts.
+            val picture = directory.resolve("managed").resolve("scan.png")
+            writePaper(picture, width = MULTI_FRAME_WIDTH, height = MULTI_FRAME_HEIGHT)
+            val pictureDocument = archive.document(name = "scan.png", collection = "Rescan pictures")
+            val pictureSink = CandidateRevisionSink(archive.revisions, pictureDocument.id, "RESCAN")
+            extractInto(
+                ImageExtractor(PageOcrEngines(listOf(RecordingEngine()))),
+                inputFor(
+                    picture,
+                    attemptSettings(mode = OcrImportMode.CHECK_AND_IMPROVE),
+                    documentId = pictureDocument.id,
+                    artifactRoot = archive.artifacts,
+                    boundary = PermitProbeBoundary(),
+                ),
+                pictureSink,
+            )
+
+            val picturePage = archive.revisions.pages(assertNotNull(pictureSink.candidateRevisionId)).single()
+            assertEquals(SourceImageRoot.MANAGED_COPY, assertNotNull(picturePage.sourceImage).root)
+            assertEquals(sha256Of(picture), rebuiltFrom(archive, pictureDocument.id, picturePage).sha256)
+        } finally {
+            archive.close()
+        }
+    }
+
+    @Test
     fun `a staged picture page names the copy it was read from rather than the picture behind it`() {
         val archive = Archive(directory)
         try {
@@ -796,6 +876,19 @@ class OcrEngineContractTest {
         rotationDegrees = 0,
     )
 
+    /** The page image a staged page's own record names, rebuilt the way a later phase has to. */
+    private fun rebuiltFrom(archive: Archive, documentId: DocumentId, page: RevisionPageText): PageImage =
+        PageImage.ofProvenance(
+            documentId = documentId,
+            unitId = page.unitId.value,
+            ordinal = page.ordinal,
+            provenance = assertNotNull(page.sourceImage, "a staged page names no image it was read from"),
+            // The document's artifact root and the directory holding its managed copy: the two roots a
+            // provenance names, and the two an archive lays down per document.
+            artifactRoot = archive.artifacts,
+            managedCopyRoot = directory.resolve("managed"),
+        )
+
     /** A page image over a written PNG, for the tests that only need one that exists. */
     private fun writtenPageImage(): PageImage {
         val root = Files.createDirectory(directory.resolve("written"))
@@ -974,13 +1067,13 @@ private class Archive(directory: Path) : AutoCloseable {
         SchemaMigrator(database).migrate()
     }
 
-    /** A document of this archive that a test can commit pages for. */
-    fun document(name: String = "rescan.pdf"): Document {
-        val collection = collections.create("Rescan")
+    /** A document of this archive that a test can commit pages for, in a collection of its own. */
+    fun document(name: String = "rescan.pdf", collection: String = "Rescan"): Document {
+        val owner = collections.create(collection)
         return documents.insert(
             Document(
                 id = DocumentId("doc-$name"),
-                collectionId = collection.id,
+                collectionId = owner.id,
                 sha256 = "b".repeat(64),
                 mediaType = "application/pdf",
                 originalFilename = name,

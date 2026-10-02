@@ -624,6 +624,26 @@ interface ExtractionSink {
     /** Whether a unit committed here outlives the attempt. */
     val storesUnits: Boolean
 
+    /**
+     * Whether what this sink takes is a reading staged for a person's decision rather than published text.
+     *
+     * A staged reading replaces nothing on its own: it is held as a candidate revision of its document, and
+     * whether any of its pages becomes searchable is decided afterwards — by the attempt that judged it and
+     * by the publication that took it. The default is the answer every reading that becomes content gives — a
+     * text layer, a parser's output, a tool's transcription the archive accepts. See
+     * [infoscry.ocr.CandidateRevisionSink].
+     */
+    val stagesForReview: Boolean get() = false
+
+    /**
+     * The revision a staged reading is held in, or null when this sink stages nothing or has staged nothing.
+     *
+     * A reading staged for review lives in a revision of the document rather than in published content, and
+     * the attempt's later phases — chunking, embedding and publication — name it. A sink that publishes what
+     * it is handed has no such revision, which is why the default is null.
+     */
+    val candidateRevisionId: String? get() = null
+
     /** Keys a previous attempt committed for this document and fingerprint. */
     suspend fun committedKeys(
         documentId: DocumentId,

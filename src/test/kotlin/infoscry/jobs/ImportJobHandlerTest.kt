@@ -31,6 +31,9 @@ import infoscry.embedding.E5Embedder
 import infoscry.embedding.ModelManager
 import infoscry.embedding.TestDocumentEmbedder
 import infoscry.extract.OCR_FAILED_CODE
+import infoscry.llm.FakeOpenAiResponse
+import infoscry.llm.FakeOpenAiServer
+import infoscry.ocr.CandidateRevisionSink
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrExternalAccount
 import infoscry.ocr.OcrExternalOwner
@@ -39,10 +42,16 @@ import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.ExternalDispatchPermitRequest
 import infoscry.ocr.ImageLlmException
 import infoscry.ocr.PageDispatchIdentity
+import infoscry.ocr.PageImage
+import infoscry.ocr.PublicationDisposition
+import infoscry.ocr.ReviewerRecommendation
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import infoscry.storage.JobStore
 import infoscry.storage.OcrOperationStore
+import infoscry.storage.PageApproval
+import infoscry.search.SearchFilters
+import infoscry.search.SearchMode
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -58,6 +67,11 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 
 /**
  * What an import does with a directory of real files.
@@ -589,6 +603,228 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a check-and-improve import stages its pages as a candidate and leaves published content alone`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            // What admission does: the collection's check-and-improve selection becomes the attempt's settings.
+            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(
+                OcrSettingsSnapshot(
+                    engine = OcrEngine.SURYA,
+                    mode = OcrImportMode.CHECK_AND_IMPROVE,
+                    language = "eng",
+                    extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+                ),
+            )
+            var staged: CandidateRevisionSink? = null
+
+            val run = harness.importStaging(listOf(source), RecordingUnits(units = 2), settings) { staged = it }
+
+            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+            val document = run.documents.values.single()
+            // A reading nobody has decided about is not a finished document: it owes a person an answer, and
+            // a document waiting for one is not complete.
+            assertEquals(DocumentStatus.NEEDS_REVIEW, document.status)
+
+            val candidate = assertNotNull(assertNotNull(staged).candidateRevisionId, "the reading was staged")
+            AppContext.open(harness.dataDir).use { context ->
+                val pages = context.revisions.pages(candidate)
+                assertEquals(listOf(0, 1), pages.map { it.ordinal }, "every page the attempt read is staged")
+                assertTrue(pages.all { page -> page.approval == PageApproval.PENDING })
+
+                // Nothing of the reading reached what the document publishes or what a search reads: no
+                // content unit, no chunk, no index entry, and no revision the document would serve.
+                assertTrue(
+                    context.content.listUnits(document.id, -1, 10).isEmpty(),
+                    "a staged reading must not commit content units",
+                )
+                assertEquals(0, context.content.chunkCount(document.id))
+                assertEquals(0, context.index().chunkCount(CollectionId("default"), document.id))
+                assertNull(context.revisions.activeRevisionId(document.id))
+            }
+        }
+    }
+
+    @Test
+    fun `a check-and-improve import records a pending review for a page its reading disagrees with`() = runBlocking {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val reviewer = FakeOpenAiServer(
+                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
+            )
+            try {
+                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
+
+                val run = harness.importStaging(
+                    sources = listOf(source),
+                    extractor = CheckAndImprovePages(text = "name 123", reading = "name 128"),
+                    settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot),
+                    ocr = snapshot,
+                )
+
+                val document = run.documents.values.single()
+                assertEquals(
+                    DocumentStatus.NEEDS_REVIEW,
+                    document.status,
+                    "the reading was staged and judged: ${document.errorCode} ${document.errorMessage}",
+                )
+                AppContext.open(harness.dataDir).use { context ->
+                    val review = context.ocrReviews.pending(document.id).single()
+                    // The page's two readings differ, so a person has to decide which one stands — pilot mode
+                    // proposes, whatever the reviewer answered.
+                    assertEquals(PublicationDisposition.PROPOSE, review.disposition)
+                    assertEquals(ReviewerRecommendation.NEW_BETTER, review.recommendation)
+                    assertEquals(
+                        "page:1",
+                        review.unitId,
+                        "the review names the page its reading was made from, the identity the reading dispatched under",
+                    )
+                    assertEquals(0, review.ordinal)
+                    assertTrue(review.reasons.isNotEmpty(), "the reason about the difference is kept")
+                }
+                assertEquals(1, reviewer.handledRequests, "the page's two readings were judged by the reviewer")
+            } finally {
+                reviewer.close()
+            }
+        }
+    }
+
+    @Test
+    fun `a check-and-improve import publishes the pages it approved and leaves the rest pending`() = runBlocking {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val reviewer = FakeOpenAiServer(
+                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
+            )
+            try {
+                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
+
+                val run = harness.importStaging(
+                    sources = listOf(source),
+                    extractor = CheckAndImproveTwoPages(
+                        matchingText = "approved page text",
+                        differingText = "the page says one thing",
+                        differingReading = "the engine read another",
+                    ),
+                    settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot),
+                    ocr = snapshot,
+                )
+
+                // A reading whose pages are not all decided is neither finished nor failed: what it publishes
+                // is the part nobody has to decide about, and what it owes is a person's answer about the rest.
+                val document = run.documents.values.single()
+                assertEquals(DocumentStatus.NEEDS_REVIEW, document.status)
+                assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+                assertEquals(JobState.COMPLETE, run.job.state)
+
+                AppContext.open(harness.dataDir).use { context ->
+                    val candidate = assertNotNull(
+                        context.revisions.activeRevisionId(document.id),
+                        "an initial import publishes what it approved rather than waiting for every page",
+                    )
+                    assertEquals(
+                        listOf(PageApproval.APPROVED, PageApproval.PENDING),
+                        context.revisions.pages(candidate).map { page -> page.approval },
+                        "the page whose reading is the text it carries is approved; the other owes a decision",
+                    )
+
+                    // The approved page is the document's text and a reader can find it...
+                    assertEquals(
+                        listOf(0),
+                        context.content.listUnits(document.id, -1, 10).map { unit -> unit.ordinal },
+                        "only the approved page becomes content",
+                    )
+                    val hits = searchable(context, "approved")
+                    assertEquals(listOf("approved page text"), hits.map { hit -> hit.text })
+                    assertEquals(candidate, hits.single().revisionId, "the published text names its revision")
+
+                    // ...while the page nobody has decided about has no searchable text at all: not what the
+                    // engine read, and not what the page itself says, until a person decides which of the two
+                    // stands. Its image and its review are what a person works from instead.
+                    assertTrue(
+                        searchable(context, "engine").isEmpty(),
+                        "the reading of a page awaiting a decision was published",
+                    )
+                    assertTrue(
+                        searchable(context, "says").isEmpty(),
+                        "a page awaiting a decision published one of its readings anyway",
+                    )
+                    val review = context.ocrReviews.pending(document.id).single()
+                    assertEquals("page:2", review.unitId)
+                    assertEquals(PublicationDisposition.PROPOSE, review.disposition)
+                }
+                // Two pages, one comparison: the pair that says the same thing is sent to nobody.
+                assertEquals(1, reviewer.handledRequests)
+            } finally {
+                reviewer.close()
+            }
+        }
+    }
+
+    /** What a reader searching this collection finds, under the revision snapshot a reader is served. */
+    private fun searchable(context: AppContext, query: String) = context.search.search(
+        query,
+        SearchMode.KEYWORD,
+        SearchFilters(collectionId = CollectionId("default")),
+    ).hits
+
+    @Test
+    fun `a check-and-improve import whose reading matches the page's own text records no review`() = runBlocking {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val reviewer = FakeOpenAiServer(
+                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
+            )
+            try {
+                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
+
+                val run = harness.importStaging(
+                    sources = listOf(source),
+                    extractor = CheckAndImprovePages(text = "name 123", reading = "name 123"),
+                    settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot),
+                    ocr = snapshot,
+                )
+
+                AppContext.open(harness.dataDir).use { context ->
+                    assertTrue(
+                        context.ocrReviews.pending(run.documents.values.single().id).isEmpty(),
+                        "two identical readings are nothing anybody has to decide, so no review is written",
+                    )
+                }
+                assertEquals(0, reviewer.handledRequests, "a pair that does not differ is not sent to a reviewer")
+            } finally {
+                reviewer.close()
+            }
+        }
+    }
+
+    @Test
+    fun `a fill-missing import through the same pipeline still commits through the stored units`() {
+        withHarness { harness ->
+            val source = harness.writeText("plain.txt", "Ordinary text\n")
+            var staged: CandidateRevisionSink? = null
+
+            val run = harness.importStaging(
+                sources = listOf(source),
+                extractor = RecordingUnits(units = 2),
+                settings = ExtractionSettings(ocrLanguages = "eng"),
+            ) { staged = it }
+
+            assertNull(staged, "a fill-missing attempt has no candidate to stage into")
+            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+            val document = run.documents.values.single()
+            assertEquals(DocumentStatus.COMPLETE, document.status)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(
+                    listOf(0, 1),
+                    context.content.listUnits(document.id, -1, 10).map { it.ordinal },
+                    "the reading is committed as the document's content units",
+                )
+                assertEquals(2, context.index().chunkCount(CollectionId("default"), document.id))
+            }
+        }
+    }
+
+    @Test
     fun `an attempt reads under the runtime identity the job was admitted with, not one probed later`() {
         withHarness { harness ->
             val source = harness.writeText("scan.txt", "Ordinary text\n")
@@ -1036,6 +1272,18 @@ class ImportJobHandlerTest {
         }
     }
 
+    /**
+     * The OCR selection a check-and-improve import is admitted with when [reviewerRevisionId] judges its
+     * pages: every page is read by the local engine, and a reviewer is configured.
+     */
+    private fun reviewingSnapshot(reviewerRevisionId: String): OcrSettingsSnapshot = OcrSettingsSnapshot(
+        engine = OcrEngine.TESSERACT,
+        mode = OcrImportMode.CHECK_AND_IMPROVE,
+        language = "eng",
+        extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+        reviewProfileRevisionId = reviewerRevisionId,
+    )
+
     private fun withHarness(block: (Harness) -> Unit) {
         val directory = Files.createTempDirectory("infoscry-import")
         try {
@@ -1130,11 +1378,14 @@ internal class Harness(val directory: Path) : AutoCloseable {
     )
 
     /**
-     * The pipeline production runs, with one substitution: the extractor.
+     * The pipeline production runs for a reading that becomes published content, with one substitution: the
+     * extractor.
      *
      * The detector, the durable sink, and the store are the real ones, so a test that uses this exercises
      * what a real import actually commits — units, checkpoints, chunks, and the document's status — rather
-     * than a file the test wrote itself.
+     * than a file the test wrote itself. It wires no candidate, so a check-and-improve attempt through it
+     * commits the way every attempt did before a staged reading existed; [stagingPipeline] is the one that
+     * stages.
      */
     fun storedPipeline(context: AppContext, extractor: DocumentExtractor): ImportPipeline = ImportPipeline(
         detector = MediaTypeDetector(),
@@ -1154,6 +1405,48 @@ internal class Harness(val directory: Path) : AutoCloseable {
     ): ImportRun = AppContext.open(dataDir).use { context ->
         val job = enqueue(context, sources, settings, collectionId, recursive)
         attach(context, storedPipeline(context, extractor), embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
+        finish(context, job.id, collectionId)
+    }
+
+    /**
+     * The durable pipeline production runs for a check-and-improve attempt: the same real detector, unit
+     * store and revision store, plus the candidate a staged reading is held in.
+     *
+     * [onCandidate] is handed the sink the attempt opened, so a test reads the revision the reading became
+     * rather than a double's claim about it. `storedPipeline` above is the same pipeline without the
+     * candidate, which is what a test that only observes the settings a reading carries keeps using.
+     */
+    fun stagingPipeline(
+        context: AppContext,
+        extractor: DocumentExtractor,
+        onCandidate: (CandidateRevisionSink) -> Unit = {},
+    ): ImportPipeline {
+        val committed = StoredUnitsSink(context.paths, context.documents, context.content)
+        return ImportPipeline(
+            detector = MediaTypeDetector(),
+            registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
+            sink = committed,
+            candidateSinkFor = { documentId ->
+                CandidateRevisionSink(
+                    revisions = context.revisions,
+                    documentId = documentId,
+                    provenance = ImportPipeline.PROVENANCE_CHECK_AND_IMPROVE,
+                ).also(onCandidate)
+            },
+        )
+    }
+
+    /** One import through [stagingPipeline], from a fresh process over the same data directory. */
+    fun importStaging(
+        sources: List<Path>,
+        extractor: DocumentExtractor,
+        settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
+        collectionId: CollectionId = CollectionId("default"),
+        ocr: OcrSettingsSnapshot? = null,
+        onCandidate: (CandidateRevisionSink) -> Unit = {},
+    ): ImportRun = AppContext.open(dataDir).use { context ->
+        val job = enqueue(context, sources, settings, collectionId, ocr = ocr)
+        attach(context, stagingPipeline(context, extractor, onCandidate))
         finish(context, job.id, collectionId)
     }
 
@@ -1278,6 +1571,28 @@ internal class Harness(val directory: Path) : AutoCloseable {
                 endpoint = "https://example.invalid/v1",
                 inputPricePerMillion = 1.0,
                 outputPricePerMillion = 2.0,
+            ),
+            enabled = true,
+        )
+    }
+
+    /**
+     * An image-model *reviewer* profile whose endpoint is [endpoint], created through the real store.
+     *
+     * A loopback endpoint is what a test's scripted reviewer answers on, and it is local: nothing has to be
+     * approved for a review to be dispatched to it, which is exactly the state a loopback provider is in.
+     */
+    fun reviewProfile(endpoint: String): infoscry.ocr.OcrProfile = AppContext.open(dataDir).use { context ->
+        context.ocrProfiles.create(
+            name = "Vision reviewer",
+            draft = infoscry.ocr.OcrProfileRevisionDraft(
+                provider = infoscry.llm.LlmProvider.OPENAI_COMPATIBLE,
+                model = "vision-reviewer",
+                contextWindow = 32_000,
+                maxOutputTokens = 1_024,
+                endpoint = endpoint,
+                inputPricePerMillion = 1.0,
+                outputPricePerMillion = 1.0,
             ),
             enabled = true,
         )
@@ -1765,6 +2080,202 @@ internal class RefusingUnits(private val unitsBeforeRefusing: Int) : DocumentExt
         }
     }
 }
+
+/**
+ * An extractor that reads every page's image even though the page carries text, as check-and-improve does.
+ *
+ * It leaves the raster a real render would leave under the document's artifacts and hands *both* readings to
+ * the sink: what the engine read from the pixels, and the text the page itself carries beside it. [text] and
+ * [reading] are the pair a person has to decide between.
+ */
+internal class CheckAndImprovePages(
+    private val text: String,
+    private val reading: String,
+) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        if (!input.isCommitted(PAGE_KEY)) {
+            val image = renderedPage(input)
+            input.boundary.unit {
+                emit(
+                    ExtractionEvent.UnitReady(
+                        key = PAGE_KEY,
+                        ordinal = PAGE_ORDINAL,
+                        unit = ContentUnitDraft(
+                            locator = SourceLocation.PdfPage(PAGE_ORDINAL + 1),
+                            extractedText = reading,
+                            searchText = reading,
+                            method = ExtractionMethod.OCR,
+                            meanConfidence = 0.9,
+                            // The image the engine read the page from, named the way a render names it, so a
+                            // later phase can rebuild those exact pixels for a reviewer.
+                            sourceImage = image.artifactProvenance(input.artifactRoot),
+                            directText = text,
+                        ),
+                    ),
+                )
+            }
+        }
+        input.boundary.unit { emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = 1)) }
+    }
+
+    /** The page image a reader of this page would have handed to the engine, as its own artifact. */
+    private fun renderedPage(input: ExtractionInput): PageImage {
+        val file = input.artifactRoot.resolve(PAGE_IMAGE_NAME)
+        Files.createDirectories(input.artifactRoot)
+        writePng(file)
+        return PageImage.ofFile(
+            documentId = input.documentId,
+            unitId = PAGE_KEY,
+            ordinal = PAGE_ORDINAL,
+            imageRoot = input.artifactRoot,
+            imageReference = PAGE_IMAGE_NAME,
+            artifactRoot = input.artifactRoot,
+            renderDpi = null,
+            rotationDegrees = 0,
+        )
+    }
+
+    private companion object {
+        const val PAGE_KEY = "page:1"
+        const val PAGE_ORDINAL = 0
+        const val PAGE_IMAGE_NAME = "page-000001.png"
+    }
+}
+
+/**
+ * Two pages of one file under check-and-improve, one of which says what the page carries and one of which does
+ * not, so an import of it has a page nobody owes a decision about beside one somebody does.
+ *
+ * Both pages carry a text layer, which is what the mode compares against: the first page's engine reading is
+ * the text the page itself holds, and the second page's reading differs from it.
+ */
+internal class CheckAndImproveTwoPages(
+    /** The text the first page carries, which its reading says too. */
+    private val matchingText: String,
+    /** The text the second page carries. */
+    private val differingText: String,
+    /** What the engine read from the second page's pixels, which is not what the page carries. */
+    private val differingReading: String,
+) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        pages().forEach { page ->
+            if (input.isCommitted(page.key)) return@forEach
+            val image = renderedPage(input, page.key, page.ordinal)
+            input.boundary.unit {
+                emit(
+                    ExtractionEvent.UnitReady(
+                        key = page.key,
+                        ordinal = page.ordinal,
+                        unit = ContentUnitDraft(
+                            locator = SourceLocation.PdfPage(page.ordinal + 1),
+                            extractedText = page.reading,
+                            searchText = page.reading,
+                            method = ExtractionMethod.OCR,
+                            meanConfidence = 0.9,
+                            sourceImage = image.artifactProvenance(input.artifactRoot),
+                            directText = page.directText,
+                        ),
+                    ),
+                )
+            }
+        }
+        input.boundary.unit { emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = pages().size)) }
+    }
+
+    /** The two pages, and the pair each one is judged by. */
+    private fun pages() = listOf(
+        Page(key = "page:1", ordinal = 0, directText = matchingText, reading = matchingText),
+        Page(key = "page:2", ordinal = 1, directText = differingText, reading = differingReading),
+    )
+
+    private data class Page(
+        val key: String,
+        val ordinal: Int,
+        val directText: String,
+        val reading: String,
+    )
+
+    /** The page image a reader of this page would have handed to the engine, as its own artifact. */
+    private fun renderedPage(input: ExtractionInput, key: String, ordinal: Int): PageImage {
+        val name = "page-00000${ordinal + 1}.png"
+        val file = input.artifactRoot.resolve(name)
+        Files.createDirectories(input.artifactRoot)
+        writePng(file)
+        return PageImage.ofFile(
+            documentId = input.documentId,
+            unitId = key,
+            ordinal = ordinal,
+            imageRoot = input.artifactRoot,
+            imageReference = name,
+            artifactRoot = input.artifactRoot,
+            renderDpi = null,
+            rotationDegrees = 0,
+        )
+    }
+}
+
+/**
+ * Writes a PNG, so a page image rebuilt from a provenance has real pixels to verify its hash against.
+ */
+private fun writePng(path: Path) {
+    val image = java.awt.image.BufferedImage(24, 16, java.awt.image.BufferedImage.TYPE_INT_RGB)
+    val graphics = image.createGraphics()
+    try {
+        graphics.color = java.awt.Color.WHITE
+        graphics.fillRect(0, 0, image.width, image.height)
+    } finally {
+        graphics.dispose()
+    }
+    check(javax.imageio.ImageIO.write(image, "png", path.toFile())) { "no PNG writer is available" }
+}
+
+/**
+ * The one page's worth of data the scripted reviewer answers about, for the pair its reading is compared with.
+ */
+private const val PAGE_KEY_FOR_REVIEW = "page:1"
+
+/**
+ * The answer an image-model reviewer gives: which side it prefers, and where the two readings differ.
+ *
+ * The unit id and ordinal are the page identity the request names, which is what the client checks an answer
+ * against, and the spans are the place the number differs in "name 123" and "name 128" — the pair the
+ * check-and-improve import of [CheckAndImprovePages] compares.
+ */
+private fun reviewAnswer(recommendation: String): String = buildJsonObject {
+    put("unitId", PAGE_KEY_FOR_REVIEW)
+    put("ordinal", 0)
+    put("recommendation", recommendation)
+    put("confidence", 0.9)
+    putJsonArray("reasons") {
+        addJsonObject {
+            put("explanation", "the number in the name differs")
+            put("aStart", 5)
+            put("aEnd", 8)
+            put("bStart", 5)
+            put("bEnd", 8)
+        }
+    }
+}.toString()
+
+/** One OpenAI-compatible envelope whose single answer is [content]. */
+private fun reviewEnvelope(content: String): String = buildJsonObject {
+    put("model", "vision-reviewer-2026-02-01")
+    putJsonArray("choices") {
+        addJsonObject {
+            put("finish_reason", "stop")
+            putJsonObject("message") {
+                put("role", "assistant")
+                put("content", content)
+            }
+        }
+    }
+}.toString()
 
 /** Fails the test rather than hanging it when a job never reaches a terminal state. */
 internal suspend fun awaitTerminal(context: AppContext, id: JobId): Job {

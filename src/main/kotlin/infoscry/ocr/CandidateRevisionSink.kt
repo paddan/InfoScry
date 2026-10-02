@@ -24,8 +24,10 @@ import infoscry.storage.RevisionPageDraft
  * - **No chunks and no embeddings.** A page is staged with its text; turning that text into passages and
  *   vectors is a later stage of a durable operation, and a staging that embedded as a side effect would
  *   hold the mutation permit for the accelerator and make a resume depend on it.
- * - **No approvals.** Every staged page is pending: what may replace published text is a review decision,
- *   and an attempt is not one.
+ * - **No approvals.** Every page it stages is pending: what may replace published text is a review decision,
+ *   and an attempt is not one. A page the attempt's own comparison found nothing to decide about is approved
+ *   by that attempt once the page exists — the staged reading is the text the page already carried, which is
+ *   not a decision either — and never by this sink.
  * - **No progress and no completion.** The caller owns the operation's progress, and the pages it reads
  *   back are the answer to "how far did this get". The flow is collected inline, so a page is staged before
  *   the next event is delivered and therefore before any progress the caller writes afterwards.
@@ -65,8 +67,11 @@ class CandidateRevisionSink(
 
     override val storesUnits: Boolean = true
 
+    /** Every page this sink stages is pending, so the reading it took is a proposal and not published text. */
+    override val stagesForReview: Boolean = true
+
     /** The candidate this sink stages into, or `null` while it has staged nothing. */
-    val candidateRevisionId: String? get() = candidate
+    override val candidateRevisionId: String? get() = candidate
 
     /**
      * The keys staged for *this* reading of *this* document.

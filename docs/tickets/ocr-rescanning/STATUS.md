@@ -11,11 +11,9 @@
 **Spec:** [2026-09-30 OCR design](../../specs/2026-09-30-ocr-rescanning.md).
 **Contracts:** [Shared interfaces, constraints and test gates](CONTRACTS.md).
 
-Product decisions and documentation were authorized on 2026-09-30. Tickets 01, 02, 03, 04, 05 and 06 are
-implemented and verified; ticket 07 is partially implemented (its rescan path is verified) and ticket 07b is
-partially implemented (its admission, approval, claiming and status work is verified; the import's
-`CHECK_AND_IMPROVE` comparison and review is open); tickets 02b, 03b and 08-11 have not started. Ticket
-decomposition and technical
+Product decisions and documentation were authorized on 2026-09-30. Tickets 01, 02, 03, 04, 05, 06 and 07b are
+implemented and verified, and ticket 07 is implemented for its rescan path (its whole deliverable is covered
+with 07b); tickets 02b, 03b and 08-11 have not started. Ticket decomposition and technical
 defaults are engineering proposals within that scope, not verified product behavior. No implementation,
 installation, model download, private-data experiment, commit or push is implicitly authorized by this
 document.
@@ -43,7 +41,7 @@ document.
 | [05 — Image-based LLM transcription and profile capability](05-image-llm.md) | 03 | Done — `ImageLlmClient` speaks both image protocols from the page's own bytes (hash-checked, format-checked, `max_tokens`-bounded, response-size bounded, per-attempt timeout, bounded retries on 429/5xx only, redirects refused unfollowed, whole request budgeted against the window and reserved output, resolved model version carried back) and refuses a non-local destination without ticket 07's permit validator; `LlmOcr` reads only through the snapshotted revision and the shipped prompt version; `prompts/ocr-transcription.txt` v1 ships with the transcription schema; `POST /api/ocr/profiles/{profileId}/probe` sends only the synthetic image and records `imageCapabilityMeasured`/`imageCapabilityCheckedAt`; focused suites green with both key invariants proven by guard-revert runs, and `./gradlew check` green (102 suites, 1268 tests, 0 failures, 15m55s); a security round closed the credentialed-endpoint hole across the OCR, LLM and catalog validators and remediated stored ones with migration 020 (credential removed, repaired conversation snapshots marked, repaired profiles switched off), and made "a switched-off profile is not a dispatch destination" hold at the routes, the CLI and the services that dispatch; a migration delimiter bug the parent found (`COALESCE` order, which would have rewritten `https://host?email=a@b/c` into `https://b/c`) was fixed and is covered by regression cases. Unverified: no real provider gate (ticket 10), and the engine is deliberately not wired into `ExtractorRegistry` — that is ticket 07's admission path (external-page accounting, previews, approval) |
 | [06 — Image-grounded comparison and pilot decisions](06-comparison.md) | 03, 05 | Done — deterministic diagnostics, the side-neutral A/B review call (prompt v2) with its answer mapped to the application's vocabulary in code, pilot mode enforced server-side so every difference is `PROPOSE`, durable reviews keyed by baseline/candidate/reviewer/prompt/policy, identical-nonblank no-ops, empty pairs pending and unsearchable, and failures that keep the baseline with zero re-transcription; `./gradlew check` green (104 suites, 1313 tests, 0 failures, 15m53s); four review rounds made approval structural (a policy that holds the review store, whose acceptance can only be resolved from a live row) and verified baselines against the stored revision page before every shortcut |
 | [07 — Rescan jobs, import modes and external approval](07-jobs-and-admission.md) | 04, 05, 06 | Partially implemented — the rescan path is verified: `RESCAN` job type and operation record (migration 023), preview/admission with request-id idempotency, per-page checkpoints and bounded cancellation, external-page accounting, `AWAITING_APPROVAL`, comparison and review wiring, decisions and publication, and operation ownership that holds a document while an operation is unfinished or awaiting review (migration 024 adds review-pending imports); `./gradlew check` green after three hand repairs (106 suites, 1340 tests, 0 failures, 16m27s). The import half executes none of what it admits, admission does not revalidate the whole settings snapshot, and resume/approval can start a second attempt — all carried by 07b |
-| [07b — Import execution, admission revalidation and attempt claiming](07b-import-execution-and-admission.md) | 07 | Partially implemented — verified: job-owned external approval with `AWAITING_APPROVAL`, the two-file allowance with distinct pages counted once and calls separately, full settings revalidation at admission, attempt claiming through `OcrOperationStore.startAttempt`, the CLI surfacing a waiting-approval requirement, the admitted runtime identity carried into execution, `NEEDS_REVIEW` reachable and a finished status for imports, and a page carrying its direct text beside the engine's reading (`ContentUnitDraft.directText`, set only when every page is read so `FILL_MISSING` is unchanged); my `./gradlew check` green (106 suites, 1358 tests, 0 failures, 16m43s). **Open (largest remaining item):** the import's compare/review/publication, which needs the rescan handler's private candidate phases extracted into a shared component, the page image on the draft or rebuilt from provenance, and per-document sink selection; it is gated on the publication question recorded in the ticket |
+| [07b — Import execution, admission revalidation and attempt claiming](07b-import-execution-and-admission.md) | 07 | Done — job-owned external approval with `AWAITING_APPROVAL`, the two-file allowance (distinct pages once, calls apart), settings revalidation at admission, attempt claiming through `OcrOperationStore.startAttempt`, the CLI surfacing a waiting-approval requirement, the admitted runtime identity carried into execution, `NEEDS_REVIEW` reachable and a finished status for imports, and a check-and-improve import that compares each page against its own text, records the reviews a person owes, publishes the pages it approved and leaves pending pages with no content unit, chunk or index row (rescans keep all-or-nothing refusal). Focused suites green (26 suites / 542 tests; a forced 2m34s run over jobs/document/ocr/extract). Residuals in the ticket: no decision surface for an import's pending pages yet (ticket 08), a pure scan in check-and-improve publishes nothing by design, the embedder is now required, a check-and-improve retry stages without reviews, and external review dispatch is untested because the tests are loopback |
 | [08 — Admin profiles, collection controls and page review](08-admin-and-review.md) | 07 | Not started |
 | [09 — Revision history and explicit restoration](09-history-and-restore.md) | 08 | Not started |
 | [10 — Integrated browser and real-runtime acceptance](10-integrated-acceptance.md) | 09 | Not started |
@@ -256,6 +254,18 @@ Residuals also recorded: the review's remaining P2s — the import admission sna
 identity (it is re-probed in `DocumentIngest`, so a restart could resume under a newly discovered runtime),
 and `OcrRoutes` already exposes review-decision/publication and revision endpoints that belong to tickets 08
 and 09.
+
+### Ticket 07b's finished sequence (baby steps)
+
+The import half was finished in five small steps, each verified by a forced focused run of my own rather than by
+its report alone: candidate phases extracted from the rescan handler into `CandidateRevisionPhases.kt` (986 →
+709 lines, bodies moved not copied); `PageImage.ofProvenance` rebuilding a staged page's image and refusing
+changed bytes; per-document sink selection so a check-and-improve import stages a candidate while `FILL_MISSING`
+keeps the stored-units path; the comparison and review recorded while the draft is in hand (the reviewer factory
+moved to `StagedPageReview.kt`); and publication of an initial import's approved pages through the shared
+phases, with the rescan rule untouched. The product rule behind the last step came from the owner: an initial
+import publishes its approved pages because there is no earlier reading to protect, while a rescan stays
+all-or-nothing because its base revision is already serving readers.
 
 ## Ticket 07b verification record
 

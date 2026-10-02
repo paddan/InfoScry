@@ -131,7 +131,7 @@ class RevisionPublicationService(
 
         // 1a. A target that cannot become a published reading is refused durably, in the words of what it
         //     is waiting for. Nothing is staged, nothing is hidden, and the baseline is untouched.
-        val refusal = refusalFor(candidateRevisionId)
+        val refusal = refusalFor(candidateRevisionId, baseRevisionId)
         if (refusal != null) {
             val refused = revisions.prepare(
                 documentId = documentId,
@@ -143,7 +143,11 @@ class RevisionPublicationService(
             return refused.id
         }
 
-        val pages = revisions.pages(candidateRevisionId)
+        // The pages this attempt publishes are the target's approved ones. For a replacement that is every
+        // page of the target, because a single unapproved page refused it above; for an initial import it is
+        // the pages nobody owes a decision about, and the pages that still owe one are left out of the
+        // reading rather than published as though their text had been accepted.
+        val pages = publishablePages(candidateRevisionId)
         val chunks = revisions.chunks(candidateRevisionId)
 
         // 1b. Persist the intent. Its durable artifacts are already the revision's own pages, chunks and
@@ -310,7 +314,9 @@ class RevisionPublicationService(
 
     /** Finishes a publication whose authority is already durable, from its own staged artifacts. */
     private suspend fun complete(intent: PublicationIntent, observe: (PublicationStep) -> Unit) {
-        val pages = revisions.pages(intent.targetRevisionId)
+        // The same set the authority was committed with: finishing a publication must not stage a row for a
+        // page whose text this attempt did not publish.
+        val pages = publishablePages(intent.targetRevisionId)
         val chunks = revisions.chunks(intent.targetRevisionId)
         if (pages.isEmpty() || chunks.any { !it.isStaged }) {
             // The intent was admitted only with a complete set of artifacts, so this is a damaged archive
@@ -411,18 +417,40 @@ class RevisionPublicationService(
     }
 
     /**
+     * The pages of a target revision this archive may publish.
+     *
+     * Only an approved page is text somebody accepted. A replacement's approval is decided as a whole by
+     * [refusalFor], so nothing is filtered away there; an initial import publishes the pages it has approved,
+     * and this is where the pages that still owe a decision are left out of the reading.
+     */
+    private fun publishablePages(revisionId: String): List<RevisionPageText> =
+        revisions.pages(revisionId).filter { page -> page.approval == PageApproval.APPROVED }
+
+    /**
      * The reasons a candidate cannot be published yet, as a code and an actionable sentence.
      *
-     * A page that has not been approved is not a failure of the publication: it is a document waiting for
-     * a review decision, and publishing the approved pages alone would silently drop the rest of the
-     * document. Every page of the revision therefore has to be approved before any of it is published.
+     * A page that has not been approved is not a failure of the publication: it is a document waiting for a
+     * review decision. What it costs depends on what is being replaced.
+     *
+     * A *replacement* publishes every page of the target or none of them: its base revision is already
+     * serving readers, and publishing the approved pages alone would silently drop text a reader can search
+     * today. One unapproved page therefore refuses the whole replacement.
+     *
+     * An *initial* import has no earlier reading to protect. The spec lets it publish the pages it has
+     * approved while the rest have image access and pending-review state but no searchable text, so it is
+     * refused only when no page at all is approved: a reading nobody has decided about is not text to serve.
      */
-    private fun refusalFor(revisionId: String): Pair<String, String>? {
+    private fun refusalFor(revisionId: String, baseRevisionId: String?): Pair<String, String>? {
         val pages = revisions.pages(revisionId)
-        if (pages.isEmpty() || pages.any { it.approval != PageApproval.APPROVED }) {
-            return AWAITING_REVIEW_CODE to
+        val approved = pages.count { page -> page.approval == PageApproval.APPROVED }
+        if (approved == 0 || (baseRevisionId != null && approved != pages.size)) {
+            return AWAITING_REVIEW_CODE to if (baseRevisionId == null) {
+                "no page of this reading has been approved yet; nothing was published and every page of it " +
+                    "stays pending review"
+            } else {
                 "the replacement's text has not been fully approved yet; no page was published and the " +
-                "document still shows its current text"
+                    "document still shows its current text"
+            }
         }
         val chunks = revisions.chunks(revisionId)
         if (chunks.isEmpty()) {

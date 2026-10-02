@@ -276,6 +276,62 @@ data class PageImage(
             )
         }
 
+        /**
+         * The page image a durable record's provenance names, rebuilt from what the record kept.
+         *
+         * A record keeps the reference, the hash, the dimensions and the rendering version of the pixels a
+         * reading was made from and nothing else, so anything that has to look at those pixels again later —
+         * a comparison, a reviewer, a person opening the page — has to rebuild the page image from them. The
+         * root the reference resolves against is the one the provenance itself names: the document's artifact
+         * root for a page this pipeline rendered or copied, and the directory holding the managed copy for a
+         * picture that *is* the document.
+         *
+         * The rebuilt image is only produced while the artifact is still the one the record names. An
+         * artifact that was replaced, truncated or removed is not the image the page was read from, and
+         * showing it under that page's name would attribute a reading to pixels it never saw; the hash and
+         * the dimensions are read back from the file, as they are from any artifact this pipeline names.
+         *
+         * What the record does not keep is the resolution a render chose and the rotation a page declared,
+         * so a rebuilt image names no resolution and declares no rotation of its own: the pixels already
+         * carry the rotation an engine applied, and a page whose record cannot say which resolution it was
+         * rendered at must not invent one.
+         *
+         * @throws IllegalStateException when the artifact is gone or is no longer the bytes the record names.
+         */
+        fun ofProvenance(
+            documentId: DocumentId,
+            unitId: String,
+            ordinal: Int,
+            provenance: SourceImageProvenance,
+            artifactRoot: Path,
+            managedCopyRoot: Path,
+        ): PageImage {
+            val imageRoot = when (provenance.root) {
+                SourceImageRoot.ARTIFACTS -> artifactRoot
+                SourceImageRoot.MANAGED_COPY -> managedCopyRoot
+            }
+            val path = resolveInside(imageRoot, provenance.relativePath)
+            check(Files.isRegularFile(path)) {
+                "the image this page's record names is not there any more, so the page cannot be read from it"
+            }
+            val image = ofFile(
+                documentId = documentId,
+                unitId = unitId,
+                ordinal = ordinal,
+                imageRoot = imageRoot,
+                imageReference = provenance.relativePath,
+                artifactRoot = artifactRoot,
+                renderDpi = null,
+                rotationDegrees = NO_DECLARED_ROTATION,
+                renderVersion = provenance.renderVersion,
+            )
+            check(image.sha256 == provenance.sha256) {
+                "the image this page's record names is no longer the image that page was read from, so it is " +
+                    "not the page a comparison may be made against"
+            }
+            return image
+        }
+
         /** The pixel dimensions an image file declares, or `null` when it is not one this build reads. */
         private fun imageSize(path: Path): Pair<Int, Int>? = try {
             ImageIO.createImageInputStream(path.toFile())?.use { stream ->
@@ -356,6 +412,12 @@ data class PageImage(
         private fun Char.isHexCharacter(): Boolean = this in '0'..'9' || this in 'a'..'f'
         private const val MAX_REPORTED_HASH_CHARACTERS: Int = 16
         private const val MAX_ROTATION_DEGREES: Int = 359
+
+        /**
+         * The rotation a page image declares when nothing declares one for it: an imported picture, or a page
+         * rebuilt from a record that kept no rotation.
+         */
+        private const val NO_DECLARED_ROTATION: Int = 0
     }
 }
 

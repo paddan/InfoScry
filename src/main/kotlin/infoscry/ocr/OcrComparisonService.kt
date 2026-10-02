@@ -94,6 +94,14 @@ class OcrComparisonException(val code: String, message: String) : IllegalStateEx
  * revision holds for the page at [PageComparisonInput.ordinal], because the service verifies the supplied
  * text, hash, unit and ordinal against that revision before anything is compared. A page image of a document
  * with published text is therefore named as the revision names it, not by a name of the producer's choosing.
+ *
+ * A baseline that is the page's own text rather than a published reading is the third shape: an import in
+ * check-and-improve mode compares what an engine read from a page's pixels with the text layer of the file it
+ * is importing, and that text was never published, so the comparison names it and no revision — and no hash,
+ * because a hash is how a caller names the text of a *stored* page for this service to verify, and there is no
+ * stored page here. What such a comparison is about is therefore the text it holds, the reading it stages and
+ * the image they were both about; the review it produces carries no baseline revision or hash, exactly as a
+ * page with nothing published does.
  */
 data class PageComparisonInput(
     val page: PageImage,
@@ -119,15 +127,23 @@ data class PageComparisonInput(
         require(reviewProfileRevisionId.isNotBlank()) {
             "a comparison names the reviewer revision that is to judge it"
         }
-        require((baselineRevisionId == null) == (baselineText == null)) {
-            "a baseline is named revision and text together, or it is absent: a page with no published text " +
-                "has no baseline rather than an empty one"
+        // The three shapes a baseline comes in, and what each must carry: absent for a page with nothing to
+        // compare against; revision, text and hash together for a reading the archive publishes, because that
+        // is what the service verifies the supplied text against; and a bare text for a reading the caller
+        // holds, which names neither revision nor hash because nothing stored holds it.
+        require(baselineRevisionId == null || baselineText != null) {
+            "a baseline that names a revision names the text of that revision's page: a published reading is " +
+                "not compared against nothing"
         }
-        require((baselineText == null) == (baselineTextHash == null)) {
-            "a baseline is named with the hash of its text or not at all, because a text nobody can verify " +
-                "is not the reading this comparison may claim to be about"
+        require(baselineRevisionId == null || baselineTextHash != null) {
+            "a baseline that names a revision names the hash of its text, because that is what a stored page " +
+                "is verified against"
         }
-        require(baselineText == null || readingTextHash(baselineText) == baselineTextHash) {
+        require(baselineRevisionId != null || baselineTextHash == null) {
+            "only a baseline the archive publishes is named by a hash: a reading the caller holds has no stored " +
+                "page to verify it against, and a hash that names nothing is not this comparison's baseline"
+        }
+        require(baselineTextHash == null || readingTextHash(checkNotNull(baselineText)) == baselineTextHash) {
             "the baseline text is not the text this comparison names by hash, so the reading it holds is not " +
                 "the reading it says it is"
         }

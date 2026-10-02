@@ -5,25 +5,19 @@ import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.CollectionId
-import infoscry.domain.ContentUnit
-import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
-import infoscry.domain.ExtractionMethod
 import infoscry.domain.Job
-import infoscry.domain.SourceImageProvenance
-import infoscry.domain.SourceLocation
 import infoscry.document.PageReviewer
 import infoscry.document.RescanPage
 import infoscry.document.RescanPageSource
 import infoscry.document.RevisionPublicationService
 import infoscry.embedding.DocumentEmbedder
 import infoscry.extract.OcrUnavailableException
-import infoscry.extract.TextNormalizer
 import infoscry.library.ManagedLibrary
+import infoscry.ocr.CandidateRevisionPhases
 import infoscry.ocr.ImageLlmException
 import infoscry.ocr.OcrComparisonException
-import infoscry.ocr.OcrDecisionPolicy
 import infoscry.ocr.OcrDispatchAuthority
 import infoscry.ocr.OcrDispatchStage
 import infoscry.ocr.OcrEndpointScope
@@ -34,13 +28,12 @@ import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrProfileRevision
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PageComparisonInput
-import infoscry.ocr.PageDiagnostics
-import infoscry.ocr.PageImage
 import infoscry.ocr.PageOcrEngine
 import infoscry.ocr.PageReview
 import infoscry.ocr.PublicationDisposition
-import infoscry.ocr.ReviewerRecommendation
-import infoscry.ocr.ReviewerScope
+import infoscry.ocr.RescanAttemptFailedException
+import infoscry.ocr.StagedCandidatePage
+import infoscry.ocr.failAttempt
 import infoscry.ocr.readingTextHash
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
@@ -52,8 +45,6 @@ import infoscry.storage.MutationCoordinator
 import infoscry.storage.OcrOperationStore
 import infoscry.storage.OcrReviewStore
 import infoscry.storage.PageApproval
-import infoscry.storage.PublicationPhase
-import infoscry.storage.RevisionPageDraft
 import infoscry.storage.RevisionPageText
 import java.io.IOException
 import java.nio.file.Files
@@ -64,19 +55,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
-
-/**
- * One page's outcome as the attempt stages it: the text that would be published for it, and whether a person
- * still has to decide about it.
- */
-internal data class StagedCandidatePage(
-    val text: String,
-    val approval: PageApproval,
-    val disposition: PublicationDisposition,
-    val confidence: Double?,
-    val artifactRelativePath: String?,
-    val artifactSha256: String?,
-)
 
 /**
  * Reads a published document's pages again and replaces its text through a whole reviewed revision.
@@ -121,6 +99,14 @@ class RescanJobHandler internal constructor(
     private val profileRevisionOf: (String) -> OcrProfileRevision?,
     private val pages: RescanPageSource = RescanPageSource(),
 ) : JobHandler {
+
+    /** What a staged reading becomes: the page it is decided to be, its passages, and the publication. */
+    private val phases = CandidateRevisionPhases(
+        revisions = revisions,
+        chunker = chunker,
+        operations = operations,
+        publication = publication,
+    )
 
     override suspend fun handle(job: Job, stage: JobStage) {
         val payload = RescanJobPayload.decode(job.payload)
@@ -325,10 +311,13 @@ class RescanJobHandler internal constructor(
                 pauseForApproval(job, operation, stage)
                 return
             }
-            val stagedPage = outcome.reading?.let { reading -> acceptedPageOf(page, reading, review) }
+            val stagedPage = outcome.reading?.let { reading -> phases.acceptedPageOf(page, reading, review) }
             stage.run(STAGE_COMMIT) {
                 if (stagedPage != null) {
-                    revisions.appendPage(candidate, draftOf(page, document, stagedPage, documentArtifactRoot))
+                    revisions.appendPage(
+                        candidate,
+                        phases.draftOf(page, document, stagedPage, documentArtifactRoot),
+                    )
                     committed++
                 } else {
                     // A page with no usable reading keeps what the document publishes for it. That is staged
@@ -338,7 +327,7 @@ class RescanJobHandler internal constructor(
                     page.baseline?.let { baselinePage ->
                         revisions.appendPage(
                             candidate,
-                            draftOf(
+                            phases.draftOf(
                                 page = page,
                                 document = document,
                                 stagedPage = StagedCandidatePage(
@@ -382,15 +371,20 @@ class RescanJobHandler internal constructor(
 
         // ---- phase 2: chunk what was staged ----
         stage.run(STAGE_CHUNK) { operations.advance(operation.operationId, OcrOperationStage.CHUNKING) }
-        chunkCandidate(operation.operationId, candidate, document, stage)
+        phases.chunkCandidate(operation.operationId, candidate, document, stage)
 
         // ---- phase 3: embed the passages that have no vector ----
         stage.run(STAGE_EMBED) { operations.advance(operation.operationId, OcrOperationStage.EMBEDDING) }
-        embedCandidate(candidate, embedder, stage)
+        phases.embedCandidate(candidate, embedder, stage)
 
         // ---- phase 4: publish the whole revision, or leave the document's text alone ----
         stage.run(STAGE_INDEX) { operations.advance(operation.operationId, OcrOperationStage.INDEXING) }
-        publishCandidate(operation, candidate, stage)
+        if (phases.publishCandidate(operation, candidate, stage)) {
+            LOGGER.atInfo()
+                .addKeyValue(DOCUMENT_FIELD, operation.documentId.value)
+                .addKeyValue(OPERATION_FIELD, operation.operationId)
+                .log("a rescan published a replacement revision")
+        }
     }
 
     // ---- one page ----
@@ -492,266 +486,6 @@ class RescanJobHandler internal constructor(
     }
 
     /**
-     * What the candidate page becomes: which text is proposed for it, and whether a person still has to
-     * decide.
-     *
-     * The rules the archive promises, in one place:
-     *
-     * - A reviewer that recommends the new reading does **not** replace anything in pilot mode: the page is
-     *   staged as a proposal, and its text becomes searchable only after a person approves it.
-     * - A page that keeps the text it already publishes is staged *approved* with that text: retaining it is
-     *   not a decision anybody owes, and a revision that holds what the document already said is complete.
-     * - A page with **no** published text is never approved by an engine or a model. Whatever it proposes
-     *   stays pending and outside retrieval until a person decides, which is what "an uncertain proposal
-     *   outside search" means for a document that had no text there.
-     */
-    private fun acceptedPageOf(
-        page: RescanPage,
-        reading: OcrPageResult,
-        review: PageReview?,
-    ): StagedCandidatePage {
-        val baseline = page.baseline
-        val disposition = review?.disposition ?: deterministicDisposition(page, reading)
-        return when {
-            disposition == PublicationDisposition.KEEP && baseline != null -> StagedCandidatePage(
-                text = baseline.extractedText,
-                approval = PageApproval.APPROVED,
-                disposition = disposition,
-                confidence = baseline.meanConfidence,
-                artifactRelativePath = baseline.artifactRelativePath,
-                artifactSha256 = baseline.artifactSha256,
-            )
-
-            disposition == PublicationDisposition.APPROVE && baseline != null -> StagedCandidatePage(
-                text = reading.text,
-                approval = PageApproval.APPROVED,
-                disposition = disposition,
-                confidence = reading.meanConfidence,
-                artifactRelativePath = reading.artifactRelativePath,
-                artifactSha256 = reading.artifactSha256,
-            )
-
-            else -> StagedCandidatePage(
-                text = reading.text,
-                approval = PageApproval.PENDING,
-                disposition = PublicationDisposition.PROPOSE,
-                confidence = reading.meanConfidence,
-                artifactRelativePath = reading.artifactRelativePath,
-                artifactSha256 = reading.artifactSha256,
-            )
-        }
-    }
-
-    /**
-     * What the deterministic checks alone decide about a page with no reviewer configured.
-     *
-     * An identical non-empty pair keeps the text: there is nothing to replace, and nobody has to confirm that
-     * a page still says what it said. Everything else is a proposal, because replacing text without a person
-     * is what pilot mode does not do — and the acceptance question cannot be answered here at all, because
-     * there is no reviewer revision a measured acceptance could have been about.
-     */
-    private fun deterministicDisposition(page: RescanPage, reading: OcrPageResult): PublicationDisposition {
-        val baselineText = page.baseline?.extractedText
-        if (baselineText != null && baselineText.isNotBlank() && baselineText == reading.text) {
-            return PublicationDisposition.KEEP
-        }
-        return OcrDecisionPolicy().disposition(
-            diagnostics = PageDiagnostics.of(baselineText, reading.text),
-            recommendation = ReviewerRecommendation.UNCERTAIN,
-            scope = ReviewerScope(reviewerRevisionId = NO_REVIEWER, reviewPromptVersion = 1),
-        )
-    }
-
-    /** One staged page, in the form the revision store takes it. */
-    private fun draftOf(
-        page: RescanPage,
-        document: Document,
-        stagedPage: StagedCandidatePage,
-        documentArtifactRoot: Path,
-    ): RevisionPageDraft {
-        val normalised = TextNormalizer.normalize(stagedPage.text)
-        return RevisionPageDraft(
-            ordinal = page.image.ordinal,
-            unitId = ContentUnitId(page.image.unitId),
-            locator = locatorOf(page, document),
-            extractedText = normalised.extracted,
-            searchText = normalised.search,
-            extractionMethod = ExtractionMethod.OCR,
-            meanConfidence = stagedPage.confidence,
-            artifactRelativePath = stagedPage.artifactRelativePath,
-            artifactSha256 = stagedPage.artifactSha256,
-            // Which file the reading was made from, named against the root it actually lives under: the page
-            // of a PDF this attempt rendered, or the managed copy that *is* a picture document. The two roots
-            // are not interchangeable — a reference that resolved against the artifact root would name a file
-            // outside it for a picture — and a reader shown the pixels a reading was made from needs both the
-            // reference and the hash it verifies against.
-            sourceImage = provenanceOf(page.image, documentArtifactRoot),
-            approval = stagedPage.approval,
-        )
-    }
-
-    /**
-     * Which root a page image's provenance resolves against: the attempt's artifacts, or the managed copy.
-     *
-     * The rule is the file's own location rather than a flag: a page this attempt rendered sits under the
-     * document's artifact root, while a picture that is the document sits in the managed-copy directory it was
-     * imported into. The stored reference is only resolvable by whoever reads the record back, which is what
-     * makes the difference matter rather than cosmetic.
-     */
-    private fun provenanceOf(image: PageImage, documentArtifactRoot: Path): SourceImageProvenance =
-        if (image.imagePath.startsWith(documentArtifactRoot.normalize())) {
-            image.artifactProvenance(documentArtifactRoot)
-        } else {
-            image.managedCopyProvenance()
-        }
-
-    private fun locatorOf(page: RescanPage, document: Document): SourceLocation =
-        page.baseline?.locator ?: when (document.mediaType) {
-            RescanPageSource.PDF_MEDIA_TYPE -> SourceLocation.PdfPage(page.image.ordinal + 1)
-            else -> SourceLocation.Image(document.originalFilename)
-        }
-
-    // ---- chunking and embedding ----
-
-    /**
-     * Chunks every staged page that has no passages yet, one page at a time.
-     *
-     * The pass reads what the candidate holds rather than what this attempt read, so a resumed attempt still
-     * re-chunks what a previous process staged and stopped in the middle of — and a page whose passages exist
-     * is not chunked again, which is what keeps re-chunking independent of re-reading.
-     */
-    private suspend fun chunkCandidate(
-        operationId: String,
-        candidate: String,
-        document: Document,
-        stage: JobStage,
-    ) {
-        val staged = revisions.pages(candidate)
-        val chunked = revisions.chunks(candidate).mapTo(mutableSetOf()) { chunk -> chunk.unitOrdinal }
-        staged.forEach { page ->
-            if (page.ordinal in chunked) return@forEach
-            val plan = chunker.chunk(
-                unit = ContentUnit(
-                    id = page.unitId,
-                    documentId = document.id,
-                    ordinal = page.ordinal,
-                    locator = page.locator,
-                    extractedText = page.extractedText,
-                    searchText = page.searchText,
-                    artifactRelativePath = page.artifactRelativePath,
-                    artifactSha256 = page.artifactSha256,
-                    meanConfidence = page.meanConfidence,
-                    extractionMethod = page.extractionMethod,
-                ),
-                maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
-                overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
-            )
-            stage.run(STAGE_CHUNK) { revisions.recordPageChunks(candidate, page.ordinal, plan.drafts) }
-        }
-        val pending = revisions.pages(candidate).count { page -> page.approval == PageApproval.PENDING }
-        stage.run(STAGE_CHUNK) {
-            operations.recordProgress(operationId = operationId, pendingReview = pending)
-        }
-    }
-
-    /**
-     * Embeds every staged passage that has no vector, page by page and in bounded batches.
-     *
-     * A passage is embedded once: a resumed attempt embeds only the passages a previous process did not reach,
-     * and the passages already embedded keep the vectors they were embedded with, which are the ones the index
-     * will be staged from.
-     */
-    private suspend fun embedCandidate(
-        candidate: String,
-        embedder: DocumentEmbedder,
-        stage: JobStage,
-    ) {
-        val byPage = revisions.chunks(candidate).groupBy { chunk -> chunk.unitOrdinal }
-        byPage.forEach { (ordinal, chunks) ->
-            val ordered = chunks.sortedBy { chunk -> chunk.ordinal }
-            if (ordered.none { chunk -> !chunk.isStaged }) return@forEach
-            val pending = ordered.filter { chunk -> !chunk.isStaged }
-            val vectors = pending.chunked(EMBED_BATCH).flatMap { batch ->
-                val embedded = stage.run(STAGE_EMBED) { embedder.embedDocuments(batch.map { it.text }) }
-                require(embedded.size == batch.size) {
-                    "the embedder returned ${embedded.size} vectors for ${batch.size} passages"
-                }
-                embedded.toList()
-            }
-            stage.run(STAGE_EMBED) {
-                var next = 0
-                revisions.recordChunkVectors(
-                    revisionId = candidate,
-                    unitOrdinal = ordinal,
-                    // Every passage is written, in order: the ones already embedded keep their own vector, so a
-                    // resumed pass neither loses them nor re-embeds them.
-                    vectors = ordered.map { chunk -> chunk.embedding ?: vectors[next++] },
-                )
-            }
-        }
-    }
-
-    // ---- publication ----
-
-    /**
-     * Publishes the candidate as the document's whole revision, or leaves its text exactly where it is.
-     *
-     * Refusing to publish is a first-class outcome rather than a failure: a revision with pages nobody has
-     * decided about may not become the document's text, and the publication says so with a code while the
-     * document keeps publishing what it published. That refusal is the state "needs review" is read from, and
-     * a publication that throws leaves the previous revision active and searchable — the promise the whole
-     * publication protocol exists to keep.
-     */
-    private suspend fun publishCandidate(operation: OcrOperation, candidate: String, stage: JobStage) {
-        val pending = revisions.pages(candidate).count { page -> page.approval == PageApproval.PENDING }
-        val publicationId = try {
-            publication.publish(
-                documentId = operation.documentId,
-                baseRevisionId = operation.baseRevisionId,
-                candidateRevisionId = candidate,
-            )
-        } catch (deleted: DocumentBeingDeletedException) {
-            throw deleted
-        } catch (notActive: CollectionNotActiveException) {
-            throw notActive
-        } catch (failure: Exception) {
-            fail(
-                stage,
-                operation,
-                OcrOperationStage.FAILED,
-                PUBLICATION_FAILED,
-                failure.message
-                    ?: "the replacement could not be published, so the document still shows its published text",
-            )
-        }
-        val intent = revisions.intent(publicationId)
-        val published = intent?.phase == PublicationPhase.PUBLISHED
-        stage.run(STAGE_RECORD) {
-            operations.recordProgress(
-                operationId = operation.operationId,
-                pendingReview = pending,
-            )
-            operations.finish(
-                operationId = operation.operationId,
-                stage = OcrOperationStage.COMPLETE,
-                errorCode = if (published) null else (intent?.errorCode ?: AWAITING_REVIEW_CODE),
-                errorMessage = if (published) {
-                    null
-                } else {
-                    intent?.errorMessage ?: "$pending page(s) of the replacement are waiting for a decision, " +
-                        "so the document still shows its published text"
-                },
-            )
-        }
-        if (published) {
-            LOGGER.atInfo()
-                .addKeyValue(DOCUMENT_FIELD, operation.documentId.value)
-                .addKeyValue(OPERATION_FIELD, operation.operationId)
-                .log("a rescan published a replacement revision")
-        }
-    }
-
-    /**
      * Whether the attempt must stop because this operation now waits for an external page approval.
      *
      * The waiting state is durable and is what the refusal wrote; the attempt reads it back rather than
@@ -785,17 +519,14 @@ class RescanJobHandler internal constructor(
         stageName: OcrOperationStage,
         code: String,
         message: String,
-    ): Nothing {
-        stage.run(STAGE_RECORD) {
-            operations.finish(
-                operationId = operation.operationId,
-                stage = stageName,
-                errorCode = code,
-                errorMessage = message,
-            )
-        }
-        throw RescanAttemptFailedException(code, message)
-    }
+    ): Nothing = failAttempt(
+        operations = operations,
+        stage = stage,
+        operationId = operation.operationId,
+        stageName = stageName,
+        code = code,
+        message = message,
+    )
 
     // ---- dispatch authority ----
 
@@ -892,20 +623,14 @@ class RescanJobHandler internal constructor(
 
         const val PROVENANCE_RESCAN = "RESCAN"
         const val RESCAN_PAGES_DIRECTORY = "rescan"
-        const val NO_REVIEWER = "no-reviewer"
 
         const val CANCELLED_CODE = "RESCAN_CANCELLED"
         const val STALE_BASELINE = "OCR_STALE_BASELINE"
-        const val AWAITING_REVIEW_CODE = "AWAITING_REVIEW"
         const val MANAGED_COPY_CHANGED = "RESCAN_MANAGED_COPY_CHANGED"
         const val RUNTIME_CHANGED = "RESCAN_ENGINE_RUNTIME_CHANGED"
         const val PAGE_IMAGES_UNSUPPORTED = "PAGE_IMAGES_UNSUPPORTED"
         const val EMBEDDING_UNAVAILABLE = "EMBEDDING_UNAVAILABLE"
-        const val PUBLICATION_FAILED = "PUBLICATION_FAILED"
         const val NEEDS_ENGINE_PREFIX = "NEEDS_"
-
-        /** How many passages one embedding step holds, so a long document stays interruptible. */
-        const val EMBED_BATCH = 64
 
         const val HASH_BUFFER_BYTES = 64 * 1024
 
@@ -925,9 +650,6 @@ class RescanJobHandler internal constructor(
  * durable, and the approval starts another attempt that continues from here.
  */
 private class RescanPaused : RuntimeException("this rescan waits for an external page scope to be approved")
-
-/** The attempt failed in a way the operation already recorded, so the job fails with the same code. */
-internal class RescanAttemptFailedException(val code: String, message: String) : IllegalStateException(message)
 
 private val LOGGER = LoggerFactory.getLogger("infoscry.rescan")
 
@@ -962,25 +684,3 @@ internal fun rescanEngineFactory(
             localEngines.engineFor(kind)
         }
     }
-
-/** The reviewer factory a production attempt uses: the comparison service, bound to one operation's scope. */
-internal fun rescanReviewerFactory(
-    revisions: DocumentRevisionStore,
-    reviews: OcrReviewStore,
-    profiles: infoscry.storage.OcrProfileStore,
-    lookup: (String) -> String? = System::getenv,
-): (OcrSettingsSnapshot, OcrDispatchAuthority?) -> PageReviewer = { snapshot, dispatch ->
-    val comparison = infoscry.ocr.OcrComparisonService(
-        revisions = revisions,
-        reviews = reviews,
-        revisionOf = { revisionId -> profiles.findRevision(revisionId) },
-        // A store-backed policy: whether a page may replace text without a person is resolved from the
-        // archive's accepted validation rows on every decision, so an approval can only exist while the row
-        // that grants it does. Pilot mode still replaces nothing.
-        policy = OcrDecisionPolicy(snapshot.policyVersion, reviews),
-        lookup = lookup,
-        permits = dispatch,
-        calls = dispatch?.let { authority -> authority::attemptAboutToBeSent },
-    )
-    PageReviewer { input -> comparison.compare(input) }
-}
