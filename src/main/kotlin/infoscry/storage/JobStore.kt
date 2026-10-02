@@ -200,6 +200,40 @@ open class JobStore(private val database: Database) {
     }
 
     /**
+     * Returns a job that paused for an external page approval to the queue, and answers with it.
+     *
+     * A job that waits for a person is not finished *and* not running: its attempt ended — nothing is holding
+     * the archive for work nobody can do yet — and the row keeps the waiting stage so the queue, the CLI and
+     * the approval route can all see what it is waiting for. Resuming is therefore not a state change a
+     * handler can make, and this is the one place a completed attempt may leave `COMPLETE` again: the wait is
+     * a state the archive put the job in deliberately, and the approval is the thing that ends it.
+     *
+     * A job that is not waiting is answered unchanged rather than refused: an approval is also how a person
+     * widens the scope of work that will run later, and a job that is queued, running or already finished has
+     * nothing to resume. Its stage is not a reason to fail the request that granted the scope.
+     *
+     * The stage is cleared and the counters are kept, exactly as a shutdown's requeue does: what the attempt
+     * already imported is what the next one skips.
+     *
+     * @throws NoSuchJobException when no such job exists.
+     */
+    fun resumeAwaitingApproval(id: JobId): Job = database.transaction { connection ->
+        val job = selectById(connection, id) ?: throw NoSuchJobException(id)
+        if (job.state != JobState.COMPLETE || job.stage != AWAITING_APPROVAL_STAGE) return@transaction job
+        updateIn(
+            connection,
+            "UPDATE jobs SET state = ?, stage = NULL, current_item = NULL, error_code = NULL, " +
+                "error_message = NULL, updated_at = ? WHERE id = ? AND state = ? AND stage = ?",
+            JobState.QUEUED.name,
+            Instants.now(),
+            id.value,
+            JobState.COMPLETE.name,
+            AWAITING_APPROVAL_STAGE,
+        )
+        readIn(connection, id)
+    }
+
+    /**
      * Ends a failed attempt with a code a caller can branch on and a message an operator can act on.
      *
      * The message is written by the worker, so it names the tool or the file, never the document's own
@@ -426,6 +460,15 @@ open class JobStore(private val database: Database) {
         }
 
     companion object {
+
+        /**
+         * The stage a job's row carries while it waits for a person to approve an external page scope.
+         *
+         * It is a stage rather than a state because the attempt really did end: the job is complete, nothing
+         * holds the archive, and the wait is a fact about *why* it stopped that the queue, the CLI and the
+         * approval route all have to be able to read.
+         */
+        const val AWAITING_APPROVAL_STAGE: String = "awaiting-approval"
 
         /**
          * The states a job may move between: queued may run or be cancelled outright, a running attempt

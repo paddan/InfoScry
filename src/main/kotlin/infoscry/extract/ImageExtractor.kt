@@ -78,9 +78,9 @@ class ImageExtractor(
      * What the picture's engine would read it with, discovered without reading anything.
      *
      * A picture is one page and the engines are this reader's, so it is this reader that can say what they
-     * are: the identity reaches the attempt's fingerprint before the page is handed over, which is what makes
-     * a reading under another runtime a different reading ([PageOcrEngines.engineFor] answers nothing for an
-     * engine this build does not have, and the engine answers nothing when its runtime cannot be described).
+     * are: the identity reaches the attempt's fingerprint before the page is handed over, for the attempt
+     * that was admitted without one ([PageOcrEngines.engineFor] answers nothing for an engine this build
+     * does not have, and the engine answers nothing when its runtime cannot be described).
      */
     override suspend fun runtimeIdentity(kind: OcrEngine): String? = ocr.engineFor(kind)?.runtimeIdentity()
 
@@ -122,7 +122,11 @@ class ImageExtractor(
                 return@unit
             }
             val reading = try {
-                ocr.transcribe(input.settings.readingEngine(), image, input.settings.pageOcrSettings(null))
+                val engine = input.settings.readingEngine()
+                // The build's engines plus the one this attempt builds for its dispatch authority: a picture
+                // read by an external engine is one of this attempt's pages leaving the machine.
+                ocr.forAttempt(input.dispatch)
+                    .transcribe(engine, image, input.settings.pageOcrSettings(null))
             } catch (unavailable: OcrUnavailableException) {
                 // Not this image's failure: the engine cannot read any image, so one row in the queue saying
                 // so is worth more than every picture failing identically. The refusal is emitted inside

@@ -1,5 +1,6 @@
 package infoscry.extract
 
+import infoscry.ocr.PageOcrEngine
 import infoscry.ocr.PageOcrEngines
 import infoscry.ocr.SuryaOcr
 import kotlinx.coroutines.flow.Flow
@@ -100,9 +101,19 @@ class ExtractorRegistry(
             tesseract: TesseractOcr = TesseractOcr(),
             calibre: CalibreConverter = CalibreConverter(),
             surya: SuryaOcr? = SuryaOcr.configured(),
+            /**
+             * How an attempt builds the image-model engine that reads its pages, from the attempt's dispatch
+             * authority. The engine is absent from the build's own set because an external reading is not a
+             * property of the machine: it dispatches against one job's or operation's allowance through one
+             * immutable profile revision, so it is built where that authority is known.
+             */
+            llm: ((infoscry.ocr.OcrDispatchAuthority?) -> PageOcrEngine?)? = null,
         ): ExtractorRegistry {
             val epub = EpubExtractor(tesseract::recognize)
-            val engines = PageOcrEngines(listOfNotNull(tesseract, surya))
+            val engines = PageOcrEngines(
+                listOfNotNull(tesseract, surya),
+                attemptEngines = listOfNotNull(llm),
+            )
             return ExtractorRegistry(
                 listOf(
                     PlainTextExtractor(),

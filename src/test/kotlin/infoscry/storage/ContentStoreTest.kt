@@ -455,6 +455,30 @@ class ContentStoreTest {
     }
 
     @Test
+    fun `only pages a person still owes a decision about await one`() {
+        val document = newDocument()
+        store.commitExtractedUnit(document, fingerprint, "page-1", 0, draftOf(), artifactRoot(document))
+        store.commitExtractedUnit(document, fingerprint, "page-2", 1, draftOf(), artifactRoot(document))
+
+        // A committed page owes nobody anything: its approval is an absence, not a default, and an absence
+        // is not a pending decision.
+        assertEquals(0, store.unitsAwaitingDecision(document))
+
+        database.transaction { connection ->
+            connection.prepareStatement(
+                "UPDATE content_units SET page_approval = ? WHERE document_id = ? AND ordinal = ?",
+            ).use { statement ->
+                statement.setString(1, PageApproval.PENDING.name)
+                statement.setString(2, document.value)
+                statement.setInt(3, 1)
+                statement.executeUpdate()
+            }
+        }
+
+        assertEquals(1, store.unitsAwaitingDecision(document), "a proposed page is one nobody has decided about")
+    }
+
+    @Test
     fun `an artifact path outside the artifact root is refused`() {
         val document = newDocument()
         val outside = Files.writeString(dataDir.resolve("outside.txt"), "not an artifact")

@@ -160,7 +160,12 @@ class AppContext private constructor(
      */
     val ocrProfiles: OcrProfileStore = OcrProfileStore(database)
 
-    val ocr: OcrProfileService = OcrProfileService(ocrProfiles)
+    val ocr: OcrProfileService = OcrProfileService(
+        profiles = ocrProfiles,
+        // The same engines a page image would be read through, so an import or a retry records the runtime
+        // it was admitted under rather than discovering another one when it happens to run.
+        engineFor = rescanEngineFactory(ocrProfiles),
+    )
 
     /**
      * The durable rescan operations, with their previews, their external-page admission and their approvals.
@@ -270,10 +275,12 @@ class AppContext private constructor(
                 // mode that reads images a page already has is a different reading of the same bytes, and a
                 // checkpoint committed under one is not evidence about the other.
                 ocrSnapshot = { settings ->
-                    ocr.snapshotFor(
-                        settings = settings,
-                        extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
-                        renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
+                    ocr.withProbedRuntime(
+                        ocr.snapshotFor(
+                            settings = settings,
+                            extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+                            renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
+                        ),
                     )
                 },
             )

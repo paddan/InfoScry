@@ -46,6 +46,7 @@ import infoscry.storage.OcrOperationConflictException
 import infoscry.storage.OcrOperationStore
 import infoscry.storage.OcrReviewStore
 import infoscry.storage.PageApproval
+import infoscry.storage.RescanPreviewOverrides
 import infoscry.storage.RevisionPageText
 import infoscry.storage.StaleRescanPreviewException
 import java.io.IOException
@@ -495,15 +496,18 @@ class RescanService(
                     "the document publishes ${active ?: "no revision"} now, not the reading it named",
                 )
             }
-            // The snapshot is re-validated against the profiles the settings name *now*: a preview whose
-            // profile was repointed or switched off between being shown and being admitted is a different
-            // reading, and admitting it would dispatch to a scope nobody looked at.
+            // The snapshot is re-validated against the profiles the settings name *now*, and against every
+            // field of the effective settings the preview was taken with: a preview whose profile was
+            // repointed, whose engine, mode, language or allowance was edited, or whose reviewer was
+            // deselected between being shown and being admitted is a different reading, and admitting it would
+            // dispatch a scope and a text nobody looked at.
             requireSnapshotStillResolvable(preview.snapshot, collection)
+            requirePreviewStillCurrent(preview, collection)
             requireRescanable(document, preview.snapshot)
             operations.activeOperation(documentId)?.let { running ->
                 throw OcrOperationConflictException(documentId, running.stage)
             }
-            val operation = operations.admit(
+            val admitted = operations.admit(
                 collectionId = collectionId.value,
                 documentId = documentId,
                 baseRevisionId = active,
@@ -513,20 +517,10 @@ class RescanService(
                 pageTotal = preview.pageTotal,
                 jobId = null,
             )
-            // Admission is durable before the attempt exists: the job is created afterwards so a crash
-            // between the two leaves an operation with no attempt, which resume can start, rather than an
-            // attempt whose operation was never written.
-            val job = jobs.enqueue(
-                type = infoscry.domain.JobType.RESCAN,
-                collectionId = collection.id,
-                payload = RescanJobPayload(
-                    collectionId = collection.id.value,
-                    documentId = documentId.value,
-                    operationId = operation.operationId,
-                ).encode(),
-                total = 1,
-            )
-            operations.recordAttempt(operation.operationId, job.id.value)
+            // Admission is durable before the attempt exists: the attempt is created by the claim, in the same
+            // write that names it, so a crash between the two leaves an operation without an attempt — the
+            // state resume starts from — rather than an attempt whose operation was never written.
+            resumeAttempt(admitted)
         }
     }
 
@@ -588,6 +582,13 @@ class RescanService(
                 snapshotHash = snapshotHash,
                 authorizedDistinctPages = maxDistinctPages,
             )
+            // An approval while an attempt is running is *its* approval: the authority resolves the allowance
+            // again on every dispatch, so the reading already under way continues past the scope it was
+            // waiting on. Starting another attempt for it would be a second worker on one candidate and one
+            // set of counters, which is what the claim seam refuses; there is simply nothing to resume.
+            if (operations.liveAttempt(operation.operationId) != null) {
+                return@withMutation checkNotNull(operations.operation(operation.operationId))
+            }
             resumeAttempt(operation)
         }
     }
@@ -876,21 +877,21 @@ class RescanService(
 
     private suspend fun resumeAttempt(operation: OcrOperation): OcrOperation {
         val collectionId = CollectionId(operation.collectionId)
-        val job = jobs.enqueue(
-            type = infoscry.domain.JobType.RESCAN,
-            collectionId = collectionId.takeIf { collections.get(it) != null },
-            payload = RescanJobPayload(
-                collectionId = operation.collectionId,
-                documentId = operation.documentId.value,
-                operationId = operation.operationId,
-            ).encode(),
-            total = 1,
-        )
-        val queued = operations.recordAttempt(operation.operationId, job.id.value)
-        // The stage the attempt resumes into: another attempt continues the same reading from its committed
-        // pages, so a waiting or failed operation starts reading again and a cancelled one may too, because a
-        // cancellation only stops the attempt that observed it.
-        return operations.advance(queued.operationId, OcrOperationStage.PREFLIGHT)
+        // The attempt is claimed and the job created in one write: an operation another attempt already owns
+        // refuses rather than queueing a second one, so two workers cannot read the same pages into the same
+        // candidate and count the same external pages twice.
+        return operations.startAttempt(operation.operationId, OcrOperationStage.PREFLIGHT) {
+            jobs.enqueue(
+                type = infoscry.domain.JobType.RESCAN,
+                collectionId = collectionId.takeIf { collections.get(it) != null },
+                payload = RescanJobPayload(
+                    collectionId = operation.collectionId,
+                    documentId = operation.documentId.value,
+                    operationId = operation.operationId,
+                ).encode(),
+                total = 1,
+            ).id.value
+        }
     }
 
     private fun requireScopedOperation(
@@ -1066,6 +1067,60 @@ class RescanService(
             )
         }
     }
+
+    /**
+     * Whether the settings a preview showed are still the settings this collection would produce.
+     *
+     * This is the whole of what a person agreed to, re-resolved at the moment it is acted on. The preview's
+     * own overrides are re-applied first, so "the collection's engine was edited" and "this preview never
+     * used the collection's engine" stay two different answers: an overridden field cannot drift, because
+     * re-applying the override yields exactly what was shown. Everything not overridden is compared field by
+     * field, and a profile slot is compared as the revision it resolves to *now*, because a profile repointed
+     * at another revision is a different reading whether or not its id changed.
+     *
+     * The allowance is part of this on purpose: a preview shown with no external pages allowed, admitted after
+     * the collection was raised to send twenty, would send pages the person never agreed to.
+     */
+    private fun requirePreviewStillCurrent(preview: infoscry.storage.OcrOperationStore.StoredPreview, collection: Collection) {
+        val shown = preview.snapshot
+        val current = collection.ocrSettings().withOverrides(preview.overrides.asOverrides())
+
+        fun refuse(field: String, was: Any?, now: Any?): Nothing = throw StaleRescanPreviewException(
+            preview.previewId,
+            "the collection's $field is $now now, not the $was this preview showed, so the reading it described " +
+                "cannot be produced any more; preview again",
+        )
+
+        if (current.engine != shown.engine) refuse("engine", shown.engine, current.engine)
+        if (current.importMode != shown.mode) refuse("import mode", shown.mode, current.importMode)
+        if (current.language != shown.language) refuse("OCR language", shown.language, current.language)
+        if (current.externalPageLimit != shown.externalPageLimit) {
+            refuse("external page allowance", shown.externalPageLimit, current.externalPageLimit)
+        }
+        val transcription = selectedRevisionOf(current.transcriptionProfileId)
+        if (transcription != shown.transcriptionProfileRevisionId) {
+            refuse(
+                "transcription profile",
+                shown.transcriptionProfileRevisionId ?: "none",
+                transcription ?: "none",
+            )
+        }
+        val review = selectedRevisionOf(current.reviewProfileId)
+        if (review != shown.reviewProfileRevisionId) {
+            refuse("review profile", shown.reviewProfileRevisionId ?: "none", review ?: "none")
+        }
+    }
+
+    /**
+     * The profile revision a profile slot resolves to right now, or null when the slot is empty or its
+     * profile cannot be dispatched to.
+     *
+     * A profile that was switched off resolves to nothing rather than throwing here: the question this
+     * answers is "is this the same selection the person was shown", and a deselected or disabled profile is a
+     * different answer, not a missing one.
+     */
+    private fun selectedRevisionOf(profileId: String?): String? =
+        profileId?.let { id -> profileOf(id)?.takeIf { profile -> profile.enabled }?.revision?.revisionId }
 
     /**
      * Whether the document may still be read again at all, as the lifecycle sees it now.
@@ -1273,6 +1328,14 @@ class StaleCandidateDecisionException(message: String) : IllegalStateException(m
 
 /** A decision names a document revision the document no longer publishes. */
 class StaleActiveRevisionException(message: String) : IllegalStateException(message)
+
+/** The stored overrides of a preview, as the choice a preview request made. */
+private fun RescanPreviewOverrides?.asOverrides(): RescanOverrides = RescanOverrides(
+    engine = this?.engine,
+    importMode = this?.importMode,
+    transcriptionProfileId = this?.transcriptionProfileId,
+    reviewProfileId = this?.reviewProfileId,
+)
 
 /** The collection's OCR settings with a caller's overrides applied. */
 private fun CollectionOcrSettings.withOverrides(overrides: RescanOverrides): CollectionOcrSettings =

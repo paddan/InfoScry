@@ -106,6 +106,12 @@ internal class DocumentIngest(
         stage: JobStage,
         revisitFailedUnits: Boolean,
         onFailure: suspend (code: String, message: String) -> Unit,
+        /**
+         * The attempt's authority for sending this document's pages off this machine, or null when it has
+         * none. It is the caller's because only the caller knows what the allowance belongs to — an import
+         * job's twenty files share one, an operation's one document has its own.
+         */
+        dispatch: infoscry.ocr.OcrDispatchAuthority? = null,
     ): IngestResult {
         // The bytes are classified under the boundary that refuses a document the deletion removed. The
         // deletion parks the managed copy of a document it owns, and it can do that between this file's attach
@@ -133,15 +139,20 @@ internal class DocumentIngest(
 
         stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.EXTRACTING) }
 
-        // What the reading engine *is* is settled here, before the fingerprint is computed and therefore
-        // before any committed key is read, because the fingerprint is the key checkpoints are looked up by:
-        // a runtime that changed since an earlier attempt — another Surya version, other weights, another
-        // llama-server build — has to be a different key, and a page committed under the older runtime may
-        // not answer for it. A reader with no page images to read (and an extraction that is not an OCR
-        // attempt at all) answers nothing, which costs nothing: there is no runtime whose change could make
-        // its committed text a different reading. An engine that cannot describe itself is recorded as having
-        // no identity, and that absence is a different key from any discovered identity.
-        val settings = settings.withRuntimeIdentity(extractor::runtimeIdentity)
+        // What this attempt reads under is the runtime admission recorded, when it recorded one: the
+        // identity travels in the settings, and nothing here asks the reader what it is *now*, so a restart
+        // resumes the runtime it was admitted with rather than discovering a newly installed one and
+        // adopting it. The one case that still has to ask is an attempt whose settings record no runtime at
+        // all — a payload written before admission probed, or an engine that could not describe itself —
+        // because then there is no identity for the fingerprint to be computed from, and the reader's own
+        // answer is the only identity those pages can be keyed by. An absent identity is never treated as
+        // though it were a discovered one: it is a value of its own, so nothing recorded is ever confused
+        // with something that was discovered later.
+        val settings = if (settings.ocrAttempt?.runtimeIdentity == null) {
+            settings.withRuntimeIdentity(extractor::runtimeIdentity)
+        } else {
+            settings
+        }
         val fingerprint = ExtractionFingerprint.of(document.sha256, settings)
 
         val input = ExtractionInput(
@@ -158,6 +169,7 @@ internal class DocumentIngest(
             },
             boundary = StageBoundary(stage),
             originalFilename = document.originalFilename,
+            dispatch = dispatch,
         )
 
         var finished = false
@@ -189,6 +201,11 @@ internal class DocumentIngest(
             // reference that the deletion has already taken away. The attempt's own record of that is the
             // item's `CANCELLED` disposition, which the caller writes when this exception reaches it.
             throw deleted
+        } catch (waiting: ImportAwaitingApproval) {
+            // A page would have exceeded the attempt's external scope, so it was not sent. That is not this
+            // document's failure and not a partial reading to keep: the caller ends the attempt in its own
+            // durable waiting state, and the pages this document already committed stay committed.
+            throw waiting
         } catch (failure: Exception) {
             onFailure(codeFor(failure), failure.message ?: "the extractor failed without a message")
             return IngestResult.Failed
@@ -306,7 +323,16 @@ internal class DocumentIngest(
             }
             stage.run(STAGE_RECORD) {
                 val failedUnits = content.extractionMarker(document.id)?.failedUnits ?: 0
-                val status = if (failedUnits > 0) DocumentStatus.COMPLETE_WITH_WARNINGS else DocumentStatus.COMPLETE
+                val awaiting = pipeline.sink.awaitingDecision(document.id)
+                val status = when {
+                    // A page nobody has approved is not "done", however well the embedding worked: the
+                    // document owes a person a decision, and no page that awaits one is complete text. It
+                    // outranks a failed unit because the question a reader has to answer first is "did
+                    // someone accept this reading", not "did every unit come back".
+                    awaiting > 0 -> DocumentStatus.NEEDS_REVIEW
+                    failedUnits > 0 -> DocumentStatus.COMPLETE_WITH_WARNINGS
+                    else -> DocumentStatus.COMPLETE
+                }
                 documents.updateStatus(document.id, status)
             }
             return true

@@ -83,6 +83,18 @@ class CandidateRevisionSink(
         fingerprint: ExtractionFingerprint,
     ): Set<String> = staged[documentId to fingerprint]?.toSet().orEmpty()
 
+    /**
+     * The pages this attempt staged that nobody has decided about.
+     *
+     * Every page this sink stages is pending — what may replace published text is a review decision, and an
+     * attempt is not one — so the count is read back from the candidate, which is also what a resumed
+     * attempt sees.
+     */
+    override suspend fun awaitingDecision(documentId: DocumentId): Int {
+        val revision = candidate ?: return 0
+        return revisions.pages(revision).count { page -> page.approval == PageApproval.PENDING }
+    }
+
     override suspend fun deliver(
         documentId: DocumentId,
         fingerprint: ExtractionFingerprint,

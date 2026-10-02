@@ -282,6 +282,9 @@ class OcrRoutesTest {
         assertContains(approved.bodyAsText(), "\"authorizedDistinctPages\":4")
         assertContains(approved.bodyAsText(), "\"distinctPagesSent\":0")
         assertContains(approved.bodyAsText(), "\"calls\":0")
+        // The approval answers with the job's own state: a job that is not waiting for one is left exactly as
+        // it is — the scope it just approved is read on every dispatch — rather than restarted.
+        assertContains(approved.bodyAsText(), "\"state\":\"")
     }
 
     // ---- helpers ----

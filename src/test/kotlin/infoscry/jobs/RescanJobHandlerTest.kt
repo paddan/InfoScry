@@ -45,8 +45,11 @@ import infoscry.ocr.PublicationDisposition
 import infoscry.ocr.ReviewReason
 import infoscry.ocr.ReasonOrigin
 import infoscry.ocr.ReviewerRecommendation
+import infoscry.storage.OcrAttemptInProgressException
+import infoscry.storage.OcrOperationStore
 import infoscry.storage.PageApproval
 import infoscry.storage.RevisionState
+import infoscry.storage.StaleRescanPreviewException
 import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
@@ -95,6 +98,91 @@ class RescanJobHandlerTest {
             assertEquals(1, result.indexedChunks)
             assertEquals(picture.baselineRevisionId, result.activeRevisionId)
             assertEquals(1, engine.calls)
+        }
+    }
+
+    @Test
+    fun `a resume or an approval while an attempt owns the operation starts no second attempt`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            // Admission alone: the operation names the attempt its admission created, and nothing has run it.
+            val operation = harness.admitOnly(picture, reviewRevisionId = harness.reviewRevisionId)
+            val jobs = harness.rescanJobCount()
+
+            val resumed = harness.resumeRefusal(picture, operation.operationId)
+            // An approval of a scope an attempt is already working in is that attempt's approval: the running
+            // reading resolves its allowance again on every page. What it may not do is start a second attempt.
+            harness.approveThroughService(picture, operation.operationId, maxDistinctPages = 2)
+
+            assertTrue(resumed is OcrAttemptInProgressException, "a resume started a second attempt: $resumed")
+            assertEquals(2, harness.approvedScopeOf(picture, operation.operationId), "the approval was not recorded")
+            assertEquals(jobs, harness.rescanJobCount(), "one reading was given a second attempt")
+        }
+    }
+
+    @Test
+    fun `an approval of an operation that waits starts exactly one attempt`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            // No external page is allowed, so the attempt pauses before it reviews anything.
+            val paused = harness.rescan(
+                picture = picture,
+                engine = FakePageEngine(readings = listOf("second reading")),
+                reviewer = RecordingReviewer(),
+                reviewRevisionId = harness.reviewRevisionId,
+                externalPageLimit = 0,
+            )
+            assertEquals(OcrOperationStage.AWAITING_APPROVAL, paused.operation.stage)
+            val jobs = harness.rescanJobCount()
+
+            val approved = harness.approveThroughService(picture, paused.operation.operationId, maxDistinctPages = 2)
+
+            assertEquals(OcrOperationStage.PREFLIGHT, approved.stage)
+            assertNotNull(approved.jobId, "the approval has to name the attempt it started")
+            assertEquals(jobs + 1, harness.rescanJobCount(), "an approval owes exactly one new attempt")
+        }
+    }
+
+    @Test
+    fun `a settings change between preview and admission is refused for every field the person was shown`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val changes = listOf<Pair<String, (CollectionOcrSettings) -> CollectionOcrSettings>>(
+                "engine" to { settings -> settings.copy(engine = OcrEngine.TESSERACT) },
+                "mode" to { settings -> settings.copy(importMode = OcrImportMode.FILL_MISSING) },
+                "language" to { settings -> settings.copy(language = "swe") },
+                "reviewer" to { settings -> settings.copy(reviewProfileId = null) },
+                "allowance" to { settings -> settings.copy(externalPageLimit = 4) },
+            )
+            changes.forEach { (field, change) ->
+                val previewId = harness.previewFor(picture, reviewRevisionId = harness.reviewRevisionId)
+                harness.updateSelection(change)
+
+                val refusal = harness.admitRefusal(picture, previewId, requestId = "stale-$field")
+
+                assertTrue(
+                    refusal is StaleRescanPreviewException,
+                    "a change of the $field was admitted against the preview it invalidated: $refusal",
+                )
+            }
+            // The same preview, admitted against the settings it was taken with, is still admitted.
+            val previewId = harness.previewFor(picture, reviewRevisionId = harness.reviewRevisionId)
+            assertNull(harness.admitRefusal(picture, previewId, requestId = "unchanged"))
+        }
+    }
+
+    @Test
+    fun `two admissions of one document with different request ids do not both own it`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            harness.admitOnly(picture)
+
+            val second = harness.admitRefusal(picture, requestId = "another-request")
+
+            assertTrue(
+                second is infoscry.storage.OcrOperationConflictException,
+                "a second reading of one document was admitted: $second",
+            )
         }
     }
 
@@ -534,8 +622,7 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         val failure: Throwable?,
     )
 
-    fun importPicture(text: String): Picture {
-        val file = harness.sourcesDir.resolve("page.png")
+    fun importPicture(text: String): Picture {        val file = harness.sourcesDir.resolve("page.png")
         writePicture(file)
         val run = harness.importDurably(listOf(file), PictureUnits(text))
         val documentId = run.items.single().documentId!!
@@ -643,16 +730,15 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         }
     }
 
-    // ---- internals ----
-
-    private fun admitFor(
+    /**
+     * Writes the collection's OCR selection, as a person would have configured it: the local engine reads the
+     * page images, and a review profile may send the comparison off the machine.
+     */
+    private fun writeSelection(
         context: AppContext,
-        picture: Picture,
         reviewRevisionId: String?,
         externalPageLimit: Int,
-    ): String {
-        // The collection's OCR selection, as a person would have configured it: the local engine reads the
-        // page images, and a review profile may send the comparison off the machine.
+    ) {
         context.collections.updateOcrSettings(
             CollectionId("default"),
             CollectionOcrSettings(
@@ -664,6 +750,148 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
                 externalPageLimit = externalPageLimit,
             ),
         )
+    }
+
+    /** Rewrites the collection's OCR selection from what it holds now, for the stale-preview tests. */
+    fun updateSelection(change: (CollectionOcrSettings) -> CollectionOcrSettings) {
+        AppContext.open(harness.dataDir).use { context ->
+            val current = assertNotNull(context.collections.get(CollectionId("default"))).ocrSettings()
+            context.collections.updateOcrSettings(CollectionId("default"), change(current))
+        }
+    }
+
+    /** One preview of [picture], against the selection [reviewRevisionId] implies. */
+    fun previewFor(picture: Picture, reviewRevisionId: String? = null, externalPageLimit: Int = 0): String =
+        AppContext.open(harness.dataDir).use { context ->
+            writeSelection(context, reviewRevisionId, externalPageLimit)
+            runBlocking {
+                rescanServiceOf(context, FakePageEngine()).preview(CollectionId("default"), picture.documentId)
+            }.previewId
+        }
+
+    /** One admission against a preview taken against the selection the tests name. */
+    fun admitOnly(
+        picture: Picture,
+        reviewRevisionId: String? = null,
+        externalPageLimit: Int = 0,
+    ): OcrOperation = AppContext.open(harness.dataDir).use { context ->
+        writeSelection(context, reviewRevisionId, externalPageLimit)
+        val service = rescanServiceOf(context, FakePageEngine())
+        runBlocking {
+            val preview = service.preview(CollectionId("default"), picture.documentId)
+            service.admitRescan(
+                collectionId = CollectionId("default"),
+                documentId = picture.documentId,
+                previewId = preview.previewId,
+                // A distinct request id per admission: the same id is the same request, which is exactly what
+                // the routes' idempotency rests on and not what these tests are about.
+                requestId = "rescan-request-${admissions.incrementAndGet()}",
+            )
+        }
+    }
+
+    /** What one admission of a fresh preview answered, or the refusal it was refused with. */
+    fun admitRefusal(picture: Picture, requestId: String): Throwable? =
+        AppContext.open(harness.dataDir).use { context ->
+            val service = rescanServiceOf(context, FakePageEngine())
+            runBlocking {
+                runCatching {
+                    val preview = service.preview(CollectionId("default"), picture.documentId)
+                    service.admitRescan(
+                        collectionId = CollectionId("default"),
+                        documentId = picture.documentId,
+                        previewId = preview.previewId,
+                        requestId = requestId,
+                    )
+                }.exceptionOrNull()
+            }
+        }
+
+    /** What one admission of a named preview answered, or the refusal it was refused with. */
+    fun admitRefusal(picture: Picture, previewId: String, requestId: String): Throwable? =
+        AppContext.open(harness.dataDir).use { context ->
+            runBlocking {
+                runCatching {
+                    rescanServiceOf(context, FakePageEngine()).admitRescan(
+                        collectionId = CollectionId("default"),
+                        documentId = picture.documentId,
+                        previewId = previewId,
+                        requestId = requestId,
+                    )
+                }.exceptionOrNull()
+            }
+        }
+
+    /** What the service answered to a resume of an operation, or the refusal it was refused with. */
+    fun resumeRefusal(picture: Picture, operationId: String): Throwable? =
+        AppContext.open(harness.dataDir).use { context ->
+            runBlocking {
+                runCatching {
+                    rescanServiceOf(context, FakePageEngine()).resume(
+                        collectionId = CollectionId("default"),
+                        documentId = picture.documentId,
+                        operationId = operationId,
+                    )
+                }.exceptionOrNull()
+            }
+        }
+
+    /** What the service answered to an approval of an operation, or the refusal it was refused with. */
+    fun approveRefusal(picture: Picture, operationId: String, maxDistinctPages: Int): Throwable? =
+        AppContext.open(harness.dataDir).use { context ->
+            runBlocking {
+                runCatching {
+                    rescanServiceOf(context, FakePageEngine()).approveExternal(
+                        collectionId = CollectionId("default"),
+                        documentId = picture.documentId,
+                        operationId = operationId,
+                        expectedSnapshotHash = OcrOperationStore.snapshotHashOf(
+                            assertNotNull(context.ocrOperations.operation(operationId)).snapshot,
+                        ),
+                        maxDistinctPages = maxDistinctPages,
+                    )
+                }.exceptionOrNull()
+            }
+        }
+
+    /** The operation one approval answered with, which is the attempt it started. */
+    fun approveThroughService(picture: Picture, operationId: String, maxDistinctPages: Int): OcrOperation =
+        AppContext.open(harness.dataDir).use { context ->
+            runBlocking {
+                rescanServiceOf(context, FakePageEngine()).approveExternal(
+                    collectionId = CollectionId("default"),
+                    documentId = picture.documentId,
+                    operationId = operationId,
+                    expectedSnapshotHash = OcrOperationStore.snapshotHashOf(
+                        assertNotNull(context.ocrOperations.operation(operationId)).snapshot,
+                    ),
+                    maxDistinctPages = maxDistinctPages,
+                )
+            }
+        }
+
+    /** How many rescan attempts this archive holds, which is what "a second attempt" would add to. */
+    fun rescanJobCount(): Int = AppContext.open(harness.dataDir).use { context ->
+        context.jobs.list(limit = 100).count { job -> job.type == JobType.RESCAN }
+    }
+
+    /** How many distinct pages one operation's scope authorizes now, or zero when nobody approved anything. */
+    fun approvedScopeOf(picture: Picture, operationId: String): Int =
+        AppContext.open(harness.dataDir).use { context ->
+            context.ocrOperations
+                .latestApproval(OcrExternalOwner.operation(operationId))
+                ?.authorizedDistinctPages ?: 0
+        }
+
+    // ---- internals ----
+
+    private fun admitFor(
+        context: AppContext,
+        picture: Picture,
+        reviewRevisionId: String?,
+        externalPageLimit: Int,
+    ): String {
+        writeSelection(context, reviewRevisionId, externalPageLimit)
         val engine = FakePageEngine()
         val service = rescanServiceOf(context, engine)
         return runBlocking {

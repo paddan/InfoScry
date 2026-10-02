@@ -12,9 +12,10 @@
 **Contracts:** [Shared interfaces, constraints and test gates](CONTRACTS.md).
 
 Product decisions and documentation were authorized on 2026-09-30. Tickets 01, 02, 03, 04, 05 and 06 are
-implemented and verified and ticket 07 is partially implemented (its rescan path is verified; its import half
-and three admission/concurrency gaps are [07b](07b-import-execution-and-admission.md)); tickets 02b, 03b and
-08-11 have not started. Ticket decomposition and technical
+implemented and verified; ticket 07 is partially implemented (its rescan path is verified) and ticket 07b is
+partially implemented (its admission, approval, claiming and status work is verified; the import's
+`CHECK_AND_IMPROVE` comparison and review is open); tickets 02b, 03b and 08-11 have not started. Ticket
+decomposition and technical
 defaults are engineering proposals within that scope, not verified product behavior. No implementation,
 installation, model download, private-data experiment, commit or push is implicitly authorized by this
 document.
@@ -40,10 +41,9 @@ document.
 | [03b — Image provenance and artifact lifetime](03b-image-provenance.md) | 03 | Not started — carries what ticket 03's reviews left open: root-confined provenance enforced at the store and schema, no half-populated rows, and renders that staged candidates reference kept alive |
 | [04 — Local Surya adapter and Mac runtime proof](04-surya.md) | 03 | Done — `SuryaOcr` + `scripts/ocr/surya_worker.py` (bounded versioned JSON, one inference manager per worker, `--identity` probe, process-tree teardown) with the real runtime measured on this Mac (surya-ocr 0.22.1, llama.cpp 0.5.0 build 11146, weights 1.36 GiB; cold ~5.2 s / warm ~1.8 s per page); `./gradlew check --rerun-tasks` green (99 suites, 1197 tests, 0 failures, 14m43s), `externalTest --tests SuryaRealToolTest` green, `python3 scripts/ocr/test_surya_worker.py` ok; three review rounds drove whole-tree teardown, `OCR_EMPTY` failures instead of committed empty text, the runtime identity probe in the fingerprint, and `NEEDS_TOOL` remedies in the import queue |
 | [05 — Image-based LLM transcription and profile capability](05-image-llm.md) | 03 | Done — `ImageLlmClient` speaks both image protocols from the page's own bytes (hash-checked, format-checked, `max_tokens`-bounded, response-size bounded, per-attempt timeout, bounded retries on 429/5xx only, redirects refused unfollowed, whole request budgeted against the window and reserved output, resolved model version carried back) and refuses a non-local destination without ticket 07's permit validator; `LlmOcr` reads only through the snapshotted revision and the shipped prompt version; `prompts/ocr-transcription.txt` v1 ships with the transcription schema; `POST /api/ocr/profiles/{profileId}/probe` sends only the synthetic image and records `imageCapabilityMeasured`/`imageCapabilityCheckedAt`; focused suites green with both key invariants proven by guard-revert runs, and `./gradlew check` green (102 suites, 1268 tests, 0 failures, 15m55s); a security round closed the credentialed-endpoint hole across the OCR, LLM and catalog validators and remediated stored ones with migration 020 (credential removed, repaired conversation snapshots marked, repaired profiles switched off), and made "a switched-off profile is not a dispatch destination" hold at the routes, the CLI and the services that dispatch; a migration delimiter bug the parent found (`COALESCE` order, which would have rewritten `https://host?email=a@b/c` into `https://b/c`) was fixed and is covered by regression cases. Unverified: no real provider gate (ticket 10), and the engine is deliberately not wired into `ExtractorRegistry` — that is ticket 07's admission path (external-page accounting, previews, approval) |
-| [06 — Image-grounded comparison and pilot decisions](06-comparison.md) | 03, 05 | Not started |
 | [06 — Image-grounded comparison and pilot decisions](06-comparison.md) | 03, 05 | Done — deterministic diagnostics, the side-neutral A/B review call (prompt v2) with its answer mapped to the application's vocabulary in code, pilot mode enforced server-side so every difference is `PROPOSE`, durable reviews keyed by baseline/candidate/reviewer/prompt/policy, identical-nonblank no-ops, empty pairs pending and unsearchable, and failures that keep the baseline with zero re-transcription; `./gradlew check` green (104 suites, 1313 tests, 0 failures, 15m53s); four review rounds made approval structural (a policy that holds the review store, whose acceptance can only be resolved from a live row) and verified baselines against the stored revision page before every shortcut |
 | [07 — Rescan jobs, import modes and external approval](07-jobs-and-admission.md) | 04, 05, 06 | Partially implemented — the rescan path is verified: `RESCAN` job type and operation record (migration 023), preview/admission with request-id idempotency, per-page checkpoints and bounded cancellation, external-page accounting, `AWAITING_APPROVAL`, comparison and review wiring, decisions and publication, and operation ownership that holds a document while an operation is unfinished or awaiting review (migration 024 adds review-pending imports); `./gradlew check` green after three hand repairs (106 suites, 1340 tests, 0 failures, 16m27s). The import half executes none of what it admits, admission does not revalidate the whole settings snapshot, and resume/approval can start a second attempt — all carried by 07b |
-| [07b — Import execution, admission revalidation and attempt claiming](07b-import-execution-and-admission.md) | 07 | Not started — the import path must execute its admitted OCR mode, review and job-owned external approval; admission must revalidate the whole settings snapshot; and an attempt must be claimed so resume/approval cannot double-enqueue |
+| [07b — Import execution, admission revalidation and attempt claiming](07b-import-execution-and-admission.md) | 07 | Partially implemented — verified: job-owned external approval with `AWAITING_APPROVAL`, the two-file allowance with distinct pages counted once and calls separately, full settings revalidation at admission, attempt claiming through `OcrOperationStore.startAttempt` so resume/approval cannot double-enqueue, the CLI surfacing a waiting-approval requirement, the admitted runtime identity carried into execution (probed only when an attempt records none), and `NEEDS_REVIEW` reachable for an import whose pages await decisions; my `./gradlew check` is green (106 suites, 1353 tests, 0 failures, 16m39s). **Open:** an import in `CHECK_AND_IMPROVE` still does not compare or review — the map for that slice is recorded in the ticket |
 | [08 — Admin profiles, collection controls and page review](08-admin-and-review.md) | 07 | Not started |
 | [09 — Revision history and explicit restoration](09-history-and-restore.md) | 08 | Not started |
 | [10 — Integrated browser and real-runtime acceptance](10-integrated-acceptance.md) | 09 | Not started |
@@ -256,3 +256,27 @@ Residuals also recorded: the review's remaining P2s — the import admission sna
 identity (it is re-probed in `DocumentIngest`, so a restart could resume under a newly discovered runtime),
 and `OcrRoutes` already exposes review-decision/publication and revision endpoints that belong to tickets 08
 and 09.
+
+## Ticket 07b verification record
+
+Verified by my own `./gradlew check` (106 suites, 1353 tests, 0 failures, 16m39s) and by inspection of the three
+mechanisms it adds. The admitted runtime identity is now recorded at admission — import admission, the
+standalone CLI import and the retry prerequisites all probe once and carry it in the payload — and
+`DocumentIngest` asks the reader for an identity only when the settings record none, which is what kept
+`SuryaOcrTest`'s property intact: a recorded identity is never replaced, while an attempt with no identity is
+still keyed by what the reader reports, so a changed runtime forces a re-read rather than a silent reuse.
+`NEEDS_REVIEW` is reachable through `ExtractionSink.awaitingDecision` (`ContentStore.unitsAwaitingDecision`
+counts pages whose `page_approval` is PENDING), and an import whose reading still owes a person a decision ends
+in that state instead of `COMPLETE`. Job-owned external approval, the two-file allowance, settings
+revalidation, attempt claiming and the CLI's approval surfacing were already verified and remain green.
+
+One run of `./gradlew check` failed on a single pre-existing test (`SuryaOcrTest > a page committed under one
+runtime is read again when the probe reports another`) before the identity rule was reconciled as described;
+the test was not touched and passes on the final tree.
+
+Residual, to decide with the open slice: a `NEEDS_REVIEW` document is not in
+`ImportJobHandler.FINISHED_STATUSES`, so a byte-identical duplicate import would re-ingest it rather than record
+`DUPLICATE`. It is latent today because nothing writes `content_units.page_approval` yet — only the missing
+comparison/review does. The open slice also needs the page's direct text per page, a reviewer and store-backed
+policy plus a REVIEW-stage dispatch authority in the import attempt, per-document candidate staging, and
+chunking/embedding from the candidate so pending pages stay unindexed.

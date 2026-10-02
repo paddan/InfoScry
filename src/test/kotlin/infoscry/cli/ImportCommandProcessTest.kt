@@ -3,6 +3,7 @@ package infoscry.cli
 import infoscry.config.AppPaths
 import infoscry.config.BearerToken
 import infoscry.config.RuntimeInfo
+import infoscry.AppContext
 import infoscry.domain.JobState
 import infoscry.server.ApiJson
 import infoscry.server.ApiTestServer
@@ -315,6 +316,51 @@ class ImportCommandProcessTest {
         }
     }
 
+    @Test
+    fun `a remote import that needs an external page approval reports it instead of succeeding`() {
+        val source = writeSource("scan.txt", "Skannad text.\n")
+        // The collection's selection sends pages off this machine and allows none of them before a person
+        // approves a scope: the import has to stop at its first page rather than report success.
+        externalSelection(allowance = 0)
+        val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
+        try {
+            server.awaitStdoutLine("{")
+
+            val result = runHarness(
+                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "--wait",
+                source.toString(),
+            )
+
+            assertNotEquals(0, result.exitCode, "an import waiting for an approval reported success")
+            assertContains(result.stderr, "external page approval")
+            assertContains(result.stderr, "/api/jobs/")
+            assertContains(result.stderr, "/approve-external")
+            assertFalse(
+                result.stdout.contains("\"state\":\"COMPLETE\""),
+                "a waiting import must not report a finished result: ${result.stdout}",
+            )
+        } finally {
+            server.terminate()
+        }
+    }
+
+    @Test
+    fun `a standalone import that needs an external page approval reports it and holds nothing back`() {
+        val source = writeSource("scan.txt", "Skannad text.\n")
+        externalSelection(allowance = 0)
+
+        // Nobody owns the directory, so this process holds it for the whole import — and it owes the person
+        // the truth about why the import stopped, in the words of the remedy they can run.
+        val result = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", source.toString(),
+        )
+
+        assertNotEquals(0, result.exitCode, "an import waiting for an approval reported success")
+        assertContains(result.stderr, "/approve-external")
+        // Nothing was read: the file that waits is one that was never sent.
+        assertFalse(result.stdout.contains("\"imported\":1"), result.stdout)
+    }
+
     private fun awaitJobState(expected: JobState): JobState {
         var latest = JobState.QUEUED
         awaitUntil("the job to reach $expected") {
@@ -339,6 +385,43 @@ class ImportCommandProcessTest {
         val file = directory.resolve(name)
         Files.writeString(file, content)
         return file
+    }
+
+    /**
+     * The collection's OCR selection as an import admitted with an external page scope sees it: the image model
+     * reads the pages, and the job may send [allowance] distinct pages before a person has to approve more.
+     *
+     * It is written before any process opens the archive, because the collection's settings are what the
+     * enqueueing side resolves into the job's snapshot.
+     */
+    private fun externalSelection(allowance: Int) {
+        AppContext.open(AppPaths.of(dataDir)).use { context ->
+            val profile = context.ocrProfiles.create(
+                name = "Vision transcriber",
+                draft = infoscry.ocr.OcrProfileRevisionDraft(
+                    provider = infoscry.llm.LlmProvider.OPENAI_COMPATIBLE,
+                    model = "vision-model",
+                    contextWindow = 32_000,
+                    maxOutputTokens = 2_048,
+                    endpoint = "https://example.invalid/v1",
+                    inputPricePerMillion = 1.0,
+                    outputPricePerMillion = 2.0,
+                ),
+                enabled = true,
+            )
+            val collection = context.collectionService.requireActiveByNameOrId("Default")
+            context.collections.updateOcrSettings(
+                collection.id,
+                infoscry.ocr.CollectionOcrSettings(
+                    language = "eng",
+                    engine = infoscry.ocr.OcrEngine.LLM,
+                    importMode = infoscry.ocr.OcrImportMode.CHECK_AND_IMPROVE,
+                    transcriptionProfileId = profile.id,
+                    reviewProfileId = null,
+                    externalPageLimit = allowance,
+                ),
+            )
+        }
     }
 
     private fun writeSource(name: String, content: ByteArray): Path {

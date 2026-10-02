@@ -428,6 +428,11 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                     snapshotHash = snapshotHash,
                     authorizedDistinctPages = request.maxDistinctPages,
                 )
+                // An approval of a scope the job was waiting on *resumes* it: the waiting state is durable,
+                // and the approval is what ends it. A job still running or already queued is left exactly as
+                // it is — the allowance it just approved is read on every dispatch, so the attempt under way
+                // continues past the scope it stopped at, and a second attempt would be work nobody asked for.
+                val resumed = context.jobs.resumeAwaitingApproval(jobId)
                 call.respondJson(
                     HttpStatusCode.Accepted,
                     ImportExternalApprovalResponse(
@@ -438,6 +443,8 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                             OcrExternalOwner.job(jobId.value),
                         ),
                         calls = context.ocrOperations.callCount(OcrExternalOwner.job(jobId.value)),
+                        state = resumed.state.name,
+                        stage = resumed.stage,
                     ),
                 )
             }
@@ -457,6 +464,9 @@ data class ImportExternalApprovalResponse(
     val authorizedDistinctPages: Int,
     val distinctPagesSent: Int,
     val calls: Int,
+    /** The state the approved job answers with: `QUEUED` when this approval resumed it. */
+    val state: String? = null,
+    val stage: String? = null,
 )
 
 /**

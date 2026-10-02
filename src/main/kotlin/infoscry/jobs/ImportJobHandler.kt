@@ -17,6 +17,7 @@ import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.JobType
 import infoscry.domain.Job
+import infoscry.domain.JobId
 import infoscry.extract.CalibreConverter
 import infoscry.extract.DOCUMENT_TOO_LARGE_CODE
 import infoscry.extract.DOCUMENT_UNREADABLE_CODE
@@ -26,6 +27,12 @@ import infoscry.extract.ExtractionSettings
 import infoscry.extract.TesseractOcr
 import infoscry.library.ManagedImportOutcome
 import infoscry.library.ManagedLibrary
+import infoscry.ocr.OcrDispatchAuthority
+import infoscry.ocr.OcrDispatchStage
+import infoscry.ocr.OcrEndpointScope
+import infoscry.ocr.OcrExternalOwner
+import infoscry.ocr.OcrProfileRevision
+import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.SuryaOcr
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
@@ -35,6 +42,8 @@ import infoscry.storage.DocumentStore
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import infoscry.storage.ImportItemStore
+import infoscry.storage.JobStore
+import infoscry.storage.OcrOperationStore
 import java.io.IOException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
@@ -67,6 +76,14 @@ class ImportJobHandler internal constructor(
     private val documents: DocumentStore,
     private val library: ManagedLibrary,
     private val items: ImportItemStore,
+    /**
+     * The archive's rescan operations, asked about what one import job has already sent off this machine.
+     */
+    private val operations: OcrOperationStore,
+    /** The job's own row, which is where a wait for an external page approval is written durably. */
+    private val jobs: JobStore,
+    /** How a snapshotted profile revision id is resolved, so the attempt can read its dispatch scope. */
+    private val profileRevisionOf: (String) -> OcrProfileRevision?,
     /**
      * Where an attached managed copy is read into searchable content. Shared with the retry attempt, so
      * "read this document's bytes again" cannot mean two different things depending on how the document was
@@ -137,12 +154,22 @@ class ImportJobHandler internal constructor(
         var completed = 0
         for (source in sources) {
             try {
-                process(job, collection, payload.settings, source, stage)
+                process(job, collection, payload, source, stage)
             } catch (deleted: DocumentBeingDeletedException) {
                 // One document was removed while this file was being worked on. That is only this file's
                 // outcome: its item is durably marked CANCELLED so no later attempt copies the deleted
                 // document again, and the remaining files of the import keep running.
                 stage.run(STAGE_RECORD) { items.cancelTargeting(job.id, deleted.documentId) }
+            } catch (waiting: ImportAwaitingApproval) {
+                // A page would have exceeded this job's external scope, and it was not sent. The waiting
+                // state is durable and the attempt ends here rather than reading the next file: no page of
+                // any file may be dispatched until a person approves the scope. The files this attempt
+                // already imported are skipped when the approved job runs again, so the wait costs no work.
+                stage.run(STAGE_RECORD) { jobs.progress(job.id, stage = JobStore.AWAITING_APPROVAL_STAGE) }
+                LOGGER.atInfo()
+                    .addKeyValue(JOB_ID_FIELD, job.id.value)
+                    .log("an import waits for an external page scope to be approved before another page is sent")
+                return
             }
             completed++
             stage.reportProgress(completed, sources.size)
@@ -158,10 +185,11 @@ class ImportJobHandler internal constructor(
     private suspend fun process(
         job: Job,
         collection: Collection,
-        settings: ExtractionSettings,
+        payload: ImportJobPayload,
         source: ImportSource,
         stage: JobStage,
     ) {
+        val settings = payload.settings
         // The file's own name, reported before anything is done with it, so a reader watching the import
         // sees which of the selected files the wait belongs to. Only the name: the path it was selected
         // from is the archive's own bookkeeping and never crosses the API boundary.
@@ -200,6 +228,9 @@ class ImportJobHandler internal constructor(
             // for the opposite and reaches the same code through the retry handler.
             revisitFailedUnits = false,
             onFailure = { code, message -> recordFailure(job, source, stage, document, code, message) },
+            // The page allowance this file's pages leave under: the *job's*, because twenty files share one
+            // scope, and this attempt's, because nothing may be dispatched before the scope was approved.
+            dispatch = dispatchAuthorityFor(job, document, payload.ocr),
         )
         // A document deletion can land here: the file's document is written and its item is not. Nothing
         // below may fail the attempt because of that — the item writes obey the deletion's disposition
@@ -358,6 +389,49 @@ class ImportJobHandler internal constructor(
             return null
         }
         return Attached(imported.document, imported.managedPath, duplicate, updated)
+    }
+
+    /**
+     * The authority this attempt dispatches one document's pages through, or null when it sends none.
+     *
+     * An import's allowance belongs to the *job*: twenty files share one scope, and a page that left this
+     * machine is counted once whoever read it and whichever stage sent it. The authority is built per document
+     * because a dispatch names the document it is about — that pairing is what stops one job's approval from
+     * paying for another job's pages, or for another document's.
+     *
+     * A local destination gets no authority at all: nothing left the machine, so nothing is counted against
+     * the allowance. An external one is turned away *before* the page is sent, and the refusal is what ends the
+     * attempt in the durable waiting state.
+     */
+    private fun dispatchAuthorityFor(
+        job: Job,
+        document: Document,
+        snapshot: OcrSettingsSnapshot?,
+    ): OcrDispatchAuthority? {
+        val revisionId = snapshot?.transcriptionProfileRevisionId ?: return null
+        val revision = profileRevisionOf(revisionId) ?: return null
+        if (revision.scope != OcrEndpointScope.EXTERNAL) return null
+        return OcrDispatchAuthority(
+            operations = operations,
+            owner = OcrExternalOwner.job(job.id.value),
+            documentId = document.id,
+            stage = OcrDispatchStage.TRANSCRIPTION,
+            profileRevisionId = revisionId,
+            configuredAllowance = snapshot.externalPageLimit,
+            snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
+            onExhausted = { account ->
+                // The page was not sent. The attempt ends in the caller's wait, which writes the durable
+                // waiting state *after* this refusal and before the attempt ends: nothing beyond the
+                // approved scope was ever dispatched, and an approval puts the same job back in the queue.
+                LOGGER.atInfo()
+                    .addKeyValue(JOB_ID_FIELD, job.id.value)
+                    .addKeyValue(DOCUMENT_FIELD, document.id.value)
+                    .addKeyValue(DISTINCT_PAGES_FIELD, account.distinctPages)
+                    .addKeyValue(ALLOWANCE_FIELD, account.allowance)
+                    .log("an import's external page scope is spent, so this page was not sent")
+                throw ImportAwaitingApproval(job.id)
+            },
+        )
     }
 
     /**
@@ -614,6 +688,10 @@ class ImportJobHandler internal constructor(
         private const val COPY_FAILED = "COPY_FAILED"
         private const val GONE_MESSAGE = "the file was gone before the import reached it"
 
+        const val JOB_ID_FIELD = "job_id"
+        const val DISTINCT_PAGES_FIELD = "distinct_external_pages"
+        const val ALLOWANCE_FIELD = "external_page_allowance"
+
         /**
          * The largest document one import may publish in a single index transaction.
          *
@@ -697,6 +775,9 @@ class ImportJobHandler internal constructor(
                 documents = context.documents,
                 library = context.library,
                 items = context.importItems,
+                operations = context.ocrOperations,
+                jobs = context.jobs,
+                profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
                 ingest = ingest,
                 afterIngestion = afterIngestion,
                 beforeCopy = beforeCopy,
@@ -837,3 +918,16 @@ class ImportJobHandler internal constructor(
 }
 
 private val LOGGER = LoggerFactory.getLogger("infoscry.import")
+
+/**
+ * The attempt stopped because a page would have exceeded this import's external scope without an approval.
+ *
+ * It is control flow rather than a failure: the page was never sent, the attempt's waiting state is durable,
+ * and an approval queues another attempt of the same job — which resumes at the files this one did not
+ * finish rather than at the first file. It travels out through the reader and the ingest unchanged, which is
+ * why it is neither an I/O failure nor an unavailable-engine refusal: marking the file as failed would tell a
+ * person their document could not be read when the truth is that nobody has approved the scope yet.
+ */
+internal class ImportAwaitingApproval(val jobId: JobId) : IllegalStateException(
+    "import job ${jobId.value} waits for an external page scope to be approved before another page is sent",
+)

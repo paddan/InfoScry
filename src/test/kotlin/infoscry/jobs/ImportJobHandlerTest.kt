@@ -32,10 +32,17 @@ import infoscry.embedding.ModelManager
 import infoscry.embedding.TestDocumentEmbedder
 import infoscry.extract.OCR_FAILED_CODE
 import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrExternalAccount
+import infoscry.ocr.OcrExternalOwner
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.ExternalDispatchPermitRequest
+import infoscry.ocr.ImageLlmException
+import infoscry.ocr.PageDispatchIdentity
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
+import infoscry.storage.JobStore
+import infoscry.storage.OcrOperationStore
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -475,6 +482,88 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `an import sends nothing before its external scope is approved and waits for one`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val profile = harness.externalProfile()
+            // No page is allowed without an approval: the attempt has a scope, and it is spent before it starts.
+            val snapshot = harness.externalSnapshot(profile = profile, allowance = 0)
+            val dispatcher = DispatchingUnits(text = "read by the model")
+
+            val waiting = harness.importWithOcr(listOf(source), dispatcher, snapshot)
+
+            // Nothing was sent, and the job says what it waits for: the refusal comes first because that is
+            // the promise the allowance makes.
+            assertEquals(0, dispatcher.sent, "a page left this machine before its scope was approved")
+            assertEquals(0, harness.externalAccountOf(waiting.job.id, snapshot).distinctPages)
+            assertEquals(JobState.COMPLETE, waiting.job.state)
+            assertEquals(
+                JobStore.AWAITING_APPROVAL_STAGE,
+                waiting.job.stage,
+                "an import that may not dispatch has to say what it waits for",
+            )
+            assertEquals(
+                0,
+                waiting.items.count { it.outcome == ImportItemOutcome.FAILED },
+                "a job waiting for an approval is not a job whose file failed",
+            )
+
+            // The approval is the scope this job was admitted with, and it puts the same job back in the queue.
+            harness.approveJobScope(waiting.job.id, snapshot, maxDistinctPages = 1)
+            val resumed = harness.resumeWaitingImport(waiting.job.id, dispatcher)
+
+            assertEquals(1, dispatcher.sent, "the approved page was never sent")
+            val account = harness.externalAccountOf(resumed.job.id, snapshot)
+            assertEquals(1, account.distinctPages)
+            assertEquals(1, account.calls)
+            // The file this attempt had already copied is a duplicate of its own earlier work when it is read
+            // again, and it is read: what the wait cost the person is time, not the reading.
+            assertEquals(DocumentStatus.COMPLETE, resumed.documents.values.single().status)
+            assertEquals(0, resumed.items.count { it.outcome == ImportItemOutcome.FAILED })
+        }
+    }
+
+    @Test
+    fun `one allowance covers two files of one job and pauses before the page past it`() {
+        withHarness { harness ->
+            val first = harness.writeText("first.txt", "First\n")
+            val second = harness.writeText("second.txt", "Second\n")
+            val profile = harness.externalProfile()
+            // One distinct page: the allowance belongs to the job, so the second file's page is the one
+            // that would exceed it.
+            val snapshot = harness.externalSnapshot(profile = profile, allowance = 1)
+            val dispatcher = DispatchingUnits(text = "read by the model")
+
+            val limited = harness.importWithOcr(listOf(first, second), dispatcher, snapshot)
+
+            // The bound is the assertion: one page may leave, and the page that would be the second does not.
+            assertEquals(1, dispatcher.sent, "the page past the allowance was sent")
+            val sent = harness.externalAccountOf(limited.job.id, snapshot)
+            assertEquals(1, sent.distinctPages)
+            assertEquals(1, sent.calls)
+            assertEquals(JobStore.AWAITING_APPROVAL_STAGE, limited.job.stage)
+            assertEquals(
+                1,
+                limited.items.count { it.outcome == ImportItemOutcome.IMPORTED },
+                "the file whose page was approved was imported",
+            )
+
+            harness.approveJobScope(limited.job.id, snapshot, maxDistinctPages = 2)
+            val resumed = harness.resumeWaitingImport(limited.job.id, dispatcher)
+
+            // The second file's page is a different page, counted once, and the call count follows it: the
+            // two counters answer two different questions.
+            assertEquals(2, dispatcher.sent)
+            val account = harness.externalAccountOf(resumed.job.id, snapshot)
+            assertEquals(2, account.distinctPages)
+            assertEquals(2, account.calls)
+            assertEquals(2, resumed.documents.size)
+            assertTrue(resumed.documents.values.all { document -> document.status == DocumentStatus.COMPLETE })
+            assertEquals(0, resumed.items.count { it.outcome == ImportItemOutcome.FAILED })
+        }
+    }
+
+    @Test
     fun `an import admitted with check-and-improve reads with the collection's OCR selection`() {
         withHarness { harness ->
             val source = harness.writeText("scan.txt", "Ordinary text\n")
@@ -496,6 +585,88 @@ class ImportJobHandlerTest {
             assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
             assertEquals(OcrImportMode.CHECK_AND_IMPROVE, extractor.mode, "the mode has to reach the extraction")
             assertEquals(OcrEngine.SURYA, extractor.engine, "the engine has to be the one that was selected")
+        }
+    }
+
+    @Test
+    fun `an attempt reads under the runtime identity the job was admitted with, not one probed later`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            // What admission recorded: the runtime the reading engine reported when the job was created.
+            val admitted = OcrSettingsSnapshot(
+                engine = OcrEngine.SURYA,
+                mode = OcrImportMode.CHECK_AND_IMPROVE,
+                language = "eng",
+                extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+                runtimeIdentity = "surya-ocr 0.22.1 backend llamacpp",
+            )
+            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(admitted)
+            assertEquals(admitted.runtimeIdentity, settings.ocrAttempt?.runtimeIdentity)
+
+            // The first attempt dies where a killed process does, after committing two of its three units,
+            // and its reader would answer another runtime if it were ever asked.
+            val interrupted = RecordingUnits(units = 3, failProducingUnit = 2).also {
+                it.runtimeIdentityAnswer = "surya-ocr 0.23.0"
+            }
+            harness.importDurably(listOf(source), interrupted, settings = settings)
+            assertEquals(listOf("unit-0", "unit-1"), interrupted.produced)
+            assertEquals(0, interrupted.probes, "the attempt probed the reader for a runtime it was admitted with")
+
+            // The attempt that follows is handed the payload's own settings. Another Surya version installed
+            // in between is *not* this attempt's runtime: the fingerprint is the key the committed pages are
+            // looked up by, and the admitted runtime's key is the one they were written under.
+            val resumed = RecordingUnits(units = 3).also { it.runtimeIdentityAnswer = "surya-ocr 0.24.0" }
+            val second = harness.importDurably(listOf(source), resumed, settings = settings)
+
+            assertEquals(0, resumed.probes, "a probe replaced the runtime the job was admitted with")
+            assertEquals(interrupted.fingerprints.single(), resumed.fingerprints.single())
+            assertEquals(listOf("unit-0", "unit-1"), resumed.skipped, "the admitted runtime's work was not reused")
+            assertEquals(listOf("unit-2"), resumed.produced)
+            val document = second.documents.values.single()
+            assertEquals(DocumentStatus.COMPLETE, document.status)
+
+            // And the identity that was used is the admitted one: had the attempt discovered a new runtime,
+            // its key would have been this one and the reuse above could not have happened.
+            assertNotEquals(
+                resumed.fingerprints.single(),
+                ExtractionFingerprint.of(
+                    document.sha256,
+                    ExtractionSettings(ocrLanguages = "eng")
+                        .forOcrSettings(admitted.copy(runtimeIdentity = "surya-ocr 0.23.0")),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `a reading that still owes a person a decision is review-pending, not complete`() {
+        withHarness { harness ->
+            val clean = harness.writeText("clean.txt", "Ordinary text\n")
+
+            val run = harness.importAwaitingDecision(listOf(clean), RecordingUnits(units = 2))
+
+            // Every unit was read and the document finished its pass, so it is neither failed nor waiting for
+            // a tool: what it owes is a person's decision about a page the reading proposed.
+            assertEquals(DocumentStatus.NEEDS_REVIEW, run.documents.values.single().status)
+            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+            assertEquals(JobState.COMPLETE, run.job.state)
+        }
+    }
+
+    @Test
+    fun `a pending decision outranks a unit that could not be read`() {
+        withHarness { harness ->
+            val mixed = harness.writeText("mixed.txt", "Ordinary text\n")
+
+            val run = harness.importAwaitingDecision(
+                listOf(mixed),
+                FailedUnitsThenFinish(goodUnits = 1, failedUnits = 1),
+            )
+
+            // The question a reader has to answer first is whether anybody accepted the reading, so a
+            // document with both a proposal and a failed unit is review-pending; the failure stays on record
+            // per unit rather than being dropped.
+            assertEquals(DocumentStatus.NEEDS_REVIEW, run.documents.values.single().status)
         }
     }
 
@@ -1027,6 +1198,39 @@ internal class Harness(val directory: Path) : AutoCloseable {
         finish(context, jobId, collectionId)
     }
 
+    /**
+     * One import whose committed reading still owes a person a decision.
+     *
+     * The sink is the durable one with exactly one difference: it answers that a page of the reading awaits
+     * a decision, which is what a comparison stages for a page a model proposed and nobody accepted. The
+     * decision itself belongs to the import's comparison path; everything else here — the units, the
+     * checkpoints, the chunks, the index — is the real pipeline, so the document's own status is what the
+     * test observes rather than a double's opinion.
+     */
+    fun importAwaitingDecision(sources: List<Path>, extractor: DocumentExtractor): ImportRun =
+        AppContext.open(dataDir).use { context ->
+            val pipeline = ImportPipeline(
+                detector = MediaTypeDetector(),
+                registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
+                sink = PendingDecisionSink(StoredUnitsSink(context.paths, context.documents, context.content)),
+            )
+            val job = enqueue(context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"))
+            attach(context, pipeline)
+            finish(context, job.id, CollectionId("default"))
+        }
+
+    /**
+     * The durable sink with one difference: it says a page of the reading still awaits a decision.
+     *
+     * That answer is the whole of what `NEEDS_REVIEW` rests on, and the sink is where it belongs: what
+     * committed the reading is what knows whether any of it is a proposal. Everything else is delegated, so
+     * the units, their checkpoints and their artifacts are the durable sink's real work.
+     */
+    class PendingDecisionSink(private val delegate: StoredUnitsSink) : ExtractionSink by delegate {
+
+        override suspend fun awaitingDecision(documentId: DocumentId): Int = 1
+    }
+
     /** [interrupt] with the real durable unit store, so the resume has checkpoints to reuse. */
     fun interruptDurably(
         sources: List<Path>,
@@ -1041,6 +1245,80 @@ internal class Harness(val directory: Path) : AutoCloseable {
         job.id
     }
 
+    /** An external image-model profile, created through the real store so its revision is a row that exists. */
+    fun externalProfile(): infoscry.ocr.OcrProfile = AppContext.open(dataDir).use { context ->
+        context.ocrProfiles.create(
+            name = "Vision transcriber",
+            draft = infoscry.ocr.OcrProfileRevisionDraft(
+                provider = infoscry.llm.LlmProvider.OPENAI_COMPATIBLE,
+                model = "vision-model",
+                contextWindow = 32_000,
+                maxOutputTokens = 2_048,
+                endpoint = "https://example.invalid/v1",
+                inputPricePerMillion = 1.0,
+                outputPricePerMillion = 2.0,
+            ),
+            enabled = true,
+        )
+    }
+
+    /**
+     * The OCR selection one import is admitted with: the image model reads the pages, every page is read, and
+     * the *job* may send [allowance] distinct pages before a person has to approve more.
+     */
+    fun externalSnapshot(profile: infoscry.ocr.OcrProfile, allowance: Int): OcrSettingsSnapshot =
+        OcrSettingsSnapshot(
+            engine = OcrEngine.LLM,
+            mode = OcrImportMode.CHECK_AND_IMPROVE,
+            language = "eng",
+            extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+            transcriptionProfileRevisionId = profile.revision.revisionId,
+            externalPageLimit = allowance,
+        )
+
+    /** One import whose payload carries an OCR selection, run through the durable pipeline. */
+    fun importWithOcr(
+        sources: List<Path>,
+        extractor: DocumentExtractor,
+        snapshot: OcrSettingsSnapshot,
+        collectionId: CollectionId = CollectionId("default"),
+        settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
+        embedder: DocumentEmbedder = TestDocumentEmbedder(),
+    ): ImportRun = AppContext.open(dataDir).use { context ->
+        val job = enqueue(context, sources, settings, collectionId, recursive = false, ocr = snapshot)
+        attach(context, storedPipeline(context, extractor), embedder = embedder)
+        finish(context, job.id, collectionId)
+    }
+
+    /** Records the approval an import waits for, exactly as the job's own approval route does. */
+    fun approveJobScope(jobId: JobId, snapshot: OcrSettingsSnapshot, maxDistinctPages: Int) {
+        AppContext.open(dataDir).use { context ->
+            context.ocrOperations.approveExternalScope(
+                owner = OcrExternalOwner.job(jobId.value),
+                snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
+                authorizedDistinctPages = maxDistinctPages,
+            )
+        }
+    }
+
+    /** What one job-owned scope holds: the pages it sent, what they cost, and what it may send now. */
+    fun externalAccountOf(jobId: JobId, snapshot: OcrSettingsSnapshot): OcrExternalAccount =
+        AppContext.open(dataDir).use { context ->
+            context.ocrOperations.allowanceFor(
+                owner = OcrExternalOwner.job(jobId.value),
+                configuredAllowance = snapshot.externalPageLimit,
+                snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
+            )
+        }
+
+    /** Resumes a job that waited for an approval, and runs the attempt it owes in a fresh process. */
+    fun resumeWaitingImport(jobId: JobId, extractor: DocumentExtractor): ImportRun =
+        AppContext.open(dataDir).use { context ->
+            context.jobs.resumeAwaitingApproval(jobId)
+            attach(context, storedPipeline(context, extractor))
+            finish(context, jobId, CollectionId("default"))
+        }
+
     /** [resume] with the real durable unit store. */
     fun resumeDurably(
         jobId: JobId,
@@ -1054,7 +1332,6 @@ internal class Harness(val directory: Path) : AutoCloseable {
     /** Queues an import without attaching a worker, for tests that run their own pipeline. */
     internal fun enqueueForTest(context: AppContext, sources: List<Path>, recursive: Boolean = false): Job =
         enqueue(context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"), recursive)
-
     /**
      * Queues a retry for documents the archive already holds, without attaching a worker.
      *
@@ -1108,11 +1385,13 @@ internal class Harness(val directory: Path) : AutoCloseable {
         settings: ExtractionSettings,
         collectionId: CollectionId,
         recursive: Boolean = false,
+        ocr: OcrSettingsSnapshot? = null,
     ): Job {
         val payload = ImportJobPayload(
             collectionId = collectionId.value,
             sources = sources.map { it.toAbsolutePath().normalize().toString() },
             settings = settings,
+            ocr = ocr,
             recursive = recursive,
         )
         return context.jobs.enqueue(
@@ -1171,6 +1450,64 @@ internal class ModeRecordingUnits : DocumentExtractor {
 }
 
 /**
+ * An extractor that stands in for an image-capable engine, sending one page through the attempt's own
+ * dispatch authority.
+ *
+ * It asks for permission exactly where a real engine does — for this document's page, through the profile
+ * revision the attempt was admitted with — counts the call before it sends, and refuses the page when the
+ * permit is refused. The import path's job-owned allowance is therefore proven about the production seam
+ * rather than about a double that decides for itself whether it may send.
+ */
+internal class DispatchingUnits(
+    private val text: String,
+    private val unitId: String = "unit-0",
+) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    /** How many pages this engine actually sent, which is what one job's allowance bounds. */
+    var sent: Int = 0
+        private set
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        val authority = input.dispatch
+        if (authority != null && !input.isCommitted(unitId)) {
+            val request = ExternalDispatchPermitRequest(
+                profileRevisionId = authority.profileRevisionId,
+                page = PageDispatchIdentity(unitId = unitId, ordinal = 0, documentId = input.documentId.value),
+            )
+            if (!authority.isPermitted(request)) {
+                throw ImageLlmException(
+                    ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED,
+                    "this page is not covered by an external dispatch permit for this profile revision",
+                )
+            }
+            authority.attemptAboutToBeSent(request)
+            sent++
+        }
+        if (!input.isCommitted(unitId)) {
+            input.boundary.unit {
+                emit(
+                    ExtractionEvent.UnitReady(
+                        key = unitId,
+                        ordinal = 0,
+                        unit = ContentUnitDraft(
+                            locator = SourceLocation.TextLines(start = 1, end = 1),
+                            extractedText = text,
+                            searchText = text,
+                            method = ExtractionMethod.OCR,
+                        ),
+                    ),
+                )
+            }
+        }
+        input.boundary.unit {
+            emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = 1))
+        }
+    }
+}
+
+/**
  * An extractor that records which units it produced and which it skipped, so a resume is observable.
  *
  * [failProducingUnit] makes the attempt die where a child tool would: after the units before it were
@@ -1186,6 +1523,22 @@ internal class RecordingUnits(
     val produced = mutableListOf<String>()
     val skipped = mutableListOf<String>()
     val fingerprints = mutableListOf<ExtractionFingerprint>()
+
+    /**
+     * What this reader answers when an attempt asks what its runtime is, and how often it was asked.
+     *
+     * A reader is asked only for an attempt whose settings record no runtime of their own, so a call count
+     * (and the different identity it would answer) is what says that an admitted identity was used rather
+     * than replaced by one discovered at the attempt.
+     */
+    var runtimeIdentityAnswer: String? = null
+    var probes: Int = 0
+        private set
+
+    override suspend fun runtimeIdentity(kind: OcrEngine): String? {
+        probes++
+        return runtimeIdentityAnswer
+    }
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
         fingerprints += input.fingerprint

@@ -526,7 +526,19 @@ interface PageOcrEngine {
  * configured are never consulted for it. There is no fallback chain here and no preference order — two
  * engines of one kind are a wiring mistake rather than a coin toss.
  */
-class PageOcrEngines(engines: List<PageOcrEngine>) {
+class PageOcrEngines(
+    engines: List<PageOcrEngine>,
+    /**
+     * The engines that exist per attempt rather than per build, built from the attempt's dispatch authority.
+     *
+     * An external engine is not a property of the machine: it dispatches pages against *one* document's or
+     * job's allowance through *one* immutable profile revision, so it is built where that authority is known —
+     * at the attempt — and not where the extractors are wired. A factory that answers null contributes no
+     * engine, which is how "this attempt has no authority for that destination" stays an absence rather than a
+     * substitute.
+     */
+    private val attemptEngines: List<(OcrDispatchAuthority?) -> PageOcrEngine?> = emptyList(),
+) {
 
     private val byKind: Map<OcrEngine, PageOcrEngine> = buildMap {
         engines.forEach { engine ->
@@ -536,6 +548,18 @@ class PageOcrEngines(engines: List<PageOcrEngine>) {
                     "${previous?.javaClass?.simpleName} and ${engine.javaClass.simpleName}"
             }
         }
+    }
+
+    /**
+     * These engines as one attempt sees them: the build's own, plus the ones that attempt builds.
+     *
+     * A factory that produces a kind the build already has is a wiring mistake rather than a preference, and
+     * is refused the same way two built engines of one kind are.
+     */
+    fun forAttempt(dispatch: OcrDispatchAuthority?): PageOcrEngines {
+        if (attemptEngines.isEmpty()) return this
+        val built = attemptEngines.mapNotNull { factory -> factory(dispatch) }
+        return if (built.isEmpty()) this else PageOcrEngines(byKind.values + built)
     }
 
     /** The kinds this build can read a page with. */

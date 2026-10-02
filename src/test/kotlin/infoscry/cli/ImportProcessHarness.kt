@@ -16,6 +16,9 @@ import infoscry.extract.MediaTypeDetector
 import infoscry.extract.TextualFallbackExtractor
 import infoscry.jobs.ImportPipeline
 import infoscry.jobs.StoredUnitsSink
+import infoscry.ocr.ExternalDispatchPermitRequest
+import infoscry.ocr.ImageLlmException
+import infoscry.ocr.PageDispatchIdentity
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.delay
@@ -41,6 +44,9 @@ import kotlinx.coroutines.flow.flow
  * INFOSCRY_TEST_GATE   path that must exist before the extractor finishes its unit
  * INFOSCRY_TEST_UNITS  how many units the extractor produces (default 1)
  * ```
+ *
+ * A unit is sent through the attempt's own dispatch authority when the import carries one: that is the seam an
+ * external engine uses, and it is what makes "which pages left this machine" observable from a real process.
  */
 object ImportProcessHarness {
 
@@ -99,6 +105,30 @@ internal class HarnessExtractor : DocumentExtractor {
                     ImportProcessHarness.gatePath()?.let { gate ->
                         val deadline = System.nanoTime() + GATE_TIMEOUT_NANOS
                         while (!Files.exists(gate) && System.nanoTime() < deadline) delay(GATE_POLL_MILLIS)
+                    }
+                    // An import whose attempt carries a dispatch authority has one page to send, and this is
+                    // where a real engine would send it: the permit is asked for *before* the reading exists,
+                    // so a scope nobody approved refuses the page rather than reading it first and deciding
+                    // afterwards. That is the whole point of the mode: the tests that need it are about which
+                    // pages left this machine, and they must not be able to observe a page that was read and
+                    // then discarded.
+                    input.dispatch?.let { authority ->
+                        val request = ExternalDispatchPermitRequest(
+                            profileRevisionId = authority.profileRevisionId,
+                            page = PageDispatchIdentity(
+                                unitId = key,
+                                ordinal = index,
+                                documentId = input.documentId.value,
+                            ),
+                        )
+                        if (!authority.isPermitted(request)) {
+                            throw ImageLlmException(
+                                ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED,
+                                "this page is not covered by an external dispatch permit for this profile " +
+                                    "revision, so its image was not sent",
+                            )
+                        }
+                        authority.attemptAboutToBeSent(request)
                     }
                     val text = Files.readString(input.managedPath)
                     emit(

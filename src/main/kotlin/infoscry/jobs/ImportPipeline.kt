@@ -33,7 +33,18 @@ class ImportPipeline(
          */
         fun production(context: AppContext): ImportPipeline = ImportPipeline(
             detector = MediaTypeDetector(),
-            registry = ExtractorRegistry.production(),
+            registry = ExtractorRegistry.production(
+                // The image-model engine of an admitted attempt: it resolves the profile revision the job's
+                // snapshot names, and every page it would send is asked for a permit against the allowance
+                // that job owns, so nothing leaves this machine before the scope was approved.
+                llm = { dispatch ->
+                    infoscry.ocr.LlmOcr(
+                        revisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
+                        permits = dispatch,
+                        calls = dispatch?.let { authority -> authority::attemptAboutToBeSent },
+                    )
+                },
+            ),
             sink = StoredUnitsSink(
                 paths = context.paths,
                 documents = context.documents,

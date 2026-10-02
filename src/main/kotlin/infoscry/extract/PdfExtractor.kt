@@ -229,10 +229,11 @@ class PdfExtractor(
     /**
      * What the page's engine would read it with, discovered without reading anything.
      *
-     * The engines belong to this reader, so it is this reader that can say what they are, and the answer is
-     * asked for before the first page is rendered: it belongs in the attempt's fingerprint, which is the key
-     * an attempt's committed pages are looked up by ([PageOcrEngines.engineFor] answers nothing for an engine
-     * this build does not have, and the engine answers nothing when its runtime cannot be described).
+     * The engines belong to this reader, so it is this reader that can say what they are. The answer is
+     * asked for before the first page is rendered, for the attempt that was admitted without an identity of
+     * its own to key its committed pages by: it belongs in that attempt's fingerprint
+     * ([PageOcrEngines.engineFor] answers nothing for an engine this build does not have, and the engine
+     * answers nothing when its runtime cannot be described).
      */
     override suspend fun runtimeIdentity(kind: OcrEngine): String? = ocr.engineFor(kind)?.runtimeIdentity()
 
@@ -301,6 +302,9 @@ class PdfExtractor(
     ): PageRun {
         val readsEveryPage = input.settings.ocrMode == OcrImportMode.CHECK_AND_IMPROVE
         val engine = input.settings.readingEngine()
+        // The engines this attempt reads with: the build's own, plus the one this attempt builds for its
+        // dispatch authority, because an external reading counts against this attempt's page allowance.
+        val attemptEngines = ocr.forAttempt(input.dispatch)
         // Everything this attempt writes lives under its own fingerprint, so a render at another resolution
         // or by another engine can never be mistaken for this one's evidence.
         val attemptRoot = input.artifactRoot.resolve(input.fingerprint.value)
@@ -369,7 +373,7 @@ class PdfExtractor(
                         return@unit
                     }
                     val reading = try {
-                        ocr.transcribe(engine, image, input.settings.pageOcrSettings(image.renderDpi))
+                        attemptEngines.transcribe(engine, image, input.settings.pageOcrSettings(image.renderDpi))
                     } catch (unavailable: OcrUnavailableException) {
                         // Not a page failure: the engine cannot read any page, so the document cannot be
                         // read, and one failure per page would only bury the fact that matters. The

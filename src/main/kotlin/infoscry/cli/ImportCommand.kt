@@ -29,6 +29,7 @@ import infoscry.server.ApiJson
 import infoscry.server.PRODUCT_NAME
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
+import infoscry.storage.JobStore
 import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.OcrOperationStore
 import java.nio.file.Files
@@ -156,12 +157,18 @@ class ImportCommand(
             val collection = open.collectionService.requireActiveByNameOrId(collection)
             // The tool's version is asked for once here, before the job exists, because it is part of what
             // the job's checkpoints are keyed by. `runBlocking` rather than a suspend command: the CLI is
-            // a blocking program, and this is the one suspension it has before its own job loop starts.
-            val snapshot = open.ocr.snapshotFor(
-                settings = collection.ocrSettings(),
-                extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
-                renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
-            )
+            // a blocking program, and this is the one suspension it has before its own job loop starts. The
+            // snapshot records the reading engine's runtime for the same reason — a resumed attempt reads
+            // under the runtime it was admitted with, never one discovered later.
+            val snapshot = runBlocking {
+                open.ocr.withProbedRuntime(
+                    open.ocr.snapshotFor(
+                        settings = collection.ocrSettings(),
+                        extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+                        renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
+                    ),
+                )
+            }
             val settings = runBlocking { ToolProbe.extractionSettings(collection.ocrLanguages) }
                 .forOcrSettings(snapshot)
             val payload = ImportJobPayload.of(
@@ -207,7 +214,15 @@ class ImportCommand(
             // may: a command that reported a clean success while a scope waited for a person would be telling
             // the person the archive did something it did not do.
             reportExternalAdmission(open, job.id, payload, items)
-            report(finished, items, options, executedHere = true)
+            report(
+                job = finished,
+                items = items,
+                options = options,
+                executedHere = true,
+                // The standalone path holds the payload, so the remedy can name the exact hash an approval has
+                // to carry rather than a placeholder.
+                snapshotHash = payload.ocr?.let(OcrOperationStore::snapshotHashOf),
+            )
         }
     }
 
@@ -263,11 +278,27 @@ class ImportCommand(
         items: List<ImportItem>,
         options: CliOptions,
         executedHere: Boolean,
+        snapshotHash: String? = null,
     ) {
         val counts = items.groupingBy { it.outcome }.eachCount()
         val imported = counts[ImportItemOutcome.IMPORTED] ?: 0
         val duplicates = counts[ImportItemOutcome.DUPLICATE] ?: 0
         val failed = counts[ImportItemOutcome.FAILED] ?: 0
+
+        // A job that stopped for an external page approval has *not* finished: what it did is exactly the part
+        // of the import that needed nothing external, and the rest is waiting for a person. Reporting a result
+        // here would tell them the archive did something it deliberately did not — nothing beyond the approved
+        // scope was sent — so the requirement and its remedy are what this prints.
+        if (job.stage == JobStore.AWAITING_APPROVAL_STAGE) {
+            val waiting = items.count { it.outcome != ImportItemOutcome.IMPORTED }
+            echo("$waiting of ${items.size} file(s) wait for an external page approval before they can be read.", err = true)
+            echo(waitingApprovalRemedy(job.id.value, snapshotHash), err = true)
+            throw CliFailure(
+                "the import stopped before sending a page its external scope did not cover; approve the scope " +
+                    "and run the import again — the files it already imported are skipped, and nothing beyond " +
+                    "the approved scope was sent",
+            )
+        }
 
         if (options.json) {
             echo(
@@ -382,6 +413,19 @@ class ImportCommand(
                 "scope was sent",
         )
     }
+
+    /**
+     * The remedy for an import that stopped for an external page approval, as a command a person can run.
+     *
+     * The approval is bound to the job's own OCR selection — that binding is what stops one scope's approval
+     * from covering another — and this standalone path knows the hash because the payload is its own. The
+     * remote path never receives the payload, so it names what the body has to carry rather than inventing a
+     * hash no approval would match.
+     */
+    private fun waitingApprovalRemedy(jobId: String, snapshotHash: String?): String =
+        "Approve the import's scope: POST /api/jobs/$jobId/approve-external with the runtime bearer token and " +
+            "body {\"expectedSnapshotHash\":\"${snapshotHash ?: "the job's OCR selection hash"}\"," +
+            "\"maxDistinctPages\":<the number of distinct pages you authorize>}"
 
     /**
      * The remedy for an unapproved external scope, as a command a person can run.

@@ -771,7 +771,7 @@ class RescanJobHandler internal constructor(
      */
     private suspend fun pauseForApproval(job: Job, operation: OcrOperation, stage: JobStage) {
         stage.run(STAGE_RECORD) { operations.pause(operation.operationId) }
-        stage.run(STAGE_RECORD) { jobs.progress(job.id, stage = AWAITING_APPROVAL_STAGE) }
+        stage.run(STAGE_RECORD) { jobs.progress(job.id, stage = JobStore.AWAITING_APPROVAL_STAGE) }
         LOGGER.atInfo()
             .addKeyValue(DOCUMENT_FIELD, operation.documentId.value)
             .addKeyValue(OPERATION_FIELD, operation.operationId)
@@ -895,7 +895,6 @@ class RescanJobHandler internal constructor(
         const val NO_REVIEWER = "no-reviewer"
 
         const val CANCELLED_CODE = "RESCAN_CANCELLED"
-        const val AWAITING_APPROVAL_STAGE = "awaiting-approval"
         const val STALE_BASELINE = "OCR_STALE_BASELINE"
         const val AWAITING_REVIEW_CODE = "AWAITING_REVIEW"
         const val MANAGED_COPY_CHANGED = "RESCAN_MANAGED_COPY_CHANGED"

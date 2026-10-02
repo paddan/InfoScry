@@ -57,12 +57,14 @@ data class RetryPrerequisites(
          *
          * [ocrSnapshot] resolves the collection's OCR selection into the attempt snapshot the retry will run
          * with, or answers null for a caller that has no profiles wired: without it, a retry records the
-         * legacy Tesseract/fill-missing reading, which is what an unchanged collection means anyway.
+         * legacy Tesseract/fill-missing reading, which is what an unchanged collection means anyway. It is
+         * suspend because resolving the snapshot includes asking the reading engine what runtime it is —
+         * the identity an attempt is identified by has to be recorded before the attempt is queued.
          */
         suspend fun probe(
             collection: Collection,
             modelsDir: Path,
-            ocrSnapshot: (infoscry.ocr.CollectionOcrSettings) -> infoscry.ocr.OcrSettingsSnapshot? = { null },
+            ocrSnapshot: suspend (infoscry.ocr.CollectionOcrSettings) -> infoscry.ocr.OcrSettingsSnapshot? = { null },
         ): RetryPrerequisites {
             val settings = ToolProbe.extractionSettings(collection.ocrLanguages).let { probed ->
                 ocrSnapshot(collection.ocrSettings())?.let(probed::forOcrSettings) ?: probed

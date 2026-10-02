@@ -40,6 +40,14 @@ class OcrProfileService(
      * request can supply a validator of its own.
      */
     private val permits: ExternalDispatchPermitValidator? = null,
+    /**
+     * How an attempt's reading engine is built, so admission can ask what runtime it would read with.
+     *
+     * It is the same factory an attempt's page images go through, and null means this build has no engines
+     * wired: admission then records no runtime identity, which is a different value from any discovered one
+     * and therefore never compares equal to one.
+     */
+    private val engineFor: ((OcrEngine, OcrSettingsSnapshot, OcrDispatchAuthority?) -> PageOcrEngine?)? = null,
 ) {
 
     fun list(): List<OcrProfile> = profiles.list()
@@ -131,6 +139,24 @@ class OcrProfileService(
      * transcription profile at all, so its snapshot carries no revision and the reading is identified by the
      * engine and its tool version.
      */
+    /**
+     * [snapshot] with the runtime identity its reading engine reports, discovered without reading a page.
+     *
+     * The identity has to be discovered *here*, before the attempt is enqueued, because it is part of what
+     * the attempt's fingerprint is computed from and therefore of the key its committed pages are looked up
+     * by: an engine that was upgraded between two attempts must not silently be handed the older runtime's
+     * pages. Probing at the attempt instead would make the key depend on when the attempt happened to run,
+     * so a restart would resume under a newly discovered runtime rather than the recorded one.
+     *
+     * An engine that cannot describe itself answers null, which is recorded as it stands rather than left
+     * absent-and-therefore-guessable-later: the identity a snapshot carries is what the attempt uses, and no
+     * later probe replaces it. A build with no engines wired leaves the snapshot untouched.
+     */
+    suspend fun withProbedRuntime(snapshot: OcrSettingsSnapshot): OcrSettingsSnapshot {
+        val engine = engineFor?.invoke(snapshot.engine, snapshot, null) ?: return snapshot
+        return snapshot.copy(runtimeIdentity = engine.runtimeIdentity())
+    }
+
     fun snapshotFor(
         settings: CollectionOcrSettings,
         extractorVersion: String,

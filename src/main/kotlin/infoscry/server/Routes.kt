@@ -331,10 +331,17 @@ fun Application.configureRoutes(
                         // payload: the engine, the import mode, the profile revisions and the external page
                         // allowance of the whole job. Editing a default afterwards changes future imports
                         // only, and an import of twenty files has one allowance covering all of them.
-                        val snapshot = context.ocr.snapshotFor(
-                            settings = collection.ocrSettings(),
-                            extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
-                            renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
+                        //
+                        // The snapshot also records the runtime the reading engine reports *now*, before the
+                        // job exists: the attempt's fingerprint is computed from it, so an engine upgraded
+                        // between admission and a restart cannot make a resumed attempt read under a runtime
+                        // nobody admitted.
+                        val snapshot = context.ocr.withProbedRuntime(
+                            context.ocr.snapshotFor(
+                                settings = collection.ocrSettings(),
+                                extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+                                renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
+                            ),
                         )
                         val settings = ToolProbe.extractionSettings(collection.ocrLanguages)
                             .forOcrSettings(snapshot)
@@ -830,6 +837,11 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
         respondJson(
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = "OCR_ALREADY_RUNNING", message = busy.message.orEmpty())),
+        )
+    } catch (attempting: infoscry.storage.OcrAttemptInProgressException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "OCR_ATTEMPT_IN_PROGRESS", message = attempting.message.orEmpty())),
         )
     } catch (stale: StaleCandidateDecisionException) {
         respondJson(

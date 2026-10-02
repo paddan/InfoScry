@@ -267,14 +267,14 @@ data class ExtractionSettings(
     /**
      * These settings with the reading engine's runtime identity, discovered by [runtimeIdentityOf].
      *
-     * It has to happen *here*, before the fingerprint is computed, because the fingerprint is what decides
-     * whether committed pages are read again: a runtime that changed since an earlier attempt has to be
-     * visible in the key the checkpoints are looked up by, and an identity that only arrives with a reading
-     * arrives after that lookup has already happened. What the reader answers is recorded whether or not one
-     * was expected — including *no* identity, which clears an identity these settings carried — because an
-     * identity that could not be discovered must never compare equal to one that was. An extraction that is
-     * not an OCR attempt is returned untouched: it has no attempt to describe, and the tool it reads with is
-     * already part of the settings (`ocrTool`).
+     * It is asked only for settings that name an OCR attempt and record no runtime of their own: an
+     * identity that admission recorded is what the attempt reads under and nothing here replaces it. An
+     * attempt whose settings record no runtime — a payload written before admission probed, or an engine
+     * that could not describe itself — has nothing to key its committed pages by, so the reader is asked
+     * what it would read with now. What it answers is recorded whether or not one was expected, including
+     * *no* identity, because an identity that could not be discovered must never compare equal to one that
+     * was. An extraction that is not an OCR attempt is returned untouched: it has no attempt to describe,
+     * and the tool it reads with is already part of the settings (`ocrTool`).
      */
     internal suspend fun withRuntimeIdentity(
         runtimeIdentityOf: suspend (OcrEngine) -> String?,
@@ -490,6 +490,16 @@ data class ExtractionInput(
     val committedUnitKeys: Set<String>,
     val boundary: UnitBoundary,
     val originalFilename: String = managedPath.fileName.toString(),
+    /**
+     * The attempt's authority for sending this document's pages off this machine, or null when it has none.
+     *
+     * It travels with the input because a page image is read inside the reader that owns the engines, while
+     * the allowance it leaves under belongs to the attempt: a job's twenty files share one allowance, and a
+     * page may only leave after the scope that covers it was approved. An engine that dispatches externally
+     * is built from this authority per attempt (see `PageOcrEngines.forAttempt`), and its absence is never
+     * "unlimited": a destination off this machine with no authority is refused.
+     */
+    val dispatch: infoscry.ocr.OcrDispatchAuthority? = null,
 ) {
 
     /** Whether an earlier attempt already committed this unit under the same fingerprint. */
@@ -573,9 +583,9 @@ interface DocumentExtractor {
      *
      * This is the one part of an attempt that only the reader can answer: the engines a page goes to belong
      * to the extractor that hands them the page images, not to the registry that chose the extractor. It is
-     * asked *before* extraction — the answer travels into the attempt's fingerprint, which is the key an
-     * attempt's committed pages are looked up by — so the reader is asked what its runtime is now, not what
-     * it was when some earlier attempt wrote an identity down.
+     * asked before extraction, for the attempt that has no runtime identity of its own to key its committed
+     * pages by: the answer then travels into the attempt's fingerprint, which is the key those pages are
+     * looked up by.
      *
      * The default is the honest answer for every format that reads no page images: nothing to describe. An
      * extractor that does read them answers with the engine's own runtime identity, which is `null` when the
@@ -629,6 +639,17 @@ interface ExtractionSink {
         fingerprint: ExtractionFingerprint,
         event: ExtractionEvent,
     )
+
+    /**
+     * How many of this document's committed units still await a person's decision.
+     *
+     * A reading is not automatically done because every page was read: a page a model proposed and nobody
+     * accepted is text the archive holds but has not decided about, and a document with one of those is not
+     * complete however well its passages embedded. The answer belongs to the sink because the sink is what
+     * committed the reading — an ordinary reading, a page's own text layer or a tool's output the archive
+     * accepts, is finite here and owes nobody anything, which is why the default is none.
+     */
+    suspend fun awaitingDecision(documentId: DocumentId): Int = 0
 
     companion object {
 

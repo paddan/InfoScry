@@ -25,6 +25,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 
 /**
@@ -455,6 +456,31 @@ class OcrSettingsTest {
     }
 
     @Test
+    fun `admission records the runtime the engine reports and the queued job carries it`() {
+        val probe = RuntimeProbe("surya-ocr 0.22.1 backend llamacpp surya-2.gguf:1")
+        val probing = OcrProfileService(store, engineFor = { _, _, _ -> probe })
+        val settings = CollectionOcrSettings(language = "eng", engine = OcrEngine.SURYA)
+
+        val snapshot = runBlocking { probing.withProbedRuntime(probing.snapshotFor(settings, extractorVersion = "1")) }
+
+        assertEquals(probe.identity, snapshot.runtimeIdentity)
+        // The probed identity travels in the queued job, so a process that resumes it reads under the runtime
+        // that was admitted — and the attempt does not ask the engine again, which is what would let an
+        // upgrade in between silently redefine the key an earlier attempt's committed pages were written under.
+        val queued = ImportJobPayload.decode(
+            ImportJobPayload.of(
+                collectionId = CollectionId("default"),
+                sources = listOf("/tmp/scan.pdf"),
+                settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot),
+                ocr = snapshot,
+            ).encode(),
+        )
+        assertEquals(snapshot, queued.ocr)
+        assertEquals(probe.identity, queued.settings.ocrAttempt?.runtimeIdentity)
+        assertEquals(1, probe.probes)
+    }
+
+    @Test
     fun `a snapshot resolved before a profile is disabled still describes its own reading`() {
         val transcriber = profiles.create("Transcriber", draft(), enabled = true)
         val admitted = profiles.snapshotFor(
@@ -672,6 +698,24 @@ class OcrSettingsTest {
     }
 
     // ---- Fixtures ----
+
+    /** An engine that is only ever asked what its runtime is: this build reads no page through it. */
+    private class RuntimeProbe(val identity: String?) : PageOcrEngine {
+
+        override val engine: OcrEngine = OcrEngine.SURYA
+
+        /** How many times this engine was asked to describe itself. */
+        var probes: Int = 0
+            private set
+
+        override suspend fun runtimeIdentity(): String? {
+            probes++
+            return identity
+        }
+
+        override suspend fun transcribe(page: PageImage, settings: OcrSettingsSnapshot): OcrPageResult =
+            error("a runtime probe is never asked to read a page")
+    }
 
     private fun attemptIdentity() = OcrAttemptIdentity(
         engine = OcrEngine.TESSERACT,

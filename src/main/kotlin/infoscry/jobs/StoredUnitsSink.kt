@@ -49,6 +49,16 @@ class StoredUnitsSink(
     override val storesUnits: Boolean = true
 
     /**
+     * The pages of this document nobody has decided about yet.
+     *
+     * The answer is read back from the units rather than counted in memory, for the same reason every other
+     * question here is: a resumed attempt re-reads only the pages it has not committed, so the pages a
+     * person still owes a decision on have to be readable from the archive rather than from the attempt that
+     * read them.
+     */
+    override suspend fun awaitingDecision(documentId: DocumentId): Int = content.unitsAwaitingDecision(documentId)
+
+    /**
      * Where each document's artifacts live, kept only for the documents this process is working on.
      *
      * The lookup costs a document read and happens once per extraction event, so resolving it every time adds

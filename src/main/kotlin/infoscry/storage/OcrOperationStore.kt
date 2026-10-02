@@ -1,6 +1,7 @@
 package infoscry.storage
 
 import infoscry.domain.DocumentId
+import infoscry.domain.JobState
 import infoscry.ocr.OcrDispatchStage
 import infoscry.ocr.OcrExternalAccount
 import infoscry.ocr.OcrExternalOwner
@@ -323,34 +324,53 @@ class OcrOperationStore(private val database: Database) {
      * operation was claimed for it. The row is written first and the caller's own attempt is what the
      * operation answers with afterwards, so the loser of a race is refused rather than quietly started.
      *
+     * Ownership is asked of the *jobs* table rather than of the pointer alone, because a pointer outlives the
+     * attempt it names: a job cancelled while it was queued, or a job whose process died before its handler
+     * cleared the pointer, leaves an operation naming work nobody is doing. Such a row does not own the
+     * operation and must not refuse a resume forever — an attempt that is `QUEUED` or `RUNNING` does.
+     *
      * [enqueue] is given no connection: an inner transaction composes with this one as a savepoint, so the
      * job it creates and the claim that names it are one unit of work.
      *
-     * @throws OcrAttemptInProgressException when another attempt already owns the operation.
+     * @throws OcrAttemptInProgressException when another live attempt already owns the operation.
      */
     fun startAttempt(operationId: String, stage: OcrOperationStage, enqueue: () -> String): OcrOperation =
         database.transaction { connection ->
             val current = connection.readOperationById(operationId)
-            current.jobId?.let { owner -> throw OcrAttemptInProgressException(operationId, owner) }
+            current.jobId?.let { owner ->
+                if (connection.jobIsLive(owner)) throw OcrAttemptInProgressException(operationId, owner)
+            }
             val jobId = enqueue()
             // The claim is checked by its update count, which the shared `update` helper does not return:
             // this statement is what decides whether the attempt was claimed at all, so the count is the point
-            // rather than an afterthought.
+            // rather than an afterthought. The pointer may only be replaced while it names nothing, or the
+            // attempt that just ended: a live one was refused above.
             val claimed = connection.prepareStatement(
                 "UPDATE ocr_operations SET current_job_id = ?, stage = ?, error_code = NULL, " +
-                    "error_message = NULL, updated_at = ? WHERE operation_id = ? AND current_job_id IS NULL",
+                    "error_message = NULL, updated_at = ? WHERE operation_id = ? AND " +
+                    "(current_job_id IS NULL OR current_job_id = ?)",
             ).use { statement ->
                 statement.setString(1, jobId)
                 statement.setString(2, stage.name)
                 statement.setString(3, Instants.now())
                 statement.setString(4, operationId)
+                statement.setString(5, current.jobId)
                 statement.executeUpdate()
             }
             check(claimed == 1) {
-                "operation $operationId named no attempt but was not claimable, which means its row changed " +
-                    "inside one transaction"
+                "operation $operationId named no live attempt but was not claimable, which means its row " +
+                    "changed inside one transaction"
             }
             connection.readOperationById(operationId)
+        }
+
+    /** Whether the job an operation names is still an attempt that exists: queued to run, or running now. */
+    private fun Connection.jobIsLive(jobId: String): Boolean =
+        prepareStatement("SELECT 1 FROM jobs WHERE id = ? AND state IN (?, ?)").use { statement ->
+            statement.setString(1, jobId)
+            statement.setString(2, JobState.QUEUED.name)
+            statement.setString(3, JobState.RUNNING.name)
+            statement.executeQuery().use { rows -> rows.next() }
         }
 
     /** Records a known page total, discovered once the container was opened. */
@@ -601,6 +621,17 @@ class OcrOperationStore(private val database: Database) {
             allowance = maxOf(configuredAllowance, approval?.authorizedDistinctPages ?: 0),
             approvedDistinctPages = approval?.authorizedDistinctPages,
         )
+    }
+
+    /**
+     * The live attempt that owns one operation, or null when nobody is working on it.
+     *
+     * This is the question a caller asks *before* deciding whether an operation needs another attempt at all:
+     * an approval recorded while one is running belongs to that running reading, whose dispatch reads the
+     * allowance again on every page, and a second attempt would be work nobody asked for.
+     */
+    fun liveAttempt(operationId: String): String? = database.read { connection ->
+        connection.readOperationById(operationId).jobId?.takeIf { owner -> connection.jobIsLive(owner) }
     }
 
     /** One owner's call count, retries included, without resolving an allowance. */

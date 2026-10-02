@@ -439,6 +439,27 @@ class ContentStore(private val database: Database) {
     }
 
     /**
+     * How many of a document's committed units still await a person's decision.
+     *
+     * A unit's page approval is an absence, not a default: `NULL` means this page owes nobody anything —
+     * its own text layer, a format that was never read from images — while a `PENDING` page is one a model
+     * proposed and nobody has accepted. A reading with at least one of those is not a document that is done,
+     * which is what the caller reads this for.
+     */
+    fun unitsAwaitingDecision(documentId: DocumentId): Int = database.read { connection ->
+        connection.prepareStatement(
+            "SELECT COUNT(*) FROM content_units WHERE document_id = ? AND page_approval = ?",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setString(2, PageApproval.PENDING.name)
+            statement.executeQuery().use { rows ->
+                rows.next()
+                rows.getInt(1)
+            }
+        }
+    }
+
+    /**
      * Whether a document's chunks have to be built again.
      *
      * The chunking marker has to agree on the chunker, the tokenizer, the budget, the overlap **and** the
