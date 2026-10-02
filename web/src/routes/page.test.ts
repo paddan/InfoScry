@@ -670,6 +670,26 @@ describe('app shell', () => {
     expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=0&limit=16384')).toBe(true);
   });
 
+  it('opens a search hit at the revision the hit names', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [{ ...hit('Default', 'Page 12'), revisionId: 'revision-7' }] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
+
+    expect(await screen.findByText('Extracted page text')).toBeTruthy();
+    // The hit's own reading is what the viewer asks for, so a replacement cannot show this hit's text
+    // under the wording the document publishes now.
+    expect(
+      calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=0&limit=16384&revision=revision-7'),
+    ).toBe(true);
+  });
+
   it('loads more extracted source text by advancing the offset', async () => {
     let sourceRequests = 0;
     const { calls } = stubFetch({
@@ -1457,6 +1477,28 @@ describe('app shell', () => {
     expect(screen.getByRole('button', { name: 'The signer', current: true })).toBeTruthy();
   });
 
+  it('opens stored Ask evidence at the revision the citation names', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({
+        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', 'revision-8')],
+      }),
+      source: () => jsonResponse(sourcePage('Stored excerpt body', 0, 19)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+
+    expect(await screen.findByText('Stored excerpt body')).toBeTruthy();
+    // A stored citation names the revision its excerpt was saved from; asking for it is what keeps an
+    // old answer's source from being re-read as the document's current text.
+    expect(
+      calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=0&limit=16384&revision=revision-8'),
+    ).toBe(true);
+  });
+
   it('clears the Ask panel to its compose state with the New conversation button', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
@@ -1844,14 +1886,27 @@ function investigationSummary(id: string, title: string, question = title) {
 }
 
 /** One stored Ask answer, the object the list route returns and the panel replays. */
-function askHistoryEntry(id: string, title: string, question = title, answer = 'Mira signed it [S1].') {
+function askHistoryEntry(
+  id: string,
+  title: string,
+  question = title,
+  answer = 'Mira signed it [S1].',
+  revisionId?: string,
+) {
   return {
     id,
     createdAt: '2026-09-26T10:00:00Z',
     question,
     title,
     answer,
-    evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4' }],
+    evidence: [{
+      id: 'S1',
+      documentId: 'doc-1',
+      unitId: 'unit-1',
+      locator: {},
+      locatorLabel: 'Page 4',
+      ...(revisionId === undefined ? {} : { revisionId }),
+    }],
     inputTokens: 20,
     outputTokens: 9,
     costUsd: 0.0001,

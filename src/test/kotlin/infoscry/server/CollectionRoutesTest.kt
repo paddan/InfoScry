@@ -8,6 +8,10 @@ import infoscry.domain.DocumentStatus
 import infoscry.domain.JobType
 import infoscry.extract.ExtractionSettings
 import infoscry.jobs.ImportJobPayload
+import infoscry.llm.LlmProvider
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrProfileRevisionDraft
 import infoscry.storage.Instants
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
@@ -21,6 +25,7 @@ import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -209,6 +214,30 @@ class CollectionRoutesTest {
     }
 
     @Test
+    fun `multiline OCR languages are rejected at the settings boundary`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+
+        // A newline in the value is accepted by JSON and means nothing to Tesseract, but the fingerprint of
+        // every reading this collection produces is line-delimited: rejecting it here names the field,
+        // instead of failing every later import in a place nobody reading the queue can attribute.
+        val response = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrLanguages":"eng\nswe"}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
+        assertContains(response.bodyAsText(), "line break")
+        assertEquals(
+            "eng",
+            harness.context.collectionService.get(CollectionId(id))!!.ocrLanguages,
+            "a refused edit changed the collection",
+        )
+    }
+
+    @Test
     fun `OCR language update for an unknown or deleting collection is not found`() = runBlocking {
         val missing = harness.request(
             HttpMethod.Patch,
@@ -228,6 +257,163 @@ class CollectionRoutesTest {
             credential = Credential.CSRF,
         )
         assertEquals(HttpStatusCode.NotFound, deleting.status)
+    }
+
+    @Test
+    fun `a collection created without OCR settings reports the legacy defaults`() = runBlocking {
+        harness.createCollection("OCR defaults", Credential.BEARER)
+
+        val body = harness.get("/api/collections").bodyAsText()
+        val collection = listed().single { it.name == "OCR defaults" }
+
+        // Old clients and old archives see exactly the behavior they had: Tesseract, the languages the
+        // collection already carried, fill-missing mode and no external pages.
+        assertContains(body, "\"ocrEngine\":\"TESSERACT\"")
+        assertContains(body, "\"ocrImportMode\":\"FILL_MISSING\"")
+        assertEquals("eng", collection.ocrLanguages)
+        assertNull(collection.ocrTranscriptionProfileId)
+        assertNull(collection.ocrReviewProfileId, "review is unavailable until a profile is chosen")
+        assertEquals(0, collection.ocrExternalPageLimit)
+    }
+
+    @Test
+    fun `a language-only settings patch keeps the engine and profiles a newer client chose`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+        val selected = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrEngine":"SURYA","ocrImportMode":"CHECK_AND_IMPROVE","ocrExternalPageLimit":10}""",
+            credential = Credential.CSRF,
+        )
+        assertEquals(HttpStatusCode.OK, selected.status, selected.bodyAsText())
+
+        val languages = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrLanguages":"swe"}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.OK, languages.status, languages.bodyAsText())
+        assertContains(languages.bodyAsText(), "\"ocrEngine\":\"SURYA\"", message = "an old request is not a reset")
+        val saved = harness.context.collectionService.get(CollectionId(id))!!
+        assertEquals("swe", saved.ocrLanguages)
+        assertEquals(OcrImportMode.CHECK_AND_IMPROVE, saved.ocrImportMode)
+        assertEquals(10, saved.ocrExternalPageLimit)
+    }
+
+    @Test
+    fun `the OCR settings patch stores the engine, profiles and external page allowance`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+        val transcriber = harness.context.ocr.create("Transcriber", draft(model = "vision-1"), enabled = true)
+        val reviewer = harness.context.ocr.create("Reviewer", draft(model = "review-1"), enabled = true)
+
+        val response = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrLanguages":"deu+eng","ocrEngine":"LLM","ocrImportMode":"CHECK_AND_IMPROVE","ocrTranscriptionProfileId":"${transcriber.id}","ocrReviewProfileId":"${reviewer.id}","ocrExternalPageLimit":50}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        val saved = harness.context.collectionService.get(CollectionId(id))!!
+        assertEquals(OcrEngine.LLM, saved.ocrEngine)
+        assertEquals(OcrImportMode.CHECK_AND_IMPROVE, saved.ocrImportMode)
+        assertEquals(transcriber.id, saved.ocrTranscriptionProfileId)
+        assertEquals(reviewer.id, saved.ocrReviewProfileId)
+        assertEquals(50, saved.ocrExternalPageLimit)
+        assertEquals("deu+eng", saved.ocrLanguages)
+
+        // An external transcription profile is an explicit choice, and a blank reviewer id clears it.
+        val cleared = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrEngine":"LLM","ocrTranscriptionProfileId":"${transcriber.id}","ocrReviewProfileId":""}""",
+            credential = Credential.CSRF,
+        )
+        assertEquals(HttpStatusCode.OK, cleared.status, cleared.bodyAsText())
+        assertNull(harness.context.collectionService.get(CollectionId(id))!!.ocrReviewProfileId)
+    }
+
+    @Test
+    fun `an engine that disagrees with its profiles is refused and changes nothing`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+        val transcriber = harness.context.ocr.create("Transcriber", draft(), enabled = true)
+
+        val llmWithoutProfile = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrEngine":"LLM"}""",
+            credential = Credential.CSRF,
+        )
+        val profileWithLocalEngine = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrEngine":"TESSERACT","ocrTranscriptionProfileId":"${transcriber.id}"}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.BadRequest, llmWithoutProfile.status, llmWithoutProfile.bodyAsText())
+        assertContains(llmWithoutProfile.bodyAsText(), "INVALID_REQUEST")
+        assertEquals(HttpStatusCode.BadRequest, profileWithLocalEngine.status, profileWithLocalEngine.bodyAsText())
+        val saved = harness.context.collectionService.get(CollectionId(id))!!
+        assertEquals(OcrEngine.TESSERACT, saved.ocrEngine)
+        assertNull(saved.ocrTranscriptionProfileId)
+    }
+
+    @Test
+    fun `an unknown or disabled profile id is refused without naming it back`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+        val retired = harness.context.ocr.create("Retired", draft(), enabled = true)
+        harness.context.ocr.disable(retired.id)
+
+        val unknown = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrEngine":"LLM","ocrTranscriptionProfileId":"sk-live-not-a-profile-id"}""",
+            credential = Credential.CSRF,
+        )
+        val disabled = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrEngine":"LLM","ocrTranscriptionProfileId":"${retired.id}"}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.BadRequest, unknown.status, unknown.bodyAsText())
+        assertFalse(unknown.bodyAsText().contains("sk-live-not-a-profile-id"), "the id is not echoed back")
+        assertEquals(HttpStatusCode.BadRequest, disabled.status, disabled.bodyAsText())
+        assertNull(harness.context.collectionService.get(CollectionId(id))!!.ocrTranscriptionProfileId)
+    }
+
+    @Test
+    fun `a negative or malformed external page allowance is refused and changes nothing`() = runBlocking {
+        harness.createCollection("OCR settings", Credential.BEARER)
+        val id = harness.collectionIdOf("OCR settings")
+
+        val negative = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrExternalPageLimit":-1}""",
+            credential = Credential.CSRF,
+        )
+        // A count that is not a whole number is not a smaller allowance or a larger one; it is a body the
+        // caller has to fix, which is what makes it the same refusal as a negative count.
+        val fractional = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"ocrExternalPageLimit":2.5}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.BadRequest, negative.status, negative.bodyAsText())
+        assertContains(negative.bodyAsText(), "INVALID_REQUEST")
+        assertEquals(HttpStatusCode.BadRequest, fractional.status, fractional.bodyAsText())
+        assertEquals(0, harness.context.collectionService.get(CollectionId(id))!!.ocrExternalPageLimit)
     }
 
     @Test
@@ -428,6 +614,15 @@ class CollectionRoutesTest {
                 assertEquals(HttpStatusCode.Locked, refusedRename.status)
                 assertContains(refusedRename.bodyAsText(), "MAINTENANCE_IN_PROGRESS")
 
+                val refusedOcrSettings = gatedServer.request(
+                    HttpMethod.Patch,
+                    "/api/collections/$id/ocr-languages",
+                    body = """{"ocrEngine":"SURYA"}""",
+                    credential = Credential.CSRF,
+                )
+                assertEquals(HttpStatusCode.Locked, refusedOcrSettings.status)
+                assertContains(refusedOcrSettings.bodyAsText(), "MAINTENANCE_IN_PROGRESS")
+
                 release.complete(Unit)
                 val admitted = withTimeout(TIMEOUT_MILLIS) { deletion.await() }
                 assertEquals(HttpStatusCode.Accepted, admitted.status, admitted.bodyAsText())
@@ -506,6 +701,15 @@ class CollectionRoutesTest {
         assertEquals(HttpStatusCode.NotFound, unknownApi.status)
         assertContains(unknownApi.bodyAsText(), "NOT_FOUND")
     }
+
+    private fun draft(model: String = "vision-model") = OcrProfileRevisionDraft(
+        provider = LlmProvider.OPENAI_COMPATIBLE,
+        model = model,
+        contextWindow = 32_000,
+        maxOutputTokens = 4_096,
+        inputPricePerMillion = 0.0,
+        outputPricePerMillion = 0.0,
+    )
 
     private fun document(id: String, collectionId: CollectionId): Document {
         val now = Instants.now()

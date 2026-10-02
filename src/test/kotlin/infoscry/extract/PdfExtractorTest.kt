@@ -2,8 +2,18 @@ package infoscry.extract
 
 import infoscry.domain.DocumentId
 import infoscry.domain.ExtractionMethod
+import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.domain.UnitKind
+import infoscry.ocr.OCR_TRANSCRIPTION_PROMPT_VERSION
+import infoscry.ocr.OcrAttemptIdentity
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrPageResult
+import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.PageImage
+import infoscry.ocr.PageOcrEngine
+import infoscry.ocr.PageOcrEngines
 import infoscry.fixtures.PdfFixtureGenerator
 import infoscry.fixtures.PdfFixtureGenerator.MIXED_NAME
 import infoscry.fixtures.PdfFixtureGenerator.MIXED_SCANNED_PAGES
@@ -19,6 +29,7 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
+import java.nio.file.attribute.PosixFilePermissions
 import javax.imageio.ImageIO
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -29,6 +40,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.onEach
@@ -42,6 +55,8 @@ import org.apache.pdfbox.pdmodel.PDPageContentStream
 import org.apache.pdfbox.pdmodel.common.PDRectangle
 import org.apache.pdfbox.pdmodel.encryption.AccessPermission
 import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 import org.apache.pdfbox.rendering.PDFRenderer
@@ -125,7 +140,7 @@ class PdfExtractorTest {
         val spy = OcrSpy()
         val probe = PermitProbeBoundary()
 
-        val events = collect(PdfExtractor(spy.seam), inputFor(fixture(TEXT_NAME), probe), probe)
+        val events = collect(pdfExtractor(spy), inputFor(fixture(TEXT_NAME), probe), probe)
         val units = units(events)
 
         assertEquals(listOf(1, 2, 3), units.map { (it.unit.locator as SourceLocation.PdfPage).page })
@@ -136,6 +151,120 @@ class PdfExtractorTest {
         assertTrue(spy.pages.isEmpty(), "a page with its own text was rendered for OCR")
     }
 
+    // ---- The mode the attempt was admitted with -------------------------------------------------------
+
+    @Test
+    fun `a long but incorrect text layer is read by ocr when the attempt says to check and improve`() {
+        // Every page of this fixture carries a long, usable text layer, so fill-missing never renders it —
+        // which is what makes it the case the mode exists for: a text layer that is long is not a text
+        // layer that is right, and an attempt admitted to check and improve reads the page images anyway.
+        val legacy = OcrSpy()
+        val legacyEvents = collect(pdfExtractor(legacy), inputFor(fixture(TEXT_NAME), probe()), probe())
+
+        assertTrue(
+            legacy.pages.isEmpty(),
+            "fill-missing rendered a page whose own text passes every current heuristic",
+        )
+        assertEquals(listOf(1, 2, 3), units(legacyEvents).map { pageOf(it.key) })
+
+        val rescan = OcrSpy()
+        val rescanEvents = collect(
+            pdfExtractor(rescan),
+            inputFor(fixture(TEXT_NAME), probe(), settings = checkAndImprove()),
+            probe(),
+        )
+
+        assertEquals(listOf(1, 2, 3), rescan.readPages, "the rescan did not read every page image")
+        assertEquals(
+            listOf("läst sida 1", "läst sida 2", "läst sida 3"),
+            units(rescanEvents).map { it.unit.extractedText },
+            "the rescan's page text is the embedded layer it was asked to check rather than what it read",
+        )
+        assertTrue(units(rescanEvents).all { it.unit.meanConfidence == null || it.unit.method == ExtractionMethod.OCR })
+    }
+
+    @Test
+    fun `a page image read for review is kept as the attempt's evidence`() {
+        // A rescan's pages are reviewed against the image they were read from, so those images outlive the
+        // attempt. A fill-missing render is working material instead, which the test above the helpers
+        // asserts: it is deleted as soon as the page it belongs to is committed.
+        val spy = OcrSpy()
+        val settings = checkAndImprove()
+        val input = inputFor(fixture(TEXT_NAME), probe(), settings = settings)
+
+        collect(pdfExtractor(spy), input, probe())
+
+        assertTrue(spy.pages.isNotEmpty(), "nothing was rendered, so this test proves nothing")
+        spy.pages.forEach { image ->
+            assertTrue(Files.isRegularFile(image.imagePath), "${image.imagePath} was removed after it was read")
+            assertTrue(
+                image.imagePath.startsWith(input.artifactRoot.resolve(fingerprint(settings).value)),
+                "a page image was written outside this attempt's artifacts: ${image.imagePath}",
+            )
+        }
+    }
+
+    @Test
+    fun `a rotated page keeps the rotation and the raster dimensions it was read at`() {
+        val path = writeRotated(directory.resolve("rotated.pdf"), rotation = 90)
+        val spy = OcrSpy()
+
+        val events = collect(
+            pdfExtractor(spy),
+            inputFor(path, probe(), settings = checkAndImprove()),
+            probe(),
+        )
+
+        val image = spy.pages.single()
+        assertEquals(90, image.rotationDegrees, "the page's declared rotation did not reach the reading")
+        assertEquals(0, image.ordinal)
+        assertTrue(
+            assertNotNull(image.width) > assertNotNull(image.height),
+            "a page rotated a quarter turn was recorded with the dimensions of the unrotated page",
+        )
+        assertEquals(1, units(events).size)
+    }
+
+    @Test
+    fun `check and improve refuses a page it cannot render while the other pages still deliver`() {
+        val spy = OcrSpy()
+
+        val events = collect(
+            pdfExtractor(spy),
+            inputFor(fixture(MIXED_NAME), probe(), settings = checkAndImprove()),
+            probe(),
+        )
+
+        assertEquals(
+            MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES,
+            spy.readPages,
+            "a page whose raster fits the bound was not read",
+        )
+        assertEquals(
+            listOf(MIXED_UNRENDERABLE_PAGE),
+            failures(events).map { it.key }.map(::pageOf),
+            "a page whose declared size cannot be rendered did not fail on its own",
+        )
+        assertEquals(PdfExtractor.PAGE_RENDER_REFUSED_CODE, failures(events).single().code)
+        assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units(events).map { pageOf(it.key) })
+        assertIs<ExtractionEvent.Finished>(events.last())
+    }
+
+    @Test
+    fun `check and improve refuses an encrypted document instead of rendering it`() {
+        val spy = OcrSpy()
+
+        val events = collect(
+            pdfExtractor(spy),
+            inputFor(fixture(PROTECTED_NAME), probe(), settings = checkAndImprove()),
+            probe(),
+        )
+
+        assertEquals(listOf(ENCRYPTED_DOCUMENT_CODE), failures(events).map { it.code })
+        assertTrue(spy.pages.isEmpty(), "a protected document was rendered")
+        assertTrue(events.none { it is ExtractionEvent.Finished })
+    }
+
     // ---- Pages that have to be read by OCR --------------------------------------------------------
 
     @Test
@@ -143,12 +272,12 @@ class PdfExtractorTest {
         val spy = OcrSpy()
         val probe = PermitProbeBoundary()
 
-        collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe), probe)
+        collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe), probe)
 
-        assertEquals(MIXED_SCANNED_PAGES, spy.pages.map { it.page })
+        assertEquals(MIXED_SCANNED_PAGES, spy.readPages)
         assertTrue(spy.pages.all { it.renderDpi == PdfExtractor.DEFAULT_RENDER_DPI })
         assertTrue(spy.imagesPresent.all { it }, "ocr was asked to read an image that was not there")
-        assertTrue(spy.pages.all { it.ocrLanguages == "eng" })
+        assertTrue(spy.settings.all { it.language == "eng" }, "the collection's languages did not reach the engine")
         assertTrue(spy.pages.all { it.documentId == DocumentId("doc-1") })
     }
 
@@ -156,7 +285,7 @@ class PdfExtractorTest {
     fun `the text ocr read becomes the unit text for that page`() {
         val spy = OcrSpy(text = { page -> "läst sida $page" })
 
-        val units = units(collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe()))
+        val units = units(collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe()), probe()))
         val perPage = units.associate { (it.unit.locator as SourceLocation.PdfPage).page to it.unit.extractedText }
 
         assertEquals("läst sida 3", perPage[3])
@@ -169,7 +298,7 @@ class PdfExtractorTest {
     fun `the rendered images are gone once the attempt ends`() {
         val spy = OcrSpy()
 
-        collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe())
+        collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe()), probe())
 
         assertTrue(spy.pages.isNotEmpty(), "nothing was rendered, so this test proves nothing")
         spy.pages.forEach { page ->
@@ -189,20 +318,20 @@ class PdfExtractorTest {
             settings = ExtractionSettings(ocrLanguages = "eng", renderDpi = 150),
         )
 
-        collect(PdfExtractor(spy.seam), input, probe())
+        collect(pdfExtractor(spy), input, probe())
 
-        assertEquals(MIXED_SCANNED_PAGES, spy.pages.map { it.page })
+        assertEquals(MIXED_SCANNED_PAGES, spy.readPages)
         assertTrue(spy.pages.all { it.renderDpi == 150 }, "the resolution in the job's settings was ignored")
     }
 
     @Test
     fun `a page is rendered at the highest resolution that fits the pixel bound`() {
         val spy = OcrSpy()
-        val extractor = PdfExtractor(spy.seam, maxRenderedPixels = 2_500_000L)
+        val extractor = pdfExtractor(spy, maxRenderedPixels = 2_500_000L)
 
         collect(extractor, inputFor(fixture(MIXED_NAME), probe()), probe())
 
-        assertEquals(MIXED_SCANNED_PAGES, spy.pages.map { it.page })
+        assertEquals(MIXED_SCANNED_PAGES, spy.readPages)
         assertTrue(
             spy.pages.all { it.renderDpi in PdfExtractor.MIN_RENDER_DPI until PdfExtractor.DEFAULT_RENDER_DPI },
             "a page that cannot be rendered at the default resolution was not brought within the bound: " +
@@ -213,7 +342,7 @@ class PdfExtractorTest {
     @Test
     fun `a page the pixel bound cannot hold at all fails instead of being allocated`() {
         val spy = OcrSpy()
-        val extractor = PdfExtractor(spy.seam, maxRenderedPixels = 100_000L)
+        val extractor = pdfExtractor(spy, maxRenderedPixels = 100_000L)
 
         val events = collect(extractor, inputFor(fixture(MIXED_NAME), probe()), probe())
 
@@ -277,11 +406,14 @@ class PdfExtractorTest {
             artifact = { page -> "ocr/page-$page.tsv.gz" to "c".repeat(64) },
         )
 
-        val units = units(collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe()))
+        val settings = ExtractionSettings(ocrLanguages = "eng")
+        val units = units(
+            collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe(), settings = settings), probe()),
+        )
         val ocred = units.single { pageOf(it.key) == 3 }
         val parsed = units.single { pageOf(it.key) == 1 }
 
-        assertEquals("ocr/page-3.tsv.gz", ocred.unit.artifactRelativePath)
+        assertEquals("${fingerprint(settings).value}/ocr/page-3.tsv.gz", ocred.unit.artifactRelativePath)
         assertEquals("c".repeat(64), ocred.unit.artifactSha256)
         assertEquals(88.5, ocred.unit.meanConfidence)
         assertEquals(
@@ -300,13 +432,33 @@ class PdfExtractorTest {
             parsed.unit.method,
             "a parser's page and a recognised page are two methods, whatever their confidences",
         )
+        assertNull(
+            parsed.unit.sourceImage,
+            "a page whose own text layer was read named an image nobody rendered for it",
+        )
+        // The page the tool read names the image it was read from, at the place a later reader resolves
+        // artifacts from: this attempt's own directory under the document's artifact root, with the name a
+        // page's image has. A fill-missing render is working material, so it is the attempt's `working`
+        // directory rather than the `pages` a reviewed rescan keeps — the reading says which image it came
+        // from either way, which is the point. A page whose text came out of the container names nothing.
+        val rendered = assertNotNull(ocred.unit.sourceImage)
+        assertEquals(SourceImageRoot.ARTIFACTS, rendered.root)
+        assertEquals(
+            "${fingerprint(settings).value}/working/page-000003.png",
+            rendered.relativePath,
+            "the reading does not name the page image it was rendered from where a reader can find it",
+        )
+        val pageThree = spy.pages.single { image -> image.ordinal == 2 }
+        assertEquals(pageThree.width, rendered.width)
+        assertEquals(pageThree.height, rendered.height)
+        assertEquals(PageImage.RENDER_VERSION, rendered.renderVersion)
     }
 
     // ---- What the document says about itself before it is read ----------------------------------------
 
     @Test
     fun `a pdf announces its page count and its unit kind before it reads a page`() {
-        val events = collect(PdfExtractor(OcrSpy().seam), inputFor(fixture(MIXED_NAME), probe()), probe())
+        val events = collect(pdfExtractor(OcrSpy()), inputFor(fixture(MIXED_NAME), probe()), probe())
 
         val announced = events.filterIsInstance<ExtractionEvent.Progress>().single()
         assertEquals(UnitKind.PAGE, announced.unitKind)
@@ -333,14 +485,14 @@ class PdfExtractorTest {
         val spy = OcrSpy()
 
         val events = collect(
-            PdfExtractor(spy.seam, pageText = FailingPageTextReader(failOn = { page -> page == 1 })),
+            pdfExtractor(spy, pageText = FailingPageTextReader(failOn = { page -> page == 1 })),
             inputFor(fixture(MIXED_NAME), probe()),
             probe(),
         )
 
         assertEquals(
             listOf(1) + MIXED_SCANNED_PAGES,
-            spy.pages.map { it.page },
+            spy.readPages,
             "the page whose own text could not be read was not handed to ocr",
         )
         assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units(events).map { pageOf(it.key) })
@@ -357,8 +509,8 @@ class PdfExtractorTest {
     @Test
     fun `a page whose text and raster both fail is reported as unreadable`() {
         val events = collect(
-            PdfExtractor(
-                OcrSpy().seam,
+            pdfExtractor(
+                OcrSpy(),
                 pageText = FailingPageTextReader(failOn = { page -> page == MIXED_UNRENDERABLE_PAGE }),
             ),
             inputFor(fixture(MIXED_NAME), probe()),
@@ -374,20 +526,33 @@ class PdfExtractorTest {
 
     @Test
     fun `a rendered image that cannot be removed is a warning rather than a lost page`() {
-        // A directory where the renderer was asked to put an image: it exists, so the delete is attempted,
-        // and it holds a file, so the delete fails the way a real one would.
+        // The image is a real page image the attempt is not allowed to delete: it was written into a
+        // directory with no write permission, which is what makes the removal fail the way a real one
+        // would. A page image that is not a readable image at all is a render failure instead; the test
+        // below covers that.
         val renderer = PdfPageRenderer { _, page, _, where ->
-            val stubborn = where.resolve("page-$page.png")
-            Files.createDirectory(stubborn)
-            Files.write(stubborn.resolve("still-here.txt"), "not empty".toByteArray())
-            stubborn
+            val folder = where.resolve("page-$page")
+            Files.createDirectories(folder)
+            val target = folder.resolve("page-%06d.png".format(page))
+            ImageIO.write(blankRaster(), "png", target.toFile())
+            Files.setPosixFilePermissions(folder, PosixFilePermissions.fromString("r-x------"))
+            target
         }
 
-        val events = collect(
-            PdfExtractor(OcrSpy().seam, pageRenderer = renderer),
-            inputFor(fixture(MIXED_NAME), probe()),
-            probe(),
-        )
+        val spy = OcrSpy()
+        val events = try {
+            collect(
+                pdfExtractor(spy, pageRenderer = renderer),
+                inputFor(fixture(MIXED_NAME), probe()),
+                probe(),
+            )
+        } finally {
+            // The permission that made the removal fail is restored, or the test's own directory could
+            // never be cleaned up.
+            spy.pages.map { image -> image.imagePath.parent }.distinct().forEach { folder ->
+                Files.setPosixFilePermissions(folder, PosixFilePermissions.fromString("rwx------"))
+            }
+        }
 
         assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units(events).map { pageOf(it.key) })
         assertTrue(
@@ -398,6 +563,31 @@ class PdfExtractorTest {
             MIXED_SCANNED_PAGES.size.toString(),
             (events.last() as ExtractionEvent.Finished).metadata[PdfExtractor.EXTRACTION_WARNINGS_METADATA],
         )
+    }
+
+    @Test
+    fun `a render that produces something no engine can read is a refused page`() {
+        // The image the renderer names is a directory: there is no raster to read and no hash to record, so
+        // the page cannot be produced. It is one refused page rather than an attempt that reads paper.
+        val renderer = PdfPageRenderer { _, page, _, where ->
+            val stubborn = where.resolve("page-$page.png")
+            Files.createDirectory(stubborn)
+            stubborn
+        }
+
+        val events = collect(
+            pdfExtractor(OcrSpy(), pageRenderer = renderer),
+            inputFor(fixture(MIXED_NAME), probe()),
+            probe(),
+        )
+
+        assertEquals(
+            MIXED_SCANNED_PAGES + listOf(MIXED_UNRENDERABLE_PAGE),
+            failures(events).map { it.key }.map(::pageOf),
+            "a page whose raster could not be read back was not refused",
+        )
+        assertTrue(failures(events).all { it.code == PdfExtractor.PAGE_RENDER_REFUSED_CODE })
+        assertEquals(MIXED_TEXT_PAGES, units(events).map { pageOf(it.key) })
     }
 
     // ---- One page that cannot be produced does not take the document with it -------------------------
@@ -415,41 +605,48 @@ class PdfExtractorTest {
         val spy = OcrSpy(text = { "" })
 
         val events = collect(
-            PdfExtractor(spy.seam, pageRenderer = renderer),
+            pdfExtractor(spy, pageRenderer = renderer),
             inputFor(fixture(MIXED_NAME), probe()),
             probe(),
         )
 
         assertEquals(
             MIXED_SCANNED_PAGES.map { "page:$it" },
-            failures(events).filter { it.code == PdfExtractor.PAGE_BLANK_CODE }.map { it.key },
+            failures(events).filter { it.code == PAGE_BLANK_CODE }.map { it.key },
             "a page whose image was dropped was not reported as blank",
         )
         assertEquals(
             MIXED_SCANNED_PAGES,
-            spy.pages.map { it.page },
+            spy.readPages,
             "the pages whose rasters came out blank were not the ones read",
         )
     }
 
     @Test
-    fun `a page that reads as empty but carries ink is still committed`() {
-        // The raster is only consulted when the reading came back empty, so a page whose ink OCR could not
-        // turn into text is committed as the empty reading it is rather than called blank.
-        val spy = OcrSpy(text = { "" })
+    fun `a page that reads as empty but carries ink fails its unit rather than being committed`() {
+        // Empty output is not an extraction: the raster is asked whether the page is blank, and a page whose
+        // ink OCR could not turn into text is neither blank paper nor read, so its unit fails under the code
+        // an engine answers an empty reading with.
+        val spy = OcrSpy(text = { "" }, errorCode = OcrPageResult.EMPTY_READING_CODE)
 
-        val events = collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe())
+        val events = collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe()), probe())
 
         assertTrue(
-            failures(events).none { it.code == PdfExtractor.PAGE_BLANK_CODE },
+            failures(events).none { it.code == PAGE_BLANK_CODE },
             "an inked page whose reading was empty was reported as blank paper",
         )
-        assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units(events).map { pageOf(it.key) })
+        assertEquals(
+            MIXED_SCANNED_PAGES.map { page -> "page:$page" to OcrPageResult.EMPTY_READING_CODE },
+            failures(events).filter { it.code == OcrPageResult.EMPTY_READING_CODE }
+                .map { failure -> failure.key to failure.code },
+            "the pages that read as empty were not failed under the code that says they are not readings",
+        )
+        assertEquals(MIXED_TEXT_PAGES, units(events).map { pageOf(it.key) })
     }
 
     @Test
     fun `a page that cannot be rendered fails as a unit while every other page still delivers`() {
-        val events = collect(PdfExtractor(OcrSpy().seam), inputFor(fixture(MIXED_NAME), probe()), probe())
+        val events = collect(pdfExtractor(OcrSpy()), inputFor(fixture(MIXED_NAME), probe()), probe())
 
         val failed = failures(events)
         assertEquals(listOf("page:$MIXED_UNRENDERABLE_PAGE"), failed.map { it.key })
@@ -470,13 +667,13 @@ class PdfExtractorTest {
     fun `a page whose ocr fails does not discard the pages around it`() {
         val spy = OcrSpy(failOn = { page -> page == 4 })
 
-        val events = collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe())
+        val events = collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe()), probe())
 
         val ocrFailures = failures(events).filter { it.code == OCR_FAILED_CODE }
         assertEquals(listOf("page:4"), ocrFailures.map { it.key })
         assertEquals(
             MIXED_SCANNED_PAGES,
-            spy.pages.map { it.page },
+            spy.readPages,
             "the pages around the failing one were not handed over",
         )
         assertEquals(
@@ -490,7 +687,7 @@ class PdfExtractorTest {
     fun `an ocr tool that is not available fails the document instead of every page`() {
         val spy = OcrSpy(unavailable = "NEEDS_TESSERACT")
 
-        val events = collect(PdfExtractor(spy.seam), inputFor(fixture(MIXED_NAME), probe()), probe())
+        val events = collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe()), probe())
 
         assertEquals(listOf(PdfExtractor.DOCUMENT_KEY), failures(events).map { it.key })
         assertEquals("NEEDS_TESSERACT", failures(events).single().code)
@@ -503,7 +700,7 @@ class PdfExtractorTest {
             events.none { it is ExtractionEvent.Finished },
             "a document that stopped early reported itself as finished",
         )
-        assertEquals(MIXED_SCANNED_PAGES.take(1), spy.pages.map { it.page })
+        assertEquals(MIXED_SCANNED_PAGES.take(1), spy.readPages)
     }
 
     // ---- Documents that cannot be read at all -------------------------------------------------------
@@ -512,7 +709,7 @@ class PdfExtractorTest {
     fun `a password protected pdf is refused as encrypted`() {
         val spy = OcrSpy()
 
-        val events = collect(PdfExtractor(spy.seam), inputFor(fixture(PROTECTED_NAME), probe()), probe())
+        val events = collect(pdfExtractor(spy), inputFor(fixture(PROTECTED_NAME), probe()), probe())
 
         assertEquals(listOf(ENCRYPTED_DOCUMENT_CODE), failures(events).map { it.code })
         assertEquals(listOf(PdfExtractor.DOCUMENT_KEY), failures(events).map { it.key })
@@ -525,7 +722,7 @@ class PdfExtractorTest {
     fun `a pdf that opens with an owner password only is still refused`() {
         val path = writeOwnerProtected(directory.resolve("owner-protected.pdf"))
 
-        val events = collect(PdfExtractor(OcrSpy().seam), inputFor(path, probe()), probe())
+        val events = collect(pdfExtractor(OcrSpy()), inputFor(path, probe()), probe())
 
         assertEquals(listOf(ENCRYPTED_DOCUMENT_CODE), failures(events).map { it.code })
         assertTrue(events.none { it is ExtractionEvent.Finished })
@@ -533,7 +730,7 @@ class PdfExtractorTest {
 
     @Test
     fun `a container past the size bound is refused before it is opened`() {
-        val extractor = PdfExtractor(OcrSpy().seam, maxDocumentBytes = 1L)
+        val extractor = pdfExtractor(OcrSpy(), maxDocumentBytes = 1L)
 
         val events = collect(extractor, inputFor(fixture(TEXT_NAME), probe()), probe())
 
@@ -544,7 +741,7 @@ class PdfExtractorTest {
 
     @Test
     fun `a refusal that is already committed is not reported a second time`() {
-        val extractor = PdfExtractor(OcrSpy().seam, maxDocumentBytes = 1L)
+        val extractor = pdfExtractor(OcrSpy(), maxDocumentBytes = 1L)
         val input = inputFor(fixture(TEXT_NAME), probe(), committed = setOf(DOCUMENT_TOO_LARGE_KEY))
 
         assertEquals(emptyList(), collect(extractor, input, probe()))
@@ -554,7 +751,7 @@ class PdfExtractorTest {
     fun `an encrypted refusal that is already committed is not reported a second time`() {
         val input = inputFor(fixture(PROTECTED_NAME), probe(), committed = setOf(PdfExtractor.DOCUMENT_KEY))
 
-        assertEquals(emptyList(), collect(PdfExtractor(OcrSpy().seam), input, probe()))
+        assertEquals(emptyList(), collect(pdfExtractor(OcrSpy()), input, probe()))
     }
 
     @Test
@@ -562,7 +759,7 @@ class PdfExtractorTest {
         val spy = OcrSpy()
         val path = writeEmpty(directory.resolve("empty.pdf"))
 
-        val events = collect(PdfExtractor(spy.seam), inputFor(path, probe()), probe())
+        val events = collect(pdfExtractor(spy), inputFor(path, probe()), probe())
 
         assertEquals(emptyList(), units(events))
         assertEquals(
@@ -577,7 +774,7 @@ class PdfExtractorTest {
     fun `a container that is not a readable pdf is refused instead of thrown`() {
         val path = writeGarbage(directory.resolve("garbage.pdf"))
 
-        val events = collect(PdfExtractor(OcrSpy().seam), inputFor(path, probe()), probe())
+        val events = collect(pdfExtractor(OcrSpy()), inputFor(path, probe()), probe())
 
         assertEquals(listOf(DOCUMENT_UNREADABLE_CODE), failures(events).map { it.code })
         assertEquals(listOf(PdfExtractor.DOCUMENT_KEY), failures(events).map { it.key })
@@ -594,12 +791,12 @@ class PdfExtractorTest {
         val spy = OcrSpy()
 
         val events = collect(
-            PdfExtractor(spy.seam),
+            pdfExtractor(spy),
             inputFor(fixture(MIXED_NAME), probe(), committed = committed),
             probe(),
         )
 
-        assertEquals(MIXED_SCANNED_PAGES.drop(1), spy.pages.map { it.page })
+        assertEquals(MIXED_SCANNED_PAGES.drop(1), spy.readPages)
         assertEquals(listOf("page:4", "page:5"), units(events).map { it.key })
         assertEquals(
             MIXED_TEXT_PAGES.size + MIXED_SCANNED_PAGES.size + 1,
@@ -615,14 +812,14 @@ class PdfExtractorTest {
 
         assertFailsWith<CancellationException> {
             collect(
-                PdfExtractor(spy.seam),
+                pdfExtractor(spy),
                 inputFor(fixture(MIXED_NAME), probe(), committed = committed),
                 probe(),
             )
         }
 
-        assertEquals(listOf(4, 5), spy.pages.map { it.page })
-        assertTrue(spy.pages.none { it.page <= 3 }, "a page that was already committed was rendered again")
+        assertEquals(listOf(4, 5), spy.readPages)
+        assertTrue(spy.readPages.none { it <= 3 }, "a page that was already committed was rendered again")
     }
 
     @Test
@@ -634,7 +831,7 @@ class PdfExtractorTest {
         val renderer = CountingRenderer()
 
         collect(
-            PdfExtractor(OcrSpy().seam, pageRenderer = renderer),
+            pdfExtractor(OcrSpy(), pageRenderer = renderer),
             inputFor(fixture(MIXED_NAME), probe(), committed = committed),
             probe(),
         )
@@ -650,7 +847,7 @@ class PdfExtractorTest {
 
         val failure = assertFailsWith<IllegalStateException> {
             collect(
-                PdfExtractor(OcrSpy().seam, pageRenderer = renderer),
+                pdfExtractor(OcrSpy(), pageRenderer = renderer),
                 inputFor(fixture(MIXED_NAME), probe()),
                 probe(),
             )
@@ -663,7 +860,7 @@ class PdfExtractorTest {
     fun `a managed file that is gone is refused instead of throwing at the caller`() {
         val missing = directory.resolve("managed").resolve("gone.pdf")
 
-        val events = collect(PdfExtractor(OcrSpy().seam), inputFor(missing, probe()), probe())
+        val events = collect(pdfExtractor(OcrSpy()), inputFor(missing, probe()), probe())
 
         assertEquals(listOf(PdfExtractor.DOCUMENT_KEY), failures(events).map { it.key })
         assertEquals(listOf(DOCUMENT_UNREADABLE_CODE), failures(events).map { it.code })
@@ -676,7 +873,7 @@ class PdfExtractorTest {
     fun `every event is emitted inside a unit permit, one permit per event`() {
         val probe = PermitProbeBoundary()
 
-        val events = collect(PdfExtractor(OcrSpy().seam), inputFor(fixture(MIXED_NAME), probe), probe)
+        val events = collect(pdfExtractor(OcrSpy()), inputFor(fixture(MIXED_NAME), probe), probe)
 
         assertEquals(emptyList(), probe.eventsOutsidePermit)
         assertEquals(
@@ -689,9 +886,9 @@ class PdfExtractorTest {
     @Test
     fun `a refusal found mid-page is emitted inside that page's permit`() {
         val probe = PermitProbeBoundary()
-        val seam = OcrSpy(unavailable = TesseractOcr.NEEDS_TESSERACT_CODE).seam
+        val spy = OcrSpy(unavailable = TesseractOcr.NEEDS_TESSERACT_CODE)
 
-        val events = collect(PdfExtractor(seam), inputFor(fixture(MIXED_NAME), probe), probe)
+        val events = collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe), probe)
 
         assertEquals(emptyList(), probe.eventsOutsidePermit)
         assertEquals(
@@ -707,8 +904,8 @@ class PdfExtractorTest {
 
     @Test
     fun `the extractor produces the same keys locators and ordinals twice`() {
-        val first = units(collect(PdfExtractor(OcrSpy().seam), inputFor(fixture(MIXED_NAME), probe()), probe()))
-        val second = units(collect(PdfExtractor(OcrSpy().seam), inputFor(fixture(MIXED_NAME), probe()), probe()))
+        val first = units(collect(pdfExtractor(OcrSpy()), inputFor(fixture(MIXED_NAME), probe()), probe()))
+        val second = units(collect(pdfExtractor(OcrSpy()), inputFor(fixture(MIXED_NAME), probe()), probe()))
 
         assertEquals(first.map { it.key }, second.map { it.key })
         assertEquals(first.map { it.ordinal }, second.map { it.ordinal })
@@ -728,7 +925,7 @@ class PdfExtractorTest {
 
     @Test
     fun `the extractor claims the media type the detector reports for every fixture`() {
-        val extractor = PdfExtractor(OcrSpy().seam)
+        val extractor = pdfExtractor(OcrSpy())
 
         listOf(TEXT_NAME, MIXED_NAME, PROTECTED_NAME).forEach { name ->
             val mediaType = MediaTypeDetector().detect(fixture(name)).value
@@ -768,6 +965,42 @@ class PdfExtractorTest {
         events.filterIsInstance<ExtractionEvent.UnitFailed>()
 
     private fun pageOf(key: String): Int = key.substringAfter("page:").toInt()
+
+    /** The extractor under test, with the one fake engine this file reads pages with. */
+    private fun pdfExtractor(
+        spy: OcrSpy,
+        pageText: PdfPageTextReader = PdfBoxPageTextReader,
+        pageRenderer: PdfPageRenderer = PngPageRenderer,
+        maxDocumentBytes: Long = PdfExtractor.MAX_DOCUMENT_BYTES,
+        maxRenderedPixels: Long = PdfExtractor.MAX_RENDERED_PIXELS,
+    ): PdfExtractor = PdfExtractor(
+        ocr = PageOcrEngines(listOf(spy)),
+        pageText = pageText,
+        pageRenderer = pageRenderer,
+        maxDocumentBytes = maxDocumentBytes,
+        maxRenderedPixels = maxRenderedPixels,
+    )
+
+    /** The fingerprint one attempt's checkpoints are keyed by, which is where its artifacts live. */
+    private fun fingerprint(settings: ExtractionSettings): ExtractionFingerprint =
+        ExtractionFingerprint.of("b".repeat(64), settings)
+
+    /** The settings an attempt that reads page images even where a text layer exists runs with. */
+    private fun checkAndImprove(
+        renderDpi: Int = PdfExtractor.DEFAULT_RENDER_DPI,
+    ): ExtractionSettings = ExtractionSettings(
+        ocrLanguages = "eng",
+        renderDpi = renderDpi,
+        ocrMode = OcrImportMode.CHECK_AND_IMPROVE,
+        ocrAttempt = OcrAttemptIdentity(
+            engine = OcrEngine.TESSERACT,
+            language = "eng",
+            transcriptionPromptVersion = OCR_TRANSCRIPTION_PROMPT_VERSION,
+            extractorSchemaVersion = EXTRACTOR_SCHEMA_VERSION,
+            toolVersion = "tesseract 5.3.0",
+            renderDpi = renderDpi,
+        ),
+    )
 
     private fun probe(): PermitProbeBoundary = PermitProbeBoundary()
 
@@ -860,6 +1093,33 @@ class PdfExtractorTest {
         return target
     }
 
+    /**
+     * One page with a long, usable text layer of its own and a declared rotation.
+     *
+     * Written by hand rather than added to the fixture generator: the committed fixtures are compared byte
+     * for byte against what the generator writes, and a rotated page is a shape one test needs rather than a
+     * document the rest of the suite is built around.
+     */
+    private fun writeRotated(target: Path, rotation: Int): Path {
+        PDDocument().use { document ->
+            val page = PDPage(PDRectangle.A4)
+            document.addPage(page)
+            page.rotation = rotation
+            PDPageContentStream(document, page).use { content ->
+                content.beginText()
+                content.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 12f)
+                content.newLineAtOffset(72f, 760f)
+                repeat(4) { line ->
+                    content.showText("Protokollet sammanfattar överföringarna i ärendet, rad $line")
+                    content.newLineAtOffset(0f, -18f)
+                }
+                content.endText()
+            }
+            document.save(target.toFile())
+        }
+        return target
+    }
+
     /** A file that announces itself as a PDF and then has nothing a reader can follow. */
     private fun writeGarbage(target: Path): Path {
         Files.write(target, "%PDF-1.7\nthis is not a pdf\n".toByteArray(Charsets.ISO_8859_1))
@@ -868,11 +1128,12 @@ class PdfExtractorTest {
 }
 
 /**
- * The injected OCR seam, recording what it was asked to read.
+ * The injected page-image engine, recording what it was asked to read.
  *
  * The seam exists so that the extractor's decisions can be observed without a Tesseract installation: the
  * tests assert which pages were handed over, at what resolution, and that the image was still on disk when
- * the call was made — none of which needs the tool itself.
+ * the call was made — none of which needs the tool itself. The page number its answers are keyed by is
+ * derived the way a PDF page number is, from the ordinal the page image carries.
  */
 private class OcrSpy(
     private val text: (Int) -> String = { page -> "läst sida $page" },
@@ -881,28 +1142,38 @@ private class OcrSpy(
     private val failOn: (Int) -> Boolean = { false },
     private val unavailable: String? = null,
     private val cancelOn: (Int) -> Boolean = { false },
-) {
+    private val errorCode: String? = null,
+    override val engine: OcrEngine = OcrEngine.TESSERACT,
+) : PageOcrEngine {
 
-    val pages: MutableList<RenderedPage> = mutableListOf()
+    val pages: MutableList<PageImage> = mutableListOf()
+
+    /** What the engine was told about each attempt, in the order it was asked. */
+    val settings: MutableList<OcrSettingsSnapshot> = mutableListOf()
+
+    /** The pages the engine was asked to read, by page number. */
+    val readPages: List<Int> get() = pages.map { image -> image.ordinal + 1 }
 
     /** Whether the rendered image existed at the moment OCR was asked to read it. */
     val imagesPresent: MutableList<Boolean> = mutableListOf()
 
-    /** The seam, ready to hand to the extractor. */
-    val seam: suspend (RenderedPage) -> OcrResult = { page -> recognize(page) }
-
-    private suspend fun recognize(page: RenderedPage): OcrResult {
+    override suspend fun transcribe(page: PageImage, settings: OcrSettingsSnapshot): OcrPageResult {
         pages += page
+        this.settings += settings
         imagesPresent += Files.isRegularFile(page.imagePath)
-        if (cancelOn(page.page)) throw CancellationException("cancelled by the test")
+        val number = page.ordinal + 1
+        if (cancelOn(number)) throw CancellationException("cancelled by the test")
         unavailable?.let { code -> throw OcrUnavailableException(code, "no OCR tool in this build") }
-        if (failOn(page.page)) throw IOException("OCR could not read page ${page.page}")
-        val written = artifact(page.page)
-        return OcrResult(
-            text = text(page.page),
-            meanConfidence = meanConfidence(page.page),
+        if (failOn(number)) throw IOException("OCR could not read page $number")
+        val written = artifact(number)
+        return OcrPageResult(
+            text = text(number),
+            engine = engine,
+            imageSha256 = page.sha256,
+            meanConfidence = meanConfidence(number),
             artifactRelativePath = written?.first,
             artifactSha256 = written?.second,
+            errorCode = errorCode,
         )
     }
 }

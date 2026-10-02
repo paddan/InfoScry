@@ -133,6 +133,13 @@ data class SearchHit(
     val locator: SourceLocation,
     val locatorLabel: String,
     val matchedBy: Set<SearchMode>,
+    /**
+     * The revision the hit's text came from, or `null` when the row predates revision tracking.
+     *
+     * Evidence generated from a hit records this, so an excerpt saved now can be opened later at the
+     * text it was actually taken from rather than at whatever the document publishes by then.
+     */
+    val revisionId: String? = null,
 )
 
 /** The outcome of one search: the ranked hits plus how many index rows were dropped as stale (DB-deleted). */

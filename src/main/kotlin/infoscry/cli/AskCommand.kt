@@ -17,6 +17,7 @@ import infoscry.llm.AnthropicClient
 import infoscry.llm.LlmProvider
 import infoscry.llm.OpenAiCompatibleClient
 import infoscry.llm.PromptService
+import infoscry.llm.requireDispatchable
 import infoscry.server.ApiJson
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.collect
@@ -34,6 +35,14 @@ class AskCommand : CliktCommand(name = "ask") {
         val context = AppContext.open(AppPaths.of(options.dataDir))
         context.use { open ->
             val selected = open.llm.findByName(profile) ?: throw CliFailure("no such LLM profile")
+            // `ask` is a call, so it obeys the same rule the routes do: a profile retired by a person, or
+            // repaired by migration 020 and left switched off until somebody reviews the address, is refused
+            // instead of dispatched to.
+            try {
+                selected.requireDispatchable()
+            } catch (refused: IllegalArgumentException) {
+                throw CliFailure(refused.message ?: "the LLM profile '$profile' is disabled", refused)
+            }
             val service = AskService(open.search, PromptService(open.llm), client = { p ->
                 when (p.provider) {
                     LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(p, System::getenv)

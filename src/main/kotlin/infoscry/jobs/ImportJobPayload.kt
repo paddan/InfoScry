@@ -19,6 +19,15 @@ data class ImportJobPayload(
     val collectionId: String,
     val sources: List<String>,
     val settings: ExtractionSettings,
+    /**
+     * The OCR selection this import was admitted with, or null for an import that recorded none.
+     *
+     * It is here for the two things an import's OCR needs that the extraction settings cannot carry: the
+     * external page allowance of the whole job — twenty files share one allowance — and the profile
+     * revisions an approval binds to. Null means "a legacy payload", which is the same behavior the
+     * collection had before these settings existed: Tesseract, fill-missing, no external pages.
+     */
+    val ocr: infoscry.ocr.OcrSettingsSnapshot? = null,
     // Defaulted rather than required, and it has to default to false: this payload's own JSON omits a
     // defaulted field, so a new non-recursive job is written without it and has to read back as false.
     // A payload written before this flag existed therefore also reads as false, and a directory it named
@@ -50,10 +59,12 @@ data class ImportJobPayload(
             sources: List<String>,
             settings: ExtractionSettings,
             recursive: Boolean = false,
+            ocr: infoscry.ocr.OcrSettingsSnapshot? = null,
         ): ImportJobPayload = ImportJobPayload(
             collectionId = collectionId.value,
             sources = sources.map { java.nio.file.Path.of(it).toAbsolutePath().normalize().toString() },
             settings = settings,
+            ocr = ocr,
             recursive = recursive,
         )
 

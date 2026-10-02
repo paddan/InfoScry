@@ -10,6 +10,7 @@ import infoscry.llm.AnthropicClient
 import infoscry.llm.ConversationTitler
 import infoscry.llm.LlmProfile
 import infoscry.llm.OpenAiCompatibleClient
+import infoscry.llm.requireDispatchable
 import infoscry.llm.PromptService
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -33,6 +34,10 @@ fun Routing.configureAskRoutes(context: AppContext) {
             val body = call.receiveJson<AskApiRequest>()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
+            // A profile that is switched off — retired by a person, or repaired by migration 020 and left
+            // switched off until somebody reviews the address — is refused before any dispatch, as a 400 the
+            // caller can act on rather than an answer from an address nobody chose.
+            profile.requireDispatchable()
             val prompt = PromptService(context.llm)
             val titler = ConversationTitler(
                 prompt = prompt,
@@ -175,9 +180,22 @@ private fun loadAskEvidence(
 ): Map<String, List<EvidenceWire>> {
     val placeholders = conversationIds.joinToString(",") { "?" }
     return connection.prepareStatement(
-        "SELECT c.conversation_id, c.evidence_id, c.source_unit_id, c.locator_json, u.document_id " +
-            "FROM citations c JOIN content_units u ON u.id = c.source_unit_id " +
-            "JOIN documents d ON d.id = u.document_id " +
+        "SELECT c.conversation_id, c.evidence_id, c.source_unit_id, c.locator_json, c.snippet, " +
+            "r.id AS placed_revision_id, d.id AS document_id " +
+            "FROM citations c " +
+            // A stored answer's evidence is read back from its own citation row, because the unit it names may
+            // be gone: a replacement can remove the page a saved excerpt came from, and resolving the excerpt
+            // to the text the document publishes now would attribute today's wording to yesterday's answer.
+            // The excerpt, its locator and its revision therefore come from the citation itself.
+            "LEFT JOIN content_units u ON u.id = c.source_unit_id " +
+            "LEFT JOIN document_revisions r ON r.id = c.revision_id " +
+            // Only the *document* may be resolved from the revision history: a citation that recorded no
+            // revision is placed by the revision that once held its unit — so it stays in the history — but
+            // it keeps naming no revision, because which reading its excerpt came from was never recorded.
+            "JOIN documents d ON d.id = COALESCE(u.document_id, r.document_id, (" +
+            "SELECT h.document_id FROM page_text_revisions p " +
+            "JOIN document_revisions h ON h.id = p.revision_id " +
+            "WHERE p.unit_id = c.source_unit_id LIMIT 1)) " +
             "WHERE c.conversation_id IN ($placeholders) AND d.collection_id = ? AND c.supplied = 1 " +
             "ORDER BY c.conversation_id, c.evidence_id",
     ).use { statement ->
@@ -195,6 +213,8 @@ private fun loadAskEvidence(
                             unitId = rows.getString("source_unit_id"),
                             locator = locator,
                             locatorLabel = locator.describe(),
+                            revisionId = rows.getString("placed_revision_id"),
+                            excerpt = rows.getString("snippet"),
                         ),
                     )
                 }
@@ -253,6 +273,7 @@ internal fun AskEvent.toWire(conversationId: String? = null) = when (this) {
             unitId = it.unitId,
             locator = it.locator,
             locatorLabel = it.locatorLabel,
+            revisionId = it.revisionId,
         )
     })
     is AskEvent.Error -> AskWire("error", code = code, message = message)

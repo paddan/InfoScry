@@ -43,6 +43,16 @@ class SearchService(
     private val index: () -> LuceneIndex,
     private val queryEmbedder: () -> QueryEmbedder?,
     private val maxScopeTerms: Int = DEFAULT_MAX_SCOPE_TERMS,
+    /**
+     * The revision snapshots a search reads under.
+     *
+     * A search takes one lease for its whole duration, so a publication that lands while it is running
+     * cannot show it half of one reading and half of another: the rows it may match were decided before
+     * it started, and the reading it publishes keeps its own rows until the readers that leased them
+     * have finished. The default gate restricts nothing, which is what a caller that does not track
+     * revisions — a test, or a command with no publication service — should see.
+     */
+    private val snapshots: RevisionSnapshotGate = RevisionSnapshotGate(),
 ) {
 
     /**
@@ -67,6 +77,22 @@ class SearchService(
         filters: SearchFilters = SearchFilters(),
         requireLexicalAnchor: Boolean = false,
     ): SearchOutcome {
+        val lease = snapshots.acquire()
+        try {
+            return searchUnder(queryText, mode, filters, requireLexicalAnchor, lease.scope)
+        } finally {
+            lease.close()
+        }
+    }
+
+    /** One search under the revision scope its lease was handed. */
+    private fun searchUnder(
+        queryText: String,
+        mode: SearchMode,
+        filters: SearchFilters,
+        requireLexicalAnchor: Boolean,
+        scope: RevisionScope,
+    ): SearchOutcome {
         val normalizedFilters = filters.normalized()
         if (queryText.isBlank()) return SearchOutcome(emptyList(), 0)
 
@@ -89,22 +115,27 @@ class SearchService(
         val keyword = when (mode) {
             SearchMode.KEYWORD, SearchMode.HYBRID -> validatedCandidates(SearchMode.KEYWORD, queryText) { limit ->
                 searchRefusingOverbroad {
-                    index().searchKeyword(normalizedFilters.collectionId, queryText, documentIds, limit)
+                    index().searchKeyword(normalizedFilters.collectionId, queryText, documentIds, limit, scope)
                 }
             }
             SearchMode.SEMANTIC -> ValidatedCandidates.empty()
         }
 
         val semantic = when (mode) {
-            SearchMode.SEMANTIC -> semanticSearch(queryText, normalizedFilters, documentIds)
+            SearchMode.SEMANTIC -> semanticSearch(queryText, normalizedFilters, documentIds, scope)
             SearchMode.HYBRID -> if (semanticsApply(
                     queryText,
                     keyword.rawCandidates,
                     normalizedFilters,
                     documentIds,
                     requireLexicalAnchor,
+                    scope,
                 )
-            ) semanticSearch(queryText, normalizedFilters, documentIds) else ValidatedCandidates.empty()
+            ) {
+                semanticSearch(queryText, normalizedFilters, documentIds, scope)
+            } else {
+                ValidatedCandidates.empty()
+            }
             SearchMode.KEYWORD -> ValidatedCandidates.empty()
         }
         val fused = when (mode) {
@@ -141,6 +172,7 @@ class SearchService(
         queryText: String,
         filters: SearchFilters,
         documentIds: Set<String>?,
+        scope: RevisionScope,
     ): ValidatedCandidates {
         val status = index().schemaStatus
         if (status !is SchemaStatus.Ready) {
@@ -161,10 +193,10 @@ class SearchService(
         } catch (failure: EmbeddingException) {
             throw SearchUnavailableException(failure.code, failure.message ?: "the query could not be embedded")
         }
-        val candidateCount = index().vectorCandidateCount(filters.collectionId, documentIds)
+        val candidateCount = index().vectorCandidateCount(filters.collectionId, documentIds, scope)
         return validatedCandidates(SearchMode.SEMANTIC, queryText, candidateCount) { limit ->
             searchRefusingOverbroad {
-                index().searchVector(filters.collectionId, vector, documentIds, limit)
+                index().searchVector(filters.collectionId, vector, documentIds, limit, scope)
             }
         }
     }
@@ -182,9 +214,10 @@ class SearchService(
         filters: SearchFilters,
         documentIds: Set<String>?,
         requireLexicalAnchor: Boolean,
+        scope: RevisionScope,
     ): Boolean {
         if (!requireLexicalAnchor || keywordHits.isNotEmpty()) return true
-        return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds)
+        return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds, scope)
     }
 
     /**
@@ -309,6 +342,7 @@ class SearchService(
             locator = locator,
             locatorLabel = fusedHit.hit.locatorLabel,
             matchedBy = fusedHit.matchedBy,
+            revisionId = fusedHit.hit.revisionId,
         )
     }
 

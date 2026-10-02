@@ -1,6 +1,7 @@
 package infoscry.jobs
 
 import infoscry.AppContext
+import infoscry.document.RetryPrerequisites
 import infoscry.domain.CollectionId
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -17,6 +18,9 @@ import infoscry.extract.ExtractionEvent
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionInput
 import infoscry.extract.ExtractionSettings
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.storage.Instants
 import java.nio.file.Files
 import java.util.UUID
@@ -42,6 +46,39 @@ import kotlinx.coroutines.withTimeout
  * embedder are fakes, because formats and accelerators belong to their own suites.
  */
 class RetryJobHandlerTest {
+
+    @Test
+    fun `a retry records the collection's OCR selection in the settings it runs with`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val documentId = harness.failedDocument(source, RefusingUnits(unitsBeforeRefusing = 0))
+            val snapshot = OcrSettingsSnapshot(
+                engine = OcrEngine.SURYA,
+                mode = OcrImportMode.CHECK_AND_IMPROVE,
+                language = "eng",
+                extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+            )
+
+            // What admission does: the collection's selection is resolved into the attempt's snapshot, and the
+            // retry's settings carry it, so the fingerprint a resumed retry looks its checkpoints up by names
+            // the engine and mode that produced them.
+            val prerequisites = AppContext.open(harness.dataDir).use { context ->
+                runBlocking {
+                    RetryPrerequisites.probe(
+                        collection = context.collections.get(CollectionId("default"))!!,
+                        modelsDir = context.paths.modelsDir,
+                        ocrSnapshot = { snapshot },
+                    )
+                }
+            }
+
+            assertEquals(OcrEngine.SURYA, prerequisites.settings.ocrAttempt?.engine)
+            assertEquals(OcrImportMode.CHECK_AND_IMPROVE, prerequisites.settings.ocrMode)
+            // The document is still retryable: recording the selection changes the reading identity, not
+            // whether the document may be read again.
+            assertNotNull(documentId)
+        }
+    }
 
     @Test
     fun `a retry finishes from the managed copy after the external original is gone`() {

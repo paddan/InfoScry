@@ -3,6 +3,8 @@ package infoscry.server
 import infoscry.ask.AskEvent
 import infoscry.ask.CitationValidation
 import infoscry.ask.Evidence
+import infoscry.domain.CollectionId
+import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -19,6 +21,9 @@ import infoscry.llm.LlmProvider
 import infoscry.llm.TokenUsage
 import infoscry.search.vectorFor
 import infoscry.storage.Instants
+import infoscry.storage.PageApproval
+import infoscry.storage.RevisionChunkDraft
+import infoscry.storage.RevisionPageDraft
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -29,8 +34,13 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class AskRoutesTest {
     @Test
@@ -179,6 +189,167 @@ class AskRoutesTest {
                 assertFalse(
                     otherList.bodyAsText().contains("Who signed it?"),
                     "one collection's questions must not appear in another collection's history",
+                )
+            }
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    // ---- Evidence provenance ----
+
+    /**
+     * A stored citation is served from its own row, so a replacement that removed the unit it names can
+     * neither drop it from the history nor turn its excerpt into the text published today.
+     *
+     * The replaced document's page is removed from the live reading by a real publication, while the
+     * revision it was read from stays SQLite's. Three citations are stored: one that recorded its revision,
+     * one that recorded none and whose unit the replacement removed, and one that recorded none whose unit
+     * is still live. Each has to come back with the excerpt it saved, and the text published now must not be
+     * attributed to any of them.
+     */
+    @Test
+    fun `a stored citation whose unit a replacement removed stays in history with its own excerpt`() = runBlocking {
+        val dataDir = Files.createTempDirectory("infoscry-ask-evidence-provenance")
+        try {
+            ApiTestServer(dataDir).use { harness ->
+                val profile = LlmProfile(
+                    id = UUID.randomUUID().toString(),
+                    name = "evidence-asker",
+                    provider = LlmProvider.OPENAI_COMPATIBLE,
+                    model = "model",
+                    contextWindow = 10_000,
+                    maxOutputTokens = 64,
+                    inputPricePerMillion = 1.0,
+                    outputPricePerMillion = 2.0,
+                    cacheReadPricePerMillion = 0.0,
+                    enabled = true,
+                    endpoint = "https://provider.invalid/v1",
+                )
+                harness.context.llm.create(profile)
+                val collection = harness.context.collectionService.create("Default")
+
+                val (replacedDocument, replacedUnit) = seedAskDocument(
+                    harness,
+                    collection.id,
+                    "replaced-notes.txt",
+                    "the page as it was published",
+                )
+                val (keptDocument, keptUnit) = seedAskDocument(
+                    harness,
+                    collection.id,
+                    "kept-notes.txt",
+                    "the kept live page text",
+                )
+                val recordedRevision =
+                    assertNotNull(harness.context.revisions.recordPublishedContent(replacedDocument, "TEST_IMPORT"))
+
+                // The replacement names a page of its own rather than the one it replaces, which is what
+                // removes the unit the citations hold from the document's published reading.
+                val replacementText = "the page as it was replaced"
+                val candidate = harness.context.revisions.openCandidate(
+                    replacedDocument,
+                    recordedRevision,
+                    "TEST_REPLACEMENT",
+                )
+                harness.context.revisions.appendPage(
+                    candidate,
+                    RevisionPageDraft(
+                        ordinal = 0,
+                        unitId = ContentUnitId.new(),
+                        locator = SourceLocation.TextLines(1, 1),
+                        extractedText = replacementText,
+                        searchText = replacementText,
+                        extractionMethod = ExtractionMethod.OCR,
+                        approval = PageApproval.APPROVED,
+                        chunks = listOf(
+                            RevisionChunkDraft(
+                                ordinal = 0,
+                                text = replacementText,
+                                startOffset = 0,
+                                endOffset = replacementText.length,
+                                tokenCount = 5,
+                                tokenStart = 0,
+                                tokenEnd = 4,
+                                embedding = vectorFor(replacementText),
+                            ),
+                        ),
+                    ),
+                )
+                harness.context.revisionPublication.publish(replacedDocument, recordedRevision, candidate)
+                assertNull(
+                    harness.context.content.readUnit(replacedUnit),
+                    "the replacement has to remove the cited unit for this case to be what it says",
+                )
+
+                val locator = SourceLocation.TextLines(1, 1)
+                harness.context.llm.persistAsk(
+                    collectionId = collection.id,
+                    profile = profile,
+                    question = "What did the page say?",
+                    answer = "It said three things [S1] [S2] [S3].",
+                    evidence = listOf(
+                        citation("S1", collection.id, replacedDocument, replacedUnit, locator, "the excerpt S1 saved", recordedRevision),
+                        citation("S2", collection.id, keptDocument, keptUnit, locator, "the excerpt S2 saved", null),
+                        citation("S3", collection.id, replacedDocument, replacedUnit, locator, "the excerpt S3 saved", null),
+                    ),
+                    initialUsage = TokenUsage(inputTokens = 11, outputTokens = 3, cacheReadTokens = 0),
+                    initialCitations = CitationValidation(valid = listOf("S1", "S2", "S3"), invalid = emptyList()),
+                )
+
+                val response = harness.request(
+                    HttpMethod.Get,
+                    "/api/collections/${collection.id.value}/asks",
+                    credential = Credential.BEARER,
+                )
+                assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+                val body = response.bodyAsText()
+                val evidence = ApiJson.parseToJsonElement(body).jsonObject.getValue("asks").jsonArray
+                    .single().jsonObject.getValue("evidence").jsonArray
+                    .map { it.jsonObject }
+                    .associateBy { it.getValue("id").jsonPrimitive.content }
+
+                assertEquals(setOf("S1", "S2", "S3"), evidence.keys, "every saved citation stays in history: $body")
+                assertEquals(
+                    "the excerpt S1 saved",
+                    evidence.getValue("S1").getValue("excerpt").jsonPrimitive.content,
+                    "the evidence carries the excerpt the citation saved",
+                )
+                assertEquals("the excerpt S3 saved", evidence.getValue("S3").getValue("excerpt").jsonPrimitive.content)
+                assertEquals(
+                    recordedRevision,
+                    evidence.getValue("S1").getValue("revisionId").jsonPrimitive.content,
+                    "a citation that recorded its revision keeps it",
+                )
+                assertEquals(
+                    replacedDocument.value,
+                    evidence.getValue("S1").getValue("documentId").jsonPrimitive.content,
+                )
+                assertEquals(
+                    replacedDocument.value,
+                    evidence.getValue("S3").getValue("documentId").jsonPrimitive.content,
+                    "the revision that once held the unit is what places a citation the replacement removed",
+                )
+                assertEquals(
+                    keptDocument.value,
+                    evidence.getValue("S2").getValue("documentId").jsonPrimitive.content,
+                )
+                assertFalse(
+                    evidence.getValue("S2").containsKey("revisionId"),
+                    "a citation that recorded no revision is labelled unknown rather than guessed",
+                )
+                assertFalse(
+                    evidence.getValue("S3").containsKey("revisionId"),
+                    "a citation whose unit is gone and which recorded no revision is labelled unknown too",
+                )
+                assertEquals("the excerpt S2 saved", evidence.getValue("S2").getValue("excerpt").jsonPrimitive.content)
+                assertFalse(
+                    body.contains("the kept live page text"),
+                    "history must not attribute the text published now to a stored answer: $body",
+                )
+                assertFalse(
+                    body.contains(replacementText),
+                    "history must not serve the text that replaced a saved excerpt: $body",
                 )
             }
         } finally {
@@ -447,6 +618,121 @@ class AskRoutesTest {
             dataDir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun `a profile whose address was repaired is refused instead of dispatched to`() = runBlocking {
+        val dataDir = Files.createTempDirectory("infoscry-ask-repaired-profile")
+        try {
+            ApiTestServer(dataDir, queryEmbedder = { QueryEmbedder { vectorFor(it) } }).use { harness ->
+                // The fake would answer a request that reached it, so "it was never called" is what says the
+                // repaired address was not dispatched to.
+                FakeOpenAiServer(listOf(FakeOpenAiResponse(stream = true, body = answerSse()))).use { fake ->
+                    harness.context.collectionService.create("Default")
+                    val secret = "hunter2-not-a-real-credential"
+                    // The row a legacy archive holds, written around the profile type that now refuses such a
+                    // URL: read back through the store it is repaired and switched off, which is the state
+                    // migration 020 leaves behind. A repaired address is not one a person chose, so nothing
+                    // may dispatch to it until the profile has been reviewed and switched back on.
+                    harness.context.database.transaction { connection ->
+                        connection.prepareStatement(
+                            "INSERT INTO llm_profiles (id, name, provider, endpoint, model, " +
+                                "api_key_environment_variable, context_window, max_output_tokens, " +
+                                "supports_tool_calling, input_price_per_million, output_price_per_million, " +
+                                "cache_read_price_per_million, enabled, created_at, updated_at) VALUES " +
+                                "('repaired', 'Repaired', 'OPENAI_COMPATIBLE', ?, 'model', null, 128000, 4096, " +
+                                "0, 0.0, 0.0, 0.0, 1, '2026-09-30T07:00:00Z', '2026-09-30T07:00:00Z')",
+                        ).use { statement ->
+                            statement.setString(1, fake.url.replaceFirst("http://", "http://user:$secret@"))
+                            statement.executeUpdate()
+                        }
+                    }
+
+                    val refused = harness.request(
+                        HttpMethod.Post,
+                        "/api/ask",
+                        body = """{"collection":"Default","question":"Who signed it?","profile":"Repaired"}""",
+                        credential = Credential.BEARER,
+                    )
+
+                    assertEquals(HttpStatusCode.BadRequest, refused.status, refused.bodyAsText())
+                    assertContains(refused.bodyAsText(), "INVALID_REQUEST")
+                    assertContains(refused.bodyAsText(), "Repaired", message = "the refusal names the profile to review")
+                    assertContains(refused.bodyAsText(), "disabled")
+                    assertFalse(refused.bodyAsText().contains("data: "), "a refused Ask must not open an SSE stream")
+                    assertFalse(refused.bodyAsText().contains(secret), "the refusal never repeats the credential")
+                    assertEquals(0, fake.handledRequests, "the repaired address is never dispatched to")
+                }
+            }
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    /** One document with one extracted unit, as the import path leaves it: text, chunks and no revision. */
+    private fun seedAskDocument(
+        harness: ApiTestServer,
+        collectionId: CollectionId,
+        filename: String,
+        text: String,
+    ): Pair<DocumentId, ContentUnitId> {
+        val documentId = DocumentId.new()
+        val locator = SourceLocation.TextLines(1, 1)
+        val now = Instants.now()
+        harness.context.documents.insert(
+            Document(
+                id = documentId,
+                collectionId = collectionId,
+                sha256 = "sha-$filename",
+                mediaType = "text/plain",
+                originalFilename = filename,
+                sourcePath = "tmp/original/$filename",
+                sizeBytes = 1L,
+                status = DocumentStatus.COMPLETE,
+                title = filename,
+                author = null,
+                language = null,
+                createdAt = now,
+                updatedAt = now,
+            ),
+        )
+        val unit = harness.context.content.commitExtractedUnit(
+            documentId = documentId,
+            fingerprint = ExtractionFingerprint.of(
+                "sha-$filename",
+                ExtractionSettings(ocrLanguages = "eng", extractorSchemaVersion = "ask-evidence-test"),
+            ),
+            key = "unit-0",
+            ordinal = 0,
+            draft = ContentUnitDraft(
+                locator = locator,
+                extractedText = text,
+                searchText = text,
+                method = ExtractionMethod.DIRECT_TEXT,
+            ),
+            artifactRoot = harness.context.paths.libraryDir,
+        ).unit
+        return documentId to unit.id
+    }
+
+    /** One citation as the Ask path stored it, with the excerpt it saved and the revision it read, if any. */
+    private fun citation(
+        id: String,
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        unitId: ContentUnitId,
+        locator: SourceLocation,
+        excerpt: String,
+        revisionId: String?,
+    ): Evidence = Evidence(
+        id = id,
+        collectionId = collectionId.value,
+        documentId = documentId.value,
+        unitId = unitId.value,
+        locator = locator,
+        locatorLabel = locator.describe(),
+        text = excerpt,
+        revisionId = revisionId,
+    )
 
     private fun answerSse(): String = sse(
         listOf(

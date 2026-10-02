@@ -661,6 +661,7 @@ class ReindexRecoveryTest {
         collections = context.collections,
         documents = context.documents,
         content = context.content,
+        revisions = context.revisions,
         chunker = Chunker(
             E5Embedder.productionCounter(context.paths.modelsDir, context.paths.embeddingProfileDir),
         ),
@@ -779,6 +780,7 @@ object ReindexHarness {
         collections = context.collections,
         documents = context.documents,
         content = context.content,
+        revisions = context.revisions,
         chunker = Chunker(
             E5Embedder.productionCounter(context.paths.modelsDir, context.paths.embeddingProfileDir),
         ),

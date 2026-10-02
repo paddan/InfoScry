@@ -3,12 +3,18 @@ package infoscry.extract
 import infoscry.domain.DocumentId
 import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
+import infoscry.ocr.OCR_TRANSCRIPTION_PROMPT_VERSION
+import infoscry.ocr.OcrAttemptIdentity
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.Flow
@@ -95,6 +101,81 @@ class ExtractorRegistryTest {
     }
 
     @Test
+    fun `the formats that render page images say so and the ones that do not name a reason`() {
+        val registry = ExtractorRegistry.production()
+
+        assertIs<PageImageSupport.Supported>(registry.select("application/pdf").pageImageSupport)
+        assertIs<PageImageSupport.Supported>(registry.select("image/png").pageImageSupport)
+
+        // The formats this seam cannot render keep their existing extraction and say why a page-image
+        // reading is not one of the things that can be asked of them, rather than having a rendering
+        // invented for them.
+        listOf("text/plain", "text/csv", "application/epub+zip", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            .forEach { mediaType ->
+                val support = registry.select(mediaType).pageImageSupport
+                assertIs<PageImageSupport.Unsupported>(
+                    support,
+                    "$mediaType claims it can be read from page images",
+                )
+                assertEquals(PAGE_IMAGES_UNSUPPORTED_CODE, support.code)
+            }
+    }
+
+    @Test
+    fun `the production registry reads a scanned page with the engine it was configured with`() = runBlocking {
+        // The wiring, end to end: the registry selects the PDF reader, the reader renders the page, and
+        // the engine hands it to the tool the registry was built with.
+        val directory = Files.createTempDirectory("infoscry-registry-pdf")
+        try {
+            val managed = directory.resolve("managed").resolve("mixed.pdf")
+            Files.createDirectories(managed.parent)
+            val fixture = requireNotNull(javaClass.getResourceAsStream("/fixtures/mixed.pdf"))
+            fixture.use { stream -> Files.copy(stream, managed, StandardCopyOption.REPLACE_EXISTING) }
+            val tool = writeFakeExecutable(
+                directory,
+                "tesseract",
+                "cat <<'TSV'\n" +
+                    "5\t1\t1\t1\t1\t1\t44\t52\t214\t41\t94\tläst\n" +
+                    "5\t1\t1\t1\t1\t2\t277\t52\t39\t33\t94\tsida\n" +
+                    "TSV",
+            )
+            val boundary = RecordingBoundary()
+            val settings = ExtractionSettings(
+                ocrLanguages = "swe+eng",
+                ocrMode = OcrImportMode.CHECK_AND_IMPROVE,
+                ocrAttempt = OcrAttemptIdentity(
+                    engine = OcrEngine.TESSERACT,
+                    language = "swe+eng",
+                    transcriptionPromptVersion = OCR_TRANSCRIPTION_PROMPT_VERSION,
+                    extractorSchemaVersion = EXTRACTOR_SCHEMA_VERSION,
+                    toolVersion = "tesseract 5.3.0",
+                ),
+            )
+            val input = inputFor(managed, boundary, settings)
+            val registry = ExtractorRegistry.production(TesseractOcr(executable = tool.toString()))
+            val mediaType = MediaTypeDetector().detect(managed).value
+
+            val events = registry.extract(input, mediaType).toList()
+
+            val units = events.filterIsInstance<ExtractionEvent.UnitReady>()
+            assertEquals(5, units.size, "a page of the fixture was not delivered: ${units.map { it.ordinal }}")
+            assertContains(
+                units.first().unit.extractedText,
+                "läst",
+                message = "the page's text is not what the configured engine read from its image",
+            )
+            assertEquals(ExtractionMethod.OCR, units.first().unit.method)
+            assertEquals(
+                listOf(PdfExtractor.PAGE_RENDER_REFUSED_CODE),
+                events.filterIsInstance<ExtractionEvent.UnitFailed>().map { it.code },
+                "the page the fixture cannot render did not fail on its own",
+            )
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `two extractors claiming one type is a wiring mistake, not a coin toss`() {
         val failure = assertFailsWith<IllegalArgumentException> {
             ExtractorRegistry(
@@ -129,6 +210,21 @@ class ExtractorRegistryTest {
         artifactRoot = Files.createTempDirectory("infoscry-registry-artifacts"),
         settings = ExtractionSettings(ocrLanguages = "eng"),
         fingerprint = ExtractionFingerprint.of("a".repeat(64), ExtractionSettings(ocrLanguages = "eng")),
+        committedUnitKeys = emptySet(),
+        boundary = boundary,
+    )
+
+    /** The input one attempt runs with, for the tests that read a real document through the registry. */
+    private fun inputFor(
+        source: Path,
+        boundary: UnitBoundary,
+        settings: ExtractionSettings,
+    ): ExtractionInput = ExtractionInput(
+        documentId = DocumentId("doc-1"),
+        managedPath = source,
+        artifactRoot = Files.createTempDirectory("infoscry-registry-artifacts"),
+        settings = settings,
+        fingerprint = ExtractionFingerprint.of("a".repeat(64), settings),
         committedUnitKeys = emptySet(),
         boundary = boundary,
     )

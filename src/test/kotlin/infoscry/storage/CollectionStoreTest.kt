@@ -69,6 +69,26 @@ class CollectionStoreTest {
     }
 
     @Test
+    fun `create and language updates reject a language list that carries a line break`() {
+        // A line break in the language list is not a language nobody can read — it is a value no reading
+        // can be keyed by, because the fingerprint of an attempt is line-delimited. Refusing it here is what
+        // makes the failure land on the field a person typed instead of on the next import.
+        val created = store.create("Acme")
+
+        listOf("eng\nswe", "eng\rswe", "eng\r\nswe").forEach { languages ->
+            assertFailsWith<IllegalArgumentException>("store accepted '$languages'") {
+                store.create("Another", ocrLanguages = languages)
+            }
+            assertFailsWith<IllegalArgumentException>("store accepted '$languages'") {
+                store.updateOcrLanguages(created.id, languages)
+            }
+        }
+
+        assertEquals(listOf("Acme"), store.list().map { it.name }, "a refused create stored a collection")
+        assertEquals("eng", store.get(created.id)?.ocrLanguages, "a refused update changed the collection")
+    }
+
+    @Test
     fun `create rejects a name that differs only in case`() {
         store.create("Nightfall")
 

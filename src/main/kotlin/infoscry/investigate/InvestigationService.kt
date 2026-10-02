@@ -17,6 +17,7 @@ import infoscry.llm.LlmStreamingClient
 import infoscry.llm.PromptService
 import infoscry.llm.RequestBudget
 import infoscry.llm.TokenUsage
+import infoscry.llm.requireDispatchable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
@@ -209,6 +210,17 @@ class InvestigationService(
         val profile = history?.profile ?: request.profile
         val lockedPromptVersion = history?.promptVersion ?: promptVersion
         val retrievalSnapshot = history?.retrievalSnapshot ?: RetrievalSnapshot.value()
+
+        // A route checks this before it builds the service, but the profile this turn dispatches through is
+        // resolved here — from the conversation's locked snapshot on a continue — and the dispatch happens
+        // here. A direct caller, or a profile switched off after the route looked, must be refused too, so the
+        // rule is enforced where the destination is decided instead of being trusted to every caller. Nothing
+        // is created or appended for a refused turn: the check runs before the conversation and the turn.
+        val dispatchRefusal = runCatching { profile.requireDispatchable() }.exceptionOrNull()
+        if (dispatchRefusal != null) {
+            emit(InvestigateEvent.Error("INVALID_REQUEST", dispatchRefusal.message.orEmpty()))
+            return@flow
+        }
 
         // The conversation is created before the turn runs, so Started is always the first event and
         // a route can continue even a first turn that ends in an error; a continue surfaces its id the

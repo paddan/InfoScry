@@ -7,6 +7,8 @@ import infoscry.llm.LlmPromptRole.ASK
 import infoscry.llm.LlmPromptRole.INVESTIGATE
 import infoscry.llm.LlmProvider
 import infoscry.llm.ValidEnvironmentVariableName
+import infoscry.llm.endpointCarriesUserInfo
+import infoscry.llm.sanitizedEndpoint
 import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.SQLException
@@ -137,16 +139,17 @@ class LlmStore(private val database: Database) {
         evidence: List<Evidence>,
         citations: CitationValidation,
     ) {
-        connection.prepareStatement("INSERT INTO citations (id,model_call_id,conversation_id,source_unit_id,locator_json,snippet,validated,evidence_id,returned_id,supplied,invalid_marker) VALUES (?,?,?,?,?,?,?,?,?,?,?)").use { s ->
+        connection.prepareStatement("INSERT INTO citations (id,model_call_id,conversation_id,source_unit_id,locator_json,snippet,validated,evidence_id,returned_id,supplied,invalid_marker,revision_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
             evidence.forEach { e ->
-                citationRow(s, conversationId, callId, e.unitId, Json.encodeToString(e.locator), e.text, false, e.id, null, true, false)
+                citationRow(s, conversationId, callId, e.unitId, Json.encodeToString(e.locator), e.text, false, e.id, null, true, false, e.revisionId)
             }
             citations.valid.forEach { evidenceId ->
                 val e = evidence.first { it.id == evidenceId }
-                citationRow(s, conversationId, callId, e.unitId, Json.encodeToString(e.locator), e.text, true, evidenceId, evidenceId, false, false)
+                citationRow(s, conversationId, callId, e.unitId, Json.encodeToString(e.locator), e.text, true, evidenceId, evidenceId, false, false, e.revisionId)
             }
+            // An invalid marker names no source at all, so it names no revision either.
             citations.invalid.forEach { id ->
-                citationRow(s, conversationId, callId, "invalid:$id", "{}", "", false, null, id, false, true)
+                citationRow(s, conversationId, callId, "invalid:$id", "{}", "", false, null, id, false, true, null)
             }
             s.executeBatch()
         }
@@ -164,6 +167,7 @@ class LlmStore(private val database: Database) {
         returnedId: String?,
         supplied: Boolean,
         invalidMarker: Boolean,
+        revisionId: String?,
     ) {
         statement.setString(1, UUID.randomUUID().toString())
         statement.setString(2, callId)
@@ -176,6 +180,7 @@ class LlmStore(private val database: Database) {
         statement.setString(9, returnedId)
         statement.setInt(10, if (supplied) 1 else 0)
         statement.setInt(11, if (invalidMarker) 1 else 0)
+        statement.setString(12, revisionId)
         statement.addBatch()
     }
 
@@ -482,14 +487,21 @@ class LlmStore(private val database: Database) {
     private val javaClass: Class<LlmStore> get() = LlmStore::class.java
 
     private fun readProfile(results: ResultSet): LlmProfile {
-        val enabled = results.getInt("enabled") != 0
+        val storedEndpoint = results.getString("endpoint") ?: ""
+        // A row written before the endpoint rules existed can still carry a credential in its URL, and the
+        // profile type refuses such a value. Reading it through anyway would fail the whole listing — and any
+        // screen or CLI command that lists profiles — while the credential stayed in the file, so the value
+        // is read back the way migration 020 leaves one: credential removed, profile disabled until a person
+        // reviews the address. No endpoint is ever returned with its userinfo component still on it.
+        val credentialRemoved = endpointCarriesUserInfo(storedEndpoint)
+        val enabled = results.getInt("enabled") != 0 && !credentialRemoved
         val measuredValue = results.getInt("tool_calling_measured")
         val measured = if (results.wasNull()) null else measuredValue != 0
         return LlmProfile(
             id = results.getString("id"),
             name = results.getString("name"),
             provider = LlmProvider.valueOf(results.getString("provider")),
-            endpoint = results.getString("endpoint") ?: "",
+            endpoint = if (credentialRemoved) sanitizedEndpoint(storedEndpoint) else storedEndpoint,
             model = results.getString("model"),
             apiKeyEnvironmentVariable = results.getString("api_key_environment_variable"),
             contextWindow = results.getInt("context_window"),
@@ -696,7 +708,15 @@ class LlmStore(private val database: Database) {
      * The row keeps only the non-secret provider/endpoint/model/name snapshot, so the remaining
      * profile fields come from the live profile row looked up by name; the snapshot's own four
      * fields win when the live profile disagrees. A conversation whose profile no longer exists
-     * cannot be continued and reads back as null.
+     * cannot be continued and reads back as null. A snapshot that had to be repaired reads back as a
+     * switched-off profile, because the address this conversation locked is not one anything may
+     * dispatch to until somebody reviews it — whoever fixed the profile row in the meantime.
+     *
+     * "Had to be repaired" is read from two places, because the repair removes the first one's
+     * evidence: `profile_endpoint_repaired`, the marker migration 020 sets on every row whose
+     * credential it stripped, and the stored address itself, for a row that still carries `userinfo`
+     * — a hand edit, or a row the migration never saw. A snapshot the migration cleaned holds no
+     * credential any more, so without the marker it would look untouched and could dispatch again.
      */
     fun loadInvestigateHistory(conversationId: String): InvestigateHistory? = database.read { connection ->
         data class ConversationRow(
@@ -704,6 +724,7 @@ class LlmStore(private val database: Database) {
             val mode: String,
             val profileProvider: String,
             val profileEndpoint: String?,
+            val profileEndpointRepaired: Boolean,
             val profileModel: String,
             val profileName: String,
             val promptVersion: Int,
@@ -711,7 +732,7 @@ class LlmStore(private val database: Database) {
         )
 
         val conversation = connection.prepareStatement(
-            "SELECT collection_id, mode, profile_provider, profile_endpoint, profile_model, profile_name, prompt_version, retrieval_snapshot FROM conversations WHERE id = ?",
+            "SELECT collection_id, mode, profile_provider, profile_endpoint, profile_endpoint_repaired, profile_model, profile_name, prompt_version, retrieval_snapshot FROM conversations WHERE id = ?",
         ).use { statement ->
             statement.setString(1, conversationId)
             statement.executeQuery().use { results ->
@@ -721,6 +742,7 @@ class LlmStore(private val database: Database) {
                     mode = results.getString("mode"),
                     profileProvider = results.getString("profile_provider"),
                     profileEndpoint = results.getString("profile_endpoint"),
+                    profileEndpointRepaired = results.getInt("profile_endpoint_repaired") != 0,
                     profileModel = results.getString("profile_model"),
                     profileName = results.getString("profile_name"),
                     promptVersion = results.getInt("prompt_version"),
@@ -824,13 +846,33 @@ class LlmStore(private val database: Database) {
             if (entry.messageSeq != null) entry else entry.copy(messageSeq = legacyEvidenceSeqs[entry.evidenceId])
         }
 
+        // The snapshot is what the next turn dispatches to, so a snapshot that had to be repaired leaves the
+        // conversation's profile switched off exactly as a repaired `llm_profiles` row is. Computed from the
+        // snapshot rather than from the row the profile was looked up through, because the two disagree in the
+        // case that matters: a person may have fixed the profile after the conversation was created, which
+        // leaves the row clean and enabled while the address this conversation locked is still the repaired
+        // one. Nothing dispatches to a repaired address until somebody reviews it, so the gate has to see this
+        // whatever the current row says. Both the migration's marker and a stored address that still carries
+        // `userinfo` count, because the repair itself strips the credential the second test looks for: without
+        // the marker a row migration 020 cleaned reads as untouched, and without the address test a hand-edited
+        // row the migration never reached would.
+        val repairedSnapshot = conversation.profileEndpointRepaired ||
+            endpointCarriesUserInfo(conversation.profileEndpoint ?: "")
+
         InvestigateHistory(
             collectionId = CollectionId(conversation.collectionId),
             profile = profile.copy(
                 provider = LlmProvider.valueOf(conversation.profileProvider),
-                endpoint = conversation.profileEndpoint ?: "",
+                // The snapshot goes back through the profile type, which refuses a URL carrying credentials, so
+                // a row that somehow still holds one is repaired rather than allowed to fail the reopen. A clean
+                // address is returned exactly as it was stored, which is what sanitising does when there is
+                // nothing to remove.
+                endpoint = sanitizedEndpoint(conversation.profileEndpoint ?: ""),
                 model = conversation.profileModel,
                 name = conversation.profileName,
+                // Off for a repaired snapshot, and reported that way to `requireDispatchable`, whose refusal
+                // then names the address this conversation stored.
+                enabled = profile.enabled && !repairedSnapshot,
             ),
             promptVersion = conversation.promptVersion,
             retrievalSnapshot = conversation.retrievalSnapshot,

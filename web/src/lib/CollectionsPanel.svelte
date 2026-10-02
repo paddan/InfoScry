@@ -89,6 +89,7 @@
     INDEXING: 'Indexing',
     COMPLETE: 'Complete',
     COMPLETE_WITH_WARNINGS: 'Complete with warnings',
+    NEEDS_REVIEW: 'Needs review',
     FAILED: 'Failed',
     CANCELLED: 'Cancelled',
     NEEDS_TOOL: 'Needs a tool',

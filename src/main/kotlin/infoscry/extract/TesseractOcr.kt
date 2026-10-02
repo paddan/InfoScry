@@ -1,5 +1,11 @@
 package infoscry.extract
 
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrPageResult
+import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.OcrWordBox
+import infoscry.ocr.PageImage
+import infoscry.ocr.PageOcrEngine
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -77,35 +83,76 @@ class TesseractOcr(
     private val executable: String = DEFAULT_EXECUTABLE,
     private val timeout: Duration = PAGE_TIMEOUT,
     private val maxCapturedStdoutBytes: Int = ExternalProcess.MAX_CAPTURED_STDOUT_BYTES,
-) {
+) : PageOcrEngine {
 
     /**
-     * Reads [page] and returns its text, its mean confidence, and the artifact the reading was written to.
+     * Tesseract is the installed tool that reads a rendered page, and it says so itself.
      *
-     * Called by an extractor from inside its unit boundary, which is what puts the artifact write inside
-     * the same permit as the checkpoint that will describe it.
+     * An attempt that selects another engine is refused by [PageOcrEngines] rather than read here, which is
+     * what makes "which engine read this page" an answer a snapshot decided instead of a wiring accident.
+     */
+    override val engine: OcrEngine = OcrEngine.TESSERACT
+
+    /**
+     * Reads one page image and returns its text, its word boxes, its mean confidence, and the artifact the
+     * reading was written to.
+     *
+     * This is the page-image seam: the languages come from the snapshot the attempt was admitted with, the
+     * tool's own output is written beside the attempt's other artifacts, and nothing here can dispatch
+     * anywhere but to the tool this instance was configured with. A tool that is missing is a document-level
+     * refusal with [NEEDS_TESSERACT_CODE], and a page this tool could not read is that page's failure —
+     * either way no other engine is tried. A page the tool read as nothing is not a success either: it comes
+     * back under [OcrPageResult.EMPTY_READING_CODE], so that whether the page is blank is answered by the
+     * caller that holds the raster rather than by an empty string.
+     */
+    override suspend fun transcribe(page: PageImage, settings: OcrSettingsSnapshot): OcrPageResult {
+        val workingDirectory = Files.createTempDirectory(WORK_DIRECTORY_PREFIX)
+        try {
+            val run = run(page.imagePath, settings.language, workingDirectory)
+            val relativePath = boxesArtifactPath(page.ordinal)
+            val artifact = page.artifactRoot.resolve(relativePath)
+            writeArtifact(artifact, run.tsv)
+            return OcrPageResult(
+                text = run.reading.text,
+                engine = engine,
+                imageSha256 = page.sha256,
+                boxes = run.reading.boxes,
+                meanConfidence = run.reading.meanConfidence,
+                artifactRelativePath = relativePath,
+                artifactSha256 = sha256Of(artifact),
+                // A tool that recognised no word is not a page this pipeline established says nothing: the
+                // paper may be blank or the tool may have missed what is on it, and only the raster can
+                // tell the two apart. The reading is therefore this code rather than an unqualified
+                // success, exactly as the Surya engine answers an empty page.
+                errorCode = if (run.reading.text.isBlank()) OcrPageResult.EMPTY_READING_CODE else null,
+            )
+        } finally {
+            workingDirectory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * Reads one page of a container whose pictures are working material rather than managed page images.
+     *
+     * A chapter of a book archive is drawn into an image for the length of one extraction and deleted
+     * afterwards, so it has no artifact root of its own and no stable page identity of its own, which is why
+     * it keeps its own entry point instead of being described as a page image it is not. The reading itself
+     * is the same reading: one command, one parser, one artifact writer, and the same refusal when the tool
+     * is missing.
+     *
+     * Called by an extractor from inside its unit boundary, which is what puts the artifact write inside the
+     * same permit as the checkpoint that will describe it.
      */
     suspend fun recognize(page: RenderedPage): OcrResult {
         val workingDirectory = Files.createTempDirectory(WORK_DIRECTORY_PREFIX)
         try {
-            val outcome = read(page, workingDirectory)
-            if (outcome.stdoutTruncated) {
-                throw OcrToolFailedException.truncated(
-                    exitCode = outcome.exitCode,
-                    stderr = outcome.stderr,
-                    boundBytes = maxCapturedStdoutBytes,
-                )
-            }
-            if (!outcome.succeeded) {
-                throw OcrToolFailedException.exited(outcome.exitCode, outcome.stderr)
-            }
-            val reading = TesseractTsv.parse(outcome.stdout)
+            val run = run(page.imagePath, page.ocrLanguages, workingDirectory)
             val relativePath = relativeArtifactPath(page)
             val artifact = page.artifactRoot.resolve(relativePath)
-            writeArtifact(artifact, outcome.stdout)
+            writeArtifact(artifact, run.tsv)
             return OcrResult(
-                text = reading.text,
-                meanConfidence = reading.meanConfidence,
+                text = run.reading.text,
+                meanConfidence = run.reading.meanConfidence,
                 artifactRelativePath = relativePath,
                 artifactSha256 = sha256Of(artifact),
             )
@@ -114,28 +161,43 @@ class TesseractOcr(
         }
     }
 
-    private suspend fun read(page: RenderedPage, workingDirectory: Path): ProcessOutcome = try {
-        ExternalProcess.run(
-            command = listOf(
-                executable,
-                page.imagePath.toString(),
-                STDOUT_OUTPUT,
-                LANGUAGE_FLAG,
-                page.ocrLanguages,
-                TSV_OUTPUT,
-            ),
-            timeout = timeout,
-            cwd = workingDirectory,
-            maxCapturedStdoutBytes = maxCapturedStdoutBytes,
-        )
-    } catch (notInstalled: ExternalToolMissingException) {
-        // Not a page failure but a build failure: every page of every scan would fail the same way, so it
-        // is reported once against the document with the code that names what is missing.
-        throw OcrUnavailableException(
-            NEEDS_TESSERACT_CODE,
-            "'$executable' is not installed or cannot be run, so a page without its own text cannot be " +
-                "read: ${installRemedy()}",
-        )
+    /**
+     * Runs the tool on one image and parses what it printed.
+     *
+     * The two entry points differ only in where the reading is written down, so everything that is about the
+     * *tool* — the command line, its language order, its output bound, the two ways it fails, and the parse —
+     * happens once here.
+     */
+    private suspend fun run(image: Path, languages: String, workingDirectory: Path): TesseractRun {
+        val outcome = try {
+            ExternalProcess.run(
+                command = listOf(image.toString(), STDOUT_OUTPUT, LANGUAGE_FLAG, languages, TSV_OUTPUT).let {
+                    listOf(executable) + it
+                },
+                timeout = timeout,
+                cwd = workingDirectory,
+                maxCapturedStdoutBytes = maxCapturedStdoutBytes,
+            )
+        } catch (notInstalled: ExternalToolMissingException) {
+            // Not a page failure but a build failure: every page of every scan would fail the same way, so it
+            // is reported once against the document with the code that names what is missing.
+            throw OcrUnavailableException(
+                NEEDS_TESSERACT_CODE,
+                "'$executable' is not installed or cannot be run, so a page without its own text cannot be " +
+                    "read: ${installRemedy()}",
+            )
+        }
+        if (outcome.stdoutTruncated) {
+            throw OcrToolFailedException.truncated(
+                exitCode = outcome.exitCode,
+                stderr = outcome.stderr,
+                boundBytes = maxCapturedStdoutBytes,
+            )
+        }
+        if (!outcome.succeeded) {
+            throw OcrToolFailedException.exited(outcome.exitCode, outcome.stderr)
+        }
+        return TesseractRun(tsv = outcome.stdout, reading = TesseractTsv.parse(outcome.stdout))
     }
 
     /**
@@ -214,6 +276,20 @@ class TesseractOcr(
         ).joinToString("/")
 
         /**
+         * The path of one page image's word boxes, relative to the attempt's artifact root.
+         *
+         * A page image is read under the attempt directory the extractor built from its fingerprint, so the
+         * path here is inside that directory; the page number is the page's ordinal plus one, which is the
+         * name every committed artifact of this tool has always had. Keeping the name is what keeps a
+         * citation's word boxes findable: the rows of documents read before this seam existed name the same
+         * files.
+         */
+        internal fun boxesArtifactPath(ordinal: Int): String = listOf(
+            ARTIFACT_DIRECTORY,
+            String.format(Locale.ROOT, ARTIFACT_NAME_FORMAT, ordinal + 1),
+        ).joinToString("/")
+
+        /**
          * What to do about a missing tool, in the words of the platform's own package manager.
          *
          * The message a user sees names the command that fixes it, because "Tesseract is missing" is not
@@ -233,13 +309,26 @@ class TesseractOcr(
 }
 
 /**
- * What one reading of a page says: the lines, and how sure the tool was.
+ * What one run of the tool produced: the TSV it printed, and the reading parsed from it.
+ *
+ * Both travel together because the artifact is the tool's own output and the reading is this project's
+ * interpretation of it: what a citation opens is the first, what a page says is the second, and neither is
+ * derived from the other a second time.
+ */
+private class TesseractRun(val tsv: String, val reading: TesseractReading)
+
+/**
+ * What one reading of a page says: the lines, the words with their boxes, and how sure the tool was.
  *
  * [text] is the page as lines of words, in the order the tool read them. [meanConfidence] is the mean of
  * the word confidences as a fraction of one, and is absent when the tool recognised no words at all —
  * which is a different thing from being unsure about them.
  */
-internal data class TesseractReading(val text: String, val meanConfidence: Double?)
+internal data class TesseractReading(
+    val text: String,
+    val meanConfidence: Double?,
+    val boxes: List<OcrWordBox> = emptyList(),
+)
 
 /**
  * Turns Tesseract's TSV into lines of text and one confidence.
@@ -265,6 +354,7 @@ internal object TesseractTsv {
     fun parse(tsv: String): TesseractReading {
         val lines = linkedMapOf<LineKey, MutableList<String>>()
         val confidences = mutableListOf<Double>()
+        val boxes = mutableListOf<OcrWordBox>()
         for (row in tsv.lineSequence()) {
             val fields = row.split('\t')
             if (fields.size < COLUMN_COUNT) continue
@@ -278,9 +368,17 @@ internal object TesseractTsv {
                 line = fields[LINE_COLUMN].trim().toIntOrNull() ?: 0,
             )
             lines.getOrPut(key) { mutableListOf() }.add(text)
-            fields[CONFIDENCE_COLUMN].trim().toDoubleOrNull()
-                ?.takeIf { confidence -> confidence >= 0 }
-                ?.let { confidence -> confidences.add(confidence) }
+            val confidence = fields[CONFIDENCE_COLUMN].trim().toDoubleOrNull()?.takeIf { value -> value >= 0 }
+            confidence?.let { value -> confidences.add(value) }
+            boxes += OcrWordBox(
+                text = text,
+                left = fields[LEFT_COLUMN].trim().toIntOrNull() ?: 0,
+                top = fields[TOP_COLUMN].trim().toIntOrNull() ?: 0,
+                width = fields[WIDTH_COLUMN].trim().toIntOrNull() ?: 0,
+                height = fields[HEIGHT_COLUMN].trim().toIntOrNull() ?: 0,
+                // The same fraction the mean is in, so one confidence can be compared with the other.
+                confidence = confidence?.div(PERCENT),
+            )
         }
         val ordered = lines.entries.sortedWith(
             compareBy({ it.key.page }, { it.key.block }, { it.key.paragraph }, { it.key.line }),
@@ -288,6 +386,7 @@ internal object TesseractTsv {
         return TesseractReading(
             text = ordered.joinToString("\n") { (_, words) -> words.joinToString(" ") },
             meanConfidence = if (confidences.isEmpty()) null else confidences.average() / PERCENT,
+            boxes = boxes,
         )
     }
 
@@ -299,6 +398,10 @@ internal object TesseractTsv {
     private const val BLOCK_COLUMN: Int = 2
     private const val PARAGRAPH_COLUMN: Int = 3
     private const val LINE_COLUMN: Int = 4
+    private const val LEFT_COLUMN: Int = 6
+    private const val TOP_COLUMN: Int = 7
+    private const val WIDTH_COLUMN: Int = 8
+    private const val HEIGHT_COLUMN: Int = 9
     private const val CONFIDENCE_COLUMN: Int = 10
     private const val TEXT_COLUMN: Int = 11
 

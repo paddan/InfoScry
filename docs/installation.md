@@ -10,6 +10,7 @@
 | JDK 25 | Build and run the application |
 | Node.js 24 and npm | Build and test the web interface; the setup below uses Node 24 |
 | Tesseract and the OCR languages you use | OCR runtime dependency |
+| Surya and llama.cpp (optional) | Local page reading with the Surya model instead of Tesseract |
 | Calibre (optional) | E-book formats that need conversion |
 
 Linux/CUDA, Intel Macs and Windows are outside the current runtime scope.
@@ -70,6 +71,89 @@ that `eng` and `swe` appear in the language list if you use both.
 Collections default to `eng`. For Swedish and English documents, save
 `swe+eng` under **Admin → Collections → OCR languages** before importing or
 retrying. Saving languages alone does not reprocess existing documents.
+
+### Surya for local page reading (optional)
+
+Surya is the second local OCR engine. It reads a whole page with one
+vision-language model call instead of line by line, which is better on
+irregular letterforms and layouts, and it needs no cloud service. Install it
+only if you select Surya as an engine; Tesseract remains the default and the two
+are alternatives, never a fallback chain.
+
+The runtime has two halves: a Python environment with the `surya-ocr` package,
+and `llama-server` from [llama.cpp](https://formulae.brew.sh/formula/llama.cpp),
+which serves the model on the Apple GPU through Metal. Install both:
+
+```bash
+brew install llama.cpp uv
+uv venv --python 3.12 "$HOME/.local/share/infoscry/surya-venv"
+uv pip install --python "$HOME/.local/share/infoscry/surya-venv/bin/python" 'surya-ocr==0.22.1'
+```
+
+Only the Python half is pinned, and `surya-ocr==0.22.1` in a Python 3.12
+environment is what this project is verified against. Homebrew's `llama.cpp`
+is **not** pinned: the formula moves with each `brew upgrade`. That is why
+InfoScry reads the `llama-server` build, the package version, the backend and
+the cached weights' revisions and sizes into the identity it fingerprints a
+reading with, so a page read by another build is read again instead of being
+reused under a runtime that did not read it.
+
+`--python 3.12` is deliberate: the PyTorch wheels this package needs are not
+built for Homebrew's newer Python, so a 3.14 environment installs a package that
+cannot import. The commands pin `surya-ocr==0.22.1` because the reading a
+collection receives is fingerprinted by the runtime and model that produced it.
+
+Check the installation before starting InfoScry:
+
+```bash
+command -v llama-server && llama-server --version
+"$HOME/.local/share/infoscry/surya-venv/bin/python" --version
+"$HOME/.local/share/infoscry/surya-venv/bin/python" \
+  -c "import importlib.metadata as m; print(m.version('surya-ocr'))"
+```
+
+`llama-server --version` writes to stderr; a verified installation answers with
+version `0.5.0`, build `11146`, commit `7fe450e19` on macOS arm64, though a later
+Homebrew upgrade answers with a build of its own. Python should report `3.12.x`
+and the last command `0.22.1`.
+
+On the first page it reads, the runtime downloads the weights from Hugging Face
+into `~/.cache/huggingface/hub/models--datalab-to--surya-ocr-2-gguf`:
+`surya-2.gguf` (1,266,400,864 bytes) and `surya-2-mmproj.gguf`
+(204,986,688 bytes), about 1.36 GiB together. Nothing else is fetched at run
+time; check that the cache directory exists after reading one page. The server
+holds the model in memory while InfoScry runs and is stopped with the process
+that started it.
+
+InfoScry finds this runtime by itself when it is installed at the path above
+and the application is started from the checkout. To point it somewhere else,
+set these environment variables in the terminal that starts the server:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `INFOSCRY_SURYA_PYTHON` | Interpreter with `surya-ocr` installed | `~/.local/share/infoscry/surya-venv/bin/python` |
+| `INFOSCRY_SURYA_WORKER` | The worker script InfoScry spawns | `scripts/ocr/surya_worker.py`, relative to the working directory |
+| `LLAMA_CPP_BINARY` | `llama-server` when it is not on `PATH` (read by Surya) | `llama-server` on `PATH` |
+
+A collection that selects Surya on a machine where the runtime is missing,
+unusable or pointing at the wrong interpreter is refused with `NEEDS_SURYA`,
+`NEEDS_LLAMA_CPP`, `NEEDS_SURYA_MODEL` or `SURYA_START_FAILED` and the install
+line that fixes it: the document ends in `NEEDS_TOOL` with that line beside the
+code, so a document waiting for something to be installed is not reported as a
+broken one. Nothing is read with Tesseract instead, because a reading is
+attributed to the engine the collection selected.
+
+**Licences.** The `surya-ocr` package is Apache-2.0. The model weights use a
+modified AI Pubs Open Rail-M licence: free for research, personal use and
+startups under $5M funding/revenue, with broader commercial self-hosting needing
+a licence from the model authors
+([model card](https://huggingface.co/datalab-to/surya-ocr-2-gguf),
+[pricing](https://www.datalab.to/pricing)). llama.cpp itself is MIT licensed.
+
+Surya's runtime is separate from the embedding requirement under
+[Requirements](#requirements): embeddings still need CoreML on the Apple GPU,
+while Surya reads pages through llama.cpp. Installing one does not satisfy the
+other.
 
 ### Calibre for e-book conversion
 

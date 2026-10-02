@@ -22,6 +22,7 @@ import infoscry.extract.ExtractionInput
 import infoscry.extract.ExtractionSettings
 import infoscry.extract.ExtractionSink
 import infoscry.extract.ExtractorRegistry
+import infoscry.extract.EXTRACTOR_SCHEMA_VERSION
 import infoscry.extract.MediaTypeDetector
 import infoscry.extract.TextualFallbackExtractor
 import infoscry.extract.emitDocumentRefusal
@@ -30,6 +31,9 @@ import infoscry.embedding.E5Embedder
 import infoscry.embedding.ModelManager
 import infoscry.embedding.TestDocumentEmbedder
 import infoscry.extract.OCR_FAILED_CODE
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import java.nio.file.Files
@@ -468,6 +472,53 @@ class ImportJobHandlerTest {
                 )
             }
         }
+    }
+
+    @Test
+    fun `an import admitted with check-and-improve reads with the collection's OCR selection`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            // What the route does at admission: the collection's selection is resolved into the attempt's
+            // snapshot, and the extraction settings that travel in the payload are derived from it.
+            val snapshot = OcrSettingsSnapshot(
+                engine = OcrEngine.SURYA,
+                mode = OcrImportMode.CHECK_AND_IMPROVE,
+                language = "eng",
+                extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+            )
+            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
+            assertEquals(OcrImportMode.CHECK_AND_IMPROVE, settings.ocrMode)
+            assertEquals(OcrEngine.SURYA, settings.ocrAttempt?.engine)
+
+            val extractor = ModeRecordingUnits()
+            val run = harness.importDurably(listOf(source), extractor, settings = settings)
+
+            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+            assertEquals(OcrImportMode.CHECK_AND_IMPROVE, extractor.mode, "the mode has to reach the extraction")
+            assertEquals(OcrEngine.SURYA, extractor.engine, "the engine has to be the one that was selected")
+        }
+    }
+
+    @Test
+    fun `an unchanged collection keeps the legacy reading identity`() {
+        // A collection that still selects Tesseract and fill-missing adds nothing to the extent settings, which
+        // is what keeps the extraction fingerprint of an unchanged archive byte-identical to what it was before
+        // OCR engines existed: committed checkpoints stay reusable rather than being read again.
+        val snapshot = OcrSettingsSnapshot(
+            engine = OcrEngine.TESSERACT,
+            mode = OcrImportMode.FILL_MISSING,
+            language = "eng",
+            extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+        )
+
+        val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
+
+        assertNull(settings.ocrAttempt)
+        assertEquals(OcrImportMode.FILL_MISSING, settings.ocrMode)
+        assertEquals(
+            ExtractionFingerprint.of("a".repeat(64), ExtractionSettings(ocrLanguages = "eng")),
+            ExtractionFingerprint.of("a".repeat(64), settings),
+        )
     }
 
     @Test
@@ -1084,6 +1135,39 @@ internal class Harness(val directory: Path) : AutoCloseable {
     }
 
     override fun close() = Unit
+}
+
+/** An extractor that records the reading settings it was handed, so the mode and engine are observable. */
+internal class ModeRecordingUnits : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    var mode: OcrImportMode? = null
+        private set
+    var engine: infoscry.ocr.OcrEngine? = null
+        private set
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        mode = input.settings.ocrMode
+        engine = input.settings.readingEngine()
+        input.boundary.unit {
+            emit(
+                ExtractionEvent.UnitReady(
+                    key = "unit-0",
+                    ordinal = 0,
+                    unit = ContentUnitDraft(
+                        locator = SourceLocation.TextLines(start = 1, end = 1),
+                        extractedText = "read under the collection's selection",
+                        searchText = "read under the collection's selection",
+                        method = ExtractionMethod.OCR,
+                    ),
+                ),
+            )
+        }
+        input.boundary.unit {
+            emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = 1))
+        }
+    }
 }
 
 /**

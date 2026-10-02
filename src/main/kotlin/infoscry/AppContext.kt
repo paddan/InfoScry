@@ -10,28 +10,39 @@ import infoscry.document.DocumentIndexRemover
 import infoscry.document.DocumentService
 import infoscry.document.RetryPrerequisites
 import infoscry.document.RetryService
+import infoscry.document.PublicationRecoveryReport
+import infoscry.document.RescanService
+import infoscry.document.RevisionPublicationService
+import infoscry.jobs.rescanEngineFactory
 import infoscry.domain.Collection
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.embedding.E5Embedder
+import infoscry.embedding.ModelManager
 import infoscry.embedding.ModelManifest
 import infoscry.embedding.QueryEmbedder
 import infoscry.jobs.JobRunner
 import infoscry.library.ManagedLibrary
 import infoscry.logging.LoggingBootstrap
+import infoscry.ocr.OcrProfileService
 import infoscry.search.IndexIdentity
 import infoscry.search.LuceneIndex
 import infoscry.search.LuceneSchema
+import infoscry.search.RevisionSnapshotGate
 import infoscry.search.SearchService
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
 import infoscry.storage.Database
 import infoscry.storage.DeletionStore
+import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.JobStore
 import infoscry.storage.LlmStore
 import infoscry.storage.ImportItemStore
 import infoscry.storage.MutationCoordinator
+import infoscry.storage.OcrOperationStore
+import infoscry.storage.OcrProfileStore
+import infoscry.storage.OcrReviewStore
 import infoscry.storage.SchemaMigrator
 import java.nio.file.Path
 import kotlinx.coroutines.runBlocking
@@ -58,6 +69,19 @@ class AppContext private constructor(
     val collections: CollectionStore,
     val documents: DocumentStore,
     val content: ContentStore,
+    /**
+     * The immutable revisions of documents: their page texts, their chunks and vectors, which revision
+     * each document publishes, and the publications still in flight.
+     */
+    val revisions: DocumentRevisionStore,
+    /**
+     * The snapshot readers lease and that a publication swaps.
+     *
+     * One object per process, shared by the search service and the publication service, because the two
+     * have to agree on which revisions a reader may see — a second gate would let a search read a
+     * revision the publication had already replaced.
+     */
+    val revisionSnapshots: RevisionSnapshotGate,
     val deletions: DeletionStore,
     val importItems: ImportItemStore,
     val library: ManagedLibrary,
@@ -90,6 +114,14 @@ class AppContext private constructor(
      * installed has to be able to say what it wants the answer to be. Nothing in production passes it.
      */
     private val injectedRetryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
+    /**
+     * Whether a rescan could embed a replacement on this machine, or null for the pinned model's own answer.
+     *
+     * The same kind of seam as [injectedRetryPrerequisites]: whether the model is installed is a property of
+     * the machine, and a test that drives rescan admission has to be able to say what the answer is rather
+     * than depend on what happens to be installed where the suite runs. Nothing in production passes it.
+     */
+    private val injectedRescanEmbedder: (() -> Boolean)? = null,
 ) : AutoCloseable {
 
     /**
@@ -119,12 +151,74 @@ class AppContext private constructor(
             injectedIndexRemover
         }
 
+    /**
+     * OCR profiles, kept apart from the Ask/Investigate profiles.
+     *
+     * An image-model transcription is a different decision from an answer's model — it sends page images to an
+     * endpoint, which is an explicit external-processing choice — so it has its own profiles, its own routes
+     * and no effect on the LLM defaults.
+     */
+    val ocrProfiles: OcrProfileStore = OcrProfileStore(database)
+
+    val ocr: OcrProfileService = OcrProfileService(ocrProfiles)
+
+    /**
+     * The durable rescan operations, with their previews, their external-page admission and their approvals.
+     */
+    val ocrOperations: OcrOperationStore = OcrOperationStore(database)
+
+    /** The reviews a comparison writes and a person decides about. */
+    val ocrReviews: OcrReviewStore = OcrReviewStore(database)
+
+    /**
+     * Publishing a staged candidate revision of one document, and finishing what a previous process left
+     * unfinished. It shares the mutation gate with every other writer, because the publication boundary is
+     * where a deletion or a tombstoned collection gets to win.
+     */
+    val revisionPublication: RevisionPublicationService = RevisionPublicationService(
+        revisions = revisions,
+        documents = documents,
+        collections = collections,
+        mutations = mutations,
+        index = { index() },
+        gate = revisionSnapshots,
+    )
+
+    /**
+     * Admitting, following, approving and cancelling a rescan of one document.
+     *
+     * It shares the mutation gate, the deletion blockers and the publication service with every other writer,
+     * because a rescan admits durable work on a document an operator may be deleting, and it publishes through
+     * exactly the same recoverable protocol an import and a restore do.
+     */
+    val rescanService: RescanService = RescanService(
+        paths = paths,
+        collections = collections,
+        documents = documents,
+        revisions = revisions,
+        jobs = jobs,
+        operations = ocrOperations,
+        reviews = ocrReviews,
+        mutations = mutations,
+        blockers = blockers,
+        publication = revisionPublication,
+        index = { index() },
+        profileOf = { profileId -> ocrProfiles.findById(profileId) },
+        profileRevisionOf = { revisionId -> ocrProfiles.findRevision(revisionId) },
+        engines = rescanEngineFactory(ocrProfiles),
+        // The cheap installation check rather than a session: admission asks whether a replacement could ever
+        // be published, not whether the accelerator is reachable this second.
+        embedderAvailable = injectedRescanEmbedder
+            ?: { ModelManager.production().isInstalled(paths.modelsDir) },
+    )
+
     val collectionService: CollectionService = CollectionService(
         database = database,
         paths = paths,
         collections = collections,
         deletions = deletions,
         coordinator = mutations,
+        ocrProfiles = ocr,
         index = indexRemover,
         blockers = blockers,
     )
@@ -168,8 +262,22 @@ class AppContext private constructor(
         jobs = jobs,
         coordinator = mutations,
         blockers = blockers,
-        prerequisites = injectedRetryPrerequisites
-            ?: { collection -> RetryPrerequisites.probe(collection.ocrLanguages, paths.modelsDir) },
+        prerequisites = injectedRetryPrerequisites ?: { collection ->
+            RetryPrerequisites.probe(
+                collection = collection,
+                modelsDir = paths.modelsDir,
+                // A retry records the attempt it will run with, exactly as an import does: another engine or a
+                // mode that reads images a page already has is a different reading of the same bytes, and a
+                // checkpoint committed under one is not evidence about the other.
+                ocrSnapshot = { settings ->
+                    ocr.snapshotFor(
+                        settings = settings,
+                        extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+                        renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
+                    )
+                },
+            )
+        },
     )
 
     /** The generation the process currently serves. Reading it is a single atomic reference read. */
@@ -203,6 +311,7 @@ class AppContext private constructor(
             index = { index() },
             queryEmbedder = injectedQueryEmbedder
                 ?: E5Embedder.productionQueryEmbedder(paths.modelsDir, paths.embeddingProfileDir),
+            snapshots = revisionSnapshots,
         )
     }
 
@@ -236,6 +345,14 @@ class AppContext private constructor(
      */
     @Volatile
     var deletionRecovery: DeletionRecoveryReport = DeletionRecoveryReport(emptyList(), emptyList())
+        private set
+
+    /**
+     * What the startup roll-forward found among unfinished publications. Reported rather than acted on:
+     * by the time this is readable, the contexts's state already agrees with it.
+     */
+    @Volatile
+    var publicationRecovery: PublicationRecoveryReport = PublicationRecoveryReport(emptyList(), emptyList())
         private set
 
     override fun close() {
@@ -276,7 +393,15 @@ class AppContext private constructor(
             queryEmbedder: (() -> QueryEmbedder?)? = null,
             documentIndex: DocumentIndexRemover = DocumentIndexRemover.NONE,
             retryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
-        ): AppContext = open(AppPaths.from(dataDir), index, queryEmbedder, documentIndex, retryPrerequisites)
+            rescanEmbedder: (() -> Boolean)? = null,
+        ): AppContext = open(
+            AppPaths.from(dataDir),
+            index,
+            queryEmbedder,
+            documentIndex,
+            retryPrerequisites,
+            rescanEmbedder,
+        )
 
         fun open(
             paths: AppPaths,
@@ -284,6 +409,7 @@ class AppContext private constructor(
             queryEmbedder: (() -> QueryEmbedder?)? = null,
             documentIndex: DocumentIndexRemover = DocumentIndexRemover.NONE,
             retryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
+            rescanEmbedder: (() -> Boolean)? = null,
         ): AppContext {
             // The whole layout first, before anything can write into it. Opening a data directory creates its
             // database, so this is not a read-only operation and must not pretend to be one: the import path
@@ -303,6 +429,7 @@ class AppContext private constructor(
                     val collections = CollectionStore(database)
                     val documents = DocumentStore(database)
                     val content = ContentStore(database)
+                    val revisions = DocumentRevisionStore(database, content)
                     val deletions = DeletionStore(database)
                     val jobs = JobStore(database)
                     val importItems = ImportItemStore(database)
@@ -320,6 +447,8 @@ class AppContext private constructor(
                             collections = collections,
                             documents = documents,
                             content = content,
+                            revisions = revisions,
+                            revisionSnapshots = RevisionSnapshotGate(),
                             deletions = deletions,
                             importItems = importItems,
                             library = ManagedLibrary(paths, documents),
@@ -333,7 +462,15 @@ class AppContext private constructor(
                             lock = lock,
                             injectedQueryEmbedder = queryEmbedder,
                             injectedRetryPrerequisites = retryPrerequisites,
+                            injectedRescanEmbedder = rescanEmbedder,
                         )
+                        // A publication that a previous process did not finish is resolved before the
+                        // marker is resolved and before anything may read: an intent that moved authority
+                        // is completed from its own staged artifacts, and one that did not leaves the
+                        // reading it was replacing in place.
+                        context.publicationRecovery = runBlocking {
+                            context.revisionPublication.recoverUnfinished()
+                        }
                         context.deletionRecovery = runBlocking {
                             // Both kinds are finished before the marker is resolved and before any job is
                             // admitted, so no worker can see a document whose rows are half removed.

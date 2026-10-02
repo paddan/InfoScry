@@ -40,6 +40,7 @@ import org.apache.lucene.search.BooleanClause
 import org.apache.lucene.search.BooleanQuery
 import org.apache.lucene.search.IndexSearcher
 import org.apache.lucene.search.KnnFloatVectorQuery
+import org.apache.lucene.search.MatchAllDocsQuery
 import org.apache.lucene.search.PrefixQuery
 import org.apache.lucene.search.Query
 import org.apache.lucene.search.ScoreDoc
@@ -166,6 +167,13 @@ data class DocumentRow(
     val locatorLabel: String,
     val chunk: Chunk,
     val vector: FloatArray,
+    /**
+     * The revision this row's text belongs to, or `null` for a row written before revisions existed.
+     *
+     * A staged candidate always names its revision, which is what keeps its rows out of a search until
+     * the revision is published; a row with no revision is a legacy row and stays visible.
+     */
+    val revisionId: String? = null,
 )
 
 /** A search hit: the stored data a result pane needs, already filtered by the query. */
@@ -178,6 +186,8 @@ data class IndexHit(
     val locator: String,
     val locatorLabel: String,
     val score: Float,
+    /** The revision the row's text came from, or `null` when the row predates revision tracking. */
+    val revisionId: String? = null,
 )
 
 /**
@@ -240,6 +250,126 @@ class LuceneIndex private constructor(
     suspend fun deleteDocument(documentId: DocumentId): Unit = writeMutex.withLock {
         handle.writer.deleteDocuments(Term(LuceneSchema.FIELD_DOCUMENT_ID, documentId.value))
         publish()
+    }
+
+    /**
+     * Writes one document's replacement rows without committing them.
+     *
+     * This is the staging half of a publication: the rows are in the index's memory and readable by a
+     * fresh searcher, but nothing is durable until [commit]. It is deliberately not [replaceDocument]:
+     * a publication has a boundary between "the rows exist" and "the rows are durable", and a fault at
+     * either side of that boundary is a state recovery has to resolve rather than one this call hides.
+     *
+     * Every row must name its revision, because a staged row that named none would be treated as a
+     * legacy row and would be visible before the revision it belongs to is published.
+     *
+     * The write replaces the rows *of this revision* and nothing else. That is deliberate: the reading
+     * the document publishes now has to stay in the index, findable and complete, until the boundary
+     * swaps the snapshot — a staging that removed it would leave a window in which a reader leased to the
+     * previous snapshot found nothing at all.
+     */
+    internal suspend fun stageDocument(rows: List<DocumentRow>): Unit = writeMutex.withLock {
+        require(rows.isNotEmpty()) { "a document must have at least one chunk to be indexed" }
+        require(rows.all { it.documentId == rows.first().documentId }) {
+            "staging a document indexes one document, not several"
+        }
+        require(rows.all { it.revisionId != null }) { "a staged row names the revision it belongs to" }
+        val revisionId = checkNotNull(rows.first().revisionId) { "a staged row names its revision" }
+        val staged = BooleanQuery.Builder().apply {
+            add(
+                TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, rows.first().documentId.value)),
+                BooleanClause.Occur.FILTER,
+            )
+            add(TermQuery(Term(LuceneSchema.FIELD_REVISION_ID, revisionId)), BooleanClause.Occur.FILTER)
+        }.build()
+        handle.writer.deleteDocuments(staged)
+        rows.forEach { row -> handle.writer.addDocument(toLuceneDocument(row)) }
+    }
+
+    /**
+     * Removes the staged rows of one revision of one document, leaving the document's other rows alone.
+     *
+     * This is what lets a publication that never moved authority give up cleanly: the candidate's rows
+     * are deleted by their own revision tag, so the reading the document still publishes is untouched.
+     */
+    internal suspend fun deleteStagedRevision(documentId: DocumentId, revisionId: String): Unit =
+        writeMutex.withLock {
+            val staged = BooleanQuery.Builder().apply {
+                add(
+                    TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, documentId.value)),
+                    BooleanClause.Occur.FILTER,
+                )
+                add(
+                    TermQuery(Term(LuceneSchema.FIELD_REVISION_ID, revisionId)),
+                    BooleanClause.Occur.FILTER,
+                )
+            }.build()
+            handle.writer.deleteDocuments(staged)
+            publish()
+        }
+
+    /**
+     * Removes every row of [documentId] that does not belong to the revision it now publishes.
+     *
+     * This is the cleanup after a publication and it is expressed as "everything else" on purpose: the
+     * reading being replaced may have rows tagged with its own revision *or* rows written before
+     * revisions existed, and both are the same thing here — a reading no reader may still see. It is
+     * idempotent, which is what lets recovery run it against a publication that already cleaned up.
+     */
+    internal suspend fun deleteSupersededRows(documentId: DocumentId, publishedRevisionId: String): Unit =
+        writeMutex.withLock {
+            val superseded = BooleanQuery.Builder().apply {
+                add(
+                    TermQuery(Term(LuceneSchema.FIELD_DOCUMENT_ID, documentId.value)),
+                    BooleanClause.Occur.MUST,
+                )
+                add(
+                    TermQuery(Term(LuceneSchema.FIELD_REVISION_ID, publishedRevisionId)),
+                    BooleanClause.Occur.MUST_NOT,
+                )
+            }.build()
+            handle.writer.deleteDocuments(superseded)
+            publish()
+        }
+
+    /**
+     * Removes the revision tags this generation holds rows for, read from the index itself.
+     *
+     * The counterpart of [storedDocumentIds]: a rebuild that wants to know which revisions are still
+     * represented cannot ask the database, because a row left behind by an interrupted publication is
+     * exactly the disagreement it is looking for. Rows written before revisions existed carry no tag
+     * and are therefore absent from this set, which is how they survive a cleanup they do not need.
+     */
+    internal fun storedRevisionIds(): Set<String> = readSearcher { searcher ->
+        buildSet {
+            for (leaf in searcher.indexReader.leaves()) {
+                val terms = leaf.reader().terms(LuceneSchema.FIELD_REVISION_ID) ?: continue
+                val iterator = terms.iterator()
+                while (iterator.next() != null) {
+                    add(iterator.term().utf8ToString())
+                }
+            }
+        }
+    }
+
+    /**
+     * Removes the rows of every revision that is not in [liveRevisionIds].
+     *
+     * A rebuild is the one moment the whole index is rewritten from the database's authority, so it is
+     * also the moment to shed rows of revisions no document publishes any more: a publication whose
+     * cleanup never drained its readers, or an abandoned candidate whose rows outlived their intent.
+     * Untagged rows are not touched.
+     */
+    internal suspend fun deleteStaleRevisions(liveRevisionIds: Set<String>): List<String> {
+        val stale = storedRevisionIds() - liveRevisionIds
+        if (stale.isEmpty()) return emptyList()
+        writeMutex.withLock {
+            for (revisionId in stale) {
+                handle.writer.deleteDocuments(TermQuery(Term(LuceneSchema.FIELD_REVISION_ID, revisionId)))
+            }
+            publish()
+        }
+        return stale.sorted()
     }
 
     /** Removes every chunk of one collection. Idempotent, and the deletion machine's index phase. */
@@ -308,10 +438,12 @@ class LuceneIndex private constructor(
         collectionId: CollectionId?,
         queryText: String,
         limit: Int,
+        documentIds: Set<String>? = null,
+        revisionScope: RevisionScope = RevisionScope.EVERYTHING,
     ): List<IndexHit> {
         requireQueryWithinClauseCeiling(queryText)
         val parsed = parseSafely(queryText)
-        val query = filteredBy(parsed, collectionId, documentIds = null)
+        val query = filteredBy(parsed, collectionId, documentIds, revisionScope)
         return toHits(searcher, searcher.search(query, limit))
     }
 
@@ -346,16 +478,10 @@ class LuceneIndex private constructor(
         queryText: String,
         documentIds: Set<String>? = null,
         limit: Int,
+        revisionScope: RevisionScope = RevisionScope.EVERYTHING,
     ): List<IndexHit> {
         return readSearcher { searcher ->
-            if (documentIds == null) {
-                searchKeywordWithReader(searcher, collectionId, queryText, limit)
-            } else {
-                requireQueryWithinClauseCeiling(queryText)
-                val parsed = parseSafely(queryText)
-                val query = filteredBy(parsed, collectionId, documentIds)
-                toHits(searcher, searcher.search(query, limit))
-            }
+            searchKeywordWithReader(searcher, collectionId, queryText, limit, documentIds, revisionScope)
         }
     }
 
@@ -374,11 +500,17 @@ class LuceneIndex private constructor(
         queryText: String,
         collectionId: CollectionId?,
         documentIds: Set<String>? = null,
+        revisionScope: RevisionScope = RevisionScope.EVERYTHING,
     ): Boolean = readSearcher { searcher ->
         analyzeTokens(queryText)
             .filter { it.length >= MIN_ANCHOR_PREFIX }
             .any { token ->
-                val query = filteredBy(PrefixQuery(Term(LuceneSchema.FIELD_TEXT, token)), collectionId, documentIds)
+                val query = filteredBy(
+                    PrefixQuery(Term(LuceneSchema.FIELD_TEXT, token)),
+                    collectionId,
+                    documentIds,
+                    revisionScope,
+                )
                 searcher.search(query, 1).scoreDocs.isNotEmpty()
             }
     }
@@ -401,31 +533,49 @@ class LuceneIndex private constructor(
      * Returns the nearest vectors to [vector], narrowed by [collectionId] and [documentIds] when given.
      * The caller is the search service, which decides whether the index's [schemaStatus] still matches the
      * model it embeds with before calling this.
+     *
+     * The revision scope goes in as the kNN search's own filter rather than as a `MUST_NOT` beside it. A
+     * filtered kNN keeps exploring until it has [limit] neighbours the filter accepts, so a hidden revision
+     * cannot consume one of the top-k slots a visible row would have taken; excluding its rows afterwards
+     * would look identical in the steady state and silently shorten a result the moment one exists.
      */
     fun searchVector(
         collectionId: CollectionId?,
         vector: FloatArray,
         documentIds: Set<String>? = null,
         limit: Int,
+        revisionScope: RevisionScope = RevisionScope.EVERYTHING,
     ): List<IndexHit> = readSearcher { searcher ->
         require(vector.size == handle.identity.dimension) {
             "a query vector must match the index's dimension (${handle.identity.dimension}), was ${vector.size}"
         }
         val filter = scopeFilter(collectionId, documentIds)
-        val query = if (filter != null) {
-            KnnFloatVectorQuery(LuceneSchema.FIELD_VECTOR, vector, limit, filter)
+        val candidates = if (filter == null && revisionScope.unrestricted) {
+            null
+        } else {
+            scopeWithCandidates(filter, revisionScope)
+        }
+        val nearest = if (candidates != null) {
+            KnnFloatVectorQuery(LuceneSchema.FIELD_VECTOR, vector, limit, candidates)
         } else {
             KnnFloatVectorQuery(LuceneSchema.FIELD_VECTOR, vector, limit)
         }
-        toHits(searcher, searcher.search(query, limit))
+        toHits(searcher, searcher.search(nearest, limit))
     }
 
     /** Number of possible vector rows in the same collection/document scope used by [searchVector]. */
-    fun vectorCandidateCount(collectionId: CollectionId?, documentIds: Set<String>? = null): Int =
-        readSearcher { searcher ->
-            val filter = scopeFilter(collectionId, documentIds)
-            if (filter == null) searcher.indexReader.numDocs() else searcher.count(filter)
+    fun vectorCandidateCount(
+        collectionId: CollectionId?,
+        documentIds: Set<String>? = null,
+        revisionScope: RevisionScope = RevisionScope.EVERYTHING,
+    ): Int = readSearcher { searcher ->
+        val filter = scopeFilter(collectionId, documentIds)
+        if (filter == null && revisionScope.unrestricted) {
+            searcher.indexReader.numDocs()
+        } else {
+            searcher.count(scopeWithCandidates(filter, revisionScope))
         }
+    }
 
     /** How many chunks [documentId] currently has in the index, for the idempotency guarantees. */
     fun chunkCount(collectionId: CollectionId, documentId: DocumentId): Int = readSearcher { searcher ->
@@ -472,13 +622,48 @@ class LuceneIndex private constructor(
         query: Query,
         collectionId: CollectionId?,
         documentIds: Set<String>?,
+        revisionScope: RevisionScope = RevisionScope.EVERYTHING,
     ): Query {
         val scope = scopeFilter(collectionId, documentIds)
-        if (scope == null) return query
+        val hidden = hiddenRevisions(revisionScope)
+        if (scope == null && hidden == null) return query
         return BooleanQuery.Builder().apply {
             add(query, BooleanClause.Occur.MUST)
-            add(scope, BooleanClause.Occur.FILTER)
+            scope?.let { add(it, BooleanClause.Occur.FILTER) }
+            hidden?.let { add(it, BooleanClause.Occur.MUST_NOT) }
         }.build()
+    }
+
+    /**
+     * The clause that keeps the revisions a reader may not see out of a query.
+     *
+     * A hidden revision is excluded inside the query rather than removed from the results, which is what
+     * makes a staged candidate unable to displace a live hit: the ranking pass never sees its rows, so
+     * they cannot consume one of the top-k slots a published row would have taken.
+     */
+    private fun hiddenRevisions(revisionScope: RevisionScope): Query? =
+        if (revisionScope.unrestricted) {
+            null
+        } else {
+            TermInSetQuery(
+                LuceneSchema.FIELD_REVISION_ID,
+                revisionScope.hiddenRevisionIds.map { BytesRef(it) },
+            )
+        }
+
+    /** Wraps a query so it cannot match a hidden revision; [query] stays the positive clause. */
+    private fun hiddenByRevision(query: Query, revisionScope: RevisionScope): Query {
+        val hidden = hiddenRevisions(revisionScope) ?: return query
+        return BooleanQuery.Builder().apply {
+            add(query, BooleanClause.Occur.MUST)
+            add(hidden, BooleanClause.Occur.MUST_NOT)
+        }.build()
+    }
+
+    /** A query that matches every row a candidate count should consider: the scope, or every row. */
+    private fun scopeWithCandidates(scope: Query?, revisionScope: RevisionScope): Query {
+        val candidates = scope ?: MatchAllDocsQuery()
+        return hiddenByRevision(candidates, revisionScope)
     }
 
     /**
@@ -556,6 +741,7 @@ class LuceneIndex private constructor(
             locator = stored.get(LuceneSchema.FIELD_LOCATOR).orEmpty(),
             locatorLabel = stored.get(LuceneSchema.FIELD_LOCATOR_LABEL).orEmpty(),
             score = hit.score,
+            revisionId = stored.get(LuceneSchema.FIELD_REVISION_ID),
         )
     }
 
@@ -577,6 +763,7 @@ class LuceneIndex private constructor(
         add(StringField(LuceneSchema.FIELD_DOCUMENT_ID, row.documentId.value, Field.Store.YES))
         add(StringField(LuceneSchema.FIELD_COLLECTION_ID, row.collectionId.value, Field.Store.YES))
         add(StringField(LuceneSchema.FIELD_CONTENT_UNIT_ID, row.unitId.value, Field.Store.YES))
+        row.revisionId?.let { add(StringField(LuceneSchema.FIELD_REVISION_ID, it, Field.Store.YES)) }
         add(IntPoint(LuceneSchema.FIELD_ORDINAL, row.chunk.ordinal))
         add(StoredField(LuceneSchema.FIELD_ORDINAL, row.chunk.ordinal))
         // Stored so a snippet can be read back without broaching the database, and analyzed with the

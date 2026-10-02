@@ -29,11 +29,19 @@ class ConversationTitler(
      * so a reader who has already gone still unwinds the request promptly.
      */
     suspend fun title(conversationId: String, openingQuestion: String, profile: LlmProfile) {
-        val client = when (profile.provider) {
-            LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(profile, System::getenv)
-            LlmProvider.ANTHROPIC -> AnthropicClient(profile, System::getenv)
-        }
+        // The title is a best-effort dispatch of the opening question, so a profile that is switched off is
+        // not called at all: the caller's route already refused it for the answer, and a profile disabled
+        // between the answer and this call must not receive the question either.
+        if (runCatching { profile.requireDispatchable() }.isFailure) return
+        // The client is built *inside* the try because building one can throw — a profile whose endpoint is
+        // blank is accepted by the profile and the API while the client constructors refuse it — and this
+        // method's contract is that no titling failure reaches the answer: the row keeps its question
+        // fallback, exactly as it does when the call itself fails.
         try {
+            val client = when (profile.provider) {
+                LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(profile, System::getenv)
+                LlmProvider.ANTHROPIC -> AnthropicClient(profile, System::getenv)
+            }
             // A stalled provider cannot be allowed to hold a finished answer's route open forever:
             // the bounded completion makes a timeout a silent titling failure exactly like any other,
             // while caller cancellation still arrives as CancellationException and propagates.

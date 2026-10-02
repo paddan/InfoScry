@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.io.IOException
 import java.net.InetSocketAddress
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -24,6 +25,8 @@ import kotlin.math.min
 internal class FakeOpenAiResponse(
     val statusCode: Int = 200,
     val body: String = "",
+    /** Response headers to send, so a test can script the `Location` a redirect carries. */
+    val headers: Map<String, String> = emptyMap(),
     val stream: Boolean = false,
     val fragmentBytes: Int = 1024,
     val gapMillis: Long = 0,
@@ -43,6 +46,7 @@ internal class FakeOpenAiServer(
     private val lastAuthorization: AtomicReference<String?> = AtomicReference(null)
     private val lastApiKey: AtomicReference<String?> = AtomicReference(null)
     private val lastRequestBody: AtomicReference<String?> = AtomicReference(null)
+    private val lastHeaders: AtomicReference<Map<String, String>> = AtomicReference(emptyMap())
     private val capturedRequestBodies: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
     val url: String get() = "http://$LOOPBACK_HOST:${server.address.port}"
@@ -50,6 +54,9 @@ internal class FakeOpenAiServer(
     val authorization: String? get() = lastAuthorization.get()
     val xApiKey: String? get() = lastApiKey.get()
     val requestBody: String? get() = lastRequestBody.get()
+
+    /** One header of the last request, so a test can assert a protocol's own required header. */
+    fun lastHeader(name: String): String? = lastHeaders.get()[name.lowercase(Locale.ROOT)]
     val requestBodies: List<String> get() = synchronized(capturedRequestBodies) { capturedRequestBodies.toList() }
 
     init {
@@ -66,6 +73,13 @@ internal class FakeOpenAiServer(
             val index = handled.getAndIncrement()
             lastAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"))
             lastApiKey.set(exchange.getRequestHeaders().getFirst("x-api-key"))
+            lastHeaders.set(
+                exchange.getRequestHeaders().entries.associate { (name, values) ->
+                    // The server's own Headers type normalises a name's casing, so the map is keyed by the
+                    // lower-cased name and a test asks for the header the way the protocol spells it.
+                    name.lowercase(Locale.ROOT) to values.firstOrNull().orEmpty()
+                },
+            )
             val requestBody = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
             lastRequestBody.set(requestBody)
             capturedRequestBodies.add(requestBody)
@@ -82,6 +96,7 @@ internal class FakeOpenAiServer(
 
     private fun respondOnce(exchange: HttpExchange, response: FakeOpenAiResponse) {
         val body = response.body.toByteArray(Charsets.UTF_8)
+        response.headers.forEach { (name, value) -> exchange.getResponseHeaders().add(name, value) }
         exchange.sendResponseHeaders(response.statusCode, body.size.toLong())
         exchange.getResponseBody().write(body)
         exchange.close()
@@ -90,6 +105,7 @@ internal class FakeOpenAiServer(
     private fun streamResponse(exchange: HttpExchange, response: FakeOpenAiResponse) {
         val content = response.body.toByteArray(Charsets.UTF_8)
         val declared = if (response.declaredLength > 0) response.declaredLength else content.size.toLong()
+        response.headers.forEach { (name, value) -> exchange.getResponseHeaders().add(name, value) }
         // A fixed Content-Length streams just as well as chunked for this client and the JDK server
         // delivers fixed-length bodies reliably, which chunked (-1) did not in the first attempt.
         exchange.sendResponseHeaders(response.statusCode, declared)

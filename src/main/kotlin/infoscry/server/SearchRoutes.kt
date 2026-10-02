@@ -17,6 +17,7 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 
 /** One search hit as the API reports it: the citation, what matched, and the unit to open. */
@@ -32,6 +33,14 @@ data class SearchHitResponse(
     val locator: SourceLocation,
     val locatorLabel: String,
     val matchedBy: Set<String>,
+    /**
+     * The revision the hit's text came from, or absent when the row predates revision tracking.
+     *
+     * Absent is therefore not "whatever the document publishes now": a legacy row belongs to no
+     * revision, and resolving it to the active one would attribute text to a citation nobody can place.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val revisionId: String? = null,
 )
 
 /** What one search returned, plus how many index rows pointed at database rows that no longer exist. */
@@ -154,6 +163,7 @@ private suspend fun ApplicationCall.runSearch(
                 locator = hit.locator,
                 locatorLabel = hit.locatorLabel,
                 matchedBy = hit.matchedBy.map { it.name }.toSet(),
+                revisionId = hit.revisionId,
             )
         },
         staleFiltered = outcome.staleFiltered,

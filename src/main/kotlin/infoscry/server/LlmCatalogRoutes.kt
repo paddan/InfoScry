@@ -5,6 +5,7 @@ import infoscry.llm.LlmProvider
 import infoscry.llm.ProviderCatalog
 import infoscry.llm.ProviderCatalogData
 import infoscry.llm.ValidEnvironmentVariableName
+import infoscry.llm.endpointCarriesUserInfo
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
@@ -96,6 +97,15 @@ fun Routing.configureLlmCatalogRoutes(
                             URI(raw)
                         } catch (failure: URISyntaxException) {
                             throw BadRequestException("endpoint must be an absolute http or https URL")
+                        }
+                        // A credentialed URL is not a supported form here either: the credential belongs in
+                        // the named environment variable, and this endpoint is chosen by the caller rather
+                        // than stored, so it is refused instead of being forwarded or echoed.
+                        if (endpointCarriesUserInfo(raw)) {
+                            throw BadRequestException(
+                                "endpoint must not carry userinfo credentials; the key belongs in the named " +
+                                    "environment variable",
+                            )
                         }
                         uri.isAbsolute && uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
                     }

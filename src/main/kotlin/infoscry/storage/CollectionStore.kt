@@ -3,6 +3,10 @@ package infoscry.storage
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.ocr.CollectionOcrSettings
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.requireOcrLanguages
 import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.SQLException
@@ -33,12 +37,16 @@ class CollectionStore(private val database: Database) {
         ocrLanguages: String = DEFAULT_OCR_LANGUAGES,
     ): Collection {
         val trimmedName = requireName(name)
-        require(ocrLanguages.isNotBlank()) { "collection ocr languages must not be blank" }
+        // The one spelling of the languages rule, shared with the collection service's settings edit and with
+        // the fingerprint that would otherwise reject the value much later. A value this refuses is one no
+        // attempt could key a reading by, so it is refused here rather than stored and discovered by the next
+        // import.
+        val languages = requireOcrLanguages(ocrLanguages)
         val now = Instants.now()
         val collection = Collection(
             id = CollectionId.new(),
             name = trimmedName,
-            ocrLanguages = ocrLanguages.trim(),
+            ocrLanguages = languages,
             createdAt = now,
             updatedAt = now,
             description = description?.trim()?.ifEmpty { null },
@@ -125,8 +133,7 @@ class CollectionStore(private val database: Database) {
 
     /** Updates the OCR languages used when future import jobs snapshot this collection's settings. */
     fun updateOcrLanguages(id: CollectionId, ocrLanguages: String): Collection {
-        val trimmedLanguages = ocrLanguages.trim()
-        require(trimmedLanguages.isNotEmpty()) { "collection ocr languages must not be blank" }
+        val trimmedLanguages = requireOcrLanguages(ocrLanguages)
         return database.transaction { connection ->
             val existing = selectById(connection, id)
                 ?: throw NoSuchElementException("no collection with id ${id.value}")
@@ -142,6 +149,44 @@ class CollectionStore(private val database: Database) {
             existing.copy(ocrLanguages = trimmedLanguages, updatedAt = updatedAt)
         }
     }
+
+    /**
+     * Writes every OCR setting of a collection in one statement, so a reader never sees half an edit.
+     *
+     * [settings] is the whole effective set rather than the fields that changed, because the settings are
+     * only meaningful together: an engine without the profile it reads through is not a collection state.
+     * Already queued payloads are untouched — this changes what the *next* attempt snapshots.
+     */
+    fun updateOcrSettings(id: CollectionId, settings: CollectionOcrSettings): Collection =
+        database.transaction { connection ->
+            val existing = selectById(connection, id)
+                ?: throw NoSuchElementException("no collection with id ${id.value}")
+            val updatedAt = Instants.now()
+            connection.prepareStatement(
+                "UPDATE collections SET ocr_languages = ?, ocr_engine = ?, ocr_import_mode = ?, " +
+                    "ocr_transcription_profile_id = ?, ocr_review_profile_id = ?, " +
+                    "ocr_external_page_limit = ?, updated_at = ? WHERE id = ?",
+            ).use { statement ->
+                statement.setString(1, settings.language)
+                statement.setString(2, settings.engine.name)
+                statement.setString(3, settings.importMode.name)
+                statement.setString(4, settings.transcriptionProfileId)
+                statement.setString(5, settings.reviewProfileId)
+                statement.setInt(6, settings.externalPageLimit)
+                statement.setString(7, updatedAt)
+                statement.setString(8, id.value)
+                statement.executeUpdate()
+            }
+            existing.copy(
+                ocrLanguages = settings.language,
+                ocrEngine = settings.engine,
+                ocrImportMode = settings.importMode,
+                ocrTranscriptionProfileId = settings.transcriptionProfileId,
+                ocrReviewProfileId = settings.reviewProfileId,
+                ocrExternalPageLimit = settings.externalPageLimit,
+                updatedAt = updatedAt,
+            )
+        }
 
     /**
      * Deletes a collection row and cascades to its documents and jobs. Returns whether the
@@ -198,6 +243,11 @@ class CollectionStore(private val database: Database) {
         updatedAt = getString("updated_at"),
         description = getString("description"),
         lifecycle = CollectionLifecycle.valueOf(getString("lifecycle")),
+        ocrEngine = OcrEngine.valueOf(getString("ocr_engine")),
+        ocrImportMode = OcrImportMode.valueOf(getString("ocr_import_mode")),
+        ocrTranscriptionProfileId = getString("ocr_transcription_profile_id"),
+        ocrReviewProfileId = getString("ocr_review_profile_id"),
+        ocrExternalPageLimit = getInt("ocr_external_page_limit"),
     )
 
     companion object {
@@ -207,7 +257,9 @@ class CollectionStore(private val database: Database) {
         const val DEFAULT_OCR_LANGUAGES = "eng"
 
         private const val SELECT_COLLECTIONS =
-            "SELECT id, name, description, ocr_languages, lifecycle, created_at, updated_at FROM collections"
+            "SELECT id, name, description, ocr_languages, lifecycle, created_at, updated_at, " +
+                "ocr_engine, ocr_import_mode, ocr_transcription_profile_id, ocr_review_profile_id, " +
+                "ocr_external_page_limit FROM collections"
 
         /**
          * The same columns plus a document count, joined and grouped so one round trip answers the
@@ -216,7 +268,8 @@ class CollectionStore(private val database: Database) {
          */
         private const val SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT =
             "SELECT c.id, c.name, c.description, c.ocr_languages, c.lifecycle, c.created_at, " +
-                "c.updated_at, COUNT(d.id) AS document_count FROM collections c " +
-                "LEFT JOIN documents d ON d.collection_id = c.id GROUP BY c.id"
+                "c.updated_at, c.ocr_engine, c.ocr_import_mode, c.ocr_transcription_profile_id, " +
+                "c.ocr_review_profile_id, c.ocr_external_page_limit, COUNT(d.id) AS document_count " +
+                "FROM collections c LEFT JOIN documents d ON d.collection_id = c.id GROUP BY c.id"
     }
 }

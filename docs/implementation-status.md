@@ -20,6 +20,25 @@ application suites.
 | Investigate | Bounded research, retained-evidence follow-ups, one adopted answer per turn and saved conversations |
 | Sources | Bounded extracted-source viewer and managed-original link |
 
+## OCR engines and document rescanning
+
+[Selectable OCR and document rescanning](specs/2026-09-30-ocr-rescanning.md) is
+implemented through the plan's rescan core. Tesseract, a local Surya engine and
+image-capable LLM profiles can transcribe page images; documents carry immutable
+revisions with a recoverable publication boundary; a rescan compares its reading
+with the published text, a reviewer recommends and a person decides. Everything
+stays in pilot mode: no replacement happens without a manual decision, and
+"Scan again" is driven by the operations API rather than a UI panel. The remaining
+import-execution and admission gaps and the still-open verification gates are
+recorded in the [ticket plan](tickets/ocr-rescanning/STATUS.md).
+
+## Planned compact document list
+
+The [compact Collections document list](specs/2026-09-30-compact-document-list.md)
+is designed but not implemented. Its [four-ticket plan](tickets/compact-document-list/STATUS.md)
+adds a collapsed summary, bounded table, session view memory, live filename search
+and inline details independently of the OCR extension.
+
 ## Recorded verification
 
 The previous README recorded a local 2026-09-24 run of `check`, `externalTest`

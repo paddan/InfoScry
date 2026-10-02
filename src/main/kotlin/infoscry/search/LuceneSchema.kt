@@ -19,6 +19,16 @@ object LuceneSchema {
     const val FIELD_COLLECTION_ID: String = "collection_id"
     const val FIELD_CONTENT_UNIT_ID: String = "content_unit_id"
 
+    /**
+     * The revision this row's text belongs to.
+     *
+     * A row written before revisions existed carries no value for this field, and that is not a missing
+     * revision: it is a row the archive can only explain as "whatever the document published then". Such
+     * rows stay visible, because a document can only hold two readings through a publication, and a
+     * publication replaces every row of the document in the same writer operation.
+     */
+    const val FIELD_REVISION_ID: String = "revision_id"
+
     // Analyzed text: what keyword search indexes and what a result snippet is read back from.
     const val FIELD_TEXT: String = "text"
     const val FIELD_SNIPPET: String = "snippet"

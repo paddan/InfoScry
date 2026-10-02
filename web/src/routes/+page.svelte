@@ -24,6 +24,7 @@
     readSource,
     retryDocuments,
     searchCollection,
+    SOURCE_PAGE_CHARS,
     type AskHistoryEntry,
     type Collection,
     type InvestigateEvidence,
@@ -429,7 +430,7 @@
     sourceError = null;
     loadingSource = true;
     try {
-      const pagePromise = readSource(sourceCollectionId, hit.unitId);
+      const pagePromise = readSource(sourceCollectionId, hit.unitId, 0, SOURCE_PAGE_CHARS, hit.revisionId);
       await tick();
       sourceSheet?.focus();
       const page = await pagePromise;
@@ -450,7 +451,13 @@
     loadingSource = true;
     sourceError = null;
     try {
-      const page = await readSource(sourceCollectionId, hit.unitId, source.offset + source.text.length);
+      const page = await readSource(
+        sourceCollectionId,
+        hit.unitId,
+        source.offset + source.text.length,
+        SOURCE_PAGE_CHARS,
+        hit.revisionId,
+      );
       if (generation !== sourceGeneration || hit.collectionId !== sourceCollectionId) return;
       source = page;
       sourceText += page.text;
@@ -775,6 +782,7 @@
                 <option value="">Any status</option>
                 <option value="COMPLETE">Complete</option>
                 <option value="COMPLETE_WITH_WARNINGS">Complete with warnings</option>
+                <option value="NEEDS_REVIEW">Needs review</option>
                 <option value="FAILED">Failed</option>
                 <option value="NEEDS_TOOL">Needs tool</option>
               </select>
@@ -944,6 +952,7 @@
         locator: evidence.locator,
         locatorLabel: evidence.locatorLabel,
         matchedBy: [],
+        revisionId: evidence.revisionId,
       })} /></div>
       <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} limits={investigateLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
     {/key}

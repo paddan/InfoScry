@@ -17,6 +17,7 @@ import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
 import infoscry.llm.OpenAiCompatibleClient
 import infoscry.llm.PromptService
+import infoscry.llm.requireDispatchable
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
@@ -221,6 +222,9 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             val limits = body.limits.toLimits()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
+            // A switched-off profile is refused before the capability gate, the conversation or the SSE
+            // stream: retired by a person, or repaired by migration 020 and left off until a review.
+            profile.requireDispatchable()
             if (!profile.toolCallingSupported) {
                 // The gate fires before the service is built, so no provider call and no conversation
                 // row can exist for a profile whose tool capability was never measured as true.
@@ -260,10 +264,15 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             val limits = body.limits.toLimits()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
+            profile.requireDispatchable()
             // Tools stay scoped to the conversation's locked collection even when the request names a
             // different one; an unknown conversation still streams the service's CONVERSATION_NOT_FOUND.
-            val lockedCollectionId = context.llm.loadInvestigateHistory(conversationId)?.collectionId
-                ?: CollectionId(collection.id.value)
+            val history = context.llm.loadInvestigateHistory(conversationId)
+            // The turn dispatches through the profile the conversation *locked*, not the one this request
+            // names, so the locked snapshot passes the same gate: a conversation whose profile was switched
+            // off after it was created must not keep dispatching through the address that was retired.
+            history?.profile?.requireDispatchable()
+            val lockedCollectionId = history?.collectionId ?: CollectionId(collection.id.value)
             if (!activeTurnIds.add(conversationId)) {
                 call.respondJson(
                     HttpStatusCode.Conflict,
@@ -434,7 +443,9 @@ private suspend fun ApplicationCall.streamInvestigation(
 
 /**
  * A citation a `done` event can resolve: the stable evidence id, the unit that holds the source, and
- * the location inside it. Deliberately carries no excerpt text — the viewer fetches content by unit id.
+ * the location inside it. A live citation carries no excerpt — the viewer fetches content by unit id —
+ * while stored evidence carries the excerpt its own citation saved, which is the only copy of that text
+ * left once a replacement has removed the unit the excerpt names.
  */
 @Serializable
 data class EvidenceWire(
@@ -443,6 +454,18 @@ data class EvidenceWire(
     val unitId: String,
     val locator: SourceLocation,
     val locatorLabel: String,
+    /**
+     * The revision this excerpt was taken from, or absent when the citation cannot be placed in one.
+     *
+     * Absent is the honest answer for an old citation: its excerpt belongs to a reading nobody recorded,
+     * and a viewer that opened it against the text published now would attribute new text to old evidence.
+     * The viewer reads what this field says, and shows the omission as "revision unknown".
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val revisionId: String? = null,
+    /** The excerpt as the citation saved it; absent on a live citation, which never had one to save. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val excerpt: String? = null,
 )
 
 @Serializable

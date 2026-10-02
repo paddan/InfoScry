@@ -287,6 +287,56 @@ class InvestigationServiceTest {
     }
 
     @Test
+    fun `a continue whose locked profile is switched off is refused where the service dispatches`() = runBlocking {
+        val history = InvestigateHistory(
+            collectionId = CollectionId("collection"),
+            profile = profile().copy(enabled = false),
+            promptVersion = 1,
+            retrievalSnapshot = RetrievalSnapshot.value(),
+            messages = listOf(LlmMessage("user", "prior question")),
+            evidenceIds = emptyList(),
+        )
+        val persistence = FakePersistence(mapOf("conv-1" to history))
+        val provider = ScriptedProvider(LlmEvent.TextDelta("answer"), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed)
+        val sv = service(tools(CollectionId("collection")), provider, persistence = persistence)
+
+        // The request names an enabled profile, the way a route whose check raced the profile being switched
+        // off — or a direct caller that never ran one — would: the turn dispatches through the locked snapshot,
+        // so the service itself has to refuse it, before any call leaves the process.
+        val events = sv.investigate(
+            InvestigateRequest(CollectionId("collection"), "follow-up", profile(), conversationId = "conv-1"),
+        ).toList()
+
+        // Asserted before the event shape: a dispatch that should not have happened still emits well-formed
+        // events, so the call counts are what names the failure.
+        assertEquals(0, provider.streamRequests.size, "nothing dispatches through a switched-off profile")
+        assertEquals(0, provider.completionRequests.size, "not even a correction call")
+        assertTrue(persistence.appended.isEmpty(), "a refused turn is not appended to the conversation")
+
+        val refusal = assertIs<InvestigateEvent.Error>(events.single())
+        assertEquals("INVALID_REQUEST", refusal.code)
+        assertTrue(refusal.message.contains("disabled"), "the refusal says the locked profile is switched off: ${refusal.message}")
+    }
+
+    @Test
+    fun `a new turn through a switched-off profile is refused before a conversation is created`() = runBlocking {
+        val persistence = FakePersistence()
+        val provider = ScriptedProvider()
+        val sv = service(tools(CollectionId("collection")), provider, persistence = persistence)
+
+        val events = sv.investigate(request().copy(profile = profile().copy(enabled = false))).toList()
+
+        // Asserted before the event shape: nothing is created and nothing is dispatched when the profile is off,
+        // so a regression shows up as a created conversation or a provider call, not only as a different event.
+        assertTrue(persistence.created.isEmpty(), "a refused turn must not create a conversation")
+        assertTrue(persistence.appended.isEmpty())
+        assertEquals(0, provider.streamRequests.size)
+
+        val refusal = assertIs<InvestigateEvent.Error>(events.single())
+        assertEquals("INVALID_REQUEST", refusal.code)
+    }
+
+    @Test
     fun `a continue whose collection or profile disagrees with the locked snapshot uses the snapshot`() = runBlocking {
         val locked = profile()
         val history = InvestigateHistory(

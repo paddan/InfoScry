@@ -2,39 +2,45 @@ package infoscry.extract
 
 import infoscry.domain.DocumentId
 import infoscry.domain.ExtractionMethod
+import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceLocation
 import infoscry.domain.UnitKind
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrPageResult
+import infoscry.ocr.PageImageRenderer
+import infoscry.ocr.PageOcrEngines
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
 import javax.imageio.ImageIO
-import kotlin.math.ceil
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.io.IOUtils
 import org.apache.pdfbox.pdmodel.PDDocument
-import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException
 import org.apache.pdfbox.rendering.ImageType
 import org.apache.pdfbox.rendering.PDFRenderer
 import org.apache.pdfbox.text.PDFTextStripper
 
 /**
- * What one page of OCR needs: the image to read and where the reading belongs.
+ * What one working image needs: the image to read and where the reading belongs.
  *
- * The seam carries the document and page this image came from, the artifact root the reading may write
- * its word boxes into, the languages the collection asked for, and the fingerprint the reading belongs to.
- * Passing them here rather than reading them from an ambient service keeps the OCR implementation a plain
- * function of its input: the extractor already knows all of them, and a tool that had to look them up
- * would need the extractor's state. The fingerprint is carried because the artifact is written under it:
- * two extractions of the same document under different settings must not be able to overwrite each
- * other's evidence.
+ * This is the entry point for formats whose pictures are drawn for one attempt and deleted afterwards — a
+ * chapter image inside a book archive — rather than the page-image seam, which is about a page image that is
+ * a managed artifact with a stable page identity of its own ([PageImage]). The seam carries the document and
+ * page this image came from, the artifact root the reading may write its word boxes into, the languages the
+ * collection asked for, and the fingerprint the reading belongs to. Passing them here rather than reading
+ * them from an ambient service keeps the OCR implementation a plain function of its input: the extractor
+ * already knows all of them, and a tool that had to look them up would need the extractor's state. The
+ * fingerprint is carried because the artifact is written under it: two extractions of the same document
+ * under different settings must not be able to overwrite each other's evidence.
  *
  * [renderDpi] is the resolution this image was produced at, and is absent when the image is the document
- * itself rather than a rendering of one — an imported picture has no resolution this pipeline chose.
+ * itself rather than a rendering of one.
  */
 data class RenderedPage(
     val documentId: DocumentId,
@@ -164,36 +170,42 @@ data class PdfPageCandidate(val page: Int, val text: String) {
 }
 
 /**
- * PDF pages, cited by page number, with OCR only where the page has no text of its own.
+ * PDF pages, cited by page number, with OCR where the attempt's mode says it is needed.
  *
- * A PDF is read one page at a time and each page is decided on its own: a page whose text layer is usable
- * becomes a unit without anything being rendered, and a page that is a scan is rendered and handed to the
- * OCR seam. That per-page split is what makes the common case — a digital PDF, or a mostly digital one
- * with a signed attachment at the end — cost nothing, and what keeps a long scan from stalling the
- * mutation gate for the whole document: the permit is taken per page, and the expensive rendering happens
- * inside that page's permit.
+ * A PDF is read one page at a time and each page is decided on its own: in fill-missing mode a page whose
+ * text layer is usable becomes a unit without anything being rendered, and a page that is a scan is
+ * rendered and handed to the OCR seam. In check-and-improve mode — an attempt admitted to re-read a document
+ * whose text is already there, which is what a rescan is — every page image is read, because a text layer
+ * that is long is not a text layer that is right. That per-page split is what makes the common case — a
+ * digital PDF, or a mostly digital one with a signed attachment at the end — cost nothing, and what keeps a
+ * long scan from stalling the mutation gate for the whole document: the permit is taken per page, and the
+ * expensive rendering happens inside that page's permit.
+ *
+ * Which engine reads is decided by the settings and never by this class: an attempt that names an engine
+ * this build does not have is refused with the code that names it, and no other engine is tried.
  *
  * A page that cannot be produced is one failed unit, never a failed document. Damaged content is the case
  * PDFBox is deliberately forgiving about — it warns and yields whatever text it did find — so the page that
  * genuinely stops a reader is one whose raster cannot exist: a page whose declared size cannot be rendered
- * within [maxRenderedPixels] at any legible resolution fails as a unit while every other page still
+ * within the renderer's pixel bound at any legible resolution fails as a unit while every other page still
  * delivers. A refusal that covers the whole document — a container that cannot be opened, a protected
- * document, and an OCR tool that is not usable — is reported once against the document, and the flow then
+ * document, and an engine that is not usable — is reported once against the document, and the flow then
  * ends without a `Finished` event, because the document did not get read.
  *
- * Rendering writes to a private temporary directory of this attempt's own and deletes it when the attempt
- * ends, including when it is cancelled or fails. Rendered pages are working material, not evidence: the
- * artifact root holds what a citation points at, and a half-finished render left in it would later be
- * treated as though it belonged to a committed unit.
+ * Rendering happens under the document's managed artifact root, in a directory named by the attempt's
+ * fingerprint, because a page image has to be a file this process can point at rather than one shared by
+ * two attempts with different settings. Where *inside* that directory it goes is the mode's decision, and it
+ * is a decision about evidence: a page image read for review is kept, since a reviewer has to be able to
+ * open the image the reading was made from, while a render that only filled in missing text is working
+ * material for one attempt and is deleted — every page image when its reading is committed, the directory
+ * itself when the attempt ends, including when it is cancelled or fails.
  *
- * The resolution is the job's own ([ExtractionSettings.renderDpi]) when it carries one, because the
- * fingerprint is computed over exactly those settings and an extraction rendered at another resolution
- * would be reused for output it would not produce again. A page whose raster would exceed
- * [maxRenderedPixels] at that resolution is rendered at the highest resolution that fits, never below
- * [MIN_RENDER_DPI], and is refused when even that does not fit.
+ * The resolution is the job's own ([ExtractionSettings.renderDpi]) when it carries one, and the page is
+ * brought within the renderer's pixel bound when it does not fit; the reading records the resolution it was
+ * actually rendered at, not the one it asked for.
  */
 class PdfExtractor(
-    private val ocr: suspend (RenderedPage) -> OcrResult,
+    private val ocr: PageOcrEngines,
     private val pageText: PdfPageTextReader = PdfBoxPageTextReader,
     private val pageRenderer: PdfPageRenderer = PngPageRenderer,
     private val maxDocumentBytes: Long = MAX_DOCUMENT_BYTES,
@@ -210,6 +222,19 @@ class PdfExtractor(
     }
 
     override val supportedMediaTypes: Set<String> = setOf(PDF_MEDIA_TYPE)
+
+    /** A PDF's pages are exactly what a page-image reading needs. */
+    override val pageImageSupport: PageImageSupport = PageImageSupport.Supported
+
+    /**
+     * What the page's engine would read it with, discovered without reading anything.
+     *
+     * The engines belong to this reader, so it is this reader that can say what they are, and the answer is
+     * asked for before the first page is rendered: it belongs in the attempt's fingerprint, which is the key
+     * an attempt's committed pages are looked up by ([PageOcrEngines.engineFor] answers nothing for an engine
+     * this build does not have, and the engine answers nothing when its runtime cannot be described).
+     */
+    override suspend fun runtimeIdentity(kind: OcrEngine): String? = ocr.engineFor(kind)?.runtimeIdentity()
 
     override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
         val containerBytes = try {
@@ -274,7 +299,12 @@ class PdfExtractor(
         input: ExtractionInput,
         document: PDDocument,
     ): PageRun {
-        val renderer = PDFRenderer(document)
+        val readsEveryPage = input.settings.ocrMode == OcrImportMode.CHECK_AND_IMPROVE
+        val engine = input.settings.readingEngine()
+        // Everything this attempt writes lives under its own fingerprint, so a render at another resolution
+        // or by another engine can never be mistaken for this one's evidence.
+        val attemptRoot = input.artifactRoot.resolve(input.fingerprint.value)
+        val renderer = PageImageRenderer(pageRenderer, maxRenderedPixels)
         val run = PageRun()
         var workDirectory: Path? = null
         try {
@@ -302,39 +332,46 @@ class PdfExtractor(
                         run.warnings += "page $page: its own text could not be read (${failure::class.simpleName})"
                         null
                     }
-                    if (text != null && !PdfPageCandidate(page, text).needsOcr) {
+                    // Fill-missing keeps usable direct text; check-and-improve reads the page image even
+                    // when the text layer passes every heuristic, because a text layer that is long is not
+                    // a text layer that is right. The mode is the attempt's own setting, never a hint.
+                    if (!readsEveryPage && text != null && !PdfPageCandidate(page, text).needsOcr) {
                         emitTextUnit(key = key, page = page, text = text, method = ExtractionMethod.DIRECT_TEXT)
                         return@unit
                     }
 
-                    val requested = input.settings.renderDpi ?: DEFAULT_RENDER_DPI
-                    val dpi = resolutionFor(document.getPage(page - 1), requested)
-                    if (dpi == null) {
-                        emitUnreadablePage(run, key, page, text)
-                        return@unit
+                    val directory = if (readsEveryPage) {
+                        // The pages a reviewer will look at: they outlive this attempt.
+                        attemptRoot.resolve(PageImageRenderer.PAGES_DIRECTORY)
+                    } else {
+                        workDirectory ?: Files.createDirectories(attemptRoot.resolve(WORKING_DIRECTORY))
+                            .also { created -> workDirectory = created }
                     }
-                    val directory = workDirectory ?: createWorkDirectory().also { workDirectory = it }
                     val image = try {
-                        pageRenderer.render(renderer, page, dpi, directory)
+                        renderer.render(
+                            document = document,
+                            page = page,
+                            requestedDpi = input.settings.renderDpi,
+                            directory = directory,
+                            artifactRoot = attemptRoot,
+                            documentId = input.documentId,
+                            unitId = key,
+                        )
                     } catch (failure: IOException) {
                         run.warnings += "page $page: its raster could not be produced (${failure::class.simpleName})"
                         emitUnreadablePage(run, key, page, text)
                         return@unit
                     }
-                    val result = try {
-                        ocr(
-                            RenderedPage(
-                                documentId = input.documentId,
-                                page = page,
-                                imagePath = image,
-                                artifactRoot = input.artifactRoot,
-                                ocrLanguages = input.settings.ocrLanguages,
-                                renderDpi = dpi,
-                                fingerprint = input.fingerprint,
-                            ),
-                        )
+                    if (image == null) {
+                        // The page's declared size cannot be rendered at any legible resolution, so this
+                        // page has no image to read. Every other page is still delivered.
+                        emitUnreadablePage(run, key, page, text)
+                        return@unit
+                    }
+                    val reading = try {
+                        ocr.transcribe(engine, image, input.settings.pageOcrSettings(image.renderDpi))
                     } catch (unavailable: OcrUnavailableException) {
-                        // Not a page failure: the tool cannot read any page, so the document cannot be
+                        // Not a page failure: the engine cannot read any page, so the document cannot be
                         // read, and one failure per page would only bury the fact that matters. The
                         // refusal is emitted inside this page's permit rather than under a second one —
                         // the permit already covers this step of work.
@@ -349,28 +386,53 @@ class PdfExtractor(
                     // PDFBox does not treat an image it cannot decode as a failure — it logs the missing
                     // reader and draws nothing — so a page whose image was dropped comes back as blank
                     // paper, and OCR reads it as an empty page. Committing that would record an empty
-                    // reading of text the page really carries. The raster is only looked at when the
-                    // reading came back empty, so a page that was read pays nothing for the question.
-                    if (result.text.isBlank() && isBlankRaster(image)) {
+                    // reading of text the page really carries. Empty output is never on its own a successful
+                    // extraction: the engine answers an empty reading under
+                    // [OcrPageResult.EMPTY_READING_CODE], and only the raster can say whether it was blank
+                    // paper, so the question is asked whenever the reading came back with no text.
+                    val verified = reading.verifiedAgainst(image)
+                    if (verified.text.isBlank() && verified.verifiedBlank) {
                         run.warnings += "page $page: its rendered raster is blank"
                         emit(ExtractionEvent.UnitFailed(key, page - 1, PAGE_BLANK_CODE))
-                        discardRenderedImage(run, image)
+                        discardRenderedImage(run, image.imagePath)
+                        return@unit
+                    }
+                    if (verified.text.isBlank() || verified.errorCode != null) {
+                        // A reading the engine named a failure is that failure; one that says nothing without
+                        // naming a code is still not a reading, and neither is a page of whitespace.
+                        val code = verified.errorCode ?: OcrPageResult.EMPTY_READING_CODE
+                        run.warnings += "page $page: OCR reported $code"
+                        emit(ExtractionEvent.UnitFailed(key, page - 1, code))
+                        discardRenderedImage(run, image.imagePath)
                         return@unit
                     }
                     run.ocrPages++
-                    run.confidences += result.meanConfidence
+                    run.confidences += verified.meanConfidence
                     emitTextUnit(
                         key = key,
                         page = page,
-                        text = result.text,
+                        text = verified.text,
                         method = ExtractionMethod.OCR,
-                        artifactRelativePath = result.artifactRelativePath,
-                        artifactSha256 = result.artifactSha256,
-                        meanConfidence = result.meanConfidence,
+                        // The engine's reading artifact is named inside the attempt's own directory, and a
+                        // unit's artifact is named from the document's artifact root: the fingerprint is
+                        // what joins the two.
+                        artifactRelativePath = verified.artifactRelativePath
+                            ?.let { relative -> "${input.fingerprint.value}/$relative" },
+                        artifactSha256 = verified.artifactSha256,
+                        meanConfidence = verified.meanConfidence,
+                        // The page image the engine was handed, named against the document's artifact root
+                        // so a later reader can open the pixels this page's text was read from. In
+                        // fill-missing mode this render is deleted with the attempt, and the reading still
+                        // says which image it came from: the record survives, the working copy does not.
+                        sourceImage = image.artifactProvenance(input.artifactRoot),
                     )
-                    // The collector has committed the unit by the time `emit` returns, so the working image
-                    // has done its job and is removed inside the same permit that produced it.
-                    discardRenderedImage(run, image)
+                    if (!readsEveryPage) {
+                        // The collector has committed the unit by the time `emit` returns, so a working image
+                        // has done its job and is removed inside the same permit that produced it. A page
+                        // image read for review is kept instead: it is the image the reading above has to be
+                        // reviewable against.
+                        discardRenderedImage(run, image.imagePath)
+                    }
                 }
             }
         } finally {
@@ -378,30 +440,6 @@ class PdfExtractor(
         }
         return run
     }
-
-    /**
-     * The resolution a page is rendered at, or `null` when no legible resolution fits the pixel bound.
-     *
-     * The requested resolution is the first candidate and the legibility floor the last, so a page is
-     * rendered as well as it can be within the bound instead of at a fixed compromise.
-     */
-    private fun resolutionFor(page: PDPage, requested: Int): Int? {
-        val box = page.mediaBox
-        val wanted = requested.coerceIn(MIN_RENDER_DPI, MAX_RENDER_DPI)
-        for (dpi in wanted downTo MIN_RENDER_DPI) {
-            if (pixels(box.width, box.height, dpi) <= maxRenderedPixels) return dpi
-        }
-        return null
-    }
-
-    private fun pixels(width: Float, height: Float, dpi: Int): Long {
-        val columns = ceil(width.toDouble() * dpi / POINTS_PER_INCH)
-        val rows = ceil(height.toDouble() * dpi / POINTS_PER_INCH)
-        return (columns * rows).toLong()
-    }
-
-    /** Renders one page to a PNG inside this attempt's working directory and returns the file. */
-    private fun createWorkDirectory(): Path = Files.createTempDirectory(WORK_DIRECTORY_PREFIX)
 
     /**
      * Reports a page whose raster could not be produced.
@@ -426,35 +464,11 @@ class PdfExtractor(
         if (text == null) PAGE_UNREADABLE_CODE else PAGE_RENDER_REFUSED_CODE
 
     /**
-     * Whether the PNG a page was rendered to is blank paper.
+     * Removes a page image that has nothing left to evidence.
      *
-     * PDFBox does not treat an image it cannot decode as a failure — it logs the missing reader and draws
-     * nothing — so a page whose image was dropped renders as blank paper and OCR reads it as an empty
-     * page. This is asked only when a page's reading came back empty, so a page that was read pays nothing
-     * for the question; asking it of every page would spend a raster decode on pages that already
-     * answered.
-     */
-    private fun isBlankRaster(image: Path): Boolean {
-        val raster = try {
-            ImageIO.read(image.toFile()) ?: return false
-        } catch (failure: IOException) {
-            // A raster that cannot be read back is not called blank: this answers whether the page's image
-            // arrived, not whether this reader can re-open its own file.
-            return false
-        }
-        val row = IntArray(raster.width)
-        for (y in 0 until raster.height) {
-            raster.getRGB(0, y, raster.width, 1, row, 0, raster.width)
-            if (row.any { it and WHITE_PIXEL != WHITE_PIXEL }) return false
-        }
-        return true
-    }
-
-    /**
-     * Removes the working image a page was read from.
-     *
-     * The image is working material rather than evidence, so it is deleted as soon as its reading is
-     * committed. Failing to delete it is not a reason to lose a page that has just been delivered, and
+     * Two callers, for the same reason: a working image in fill-missing mode has done its job once its
+     * reading is committed, and a page whose reading failed has no reading for an image to belong to in
+     * either mode. Failing to delete one is not a reason to lose a page that has just been delivered, and
      * the failure is recorded as a warning instead of ending the document from inside its own permit.
      */
     private fun discardRenderedImage(run: PageRun, image: Path) {
@@ -469,9 +483,10 @@ class PdfExtractor(
     /**
      * Emits one page's text as a unit, in both of the forms a unit carries.
      *
-     * Everything an OCR page has to commit alongside its text travels here: how sure the tool was, and the
-     * word boxes it wrote under the artifact root. A page with its own text layer carries neither, since
-     * neither exists for it.
+     * Everything an OCR page has to commit alongside its text travels here: how sure the tool was, the
+     * word boxes it wrote under the artifact root, and the page image those boxes were read from. A page
+     * with its own text layer carries none of them, since none of them exists for it: no raster was ever
+     * produced, and naming one would attribute a parser's text to pixels nobody rendered.
      */
     private suspend fun FlowCollector<ExtractionEvent>.emitTextUnit(
         key: String,
@@ -481,6 +496,7 @@ class PdfExtractor(
         artifactRelativePath: String? = null,
         artifactSha256: String? = null,
         meanConfidence: Double? = null,
+        sourceImage: SourceImageProvenance? = null,
     ) {
         val normalised = TextNormalizer.normalize(text)
         emit(
@@ -495,6 +511,7 @@ class PdfExtractor(
                     artifactRelativePath = artifactRelativePath,
                     artifactSha256 = artifactSha256,
                     meanConfidence = meanConfidence,
+                    sourceImage = sourceImage,
                 ),
             ),
         )
@@ -527,9 +544,6 @@ class PdfExtractor(
         /** The code a page whose raster cannot exist fails under. */
         internal const val PAGE_RENDER_REFUSED_CODE: String = "PAGE_RENDER_REFUSED"
 
-        /** The code a page whose rendered raster is blank fails under. */
-        internal const val PAGE_BLANK_CODE: String = "PAGE_BLANK"
-
         /** The code a page whose own text layer cannot be read fails under. */
         internal const val PAGE_UNREADABLE_CODE: String = "PAGE_UNREADABLE"
 
@@ -547,9 +561,6 @@ class PdfExtractor(
 
         /** The largest PDF container this extractor will open. */
         internal const val MAX_DOCUMENT_BYTES: Long = 512L * 1024 * 1024
-
-        /** Every channel of the white a rendered page's paper has. */
-        private const val WHITE_PIXEL: Int = 0xFFFFFF
 
         /** The key a PDF refused before its first unit is recorded under. */
         internal const val DOCUMENT_KEY: String = DOCUMENT_REFUSED_KEY
@@ -572,11 +583,19 @@ private class PageRun(
 /** The key of one page's unit: the page is the only stable position a PDF has. */
 private fun pageKey(page: Int): String = "page:$page"
 
-/** Points per inch: a PDF's own unit, and what a rendered resolution is relative to. */
-private const val POINTS_PER_INCH: Double = 72.0
-
-/** The name a rendered page gets, so a page's image is findable by its number. */
+/**
+ * The name a rendered page gets, so a page's image is findable by its number.
+ *
+ * The page number is the ordinal plus one; keeping that name keeps the boxes a citation opens findable for
+ * documents read before the page-image seam existed.
+ */
 private const val IMAGE_NAME_FORMAT: String = "page-%06d.png"
 
-/** The prefix of this attempt's private working directory. */
-private const val WORK_DIRECTORY_PREFIX: String = "infoscry-pdf-pages-"
+/**
+ * The directory a page image rendered to fill missing text is written into, under the attempt's own
+ * artifacts.
+ *
+ * A render that only fills in missing text is working material for one attempt, so it is deleted when the
+ * attempt ends; the durable evidence of such a page is the tool's own word boxes, not the raster.
+ */
+private const val WORKING_DIRECTORY: String = "working"

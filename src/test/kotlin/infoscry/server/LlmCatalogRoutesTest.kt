@@ -97,4 +97,20 @@ class LlmCatalogRoutesTest {
             harness.request(HttpMethod.Get, "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=https://", credential = Credential.CSRF).status,
         )
     }
+
+    @Test fun `catalog rejects a credentialed endpoint instead of forwarding the key and echoing the URL`() = runBlocking {
+        val secret = "hunter2-not-a-real-credential"
+
+        val response = harness.request(
+            HttpMethod.Get,
+            "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=https://user:$secret@vision.example.invalid/v1" +
+                "&apiKeyEnvironmentVariable=PATH",
+            credential = Credential.CSRF,
+        )
+
+        // Refused before the key is looked up or the endpoint is called, and the URL is not repeated in the
+        // answer: the credential belongs in the named environment variable, never in the address.
+        assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
+        assertFalse(response.bodyAsText().contains(secret), "a credential in a URL is never echoed back")
+    }
 }

@@ -42,6 +42,21 @@ class LlmProfilesTest {
     }
 
     @Test
+    fun `an endpoint carrying userinfo credentials is refused without repeating them`() {
+        val secret = "hunter2-not-a-real-credential"
+
+        val refused = assertFailsWith<IllegalArgumentException> {
+            valid.copy(endpoint = "https://user:$secret@api.example.com/v1")
+        }
+
+        // The key belongs in the environment variable; this endpoint is returned verbatim by the profile
+        // API, so a URL carrying a credential is refused, and the failure does not repeat the value either.
+        assertFalse(refused.message.orEmpty().contains(secret), "a URL that carried a credential is not echoed")
+        // A path or query that merely contains an `@` is not credentials.
+        assertTrue { valid.copy(endpoint = "https://api.example.com/a@b/v1?token=abc").endpoint.isNotBlank() }
+    }
+
+    @Test
     fun `serialization carries the variable name, never a secret value`() {
         val json = Json { encodeDefaults = true }
         val encoded = json.encodeToString(valid)

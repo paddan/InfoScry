@@ -187,6 +187,47 @@ class LuceneIndexTest {
     }
 
     @Test
+    fun `a hidden revision cannot consume a semantic top-k slot`() {
+        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+            val target = vectorFor("nearest")
+            runBlocking {
+                // The hidden row is the closest vector in the index by construction: it is the query itself.
+                // A search that ranked first and filtered afterwards would spend a top-k slot on it and answer
+                // with one visible row where two exist, which is why the scope is the kNN search's own filter.
+                index.replaceDocument(
+                    listOf(row(OTHER_DOCUMENT, "nearest", target, revisionId = HIDDEN_REVISION)),
+                )
+                index.replaceDocument(
+                    listOf(
+                        row(DOCUMENT, "visible one", vectorFor("visible one")),
+                        row(DOCUMENT, "visible two", vectorFor("visible two")),
+                    ),
+                )
+            }
+
+            assertEquals(
+                "nearest",
+                index.searchVector(COLLECTION, target, limit = 1).single().text,
+                "the hidden row is the closest vector in the index",
+            )
+
+            val scoped = index.searchVector(
+                COLLECTION,
+                target,
+                limit = 2,
+                revisionScope = RevisionScope(setOf(HIDDEN_REVISION)),
+            )
+
+            assertEquals(
+                2,
+                scoped.size,
+                "the hidden row must not consume one of the two top-k slots the visible rows fill",
+            )
+            assertEquals(setOf("visible one", "visible two"), scoped.map { it.text }.toSet())
+        }
+    }
+
+    @Test
     fun `deleting a collection removes every chunk that belongs to it`() {
         LuceneIndex.open(indexDir, IDENTITY).use { index ->
             runBlocking {
@@ -218,6 +259,33 @@ class LuceneIndexTest {
             other.close()
         }
     }
+
+    /** One row with its vector given explicitly, so a test can decide what is closest to what. */
+    private fun row(
+        documentId: DocumentId,
+        text: String,
+        vector: FloatArray,
+        revisionId: String? = null,
+    ): DocumentRow = DocumentRow(
+        collectionId = COLLECTION,
+        documentId = documentId,
+        unitId = ContentUnitId.new(),
+        chunk = Chunk(
+            id = ChunkId.new(),
+            contentUnitId = ContentUnitId.new(),
+            ordinal = 0,
+            text = text,
+            startOffset = 0,
+            endOffset = text.length,
+            tokenCount = text.length,
+            tokenStart = 0,
+            tokenEnd = (text.length - 1).coerceAtLeast(0),
+        ),
+        locator = SourceLocation.TextLines(1, 1),
+        locatorLabel = LOCATOR_LABEL,
+        vector = vector,
+        revisionId = revisionId,
+    )
 
     private fun chunksFor(
         documentId: DocumentId,
@@ -262,6 +330,9 @@ class LuceneIndexTest {
         val OTHER_COLLECTION = CollectionId("acme")
         val DOCUMENT = DocumentId.new()
         val OTHER_DOCUMENT = DocumentId.new()
+
+        /** The revision tag a test hides; the rows carrying it are the ones a scope keeps out of ranking. */
+        const val HIDDEN_REVISION = "hidden-revision"
         const val LOCATOR_LABEL = "page 14"
     }
 }

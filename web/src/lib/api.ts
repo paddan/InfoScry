@@ -92,6 +92,8 @@ export type SearchHit = {
   locator: unknown;
   locatorLabel: string;
   matchedBy: string[];
+  /** The revision the hit's text came from; absent when the row belongs to no revision. */
+  revisionId?: string;
 };
 
 export type SearchResponse = { hits: SearchHit[]; staleFiltered: number };
@@ -102,6 +104,15 @@ export type AskEvidence = {
   unitId: string;
   locator: unknown;
   locatorLabel: string;
+  /**
+   * The revision this excerpt was read from, or absent when the citation cannot be placed in one.
+   *
+   * An absent value is the server saying "revision unknown": its excerpt belongs to a reading nobody
+   * recorded, so opening the source without a revision is the only thing left to show.
+   */
+  revisionId?: string;
+  /** The excerpt as the citation saved it; absent on a live citation, which has none to save. */
+  excerpt?: string;
 };
 
 export type AskEvent =
@@ -216,6 +227,8 @@ export type SourceContentResponse = {
   offset: number;
   totalChars: number;
   truncated: boolean;
+  /** The revision the text was read from; absent when the live reading was served. */
+  revisionId?: string;
 };
 
 export const SOURCE_PAGE_CHARS = 16_384;
@@ -252,6 +265,7 @@ export type DocumentStatusName =
   | 'INDEXING'
   | 'COMPLETE'
   | 'COMPLETE_WITH_WARNINGS'
+  | 'NEEDS_REVIEW'
   | 'FAILED'
   | 'CANCELLED'
   | 'NEEDS_TOOL';
@@ -649,16 +663,23 @@ function parseInvestigationFrame(frame: string): InvestigateEvent | null {
   }
 }
 
-/** Read one bounded page from the exact source unit represented by a search hit. */
+/**
+ * Read one bounded page from the exact source unit represented by a search hit.
+ *
+ * A citation that names the revision it was read from passes it, so the page comes from that reading
+ * rather than from whatever the document publishes now; a citation that names none reads the live unit.
+ */
 export async function readSource(
   collectionId: string,
   sourceId: string,
   offset = 0,
   limit = SOURCE_PAGE_CHARS,
+  revisionId?: string | null,
 ): Promise<SourceContentResponse> {
   const collection = encodeURIComponent(collectionId);
   const source = encodeURIComponent(sourceId);
-  const response = await fetch(`/api/collections/${collection}/sources/${source}?offset=${offset}&limit=${limit}`);
+  const revision = revisionId ? `&revision=${encodeURIComponent(revisionId)}` : '';
+  const response = await fetch(`/api/collections/${collection}/sources/${source}?offset=${offset}&limit=${limit}${revision}`);
   return (await readJson(response)) as SourceContentResponse;
 }
 

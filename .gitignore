@@ -9,3 +9,5 @@ web/.svelte-kit/
 web/.vitest/
 .idea/
 test documents/
+__pycache__/
+*.pyc

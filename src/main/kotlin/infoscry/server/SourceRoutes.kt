@@ -4,6 +4,7 @@ import infoscry.AppContext
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
+import infoscry.storage.RevisionState
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -14,6 +15,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.route
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 
 /** One bounded page of the exact extracted source unit named by a search hit or citation. */
@@ -27,6 +29,14 @@ data class SourceContentResponse(
     val offset: Int,
     val totalChars: Int,
     val truncated: Boolean,
+    /**
+     * The revision the returned text was read from, or absent when the live reading was served.
+     *
+     * Absent means the caller did not name a revision, which is not the same as a citation whose own
+     * revision is unknown: the former is a source read, the latter is evidence nobody can place.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val revisionId: String? = null,
 )
 
 /** Reader-only endpoints. Both identifiers are opaque IDs resolved inside the selected collection. */
@@ -37,14 +47,44 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                 val collection = context.collectionService.requireActiveByNameOrId(call.collectionId().value)
                 val sourceId = call.parameters["sourceId"]?.takeIf(String::isNotBlank)
                     ?: throw BadRequestException("a source needs an id")
-                val unit = context.content.readUnit(ContentUnitId(sourceId))
+                val revisionId = call.request.queryParameters["revision"]?.takeIf(String::isNotBlank)
+                val unitId = ContentUnitId(sourceId)
+                // A citation that names its revision is read from that revision, so a saved excerpt keeps
+                // showing the text it was taken from after the document has published another reading.
+                // Reading it costs nothing from the index: the revision's text is SQLite's, which is what
+                // keeps source access working when the embedding runtime does not initialize. The named
+                // revision is resolved before the live unit is required, because the replacement that
+                // superseded it may have removed the unit it names — and a named revision that holds no
+                // such page is refused rather than answered with the current text, which would attribute
+                // that text to a citation that never held it.
+                val revisionPage = revisionId?.let { id ->
+                    // Only a reading that was published may be read here. A candidate's text is a proposal no
+                    // reader may see before it is approved and published, and a withdrawn one is text the
+                    // stager gave up on: knowing the identifier must not be enough to reach either through the
+                    // same route a citation uses. The refusal is the same not-found a foreign id gets, so it
+                    // says nothing about what other revisions exist.
+                    val state = context.revisions.revision(id)?.state
+                    if (state != RevisionState.PUBLISHED && state != RevisionState.SUPERSEDED) {
+                        throw NoSuchElementException("no source with id $sourceId exists in this collection")
+                    }
+                    context.revisions.pageForUnit(id, unitId)
+                        ?: throw NoSuchElementException(
+                            "no source with id $sourceId exists in revision $id",
+                        )
+                }
+                val unit = context.content.readUnit(unitId)
+                val documentId = revisionPage?.let { context.revisions.revision(it.revisionId)?.documentId }
+                    ?: unit?.documentId
                     ?: throw NoSuchElementException("no source with id $sourceId exists in this collection")
-                val document = context.documents.get(unit.documentId)
+                val document = context.documents.get(documentId)
                     ?: throw NoSuchElementException("no source with id $sourceId exists in this collection")
                 if (document.collectionId != collection.id) {
                     throw NoSuchElementException("no source with id $sourceId exists in this collection")
                 }
-                val sourceText = unit.extractedText
+                // One of the two readings exists here, which is what [documentId] was chosen from.
+                val sourceText = revisionPage?.extractedText ?: unit!!.extractedText
+                val sourceLocator = revisionPage?.locator ?: unit!!.locator
+                val ordinal = revisionPage?.ordinal ?: unit!!.ordinal
                 val (requestedOffset, limit) = call.sourceRange(sourceText.length)
                 val offset = if (
                     requestedOffset in 1 until sourceText.length &&
@@ -62,14 +102,15 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                 call.respondJson(
                     HttpStatusCode.OK,
                     SourceContentResponse(
-                        id = unit.id.value,
-                        documentId = unit.documentId.value,
-                        ordinal = unit.ordinal,
-                        locator = unit.locator,
+                        id = unitId.value,
+                        documentId = documentId.value,
+                        ordinal = ordinal,
+                        locator = sourceLocator,
                         text = page,
                         offset = offset,
                         totalChars = sourceText.length,
                         truncated = end < sourceText.length,
+                        revisionId = revisionPage?.revisionId,
                     ),
                 )
             }

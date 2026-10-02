@@ -23,6 +23,7 @@ import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
 import infoscry.storage.DocumentBeingDeletedException
+import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.DocumentStore
 import kotlinx.coroutines.CancellationException
 
@@ -76,6 +77,14 @@ internal class DocumentIngest(
     private val index: () -> LuceneIndex,
     private val documentEmbedder: () -> DocumentEmbedder?,
     private val maxChunksPerDocument: Int,
+    /**
+     * Where a published reading becomes a revision.
+     *
+     * An import's text is already the document's published content, so it is recorded as a published
+     * revision rather than staged as one: the reading a later replacement has to name as its base is a
+     * revision from the moment the import finishes, and the text it replaced stays readable after it.
+     */
+    private val revisions: DocumentRevisionStore,
 ) {
 
     /**
@@ -98,7 +107,6 @@ internal class DocumentIngest(
         revisitFailedUnits: Boolean,
         onFailure: suspend (code: String, message: String) -> Unit,
     ): IngestResult {
-        val fingerprint = ExtractionFingerprint.of(document.sha256, settings)
         // The bytes are classified under the boundary that refuses a document the deletion removed. The
         // deletion parks the managed copy of a document it owns, and it can do that between this file's attach
         // and this read: bytes that are gone because of that are this file's cancellation, not an unreadable
@@ -108,7 +116,9 @@ internal class DocumentIngest(
             if (documents.isDeletionTarget(document.id)) throw DocumentBeingDeletedException(document.id)
             pipeline.detector.detect(managedPath)
         }
-        try {
+        // The reader is selected once and asked about its runtime, rather than selected again per event: what
+        // an attempt's fingerprint records has to be the runtime its *own* reader will read the pages with.
+        val extractor = try {
             pipeline.registry.select(mediaType.value)
         } catch (unsupported: UnsupportedMediaTypeException) {
             onFailure(unsupported.code, "the pipeline has no extractor for ${mediaType.value}")
@@ -122,6 +132,17 @@ internal class DocumentIngest(
         }
 
         stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.EXTRACTING) }
+
+        // What the reading engine *is* is settled here, before the fingerprint is computed and therefore
+        // before any committed key is read, because the fingerprint is the key checkpoints are looked up by:
+        // a runtime that changed since an earlier attempt — another Surya version, other weights, another
+        // llama-server build — has to be a different key, and a page committed under the older runtime may
+        // not answer for it. A reader with no page images to read (and an extraction that is not an OCR
+        // attempt at all) answers nothing, which costs nothing: there is no runtime whose change could make
+        // its committed text a different reading. An engine that cannot describe itself is recorded as having
+        // no identity, and that absence is a different key from any discovered identity.
+        val settings = settings.withRuntimeIdentity(extractor::runtimeIdentity)
+        val fingerprint = ExtractionFingerprint.of(document.sha256, settings)
 
         val input = ExtractionInput(
             documentId = document.id,
@@ -146,8 +167,7 @@ internal class DocumentIngest(
             // not return until the sink has stored that unit, and the permit is still held while it does.
             // The events are read on the way past because the document's own outcome depends on them: only a
             // flow that reported it delivered everything may be called extracted.
-            pipeline.registry.extract(input, mediaType.value).collect { event ->
-                when (event) {
+            pipeline.registry.extract(input, mediaType.value).collect { event ->                when (event) {
                     is ExtractionEvent.Finished -> finished = true
                     is ExtractionEvent.UnitFailed -> lastFailureCode = event.code
                     // An announcement changes what the document's progress reads, not what this attempt
@@ -282,6 +302,7 @@ internal class DocumentIngest(
                     throw CollectionNotActiveException(collection.id)
                 }
                 index().replaceDocument(rows)
+                revisions.recordPublishedContent(document.id, PROVENANCE_IMPORT)
             }
             stage.run(STAGE_RECORD) {
                 val failedUnits = content.extractionMarker(document.id)?.failedUnits ?: 0
@@ -390,6 +411,9 @@ internal class DocumentIngest(
 
         /** The document was refused before embedding because it exceeds the configured ceiling. */
         internal const val INDEX_TOO_LARGE = "INDEX_TOO_LARGE"
+
+        /** What the revision an import publishes records about where it came from. */
+        internal const val PROVENANCE_IMPORT = "IMPORT"
 
         /** The document could not be embedded and published. */
         internal const val EMBEDDING_FAILED = "EMBEDDING_FAILED"

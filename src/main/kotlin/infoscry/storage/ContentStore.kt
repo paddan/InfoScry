@@ -67,6 +67,33 @@ data class ExtractionMarker(
 data class ContentUnitSummary(val id: ContentUnitId, val ordinal: Int, val locator: SourceLocation)
 
 /**
+ * One page of a revision, as publishing that revision writes it into the published content.
+ *
+ * The page names its own unit id rather than letting the store mint one, because a revision owns the
+ * identity its pages were read under and a published page has to keep it: a citation into page four of
+ * the previous reading must still open page four after a replacement.
+ */
+data class RevisionPage(
+    val unitId: ContentUnitId,
+    val ordinal: Int,
+    val locator: SourceLocation,
+    val extractedText: String,
+    val searchText: String,
+    val extractionMethod: ExtractionMethod?,
+    val meanConfidence: Double?,
+    val artifactRelativePath: String?,
+    val artifactSha256: String?,
+    val chunks: List<ChunkDraft>,
+) {
+    init {
+        require(ordinal >= 0) { "RevisionPage.ordinal must not be negative, was $ordinal" }
+        require((artifactRelativePath == null) == (artifactSha256 == null)) {
+            "a page's artifact reference is either complete or absent"
+        }
+    }
+}
+
+/**
  * How far one attempt of one document has got, read back from the rows the attempt committed.
  *
  * Nothing here is a stored counter. [processedUnits] and [failedUnits] are counts of the checkpoints the
@@ -514,6 +541,57 @@ class ContentStore(private val database: Database) {
         }
     }
 
+    /**
+     * Replaces the published text and chunks of [documentId] with one revision's pages.
+     *
+     * This is the only write in this class that changes what a reader sees without reading the source
+     * again, and it is deliberately one transaction: the published text, its chunks and the pages that
+     * disappeared are one state, so a crash cannot leave a document whose text and chunks disagree.
+     *
+     * The revision is the whole document, so a unit whose ordinal the revision does not name is removed
+     * — but only this document's units, and only from inside the caller's transaction, which is the
+     * publication boundary that has already rechecked the document's lifecycle and deletion state.
+     *
+     * A page keeps its unit identity because the revision names it; a page whose identity changed at an
+     * ordinal replaces the row that was there rather than leaving two units at one ordinal. The chunking
+     * marker is left alone on purpose: the revision's chunks were measured by the same chunker that
+     * wrote it, so the marker's tokenizer and version still describe them, and clearing it would make
+     * the next rebuild re-chunk pages that are already correct.
+     */
+    fun publishRevision(documentId: DocumentId, pages: List<RevisionPage>): Int {
+        require(pages.map { it.ordinal }.toSet().size == pages.size) {
+            "a revision names one page per ordinal, was ${pages.map { it.ordinal }}"
+        }
+        val now = Instants.now()
+        database.transaction { connection ->
+            val published = pages.associateBy { it.ordinal }
+            connection.listUnitIdentities(documentId).forEach { (ordinal, id) ->
+                if (published[ordinal]?.unitId?.value != id) connection.deleteUnit(ContentUnitId(id))
+            }
+            pages.forEach { page ->
+                connection.writeRevisionUnit(documentId, page, now)
+                connection.deleteChunksOf(page.unitId)
+                connection.prepareStatement(INSERT_CHUNK).use { statement ->
+                    page.chunks.forEach { draft ->
+                        statement.setString(1, ChunkId.new().value)
+                        statement.setString(2, page.unitId.value)
+                        statement.setInt(3, draft.ordinal)
+                        statement.setString(4, draft.text)
+                        statement.setInt(5, draft.startOffset)
+                        statement.setInt(6, draft.endOffset)
+                        statement.setInt(7, draft.tokenCount)
+                        statement.setInt(8, draft.tokenStart)
+                        statement.setInt(9, draft.tokenEnd)
+                        statement.setString(10, now)
+                        statement.addBatch()
+                    }
+                    statement.executeBatch()
+                }
+            }
+        }
+        return pages.size
+    }
+
     /** One unit, or `null` when no unit has that identifier. */
     fun readUnit(unitId: ContentUnitId): ContentUnit? = database.read { connection ->
         connection.prepareStatement("$SELECT_UNITS WHERE id = ?").use { statement ->
@@ -891,6 +969,57 @@ class ContentStore(private val database: Database) {
             statement.setString(1, Instants.now())
             statement.setString(2, documentId.value)
             statement.setInt(3, ordinal)
+            statement.executeUpdate()
+        }
+    }
+
+    /** The ordinal and identity of every unit [documentId] currently publishes, for a revision to replace. */
+    private fun Connection.listUnitIdentities(documentId: DocumentId): List<Pair<Int, String>> =
+        prepareStatement("SELECT ordinal, id FROM content_units WHERE document_id = ?").use { statement ->
+            statement.setString(1, documentId.value)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(rows.getInt("ordinal") to rows.getString("id")) }
+            }
+        }
+
+    private fun Connection.deleteUnit(unitId: ContentUnitId) {
+        prepareStatement("DELETE FROM content_units WHERE id = ?").use { statement ->
+            statement.setString(1, unitId.value)
+            statement.executeUpdate()
+        }
+    }
+
+    /** Writes one page of a revision by its own identity, so publishing cannot rename a page. */
+    private fun Connection.writeRevisionUnit(documentId: DocumentId, page: RevisionPage, now: String) {
+        prepareStatement(
+            "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
+                "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "ON CONFLICT (id) DO UPDATE SET document_id = excluded.document_id, " +
+                "ordinal = excluded.ordinal, locator_type = excluded.locator_type, " +
+                "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
+                "search_text = excluded.search_text, " +
+                "artifact_relative_path = excluded.artifact_relative_path, " +
+                "artifact_sha256 = excluded.artifact_sha256, mean_confidence = excluded.mean_confidence, " +
+                "extraction_method = excluded.extraction_method, updated_at = excluded.updated_at",
+        ).use { statement ->
+            statement.setString(1, page.unitId.value)
+            statement.setString(2, documentId.value)
+            statement.setInt(3, page.ordinal)
+            statement.setString(4, locatorType(page.locator))
+            statement.setString(5, encodeLocator(page.locator))
+            statement.setString(6, page.extractedText)
+            statement.setString(7, page.searchText)
+            statement.setString(8, page.artifactRelativePath)
+            statement.setString(9, page.artifactSha256)
+            if (page.meanConfidence == null) {
+                statement.setNull(10, java.sql.Types.REAL)
+            } else {
+                statement.setDouble(10, page.meanConfidence)
+            }
+            statement.setString(11, page.extractionMethod?.name)
+            statement.setString(12, now)
+            statement.setString(13, now)
             statement.executeUpdate()
         }
     }

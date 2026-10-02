@@ -16,6 +16,14 @@ data class Evidence(
     val locator: SourceLocation,
     val locatorLabel: String,
     val text: String,
+    /**
+     * The revision this excerpt was read from, or `null` when nobody recorded one.
+     *
+     * Null is a real answer and not a default: an excerpt saved before revisions existed cannot be
+     * attributed to the text a document publishes now, and a reader who is shown it under a revision
+     * label would be shown a provenance nobody can prove.
+     */
+    val revisionId: String? = null,
 )
 
 data class PackedContext(val evidences: List<Evidence>, val request: LlmRequest)
@@ -61,7 +69,16 @@ class ContextPacker(private val maxEvidence: Int = DEFAULT_MAX_EVIDENCE) {
         }
 
         val evidences = selected.mapIndexed { index, hit ->
-            Evidence("S${index + 1}", hit.collectionId.value, hit.documentId.value, hit.unitId.value, hit.locator, hit.locatorLabel, hit.text)
+            Evidence(
+                "S${index + 1}",
+                hit.collectionId.value,
+                hit.documentId.value,
+                hit.unitId.value,
+                hit.locator,
+                hit.locatorLabel,
+                hit.text,
+                hit.revisionId,
+            )
         }
         val finalRequest = request(question, systemPrompt, selected, maxOutputTokens)
         if (profile == null) budget.requireFits(finalRequest) else if (!budget.measure(profile, finalRequest).fits) throw ContextBudgetExceeded()

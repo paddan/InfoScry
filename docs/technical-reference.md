@@ -89,6 +89,107 @@ Runtime. CPU-only embedding fallback is refused. GPU readiness requires evidence
 of actual accelerated execution, not merely registering a provider. Diagnostics,
 source viewing and existing keyword search remain accessible if readiness fails.
 
+## Local OCR engines and Surya
+
+A page is read by the engine its attempt selected: Tesseract, the local Surya
+model, or a configured image model through a profile. The three are
+alternatives, never a chain. `PageOcrEngine` hands an engine one `PageImage`
+and the attempt's settings, and answers with one `OcrPageResult`; an engine
+cannot choose where it dispatches, cannot switch engines, and cannot call a page
+blank. Blankness is a fact about the raster, verified by the caller that holds
+it, and an empty reading on its own never establishes it.
+
+Surya is a vision-language model, so a page is one model call rather than a
+command per line. It is served by `llama-server` from
+[llama.cpp](https://github.com/ggml-org/llama.cpp) with Metal offload
+(`-ngl 99`), spawned by the Python runtime that
+[installation.md](installation.md#surya-for-local-page-reading-optional)
+describes. This is a **different execution path from embeddings**: embeddings
+run the pinned E5 model through ONNX Runtime with the CoreML provider and are
+refused without GPU readiness, while Surya's inference is llama.cpp's own Metal
+backend and touches neither ONNX Runtime nor CoreML. A working Surya runtime is
+not evidence that embeddings work, and the CoreML gate is not a gate on reading
+pages.
+
+InfoScry runs that runtime as a worker process it owns. `SuryaOcr` spawns
+`scripts/ocr/surya_worker.py` through the configured interpreter, writes one
+versioned JSON request line per page on the worker's stdin — the page's stable
+unit id, its ordinal, its page number and the managed image path that
+`PageImage` already validated inside its root — and reads one result line per
+page from its stdout. There is no shell anywhere in that exchange, and no
+user-supplied command: the interpreter and the worker script are configured, so
+nothing an imported document carries can become a program or an argument.
+
+| Property | How it is bounded |
+|---|---|
+| Request and result lines | 64 KiB in, 4 MiB out; an over-long line is drained and refused |
+| One page | 20 minutes. The worker and the descendants visible from it *while it is alive* are stopped on timeout or cancellation: their handles are captured as the tree is signalled, deepest first, every one of them is waited for, and a process that survives the kill is reported rather than forgotten. A helper that was already re-parented before the capture is not reachable through `descendants()` and is therefore not accounted for |
+| Pipes | stdout is read as a bounded line per page; stderr is drained by a daemon thread that is never waited for on the reading path, so a helper holding it open cannot hold a reading — and stopping the engine joins that reader, bounded, once the process tree is gone |
+| One worker | started on the first page of an engine and reused, so the runtime's imports and the model load are paid once, and one page is exchanged at a time |
+| Output | a page's text and block count have bounds; crossing one is reported, never trimmed |
+| Runtime identity | one probe per attempt that reads page images: the worker script started with `--identity`, bounded at 10 seconds and 4 KiB of line, which starts no model, no `llama-server` and no page |
+
+A result is validated before it becomes evidence: the protocol version, the
+result type, and the page the answer claims (unit id, ordinal and page number)
+all have to be this page's, every box has to be a rectangle inside the page, and
+a confidence has to be a fraction. A result that fails is discarded along with
+the worker. The four runtime failures are document-level answers with an install
+line — `NEEDS_SURYA` for the interpreter or worker script, `NEEDS_LLAMA_CPP`
+when `llama-server` is not installed, `NEEDS_SURYA_MODEL` when the weights
+cannot be obtained, and `SURYA_START_FAILED` when the server will not come up —
+and everything else is that page's failure. Each of them reaches the item, the
+queue and the CLI as `NEEDS_TOOL` with that install line as the message, the way
+a missing Tesseract does, so a document waiting for a tool is distinguishable
+from a broken one. Tesseract is never consulted for a page whose settings select
+Surya.
+
+Surya answers with block boxes rather than word boxes, and one confidence per
+page: the mean token probability of the single full-page call, which the library
+reports on every block of that page. That is what a reading carries, and with
+`SURYA_INFERENCE_LOGPROBS=false` the library substitutes `1.0` instead of
+measuring anything — a run configured that way reports **no** confidence rather
+than a certainty nobody measured, and the runtime is documented and verified
+with the default (logprobs on).
+
+The identity of the runtime is asked for **before** a page is read rather than
+learned from one: `SuryaOcr` starts the worker script once with `--identity`,
+which answers the installed `surya-ocr` version, the backend, the checkpoint,
+the cached weights' revision and size and the `llama-server` build without
+starting a model or a server (about 1.4 s measured, against 3.6 s for a first
+page, and once per attempt that reads page images rather than once per page).
+That identity is written into the attempt the extraction fingerprints
+(`OcrAttemptIdentity.runtimeIdentity`) *before* any committed key is read, so
+another Surya version, other weights or another `llama-server` build is another
+key and the page is read again — a `brew upgrade` of `llama.cpp` alone changes
+what a reading is. A runtime that cannot be described is recorded as **no**
+identity, which is a value of its own and never matches a discovered one: the
+page is read again instead of being reused under weights nobody named. Each
+reading additionally carries the identity the running worker reported for itself
+(`OcrPageResult.modelVersion`): the package version, the backend and the cached
+weights' revision and sizes, which is the reading's own provenance.
+
+Measured on the development machine (macOS 27.0.1, Apple M1 Max, 32 GB):
+`surya-ocr` 0.22.1 with torch 2.14.1 and transformers 5.18.0 under Python
+3.12.14, served by `llama-server` 0.5.0 (build 11146, commit `7fe450e19`), on
+the 1.36 GiB `datalab-to/surya-ocr-2-gguf` weights. One 900x260 typed page came
+back in 3.6 s including the worker's start and the model load, and the second
+page in 1.3 s, in the `externalTest` run recorded by
+[SuryaRealToolTest](../src/test/kotlin/infoscry/ocr/SuryaRealToolTest.kt).
+Per-invocation numbers from the command line are much larger — the CLI pays the
+interpreter's imports and the Hub cache check every time, which the worker pays
+once. `llama-server` held about 2.9 GiB resident (`ps` RSS, which includes its
+Metal buffers) while reading a page with the runtime's default
+`--parallel 8 --ctx-size 98304`.
+
+Two limitations belong to these numbers. The second committed fixture is a
+Caveat *typeface render*, not handwriting a person wrote, so it exercises
+irregular letterforms and says nothing about transcription quality on real
+handwriting — that is measured in the pilot on user-supplied samples. And when
+the server is stopped, llama.cpp 0.5.0 logs an assertion and a native backtrace
+in `~/.cache/datalab/surya/llamacpp_server.log` while tearing its Metal buffers
+down; the process is gone either way, which `SuryaRealToolTest` asserts by
+comparing the `llama-server` processes before and after.
+
 ## Privacy and local API boundaries
 
 Originals, extracted text, embeddings, indexes and saved conversations stay

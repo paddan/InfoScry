@@ -100,7 +100,7 @@ class SchemaMigrator(private val database: Database) {
 
     companion object {
         /** The schema version this build writes and understands. */
-        const val SUPPORTED_VERSION = 16
+        const val SUPPORTED_VERSION = 24
 
         private const val PRAGMA_FOREIGN_KEYS_OFF = "PRAGMA foreign_keys = OFF"
 
@@ -123,6 +123,18 @@ class SchemaMigrator(private val database: Database) {
             Migration(version = 14, resource = "db/migration/014_retry_job_type.sql", foreignKeysOff = true),
             Migration(version = 15, resource = "db/migration/015_document_deletion_paths.sql"),
             Migration(version = 16, resource = "db/migration/016_job_current_item.sql"),
+            Migration(version = 17, resource = "db/migration/017_ocr_profiles.sql"),
+            Migration(version = 18, resource = "db/migration/018_document_revisions.sql"),
+            Migration(version = 19, resource = "db/migration/019_revision_page_source_image.sql"),
+            Migration(version = 20, resource = "db/migration/020_endpoint_userinfo_repair.sql"),
+            Migration(version = 21, resource = "db/migration/021_page_reviews.sql"),
+            Migration(version = 22, resource = "db/migration/022_ocr_validation_records.sql"),
+            Migration(version = 23, resource = "db/migration/023_rescan_operations.sql", foreignKeysOff = true),
+            Migration(
+                version = 24,
+                resource = "db/migration/024_review_pending_imports.sql",
+                foreignKeysOff = true,
+            ),
         )
     }
 }

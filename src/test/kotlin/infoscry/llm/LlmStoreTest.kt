@@ -97,6 +97,38 @@ class LlmStoreTest {
     }
 
     @Test
+    fun `a credential a row still holds cannot break the profile listing`() {
+        val secret = "hunter2-not-a-real-credential"
+        // Written around the profile type that refuses such a URL, the way a hand edit or a future bug would
+        // write it: the listing these tests read through is what one such row used to fail.
+        database.transaction { connection ->
+            connection.prepareStatement(
+                "INSERT INTO llm_profiles (id, name, provider, endpoint, model, " +
+                    "api_key_environment_variable, context_window, max_output_tokens, supports_tool_calling, " +
+                    "input_price_per_million, output_price_per_million, cache_read_price_per_million, " +
+                    "enabled, created_at, updated_at) VALUES ('hand-edited', 'Hand edited', " +
+                    "'OPENAI_COMPATIBLE', ?, 'model', 'MY_SECRET_KEY', 128000, 4096, 0, 0.0, 0.0, 0.0, 1, " +
+                    "'2026-09-30T07:00:00Z', '2026-09-30T07:00:00Z')",
+            ).use { statement ->
+                statement.setString(1, "https://user:$secret@api.example.com/v1")
+                statement.executeUpdate()
+            }
+        }
+
+        val listed = store.list()
+
+        val profile = assertNotNull(listed.singleOrNull { it.name == "Hand edited" })
+        assertEquals("https://api.example.com/v1", profile.endpoint, "the credential is dropped, never returned")
+        assertFalse(profile.enabled, "a repaired address is not dispatched to until a person reviews it")
+        assertFalse(listed.any { it.endpoint.contains(secret) }, "no profile read carries the credential")
+        assertEquals(
+            "https://api.example.com/v1",
+            store.findByName("Hand edited")!!.endpoint,
+            "every read of the row repairs it, not only the listing",
+        )
+    }
+
+    @Test
     fun `a credential string is rejected as an environment variable name`() {
         // Passing a token as the variable name must be refused by validation, never persisted.
         assertFailsWith<IllegalArgumentException> {
@@ -585,6 +617,45 @@ class LlmStoreTest {
             retrievalSnapshot = "{}",
         )
         assertNull(store.loadInvestigateHistory(askConversation))
+    }
+
+    @Test
+    fun `a conversation snapshot that still holds a credential reopens without it`() {
+        val secret = "hunter2-not-a-real-credential"
+        store.create(pricedProfile())
+        val conversationId = store.persistInvestigateConversation(
+            collectionId = defaultCollectionId(),
+            profile = store.findByName("priced")!!,
+            promptVersion = 1,
+            retrievalSnapshot = "{}",
+        )
+        // A snapshot written around the profile type that refuses such a URL, the way a hand edit or a future
+        // bug would write it: reopening the conversation is what such a row used to fail.
+        database.transaction { connection ->
+            connection.prepareStatement("UPDATE conversations SET profile_endpoint = ? WHERE id = ?").use { statement ->
+                statement.setString(1, "https://user:$secret@api.example.com/v1")
+                statement.setString(2, conversationId)
+                statement.executeUpdate()
+            }
+        }
+
+        val history = assertNotNull(store.loadInvestigateHistory(conversationId))
+
+        assertEquals("https://api.example.com/v1", history.profile.endpoint, "the credential is dropped")
+        assertFalse(history.profile.endpoint.contains(secret), "the reopened snapshot carries no credential")
+        // The row the snapshot was taken from is clean and enabled — a person may have repaired it since the
+        // conversation was created — so the switched-off state a continue reads has to be computed from the
+        // snapshot itself, and the refusal names the address this conversation stored.
+        assertTrue(store.findByName("priced")!!.enabled, "the profile row itself is still usable")
+        assertFalse(
+            history.profile.enabled,
+            "a conversation whose stored address had to be repaired is not dispatched to until it is reviewed",
+        )
+        val refusal = assertFailsWith<IllegalArgumentException> { history.profile.requireDispatchable() }
+        assertTrue(
+            refusal.message.orEmpty().contains("https://api.example.com/v1"),
+            "the refusal names the conversation's stored address as the reason: ${refusal.message}",
+        )
     }
 
     @Test

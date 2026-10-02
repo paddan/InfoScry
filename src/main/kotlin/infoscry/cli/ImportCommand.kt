@@ -22,11 +22,15 @@ import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportJobPayload
 import infoscry.jobs.ImportPipeline
 import infoscry.logging.LoggingBootstrap
+import infoscry.ocr.OcrEndpointScope
+import infoscry.ocr.OcrExternalOwner
+import infoscry.ocr.OcrOperationStage
 import infoscry.server.ApiJson
 import infoscry.server.PRODUCT_NAME
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import infoscry.storage.MaintenanceInProgressException
+import infoscry.storage.OcrOperationStore
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.delay
@@ -153,12 +157,19 @@ class ImportCommand(
             // The tool's version is asked for once here, before the job exists, because it is part of what
             // the job's checkpoints are keyed by. `runBlocking` rather than a suspend command: the CLI is
             // a blocking program, and this is the one suspension it has before its own job loop starts.
+            val snapshot = open.ocr.snapshotFor(
+                settings = collection.ocrSettings(),
+                extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+                renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
+            )
             val settings = runBlocking { ToolProbe.extractionSettings(collection.ocrLanguages) }
+                .forOcrSettings(snapshot)
             val payload = ImportJobPayload.of(
                 collectionId = collection.id,
                 sources = requested,
                 settings = settings,
                 recursive = recursiveFlag,
+                ocr = snapshot,
             )
             val job = try {
                 runBlocking {
@@ -191,7 +202,12 @@ class ImportCommand(
                     what = "import",
                 )
             }
-            report(finished, open.importItems.listForJob(job.id), options, executedHere = true)
+            val items = open.importItems.listForJob(job.id)
+            // What this import did with pages that leave the machine, and what has to happen before more of them
+            // may: a command that reported a clean success while a scope waited for a person would be telling
+            // the person the archive did something it did not do.
+            reportExternalAdmission(open, job.id, payload, items)
+            report(finished, items, options, executedHere = true)
         }
     }
 
@@ -304,6 +320,87 @@ class ImportCommand(
             throw CliFailure("the import ended as ${job.state} without processing every document")
         }
     }
+
+    /**
+     * Reports what left the machine, and fails when an admission a person owes is outstanding.
+     *
+     * The standalone import owns its process until the job ends, so this is the moment the truth is known
+     * rather than guessed. Two things are reported: the external-page counters of the *job* — one allowance
+     * covers every file of one import — and the remedy for an operation that is waiting for an approval.
+     * More pages sent than the allowance authorized is a failure of the command, because the archive has done
+     * something no person approved; a scope that is exactly spent is a warning, because the work is done.
+     */
+    private fun reportExternalAdmission(
+        context: AppContext,
+        jobId: JobId,
+        payload: ImportJobPayload,
+        items: List<ImportItem>,
+    ) {
+        val snapshot = payload.ocr
+        val external = snapshot != null && listOfNotNull(
+            snapshot.transcriptionProfileRevisionId,
+            snapshot.reviewProfileRevisionId,
+        ).any { revisionId -> context.ocrProfiles.findRevision(revisionId)?.scope == OcrEndpointScope.EXTERNAL }
+        if (external) {
+            val owner = OcrExternalOwner.job(jobId.value)
+            val account = context.ocrOperations.allowanceFor(
+                owner = owner,
+                configuredAllowance = snapshot!!.externalPageLimit,
+                snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
+            )
+            echo(
+                "External pages: ${account.distinctPages} distinct page(s) sent, allowance ${account.allowance}, " +
+                    "${account.calls} provider call(s) (a page transcribed and then reviewed is one page and " +
+                    "two calls).",
+            )
+            if (account.distinctPages > account.allowance) {
+                echo(approvalRemedy(jobId.value, snapshot.externalPageLimit, account.distinctPages), err = true)
+                throw CliFailure(
+                    "this import sent ${account.distinctPages} page(s) while only ${account.allowance} were " +
+                        "authorized; the scope has to be approved before more pages may leave this machine",
+                )
+            }
+        }
+
+        // A rescan of an imported document — a person's later action, or another process's — can also be left
+        // waiting for an approval, and an import that reported success while one was would be hiding it.
+        val waiting = items.mapNotNull { item -> item.documentId }
+            .distinct()
+            .flatMap { documentId -> context.ocrOperations.operations(documentId) }
+            .filter { operation -> operation.stage == OcrOperationStage.AWAITING_APPROVAL }
+        if (waiting.isEmpty()) return
+        waiting.forEach { operation ->
+            echo(
+                "Approval needed: document ${operation.documentId.value} has sent " +
+                    "${operation.external.distinctPages} page(s) and waits before it reads another.",
+                err = true,
+            )
+            echo(approvalRemedy(operation), err = true)
+        }
+        throw CliFailure(
+            "${waiting.size} rescan(s) are waiting for an external page approval; nothing beyond the approved " +
+                "scope was sent",
+        )
+    }
+
+    /**
+     * The remedy for an unapproved external scope, as a command a person can run.
+     *
+     * It names the exact call, the snapshot hash the approval has to bind to, and the collection and document
+     * it belongs to, because an approval that named another scope would be refused — that refusal is the point
+     * of binding one to a snapshot hash.
+     */
+    private fun approvalRemedy(operation: infoscry.ocr.OcrOperation): String =
+        "Approve the scope it was admitted with: POST " +
+            "/api/collections/${operation.collectionId}/documents/${operation.documentId.value}/ocr/operations/" +
+            "${operation.operationId}/approve-external with the runtime bearer token and body " +
+            "{\"expectedSnapshotHash\":\"${OcrOperationStore.snapshotHashOf(operation.snapshot)}\"," +
+            "\"maxDistinctPages\":<the number of distinct pages you authorize>}"
+
+    private fun approvalRemedy(jobId: String, allowance: Int, sent: Int): String =
+        "Approve the import's scope: POST /api/jobs/$jobId/approve-external with the runtime bearer token and " +
+            "body {\"expectedSnapshotHash\":\"<the job's snapshot hash>\",\"maxDistinctPages\":<more than " +
+            "$sent, the pages already sent with an allowance of $allowance>}"
 
     private fun describe(item: ImportItem): String = buildString {
         append(item.outcome)

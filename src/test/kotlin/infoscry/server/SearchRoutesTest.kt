@@ -16,6 +16,9 @@ import infoscry.extract.ExtractionSettings
 import infoscry.search.DocumentRow
 import infoscry.search.vectorFor
 import infoscry.storage.Instants
+import infoscry.storage.PageApproval
+import infoscry.storage.RevisionChunkDraft
+import infoscry.storage.RevisionPageDraft
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -33,6 +36,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.jsonObject
@@ -204,6 +208,28 @@ class SearchRoutesTest {
         assertContains(response.bodyAsText(), "QUERY_TOO_LONG")
     }
 
+    /**
+     * A sealed revision snapshot is an environment the caller can retry, not a wrong answer.
+     *
+     * The seal is what the publication service raises when an authoritative publication could not be made
+     * coherent in this process. Every read under it throws, and this route is where the exception becomes
+     * the 503 the caller sees, so the mapping is asserted here with a gate given to the very context the
+     * server runs on.
+     */
+    @Test
+    fun `a sealed revision snapshot is answered as a retryable service unavailable`() = runBlocking {
+        seedUnit(document = "sealed.txt", text = "the nightfall report is sealed")
+        harness.context.revisionSnapshots.seal("an authoritative publication could not be finished")
+        try {
+            val response = harness.get("/api/search?collection=Default&q=nightfall&mode=keyword")
+
+            assertEquals(HttpStatusCode.ServiceUnavailable, response.status, response.bodyAsText())
+            assertContains(response.bodyAsText(), "REVISION_SNAPSHOT_UNAVAILABLE")
+        } finally {
+            harness.context.revisionSnapshots.unseal()
+        }
+    }
+
     // ---- Content units, and why a deleted collection's unit is not served ----
 
     @Test
@@ -225,6 +251,231 @@ class SearchRoutesTest {
             val afterDelete = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
             assertEquals(HttpStatusCode.NotFound, afterDelete.status, afterDelete.bodyAsText())
         }
+
+    @Test
+    fun `a source read can name the revision an excerpt came from`() = runBlocking {
+        val (documentId, unitId) = seedUnit(document = "replaced.txt", text = "the original wording")
+        val context = harness.context
+        val base = assertNotNull(context.revisions.recordPublishedContent(documentId, "TEST_SEED"))
+        val candidate = context.revisions.openCandidate(documentId, base, "TEST_REPLACEMENT")
+        context.revisions.appendPage(
+            candidate,
+            RevisionPageDraft(
+                ordinal = 0,
+                unitId = unitId,
+                locator = SourceLocation.TextLines(1, 1),
+                extractedText = "the replacement wording",
+                searchText = "the replacement wording",
+                extractionMethod = ExtractionMethod.OCR,
+                approval = PageApproval.APPROVED,
+                chunks = listOf(
+                    RevisionChunkDraft(
+                        ordinal = 0,
+                        text = "the replacement wording",
+                        startOffset = 0,
+                        endOffset = "the replacement wording".length,
+                        tokenCount = 5,
+                        tokenStart = 0,
+                        tokenEnd = 4,
+                        embedding = FloatArray(768) { 0.01f },
+                    ),
+                ),
+            ),
+        )
+        context.revisionPublication.publish(documentId, base, candidate)
+
+        val collectionId = harness.collectionIdOf("Default")
+        val live = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
+        assertContains(live.bodyAsText(), "the replacement wording")
+
+        // A saved excerpt names the revision it was taken from, so it keeps showing its own text.
+        val fromRevision = harness.get(
+            "/api/collections/$collectionId/sources/${unitId.value}?revision=$base",
+        )
+        assertEquals(HttpStatusCode.OK, fromRevision.status, fromRevision.bodyAsText())
+        assertContains(fromRevision.bodyAsText(), "the original wording")
+
+        val unknown = harness.get(
+            "/api/collections/$collectionId/sources/${unitId.value}?revision=does-not-exist",
+        )
+        assertEquals(HttpStatusCode.NotFound, unknown.status, unknown.bodyAsText())
+    }
+
+    @Test
+    fun `a search hit names the revision its text came from and a legacy hit names none`() = runBlocking {
+        val (documentId, _) = seedUnit(document = "evidence.txt", text = "the original wording")
+        val context = harness.context
+
+        // The seeded rows are what the import path writes: rows with no revision tag, which belong to no
+        // revision. They are reported as such rather than resolved to whatever the document publishes now,
+        // because that would attribute text to a revision that never held it.
+        val legacy = harness.get("/api/search?collection=Default&q=original&mode=keyword")
+        assertEquals(HttpStatusCode.OK, legacy.status, legacy.bodyAsText())
+        assertContains(legacy.bodyAsText(), "the original wording")
+        assertFalse(legacy.bodyAsText().contains("revisionId"), legacy.bodyAsText())
+
+        val base = assertNotNull(context.revisions.recordPublishedContent(documentId, "TEST_SEED"))
+        val candidate = context.revisions.openCandidate(documentId, base, "TEST_REPLACEMENT")
+        context.revisions.appendPage(
+            candidate,
+            RevisionPageDraft(
+                ordinal = 0,
+                unitId = ContentUnitId("unit-of-${documentId.value}"),
+                locator = SourceLocation.TextLines(1, 1),
+                extractedText = "the replacement wording",
+                searchText = "the replacement wording",
+                extractionMethod = ExtractionMethod.OCR,
+                approval = PageApproval.APPROVED,
+                chunks = listOf(
+                    RevisionChunkDraft(
+                        ordinal = 0,
+                        text = "the replacement wording",
+                        startOffset = 0,
+                        endOffset = "the replacement wording".length,
+                        tokenCount = 5,
+                        tokenStart = 0,
+                        tokenEnd = 4,
+                        embedding = vectorFor("the replacement wording"),
+                    ),
+                ),
+            ),
+        )
+        context.revisionPublication.publish(documentId, base, candidate)
+
+        val published = harness.get("/api/search?collection=Default&q=replacement&mode=keyword")
+        assertEquals(HttpStatusCode.OK, published.status, published.bodyAsText())
+        assertContains(published.bodyAsText(), "the replacement wording")
+        assertContains(published.bodyAsText(), "\"revisionId\":\"$candidate\"")
+    }
+
+    @Test
+    fun `a saved excerpt is served from its own revision after a replacement removed its unit`() = runBlocking {
+        val (documentId, unitId) = seedUnit(document = "replaced.txt", text = "the original wording")
+        val context = harness.context
+        val base = assertNotNull(context.revisions.recordPublishedContent(documentId, "TEST_SEED"))
+        // The replacement names a page of its own rather than the one it replaces, which is what removes
+        // the unit the citation holds from the document's published reading.
+        val replacementUnitId = ContentUnitId.new()
+        val candidate = context.revisions.openCandidate(documentId, base, "TEST_REPLACEMENT")
+        context.revisions.appendPage(
+            candidate,
+            RevisionPageDraft(
+                ordinal = 0,
+                unitId = replacementUnitId,
+                locator = SourceLocation.TextLines(1, 1),
+                extractedText = "the replacement wording",
+                searchText = "the replacement wording",
+                extractionMethod = ExtractionMethod.OCR,
+                approval = PageApproval.APPROVED,
+                chunks = listOf(
+                    RevisionChunkDraft(
+                        ordinal = 0,
+                        text = "the replacement wording",
+                        startOffset = 0,
+                        endOffset = "the replacement wording".length,
+                        tokenCount = 5,
+                        tokenStart = 0,
+                        tokenEnd = 4,
+                        embedding = vectorFor("the replacement wording"),
+                    ),
+                ),
+            ),
+        )
+        context.revisionPublication.publish(documentId, base, candidate)
+
+        val collectionId = harness.collectionIdOf("Default")
+        // The unit the citation names is no longer part of the document, so the live read finds nothing...
+        val live = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
+        assertEquals(HttpStatusCode.NotFound, live.status, live.bodyAsText())
+
+        // ...and the revision the excerpt came from still answers with the text it held.
+        val excerpt = harness.get("/api/collections/$collectionId/sources/${unitId.value}?revision=$base")
+        assertEquals(HttpStatusCode.OK, excerpt.status, excerpt.bodyAsText())
+        assertContains(excerpt.bodyAsText(), "the original wording")
+        assertContains(excerpt.bodyAsText(), "\"revisionId\":\"$base\"")
+        assertContains(excerpt.bodyAsText(), "\"ordinal\":0")
+
+        // A revision that never held this unit is refused rather than answered with the current text.
+        val foreign = harness.get("/api/collections/$collectionId/sources/${unitId.value}?revision=$candidate")
+        assertEquals(HttpStatusCode.NotFound, foreign.status, foreign.bodyAsText())
+    }
+
+    /**
+     * A revision that is not a published reading may not be read here even when the caller knows its
+     * identifier and it holds the very unit the citation names.
+     *
+     * The state check in the source route's revision lookup is what refuses this: without it, the
+     * candidate's page is what `pageForUnit` finds, and the response is a 200 carrying text no reader may
+     * see. A withdrawn candidate keeps its staged pages and its identifier, so it is refused by the same
+     * check rather than by the pages having gone away.
+     */
+    @Test
+    fun `a draft revision is refused like a foreign id even when it holds the page`() = runBlocking {
+        val (documentId, unitId) = seedUnit(document = "draft.txt", text = "the published wording")
+        val context = harness.context
+        val base = assertNotNull(context.revisions.recordPublishedContent(documentId, "TEST_SEED"))
+        val draft = "the unreviewed replacement wording"
+        // The candidate names the same unit as the reading the document publishes, so nothing but its
+        // state keeps its text out of the citation path.
+        val candidate = context.revisions.openCandidate(documentId, base, "TEST_REPLACEMENT")
+        context.revisions.appendPage(
+            candidate,
+            RevisionPageDraft(
+                ordinal = 0,
+                unitId = unitId,
+                locator = SourceLocation.TextLines(1, 1),
+                extractedText = draft,
+                searchText = draft,
+                extractionMethod = ExtractionMethod.OCR,
+                approval = PageApproval.APPROVED,
+                chunks = listOf(
+                    RevisionChunkDraft(
+                        ordinal = 0,
+                        text = draft,
+                        startOffset = 0,
+                        endOffset = draft.length,
+                        tokenCount = 5,
+                        tokenStart = 0,
+                        tokenEnd = 4,
+                        embedding = vectorFor(draft),
+                    ),
+                ),
+            ),
+        )
+        val collectionId = harness.collectionIdOf("Default")
+
+        val candidateRead = harness.get(
+            "/api/collections/$collectionId/sources/${unitId.value}?revision=$candidate",
+        )
+        assertEquals(HttpStatusCode.NotFound, candidateRead.status, candidateRead.bodyAsText())
+        assertFalse(
+            candidateRead.bodyAsText().contains(draft),
+            "a candidate's text must not be reachable: ${candidateRead.bodyAsText()}",
+        )
+
+        // A withdrawn candidate keeps its identifier and its staged pages, so the refusal has to come
+        // from the state it is in rather than from anything having been removed.
+        context.revisions.withdrawCandidate(candidate)
+        val withdrawnRead = harness.get(
+            "/api/collections/$collectionId/sources/${unitId.value}?revision=$candidate",
+        )
+        assertEquals(HttpStatusCode.NotFound, withdrawnRead.status, withdrawnRead.bodyAsText())
+        assertFalse(
+            withdrawnRead.bodyAsText().contains(draft),
+            "a withdrawn revision's text must not be reachable: ${withdrawnRead.bodyAsText()}",
+        )
+
+        // The published reading the same unit belongs to is still served, so the two refusals above are
+        // about the state of the revision that was named and not about the unit being unreadable.
+        val publishedRead = harness.get(
+            "/api/collections/$collectionId/sources/${unitId.value}?revision=$base",
+        )
+        assertEquals(HttpStatusCode.OK, publishedRead.status, publishedRead.bodyAsText())
+        assertContains(publishedRead.bodyAsText(), "the published wording")
+        val liveRead = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
+        assertEquals(HttpStatusCode.OK, liveRead.status, liveRead.bodyAsText())
+        assertContains(liveRead.bodyAsText(), "the published wording")
+    }
 
     @Test
     fun `a source unit cannot be read through another collection`() = runBlocking {

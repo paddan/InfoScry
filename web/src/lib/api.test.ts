@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { continueInvestigation, readInvestigationEvents, startInvestigation } from './api';
+import { continueInvestigation, readInvestigationEvents, readSource, startInvestigation } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -24,6 +24,26 @@ describe('readInvestigationEvents', () => {
     expect(events.map((event) => event.type)).toEqual(['started', 'limit', 'answer-start', 'delta', 'done']);
     expect(events[1]).toEqual({ type: 'limit', code: 'MAX_ROUNDS', message: 'Tool round limit reached.' });
     expect(events[2]).toEqual({ type: 'answer-start' });
+  });
+});
+
+describe('readSource', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('names the revision an excerpt came from and reads the live unit when none is known', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return { ok: true, status: 200, statusText: '', text: async () => JSON.stringify({ id: 'unit-1' }) } as Response;
+    }));
+
+    await readSource('Default collection', 'unit/1', 0, 16_384, 'revision-7');
+    await readSource('Default collection', 'unit/1');
+
+    expect(urls).toEqual([
+      '/api/collections/Default%20collection/sources/unit%2F1?offset=0&limit=16384&revision=revision-7',
+      '/api/collections/Default%20collection/sources/unit%2F1?offset=0&limit=16384',
+    ]);
   });
 });
 

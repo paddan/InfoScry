@@ -89,6 +89,24 @@ class AskServiceTest {
     }
 
     @Test
+    fun `a switched-off profile is refused where the answer would be dispatched`() = runBlocking {
+        // The route and the CLI check this before they reach the service; a caller that arrives here directly
+        // must not be able to send the question through a profile nobody has enabled.
+        val provider = ScriptedProvider(listOf(LlmEvent.TextDelta("unused")), LlmCompletion("unused"))
+        val service = service(CapturedSearch(listOf(hit())), provider) { _, _, _, _, _, _, _ -> error("must not persist") }
+
+        val events = service.ask(
+            AskRequest(CollectionId("collection"), "a question", profile().copy(enabled = false)),
+        ).toList()
+
+        val refusal = assertIs<AskEvent.Error>(events.single())
+        assertEquals("INVALID_REQUEST", refusal.code)
+        assertTrue(refusal.message.contains("disabled"), refusal.message)
+        assertTrue(provider.streamRequests.isEmpty(), "nothing may be dispatched")
+        assertTrue(provider.completionRequests.isEmpty(), "not even the correction call")
+    }
+
+    @Test
     fun `multiple invalid ids trigger exactly one correction and unknown markers are reported invalid`() = runBlocking {
         val provider = ScriptedProvider(
             streamed = listOf(LlmEvent.TextDelta("first [S998] second [S999]")),

@@ -2,6 +2,8 @@ package infoscry.llm
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class EndpointSanitizerTest {
 
@@ -29,5 +31,14 @@ class EndpointSanitizerTest {
     @Test
     fun `port and path survive the strip`() {
         assertEquals("https://host:8443/v1/chat", sanitizedEndpoint("https://u:p@host:8443/v1/chat"))
+    }
+
+    @Test
+    fun `userinfo is detected so a validator can refuse the URL instead of storing it`() {
+        assertTrue(endpointCarriesUserInfo("https://user:pass@host/v1"))
+        assertTrue(endpointCarriesUserInfo("https://user@host/v1"))
+        assertFalse(endpointCarriesUserInfo("https://host/v1"))
+        assertFalse(endpointCarriesUserInfo("https://host/a@b/c?token=secret"))
+        assertFalse(endpointCarriesUserInfo("not a url"), "unparsable is not the same fact as credentialed")
     }
 }

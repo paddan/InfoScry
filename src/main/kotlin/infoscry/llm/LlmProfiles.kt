@@ -65,11 +65,18 @@ data class LlmProfile(
                 URI(candidate)
             } catch (failure: java.net.URISyntaxException) {
                 throw IllegalArgumentException(
-                    "LlmProfile.endpoint must be an absolute URL when provided, was '$candidate'",
+                    "LlmProfile.endpoint must be an absolute URL when provided, was a value that is not a URL",
                     failure,
                 )
             }
-            require(uri.isAbsolute) { "LlmProfile.endpoint must be an absolute URL, was '$candidate'" }
+            require(uri.isAbsolute) { "LlmProfile.endpoint must be an absolute URL, was a value that is not one" }
+            // The key is read from the environment variable this profile names, so credentials in the URL are
+            // never a supported form — and this endpoint is returned verbatim by the profile API. Refused
+            // rather than stripped, and without repeating the value, which is where it would otherwise leak.
+            require(!endpointCarriesUserInfo(candidate)) {
+                "LlmProfile.endpoint must not carry userinfo credentials; the key belongs in the environment " +
+                    "variable this profile names"
+            }
         }
         apiKeyEnvironmentVariable?.let { require(ValidEnvironmentVariableName.matches(it)) {
             "apiKeyEnvironmentVariable must be a valid environment variable name, was '$it'"
@@ -85,6 +92,30 @@ data class LlmProfile(
 
     /** The wired environment-variable presence, resolved by the injected lookup. */
     fun keyAvailable(lookup: (String) -> String?): Boolean = apiKeyEnvironmentVariable?.let { lookup(it) != null } == true
+}
+
+/**
+ * Refuses a profile no call may dispatch through.
+ *
+ * The flag is a decision rather than a label: a person switches a profile off when they retire it, and
+ * migration 020 switches off every profile whose stored address had to be repaired, because that address was
+ * rewritten and is not the one somebody wrote. Neither may be dispatched to until somebody reviews it, so
+ * the rule lives here and a dispatch destination is resolved through it instead of being trusted to check
+ * the flag for itself. The name — a label a person chose, never a credential — is what makes the refusal
+ * actionable.
+ *
+ * The address is named too, because this refusal is also how a conversation whose locked snapshot had to be
+ * repaired is stopped: there the profile row can be clean and enabled while the address the conversation
+ * stored is the repaired one, so the address that would be dispatched to is the thing a person has to look
+ * at. Every read that produces this profile has already had its `userinfo` removed, so the refusal never
+ * repeats a credential.
+ */
+fun LlmProfile.requireDispatchable() {
+    require(enabled) {
+        val address = endpoint.takeIf { it.isNotBlank() }?.let { " '$it'" }.orEmpty()
+        "the LLM profile '$name' is disabled and cannot be used for a call; review its address$address and " +
+            "enable the profile before dispatching to it"
+    }
 }
 
 /** One capability measurement, so quotes never masquerade as measurements. */

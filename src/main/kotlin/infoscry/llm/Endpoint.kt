@@ -24,3 +24,21 @@ fun sanitizedEndpoint(endpoint: String): String = try {
     // unparsable string cannot be confidently stripped, and returning it unchanged is the honest best.
     endpoint
 }
+
+/**
+ * Whether [endpoint] carries `userinfo` credentials, as in `https://user:secret@host/v1`.
+ *
+ * A profile never holds a key: the credential lives in the environment variable the profile names, so a
+ * URL carrying one is always an accident of a copied config rather than a supported way to authenticate.
+ * It must therefore never be stored, logged or echoed back — a stored endpoint is returned verbatim by
+ * the profile API, and a log line or an error that quotes it publishes the credential to everyone who can
+ * read either. The component is read from the parsed URI rather than from the text before an `@`, so a
+ * path or query that merely contains one (`https://host/a@b/c`) is not mistaken for credentials.
+ */
+fun endpointCarriesUserInfo(endpoint: String): Boolean = try {
+    URI(endpoint).userInfo != null
+} catch (_: java.net.URISyntaxException) {
+    // Unparsable is not the same fact as credentialed, and the validators reject an unparsable value
+    // themselves rather than through this answer.
+    false
+}

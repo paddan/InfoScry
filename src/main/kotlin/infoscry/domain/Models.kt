@@ -3,6 +3,9 @@ package infoscry.domain
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
+import infoscry.ocr.CollectionOcrSettings
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
 
 // Every `createdAt`/`updatedAt` field in this file is an ISO-8601 instant string (for example
 // `2026-09-21T07:45:12.345Z`). The persistence boundary parses and formats them, so the domain stays
@@ -23,6 +26,16 @@ enum class DocumentStatus {
     INDEXING,
     COMPLETE,
     COMPLETE_WITH_WARNINGS,
+
+    /**
+     * The reading is done and a person still owes it a decision.
+     *
+     * This is not a failure and not a warning: no page that awaits a decision has searchable text, and a
+     * document with no approved text at all would be a lie if it read `COMPLETE`. It is also not
+     * `NEEDS_TOOL`, whose remedy is an installation — here the remedy is a decision, and it is the review
+     * surface rather than the queue that offers it.
+     */
+    NEEDS_REVIEW,
     FAILED,
     CANCELLED,
     NEEDS_TOOL,
@@ -43,6 +56,71 @@ enum class ExtractionMethod {
 
     /** The text was recognised from a raster by the OCR tool. */
     OCR,
+}
+
+/**
+ * Which directory a page image's reference resolves against.
+ *
+ * A page image is only ever a file inside the root its producer chose, so a reference without its root
+ * names nothing. Both roots sit under the document's own directory.
+ */
+enum class SourceImageRoot {
+
+    /** The document's `artifacts/` directory: a page this pipeline rendered, or a bounded copy it wrote. */
+    ARTIFACTS,
+
+    /** The directory holding the document's managed copy: a picture that *is* the document, read as itself. */
+    MANAGED_COPY,
+}
+
+/**
+ * The image one unit's text was read from.
+ *
+ * A reading is only honest about its own evidence if it says which pixels produced it, because the pixels
+ * are not always the ones a person would assume: a picture whose declared raster is past the bound a tool
+ * is handed is read from a *bounded copy* this pipeline wrote, and that copy is a different image from the
+ * managed original. [relativePath] therefore travels with [root], the local dimensions and hash are the
+ * artifact's own — read back from the file rather than taken from what a producer meant to write — and
+ * [renderVersion] names the procedure that produced them, so a reading of a reduced copy is never
+ * attributed to the original pixels.
+ *
+ * An absent provenance is not an empty one: it says no image was read at all, which is the truthful answer
+ * for a page whose own text layer a parser read. It is not a claim of a zero-sized image, and it is not a
+ * default that may be filled in from whatever image happens to be around later.
+ */
+data class SourceImageProvenance(
+    val root: SourceImageRoot,
+    /** The artifact's reference inside [root], which is the managed copy's own area for `MANAGED_COPY`. */
+    val relativePath: String,
+    val sha256: String,
+    /** The artifact's measured pixel width, absent when no reader would state one. */
+    val width: Int?,
+    /** The artifact's measured pixel height, absent when no reader would state one. */
+    val height: Int?,
+    /** The version of the rendering or reduction that produced these pixels. */
+    val renderVersion: Int,
+) {
+
+    init {
+        require(relativePath.isNotBlank()) { "a source image reference must not be blank" }
+        require(sha256.length == SHA256_HEX_LENGTH && sha256.all { character -> character.isHexCharacter() }) {
+            "a source image names its artifact's SHA-256, was '${sha256.take(MAX_REPORTED_HASH_CHARACTERS)}'"
+        }
+        // Both dimensions or neither, exactly as a page image declares them: a measured artifact is
+        // measured in both axes, and half a measurement is not a measurement.
+        require((width == null) == (height == null)) { "a source image either has both dimensions or neither" }
+        require(width == null || width > 0) { "a measured source image has a positive width, was $width" }
+        require(height == null || height > 0) { "a measured source image has a positive height, was $height" }
+        require(renderVersion > 0) { "a source image names the rendering that produced it, was $renderVersion" }
+    }
+
+    private companion object {
+        const val SHA256_HEX_LENGTH: Int = 64
+        const val MAX_REPORTED_HASH_CHARACTERS: Int = 16
+
+        /** Hex as `HexFormat` writes it — the only form a digest in this pipeline has. */
+        fun Char.isHexCharacter(): Boolean = this in '0'..'9' || this in 'a'..'f'
+    }
 }
 
 /**
@@ -84,6 +162,16 @@ enum class JobType {
      * already exist and must never be classified as a duplicate of itself — see `RetryJobHandler`.
      */
     RETRY,
+
+    /**
+     * Reads pages of an already published document again and may replace its text through a reviewed
+     * revision.
+     *
+     * It is a kind of its own for the same reason a retry is: retry eligibility is not broadened, and a
+     * rescan of a successful document is not a retry of a failed one. The operation it drives lives in
+     * `ocr_operations`, because a rescan outlives the attempt that started it.
+     */
+    RESCAN,
 }
 
 /**
@@ -113,6 +201,19 @@ data class Collection(
     val description: String? = null,
     val lifecycle: CollectionLifecycle = CollectionLifecycle.ACTIVE,
     /**
+     * The OCR settings future import and rescan attempts on this collection snapshot.
+     *
+     * Every one of them defaults to the behavior a pre-OCR information archive already had: Tesseract reading
+     * the pages that have no text, the collection's existing languages, no image-model profile and no external
+     * pages. That is what makes an unchanged collection, and a client that predates these fields, behave
+     * exactly as they did. See [ocrSettings].
+     */
+    val ocrEngine: OcrEngine = OcrEngine.TESSERACT,
+    val ocrImportMode: OcrImportMode = OcrImportMode.FILL_MISSING,
+    val ocrTranscriptionProfileId: String? = null,
+    val ocrReviewProfileId: String? = null,
+    val ocrExternalPageLimit: Int = 0,
+    /**
      * How many documents the collection holds. A derived listing value, counted from the document
      * rows when a collection is listed for display; it is never persisted on the collection and is
      * `0` for a collection that was not counted (for example one read back by id).
@@ -123,6 +224,21 @@ data class Collection(
         require(name.isNotBlank()) { "Collection.name must not be blank" }
         require(ocrLanguages.isNotBlank()) { "Collection.ocrLanguages must not be blank" }
     }
+
+    /**
+     * The collection's effective OCR settings as one value.
+     *
+     * Built rather than stored so there is only one definition of a collection's OCR settings, and so
+     * constructing them validates the engine/profile agreement the store and the API also enforce.
+     */
+    fun ocrSettings(): CollectionOcrSettings = CollectionOcrSettings(
+        language = ocrLanguages,
+        engine = ocrEngine,
+        importMode = ocrImportMode,
+        transcriptionProfileId = ocrTranscriptionProfileId,
+        reviewProfileId = ocrReviewProfileId,
+        externalPageLimit = ocrExternalPageLimit,
+    )
 }
 
 /**

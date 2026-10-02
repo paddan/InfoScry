@@ -12,6 +12,7 @@ import infoscry.embedding.EmbeddingException
 import infoscry.embedding.ModelManager
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
+import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.MutationCoordinator
 import java.nio.file.Files
@@ -93,6 +94,14 @@ class ReindexService(
     private val collections: CollectionStore,
     private val documents: DocumentStore,
     private val content: ContentStore,
+    /**
+     * Where each document's published revision is read from.
+     *
+     * A rebuild writes the rows of the revision the database says is published, so the index and
+     * `document_active_revisions` say the same thing and a row tagged with a revision nobody publishes is
+     * one the rebuild can shed.
+     */
+    private val revisions: DocumentRevisionStore,
     private val chunker: Chunker,
     private val paths: AppPaths,
     private val identity: IndexIdentity,
@@ -203,6 +212,18 @@ class ReindexService(
             // when the chunking marker still agrees with this tokenizer and the copy holds exactly
             // as many rows as the database holds chunks, because that is the state where the index
             // and the database already agree; anything else is rebuilt from the persisted text.
+            // A row tagged with a revision no document publishes is a left-over: a publication whose
+            // cleanup never drained its readers, or a candidate whose intent was abandoned. The rebuild
+            // is the one moment the whole index is rewritten from the database's authority, so it is
+            // where those rows go. Untagged rows are not touched — they are the reading of a document
+            // that has never published a replacement.
+            val shed = next.deleteStaleRevisions(revisions.allActiveRevisionIds())
+            if (shed.isNotEmpty()) {
+                LOGGER.atInfo()
+                    .addKeyValue(SHED_REVISIONS_FIELD, shed.size)
+                    .log("removed index rows of revisions no document publishes")
+            }
+
             val vectorsAreCurrent = previous.schemaStatus is SchemaStatus.Ready
             val totals = scope.sumOf { collection -> documents.countByCollection(collection.id) }
             var completed = 0
@@ -310,6 +331,9 @@ class ReindexService(
         documentId: DocumentId,
     ): BuiltDocument {
         ensureChunksUnderTarget(documentId)
+        // The revision the database publishes, so a rebuilt row and a staged row are told apart by the
+        // same tag and no document can end up with rows of two readings in one generation.
+        val revisionId = revisions.activeRevisionId(documentId)
         val rows = mutableListOf<DocumentRow>()
         var afterOrdinal = -1
         while (true) {
@@ -326,6 +350,7 @@ class ReindexService(
                             locatorLabel = unit.locator.describe(),
                             chunk = chunk,
                             vector = embed(chunk.text, documentId),
+                            revisionId = revisionId,
                         ),
                     )
                 }
@@ -557,6 +582,9 @@ class ReindexService(
 
         private const val GENERATION_PREFIX: String = "lucene-"
         private const val GENERATION_FIELD = "generation"
+
+        /** The structured field carrying how many stale revision tags a rebuild removed. */
+        private const val SHED_REVISIONS_FIELD = "shed_revisions"
         private val LOGGER = LoggerFactory.getLogger("infoscry.reindex")
     }
 }

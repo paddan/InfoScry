@@ -26,6 +26,7 @@ import infoscry.extract.ExtractionSettings
 import infoscry.extract.TesseractOcr
 import infoscry.library.ManagedImportOutcome
 import infoscry.library.ManagedLibrary
+import infoscry.ocr.SuryaOcr
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
@@ -536,9 +537,15 @@ class ImportJobHandler internal constructor(
          * and one thing has to be installed. That gets `NEEDS_TOOL`, so a listing can say what the document
          * needs and Retry can honestly offer to read it again once the tool is there. Everything else is
          * `FAILED`, because the document itself is what could not be read.
+         *
+         * The four Surya runtime failures are that same shape: a Python environment, a `llama-server` and a
+         * set of weights are three things to install, and a person who selected Surya and did not install it
+         * has a document that is waiting, not a document that is broken.
          */
         internal fun statusForFailureCode(code: String): DocumentStatus =
-            if (code == TesseractOcr.NEEDS_TESSERACT_CODE || code == CalibreConverter.NEEDS_CALIBRE_CODE) {
+            if (code == TesseractOcr.NEEDS_TESSERACT_CODE || code == CalibreConverter.NEEDS_CALIBRE_CODE ||
+                code in SuryaOcr.UNAVAILABLE_CODES
+            ) {
                 DocumentStatus.NEEDS_TOOL
             } else {
                 DocumentStatus.FAILED
@@ -556,7 +563,10 @@ class ImportJobHandler internal constructor(
          * those are diagnostics for the machine that ran the import. That stored text is what the CLI reads
          * directly, and an unrecognised code served here gets the generic sentence instead of it.
          */
-        internal fun messageFor(code: String): String = when (code) {
+        internal fun messageFor(code: String): String =
+            // The Surya runtime failures get their words from the engine that raises them, so the sentence a
+            // person reads in the queue and the one a failed page carries cannot drift apart.
+            SuryaOcr.remedyFor(code) ?: when (code) {
             SOURCE_MISSING -> GONE_MESSAGE
 
             SOURCE_UNREADABLE -> "the file could not be read from disk"
@@ -680,6 +690,7 @@ class ImportJobHandler internal constructor(
                 index = { context.index() },
                 documentEmbedder = documentEmbedder,
                 maxChunksPerDocument = maxChunksPerDocument,
+                revisions = context.revisions,
             )
             val handler = ImportJobHandler(
                 collections = context.collections,
@@ -703,6 +714,31 @@ class ImportJobHandler internal constructor(
                 mutations = context.mutations,
                 ingest = ingest,
             )
+            // A rescan is its own kind of work, so it has its own handler. It is wired here because this is
+            // the one place that knows how an attempt against this data directory is put together — the
+            // engines, the embedder, the chunker and the publication service are the same ones an import uses,
+            // and a second composition root would be a second answer to what a page image is read with.
+            val rescanHandler = RescanJobHandler(
+                paths = context.paths,
+                collections = context.collections,
+                documents = context.documents,
+                library = context.library,
+                mutations = context.mutations,
+                jobs = context.jobs,
+                revisions = context.revisions,
+                operations = context.ocrOperations,
+                reviews = context.ocrReviews,
+                publication = context.revisionPublication,
+                chunker = chunker,
+                documentEmbedder = documentEmbedder,
+                engineFor = rescanEngineFactory(context.ocrProfiles),
+                reviewerFor = rescanReviewerFactory(
+                    revisions = context.revisions,
+                    reviews = context.ocrReviews,
+                    profiles = context.ocrProfiles,
+                ),
+                profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
+            )
             val runner = JobRunner(
                 store = context.jobs,
                 collections = context.collections,
@@ -712,6 +748,7 @@ class ImportJobHandler internal constructor(
                         JobType.IMPORT to handler,
                         JobType.RETRY to retryHandler,
                         JobType.REINDEX to ReindexJobHandler(reindexService(context)),
+                        JobType.RESCAN to rescanHandler,
                     ),
                 ),
             )
@@ -794,6 +831,7 @@ class ImportJobHandler internal constructor(
             ),
             current = { context.index() },
             publish = { next, previous -> context.publishGeneration(next, previous) },
+            revisions = context.revisions,
         )
     }
 }

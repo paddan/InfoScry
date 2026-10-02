@@ -7,6 +7,7 @@ import infoscry.llm.LlmEvent
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmRequest
 import infoscry.llm.LlmStreamingClient
+import infoscry.llm.requireDispatchable
 import infoscry.llm.LlmCompletionClient
 import infoscry.llm.PromptService
 import infoscry.llm.RequestBudget
@@ -70,6 +71,12 @@ class AskService(
     fun ask(request: AskRequest): Flow<AskEvent> = flow {
         if (request.question.isBlank()) {
             emit(AskEvent.Error("INVALID_REQUEST", "question must not be blank")); return@flow
+        }
+        // A switched-off profile is not a dispatch destination. The route and the CLI ask before they reach
+        // this service, but this is where the call is made, so a caller that arrives here directly is refused
+        // the same way instead of sending the question through a profile nobody has enabled.
+        runCatching { request.profile.requireDispatchable() }.exceptionOrNull()?.let { refusal ->
+            emit(AskEvent.Error("INVALID_REQUEST", refusal.message.orEmpty())); return@flow
         }
         try {
             val outcome = search.search(request.question, SearchMode.HYBRID, SearchFilters(request.collectionId))

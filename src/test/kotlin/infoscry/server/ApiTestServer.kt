@@ -9,6 +9,7 @@ import infoscry.domain.Collection
 import infoscry.embedding.QueryEmbedder
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.request
@@ -63,9 +64,12 @@ internal class ApiTestServer(
      * installed where the suite runs.
      */
     retryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
+    /** Whether a rescan could embed here, for the tests that drive rescan admission without the pinned model. */
+    rescanEmbedder: (() -> Boolean)? = null,
 ) : AutoCloseable {
 
-    val context: AppContext = AppContext.open(dataDir, index, queryEmbedder, documentIndex, retryPrerequisites)
+    val context: AppContext =
+        AppContext.open(dataDir, index, queryEmbedder, documentIndex, retryPrerequisites, rescanEmbedder)
 
     // Port 0 lets the operating system choose, so a test never collides with another server — including
     // a second server started inside the same test to observe how maintenance excludes it.
@@ -97,16 +101,40 @@ internal class ApiTestServer(
         credential: Credential = Credential.NONE,
     ): HttpResponse = client.request(url + path) {
         this.method = method
+        applyCredential(credential)
+        if (body != null) {
+            contentType(ContentType.Application.Json)
+            setBody(body)
+        }
+    }
+
+    /**
+     * Sends the body as the bytes on the wire, for a request a route has to refuse by its bytes.
+     *
+     * A body is not the text it decodes to: a UTF-16 body holding only a byte order mark decodes to an
+     * empty string while still being two bytes a caller sent, so a test about "the endpoint takes no body"
+     * has to put the bytes there itself.
+     */
+    suspend fun requestBytes(
+        method: HttpMethod,
+        path: String,
+        body: ByteArray,
+        contentType: ContentType,
+        credential: Credential = Credential.NONE,
+    ): HttpResponse = client.request(url + path) {
+        this.method = method
+        applyCredential(credential)
+        contentType(contentType)
+        setBody(body)
+    }
+
+    private fun HttpRequestBuilder.applyCredential(credential: Credential) {
         when (credential) {
             Credential.NONE -> Unit
             Credential.BEARER -> header(HttpHeaders.Authorization, "Bearer $bearer")
             Credential.CSRF -> header(CSRF_HEADER, csrfToken)
             Credential.WRONG_BEARER -> header(HttpHeaders.Authorization, "Bearer $WRONG_CREDENTIAL_VALUE")
             Credential.WRONG_CSRF -> header(CSRF_HEADER, WRONG_CREDENTIAL_VALUE)
-        }
-        if (body != null) {
-            contentType(ContentType.Application.Json)
-            setBody(body)
         }
     }
 

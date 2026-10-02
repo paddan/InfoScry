@@ -2,6 +2,7 @@ package infoscry.server
 
 import infoscry.AppContext
 import infoscry.collection.DeletionRecoveryBlockedException
+import infoscry.collection.OcrSettingsUpdate
 import infoscry.diagnostics.ToolProbe
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
@@ -11,9 +12,21 @@ import infoscry.domain.JobState
 import infoscry.domain.JobType
 import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportJobPayload
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.document.RescanRefusalException
+import infoscry.document.StaleActiveRevisionException
+import infoscry.document.StaleCandidateDecisionException
+import infoscry.jobs.DocumentIngest
+import infoscry.search.RevisionSnapshotUnavailableException
+import infoscry.storage.DocumentBeingDeletedException
+import infoscry.storage.OcrOperationConflictException
+import infoscry.storage.OcrRequestConflictException
+import infoscry.storage.StaleRescanPreviewException
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
 import infoscry.storage.DuplicateLlmProfileNameException
+import infoscry.storage.DuplicateOcrProfileNameException
 import infoscry.storage.LastLlmProfileException
 import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.ImportItem
@@ -71,8 +84,33 @@ data class CreateCollectionRequest(
 @Serializable
 data class RenameCollectionRequest(val name: String)
 
+/**
+ * One collection OCR-settings edit.
+ *
+ * The path keeps its `ocr-languages` name because it is the route clients already call; the body now also
+ * carries the engine, the import mode, the two profile selections and the external page allowance. Every new
+ * field is optional and absent means "keep what the collection has", so an old request that sends only
+ * `ocrLanguages` changes only the languages. A profile id sent as an empty string clears that profile.
+ */
 @Serializable
-data class UpdateOcrLanguagesRequest(val ocrLanguages: String)
+data class UpdateOcrLanguagesRequest(
+    val ocrLanguages: String? = null,
+    val ocrEngine: OcrEngine? = null,
+    val ocrImportMode: OcrImportMode? = null,
+    val ocrTranscriptionProfileId: String? = null,
+    val ocrReviewProfileId: String? = null,
+    val ocrExternalPageLimit: Int? = null,
+) {
+
+    fun toUpdate(): OcrSettingsUpdate = OcrSettingsUpdate(
+        ocrLanguages = ocrLanguages,
+        engine = ocrEngine,
+        importMode = ocrImportMode,
+        transcriptionProfileId = ocrTranscriptionProfileId,
+        reviewProfileId = ocrReviewProfileId,
+        externalPageLimit = ocrExternalPageLimit,
+    )
+}
 
 @Serializable
 data class DeleteCollectionRequest(val confirmName: String)
@@ -178,6 +216,19 @@ val ApiJson = Json {
 }
 
 /**
+ * The same wire format, refusing a body that carries a field the contract never asked for.
+ *
+ * [ApiJson] ignores unknown keys so a newer client does not break an older server, and every request body
+ * whose extra fields can only ever be additive wants that. A body that names an environment variable is the
+ * exception: it has no slot a key *value* may occupy, so the only thing an unknown field can be there is a
+ * secret pasted into the wrong place. Dropping it silently would let the caller believe the value was
+ * accepted, so this variant refuses the body instead.
+ */
+val ApiJsonRejectingUnknownFields = Json(ApiJson) {
+    ignoreUnknownKeys = false
+}
+
+/**
  * The local HTTP API and the compiled frontend.
  *
  * Handlers stay thin: they parse, call one service method, and render the result or the failure. Status
@@ -258,7 +309,7 @@ fun Application.configureRoutes(
                     val request = call.receiveJson<UpdateOcrLanguagesRequest>()
                     call.respondJson(
                         HttpStatusCode.OK,
-                        CollectionResponse(context.collectionService.updateOcrLanguages(id, request.ocrLanguages)),
+                        CollectionResponse(context.collectionService.updateOcrSettings(id, request.toUpdate())),
                     )
                 }
             }
@@ -276,12 +327,23 @@ fun Application.configureRoutes(
                         val collection = context.collectionService.requireActiveByNameOrId(request.collection)
                         // The job records the tool version it will run with, so its checkpoints are keyed by
                         // what actually produced them. That is why the probe happens once per job creation.
+                        // The collection's OCR selection is snapshotted here, once, and travels in the
+                        // payload: the engine, the import mode, the profile revisions and the external page
+                        // allowance of the whole job. Editing a default afterwards changes future imports
+                        // only, and an import of twenty files has one allowance covering all of them.
+                        val snapshot = context.ocr.snapshotFor(
+                            settings = collection.ocrSettings(),
+                            extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+                            renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
+                        )
                         val settings = ToolProbe.extractionSettings(collection.ocrLanguages)
+                            .forOcrSettings(snapshot)
                         val payload = ImportJobPayload.of(
                             collectionId = collection.id,
                             sources = request.paths,
                             settings = settings,
                             recursive = request.recursive,
+                            ocr = snapshot,
                         )
                         val job = context.jobs.enqueue(
                             type = JobType.IMPORT,
@@ -416,6 +478,8 @@ fun Application.configureRoutes(
         configureSearchRoutes(context, context.mutations)
         configureSourceRoutes(context)
         configureLlmProfileRoutes(context)
+        configureOcrProfileRoutes(context)
+        configureOcrRescanRoutes(context)
         configureLlmCatalogRoutes(credentials)
         configureAskRoutes(context)
         configureInvestigationRoutes(context)
@@ -601,6 +665,26 @@ suspend inline fun <reified T> ApplicationCall.receiveJson(): T {
     }
 }
 
+/**
+ * Decodes the request body, refusing any key the contract does not have a field for.
+ *
+ * The failure deliberately says nothing about *what* was in the body: the unknown key's own name and the
+ * decoder's positional detail can quote the surrounding input, and the one body this is used for is a place
+ * a caller pastes a credential. "This body has a field this endpoint does not accept" is everything the
+ * caller needs to fix it and nothing a log should keep.
+ */
+suspend inline fun <reified T> ApplicationCall.receiveJsonRejectingUnknownFields(): T {
+    val body = receiveText()
+    return try {
+        ApiJsonRejectingUnknownFields.decodeFromString(body)
+    } catch (_: SerializationException) {
+        throw BadRequestException(
+            "the request body has a field this endpoint does not accept, or is not valid " +
+                "${T::class.simpleName} JSON",
+        )
+    }
+}
+
 fun ApplicationCall.jobId(): JobId {
     val raw = parameters["id"]?.takeIf { it.isNotBlank() }
         ?: throw BadRequestException("a job id is required in the path")
@@ -685,6 +769,11 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = "DUPLICATE_LLM_PROFILE_NAME", message = "an LLM profile with that name already exists")),
         )
+    } catch (duplicate: DuplicateOcrProfileNameException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "DUPLICATE_OCR_PROFILE_NAME", message = "an OCR profile with that name already exists")),
+        )
     } catch (last: LastLlmProfileException) {
         respondJson(
             HttpStatusCode.Conflict,
@@ -695,10 +784,72 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             HttpStatusCode.BadRequest,
             ApiErrorResponse(ApiError(code = "CONFIRMATION_MISMATCH", message = mismatch.message.orEmpty())),
         )
+    } catch (sealed: RevisionSnapshotUnavailableException) {
+        // An authoritative publication could not be made coherent in this process, so no search answer would
+        // be right. 503 says "the archive is repairing itself, retry" rather than dressing a mixture of two
+        // readings up as a result.
+        respondJson(
+            HttpStatusCode.ServiceUnavailable,
+            ApiErrorResponse(
+                ApiError(
+                    code = "REVISION_SNAPSHOT_UNAVAILABLE",
+                    message = "the archive is finishing a publication; retry once it has completed",
+                ),
+            ),
+        )
     } catch (missing: NoSuchElementException) {
         respondJson(
             HttpStatusCode.NotFound,
             ApiErrorResponse(ApiError(code = "NOT_FOUND", message = missing.message.orEmpty())),
+        )
+    } catch (refused: RescanRefusalException) {
+        // A rescan that cannot be admitted as asked: another format, a managed copy that is not the recorded
+        // one, an engine this build does not have, an unmeasured external profile, no embedder. The code names
+        // what to do about it, and 409 says the request was understood but the archive's state says no.
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = refused.code, message = refused.message.orEmpty())),
+        )
+    } catch (stale: StaleRescanPreviewException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(
+                ApiError(
+                    code = "STALE_RESCAN_PREVIEW",
+                    message = "the preview is no longer the document's state (${stale.message.orEmpty()}); " +
+                        "preview again",
+                ),
+            ),
+        )
+    } catch (conflict: OcrRequestConflictException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "OCR_REQUEST_CONFLICT", message = conflict.message.orEmpty())),
+        )
+    } catch (busy: OcrOperationConflictException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "OCR_ALREADY_RUNNING", message = busy.message.orEmpty())),
+        )
+    } catch (stale: StaleCandidateDecisionException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "STALE_REVIEW_DECISION", message = stale.message.orEmpty())),
+        )
+    } catch (stale: StaleActiveRevisionException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "STALE_DOCUMENT_REVISION", message = stale.message.orEmpty())),
+        )
+    } catch (deleted: DocumentBeingDeletedException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(
+                ApiError(
+                    code = "DOCUMENT_BEING_DELETED",
+                    message = "this document is being deleted, so no rescan may be admitted for it",
+                ),
+            ),
         )
     } catch (invalid: BadRequestException) {
         respondJson(

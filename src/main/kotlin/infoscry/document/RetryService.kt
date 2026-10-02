@@ -52,8 +52,21 @@ data class RetryPrerequisites(
          * ([ModelManager.isInstalled]), not a digest verification: the question here is only whether a
          * retry has any chance of embedding what it reads.
          */
-        suspend fun probe(ocrLanguages: String, modelsDir: Path): RetryPrerequisites {
-            val settings = ToolProbe.extractionSettings(ocrLanguages)
+        /**
+         * What this machine has for one collection's reading.
+         *
+         * [ocrSnapshot] resolves the collection's OCR selection into the attempt snapshot the retry will run
+         * with, or answers null for a caller that has no profiles wired: without it, a retry records the
+         * legacy Tesseract/fill-missing reading, which is what an unchanged collection means anyway.
+         */
+        suspend fun probe(
+            collection: Collection,
+            modelsDir: Path,
+            ocrSnapshot: (infoscry.ocr.CollectionOcrSettings) -> infoscry.ocr.OcrSettingsSnapshot? = { null },
+        ): RetryPrerequisites {
+            val settings = ToolProbe.extractionSettings(collection.ocrLanguages).let { probed ->
+                ocrSnapshot(collection.ocrSettings())?.let(probed::forOcrSettings) ?: probed
+            }
             return RetryPrerequisites(
                 settings = settings,
                 ocrToolAvailable = settings.ocrTool != null && settings.ocrTool != ToolProbe.OCR_TOOL_ABSENT,
@@ -113,7 +126,7 @@ class RetryService(
      * able to say what it wants the answer to be.
      */
     private val prerequisites: suspend (Collection) -> RetryPrerequisites = { collection ->
-        RetryPrerequisites.probe(collection.ocrLanguages, Path.of("."))
+        RetryPrerequisites.probe(collection, Path.of("."))
     },
 ) {
 

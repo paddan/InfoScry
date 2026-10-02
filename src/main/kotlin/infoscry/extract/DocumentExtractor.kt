@@ -2,8 +2,15 @@ package infoscry.extract
 
 import infoscry.domain.DocumentId
 import infoscry.domain.ExtractionMethod
+import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceLocation
 import infoscry.domain.UnitKind
+import infoscry.ocr.OCR_TRANSCRIPTION_PROMPT_VERSION
+import infoscry.ocr.OcrAttemptIdentity
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.fingerprintPresence
 import java.io.IOException
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -86,6 +93,16 @@ internal const val DOCUMENT_UNREADABLE_CODE: String = "DOCUMENT_UNREADABLE"
 internal const val OCR_FAILED_CODE: String = "OCR_FAILED"
 
 /**
+ * The code a unit whose rendered raster is verified blank paper fails under.
+ *
+ * One spelling, because the PDF reader and the picture reader reach the same honest answer the same way: a
+ * page whose image is white paper and whose engine read nothing is a blank page, and an engine that read
+ * nothing of a page that carries ink is not — which is why this is a code about the *image* rather than
+ * about an empty reading.
+ */
+internal const val PAGE_BLANK_CODE: String = "PAGE_BLANK"
+
+/**
  * The OCR tool cannot read this document at all, so the whole document fails.
  *
  * The distinction matters: a page OCR could not read is one failed unit among many and the rest of the
@@ -102,6 +119,35 @@ internal const val OCR_FAILED_CODE: String = "OCR_FAILED"
 class OcrUnavailableException(val code: String, message: String) : IOException(message)
 
 /**
+ * What a format can say about being read again from page images.
+ *
+ * A page-image reading needs pages, and not every format has them: a spreadsheet, a text file, a book
+ * container and a word-processing document keep their existing extraction, and a rescan of one of them is
+ * answered with the safe reason this carries rather than with rendering invented for it. Naming the reason
+ * is what keeps "this cannot be rescanned" from being reported as a failure or as an empty document.
+ */
+sealed interface PageImageSupport {
+
+    /** This format renders page images, so an engine can be asked to read them. */
+    data object Supported : PageImageSupport
+
+    /** This format has no pages to render; [code] is the safe reason a caller reports. */
+    data class Unsupported(val code: String) : PageImageSupport {
+
+        init {
+            require(code.isNotBlank()) { "an unsupported page-image reason has to name itself" }
+        }
+    }
+}
+
+/**
+ * The code a format that cannot be read from page images reports.
+ *
+ * One spelling on purpose: it reaches the queue, the CLI and the API the same way every other code does.
+ */
+const val PAGE_IMAGES_UNSUPPORTED_CODE: String = "PAGE_IMAGES_UNSUPPORTED"
+
+/**
  * One citable unit an extractor produced, before the store gives it an identifier.
  *
  * Both text forms are carried: [extractedText] is what the tool produced, [searchText] is the form the
@@ -115,6 +161,12 @@ class OcrUnavailableException(val code: String, message: String) : IOException(m
  * something derived: a parser's page and a recognised page are two methods, and `meanConfidence` is not
  * either of them (a page can be read by OCR and come back with no confidence to report, and a parser's text
  * is not evidence that OCR ran). Only the extractor knows which path it took, so only the extractor can say.
+ *
+ * [sourceImage] is the image an OCR reading was made from, and it is absent exactly when no image was read:
+ * a text-layer page parsed out of a container has none, and so does a format that produced its text without
+ * a raster. It is here rather than derived later because only this extractor saw which file the tool was
+ * handed — the managed copy, or the bounded copy of a picture too large to hand over — and a durable page
+ * that did not record it could not be told apart from one read from other pixels.
  */
 data class ContentUnitDraft(
     val locator: SourceLocation,
@@ -124,6 +176,7 @@ data class ContentUnitDraft(
     val artifactRelativePath: String? = null,
     val artifactSha256: String? = null,
     val meanConfidence: Double? = null,
+    val sourceImage: SourceImageProvenance? = null,
 )
 
 /**
@@ -150,7 +203,106 @@ data class ExtractionSettings(
     val ocrTool: String? = null,
     val renderDpi: Int? = null,
     val ebookTool: String? = null,
-)
+    /**
+     * What an OCR attempt read this document with, or null when this extraction is not an OCR attempt.
+     *
+     * An import reads a document's own text layer with a parser, and a job written before OCR attempts
+     * existed carries no attempt at all: both mean "nothing OCR-specific happened", which is exactly what
+     * null says here. It is *not* a default engine — an attempt that named Tesseract at 300 DPI must not
+     * reuse the checkpoints of a job that named nothing, which is why the absent identity is itself part of
+     * the fingerprint. The identity carries only what can change the reading: the reviewer lives in the
+     * settings snapshot and never reaches this field, so a reviewer edit cannot invalidate transcription.
+     */
+    val ocrAttempt: OcrAttemptIdentity? = null,
+    /**
+     * What an OCR attempt is for: filling missing text, or checking and improving what a page carries.
+     *
+     * The mode is a setting rather than a hint because it decides what the engine is *asked* to do, not
+     * which engine is asked: fill-missing keeps a page's own usable text and reads only the pages that have
+     * none, while check-and-improve reads every page image even where a text layer exists. It is part of the
+     * fingerprint for the same reason — a page that was trusted in one mode was not read in the other, so
+     * the two attempts' checkpoints are not each other's to reuse. A mode that reads images is an OCR
+     * attempt by definition, which is why it cannot be set without one.
+     */
+    val ocrMode: OcrImportMode = OcrImportMode.FILL_MISSING,
+) {
+
+    init {
+        require(ocrMode == OcrImportMode.FILL_MISSING || ocrAttempt != null) {
+            "check-and-improve reads page images, so the settings have to name the attempt that reads them"
+        }
+    }
+
+    /**
+     * The engine this extraction reads page images with.
+     *
+     * The attempt's own engine when it names one, and Tesseract for an extraction that is not an OCR attempt
+     * — an ordinary import reads a page that has no text of its own with the tool this build installs, which
+     * is what it has always done. It is deliberately not a fallback: an attempt that names Surya is read by
+     * Surya or refused, never by whichever engine happens to be configured.
+     */
+    fun readingEngine(): OcrEngine = ocrAttempt?.engine ?: OcrEngine.TESSERACT
+
+    /**
+     * These settings as one collection's OCR selection makes them.
+     *
+     * A collection that selects Tesseract and fill-missing is *unchanged*: nothing OCR-specific is added, so
+     * an import of such a collection fingerprints exactly as it did before OCR engines existed and keeps
+     * reusing the checkpoints it already committed. Anything else — another engine, or a mode that reads
+     * images a page already has — is a different reading of the same bytes, so the attempt identity and the
+     * mode travel into the fingerprint where they belong: a page committed under the legacy settings is not
+     * evidence about a page read by Surya, or about a page whose text layer was checked rather than trusted.
+     *
+     * [snapshot] is the collection's settings as they were resolved into the attempt's snapshot, which is what
+     * makes an import admitted before an edit keep reading with what it was admitted with.
+     */
+    fun forOcrSettings(snapshot: infoscry.ocr.OcrSettingsSnapshot): ExtractionSettings {
+        val legacy = snapshot.engine == infoscry.ocr.OcrEngine.TESSERACT &&
+            snapshot.mode == infoscry.ocr.OcrImportMode.FILL_MISSING &&
+            snapshot.transcriptionProfileRevisionId == null
+        if (legacy) return this
+        return copy(ocrAttempt = snapshot.attemptIdentity(), ocrMode = snapshot.mode)
+    }
+
+    /**
+     * These settings with the reading engine's runtime identity, discovered by [runtimeIdentityOf].
+     *
+     * It has to happen *here*, before the fingerprint is computed, because the fingerprint is what decides
+     * whether committed pages are read again: a runtime that changed since an earlier attempt has to be
+     * visible in the key the checkpoints are looked up by, and an identity that only arrives with a reading
+     * arrives after that lookup has already happened. What the reader answers is recorded whether or not one
+     * was expected — including *no* identity, which clears an identity these settings carried — because an
+     * identity that could not be discovered must never compare equal to one that was. An extraction that is
+     * not an OCR attempt is returned untouched: it has no attempt to describe, and the tool it reads with is
+     * already part of the settings (`ocrTool`).
+     */
+    internal suspend fun withRuntimeIdentity(
+        runtimeIdentityOf: suspend (OcrEngine) -> String?,
+    ): ExtractionSettings {
+        val attempt = ocrAttempt ?: return this
+        return copy(ocrAttempt = attempt.copy(runtimeIdentity = runtimeIdentityOf(attempt.engine)))
+    }
+
+    /**
+     * The settings snapshot one page of this extraction is read under, as the engine's seam takes it.
+     *
+     * [renderDpi] is the resolution the page was *actually* rendered at, which is the attempt's own fact and
+     * not the one it asked for: a page brought within a pixel bound was read at the resolution that fitted.
+     * The reviewer fields stay absent here — an extraction does not review, and a reviewer edit must not
+     * change what reading a page produces.
+     */
+    fun pageOcrSettings(renderDpi: Int?): OcrSettingsSnapshot = OcrSettingsSnapshot(
+        engine = readingEngine(),
+        mode = ocrMode,
+        language = ocrLanguages,
+        extractorVersion = extractorSchemaVersion,
+        transcriptionPromptVersion = ocrAttempt?.transcriptionPromptVersion ?: OCR_TRANSCRIPTION_PROMPT_VERSION,
+        transcriptionProfileRevisionId = ocrAttempt?.profileRevisionId,
+        toolVersion = ocrAttempt?.toolVersion ?: ocrTool,
+        modelVersion = ocrAttempt?.modelVersion,
+        renderDpi = renderDpi,
+    )
+}
 
 /**
  * What a unit's checkpoints are keyed by: the same bytes, extracted the same way.
@@ -179,20 +331,80 @@ value class ExtractionFingerprint(val value: String) {
             }
             // A canonical, ordered, line-delimited form: the same inputs always hash the same, and two
             // settings lists cannot collide by concatenating into the same string.
-            val canonical = listOf(
-                "sha256=$sha256",
-                "schema=${settings.extractorSchemaVersion}",
-                "ocr_languages=${settings.ocrLanguages}",
-                "ocr_tool=${settings.ocrTool ?: NONE}",
-                "render_dpi=${settings.renderDpi ?: NONE}",
-                "ebook_tool=${settings.ebookTool ?: NONE}",
-            ).joinToString("\n")
+            val fields = buildList {
+                add("sha256=$sha256")
+                add("schema=${settings.extractorSchemaVersion}")
+                add("ocr_languages=${settings.ocrLanguages}")
+                add("ocr_tool=${legacyFingerprintField(settings.ocrTool)}")
+                add("render_dpi=${settings.renderDpi ?: NONE}")
+                add("ebook_tool=${legacyFingerprintField(settings.ebookTool)}")
+                // The OCR block exists only when the settings name an attempt. Appending it — rather than
+                // adding absent lines for a legacy instance — is what keeps a job or checkpoint written
+                // before OCR attempts existed hashing byte-identically to the digest it was written with.
+                settings.ocrAttempt?.let { attempt ->
+                    add("ocr_engine=${attempt.engine}")
+                    add("ocr_profile_revision=${fingerprintPresence(attempt.profileRevisionId)}")
+                    add("ocr_attempt_language=${attempt.language}")
+                    add("ocr_transcription_prompt=${attempt.transcriptionPromptVersion}")
+                    add("ocr_attempt_tool=${fingerprintPresence(attempt.toolVersion)}")
+                    add("ocr_model=${fingerprintPresence(attempt.modelVersion)}")
+                    add("ocr_render_dpi=${attempt.renderDpi ?: NONE}")
+                    add("ocr_extractor_schema=${attempt.extractorSchemaVersion}")
+                    // What the machine said its runtime was *before* this attempt read anything. A commit
+                    // under one runtime is not a reading another one produced, and an attempt that could not
+                    // describe its runtime is a third thing: the absent form is a value of its own, so a
+                    // checkpoint written under weights nobody named is not reused under named ones.
+                    add("ocr_runtime=${fingerprintPresence(attempt.runtimeIdentity)}")
+                    // What the attempt would have made of a picture it read: a build that decodes the same
+                    // picture differently — as itself rather than as a reduced copy — read different pixels,
+                    // and the document-level fingerprint is the only key an attempt's checkpoints answer to,
+                    // so a policy this line does not cover would be one whose pages could be reused wrong.
+                    add("ocr_picture_decoding_policy=${attempt.pictureDecodingPolicyVersion}")
+                    // The mode belongs inside this block for the same reason the attempt does: an attempt
+                    // that trusted a text layer committed a different page than one that read its image, so
+                    // the two may not satisfy each other's checkpoints.
+                    add("ocr_mode=${settings.ocrMode}")
+                }
+            }
+            // One field per line is unambiguous only while no value carries a line of its own: an
+            // `ocr_attempt_tool` of "x\nocr_model=y" with model "z" would compose exactly the lines of tool
+            // "x" with model "y\nocr_model=z" — two different readings, one fingerprint. A value with a
+            // line break in it is not a version, an id or a language this pipeline produces, so it is
+            // refused here rather than encoded: escaping would leave the two readings comparable while
+            // still calling them different.
+            fields.forEach { field ->
+                require(field.none { character -> character == '\n' || character == '\r' }) {
+                    "an extraction fingerprint field may not contain a line break: " +
+                        "'${field.substringBefore('=')}' does"
+                }
+            }
+            val canonical = fields.joinToString("\n")
             val digest = MessageDigest.getInstance("SHA-256")
                 .digest(canonical.toByteArray(Charsets.UTF_8))
             return ExtractionFingerprint(HexFormat.of().formatHex(digest))
         }
 
         private const val NONE = "none"
+
+        /**
+         * A legacy field whose absent form is already written into committed digests.
+         *
+         * Absence must keep composing exactly `none`, or every checkpoint an archive already holds stops
+         * matching. What can be made safe is the other side: a probe accepts a tool's own first output line,
+         * so a tool can truthfully report the literal word the absent form uses — and two different states
+         * composing one digest is how a page refused because no tool ran gets reused by an attempt that has
+         * one. A present value that would read as absence, or as the escape marker itself, is therefore
+         * marked; every realistic value (a tool version, a converter version) is untouched, which is what
+         * keeps the pinned digests byte-identical.
+         */
+        private fun legacyFingerprintField(value: String?): String = when {
+            value == null -> NONE
+            value == NONE || value.startsWith(ESCAPE_MARKER) -> ESCAPE_MARKER + value
+            else -> value
+        }
+
+        /** The marker a value that would otherwise read as absence or as an escape carries. */
+        private const val ESCAPE_MARKER = "escaped:"
     }
 }
 
@@ -345,6 +557,32 @@ interface DocumentExtractor {
 
     /** The media types this extractor claims, exactly as a detector reports them. */
     val supportedMediaTypes: Set<String>
+
+    /**
+     * Whether this format can be read again from page images, and why not when it cannot.
+     *
+     * A rescan has to render pages, and a format that has none says so here rather than having a rendering
+     * invented for it: the answer is what an admission path reports before it asks anyone to pay for
+     * reading a document whose pages do not exist. The default is the honest one for every format that is
+     * not a paginated raster document.
+     */
+    val pageImageSupport: PageImageSupport get() = PageImageSupport.Unsupported(PAGE_IMAGES_UNSUPPORTED_CODE)
+
+    /**
+     * What the engine [kind] would read this format's pages with, discovered without reading a page.
+     *
+     * This is the one part of an attempt that only the reader can answer: the engines a page goes to belong
+     * to the extractor that hands them the page images, not to the registry that chose the extractor. It is
+     * asked *before* extraction — the answer travels into the attempt's fingerprint, which is the key an
+     * attempt's committed pages are looked up by — so the reader is asked what its runtime is now, not what
+     * it was when some earlier attempt wrote an identity down.
+     *
+     * The default is the honest answer for every format that reads no page images: nothing to describe. An
+     * extractor that does read them answers with the engine's own runtime identity, which is `null` when the
+     * runtime cannot be described — an absence that never compares equal to a discovered identity, so a page
+     * read under unknown weights is read again rather than reused under them.
+     */
+    suspend fun runtimeIdentity(kind: OcrEngine): String? = null
 
     fun extract(input: ExtractionInput): Flow<ExtractionEvent>
 }
