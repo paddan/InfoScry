@@ -1,6 +1,7 @@
 package infoscry.extract
 
 import infoscry.domain.DocumentId
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.fixtures.OcrFixtureGenerator
@@ -157,6 +158,23 @@ class ImageExtractorTest {
         assertEquals("1", metadata[ImageExtractor.IMAGES_METADATA])
         assertEquals("1", metadata[ImageExtractor.OCR_PAGES_METADATA])
         assertContains(metadata.getValue(ImageExtractor.OCR_MEAN_CONFIDENCE_METADATA), "0.5")
+    }
+
+    @Test
+    fun `a picture reports its ocr reading and no direct text beside it`() = runBlocking {
+        // A picture has no text layer to fill in or to check, so there is no second reading of this page to
+        // hand over: both import modes read it with the selected engine, and the engine's reading is the
+        // only one there is.
+        val managed = managedImage(OcrFixtureGenerator.IMAGE_NAME)
+        val probe = PermitProbeBoundary()
+
+        val unit = units(
+            collect(ImageExtractor(PageOcrEngines(listOf(OcrSpy()))), inputFor(managed, probe), probe),
+        ).single().unit
+
+        assertEquals(ExtractionMethod.OCR, unit.method)
+        assertEquals("Rapporten är hemligstämplad", unit.extractedText)
+        assertNull(unit.directText, "a picture was given a text layer it has not got")
     }
 
     // ---- What a resumed attempt pays for ------------------------------------------------------------

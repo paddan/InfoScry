@@ -184,6 +184,80 @@ class PdfExtractorTest {
     }
 
     @Test
+    fun `check and improve hands over the page's own text beside what it read from the image`() {
+        // The mode's whole point: the page carries a text layer *and* its image was read, so one unit has to
+        // account for both readings — the engine's as the unit's text, the page's own beside it — because
+        // comparing the two and deciding between them is what an admitted check-and-improve attempt owes.
+        val spy = OcrSpy()
+
+        val units = units(
+            collect(
+                pdfExtractor(spy),
+                inputFor(fixture(TEXT_NAME), probe(), settings = checkAndImprove()),
+                probe(),
+            ),
+        )
+
+        assertEquals(listOf("läst sida 1", "läst sida 2", "läst sida 3"), units.map { it.unit.extractedText })
+        assertEquals(
+            listOf(ExtractionMethod.OCR, ExtractionMethod.OCR, ExtractionMethod.OCR),
+            units.map { it.unit.method },
+        )
+        units.forEach { unit ->
+            val direct = assertNotNull(unit.unit.directText, "page ${pageOf(unit.key)} carried no text layer")
+            assertContains(direct, "Protokollet")
+            assertNotEquals(direct, unit.unit.extractedText, "the two readings of one page were conflated")
+        }
+    }
+
+    @Test
+    fun `check and improve reports no direct text for a page that carries none`() {
+        // A scanned page has no text layer to compare against, so there is no second reading to carry: the
+        // engine's is the only one, and a baseline invented for it would be a comparison against nothing.
+        val spy = OcrSpy()
+
+        val units = units(
+            collect(
+                pdfExtractor(spy),
+                inputFor(fixture(MIXED_NAME), probe(), settings = checkAndImprove()),
+                probe(),
+            ),
+        )
+        val direct = units.associate { pageOf(it.key) to it.unit.directText }
+
+        MIXED_SCANNED_PAGES.forEach { page ->
+            assertNull(direct[page], "the scanned page $page was given a text layer it has not got")
+        }
+        MIXED_TEXT_PAGES.forEach { page ->
+            assertNotNull(direct[page], "the readable page $page lost its own text layer")
+        }
+    }
+
+    @Test
+    fun `fill missing commits one reading of a page and never a second one`() {
+        // Fill-missing either keeps a page's own text as the unit or replaces it with what the tool read,
+        // so it never has two readings of one page to hand a sink. A page it kept is its own text, unchanged
+        // from what this extractor has always committed.
+        val spy = OcrSpy()
+
+        val events = collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe()), probe())
+        val units = units(events)
+
+        assertTrue(
+            units.all { it.unit.directText == null },
+            "fill-missing carried a second reading: ${units.map { it.unit.directText }}",
+        )
+        val kept = units.first { pageOf(it.key) in MIXED_TEXT_PAGES }
+        assertEquals(ExtractionMethod.DIRECT_TEXT, kept.unit.method)
+        assertContains(kept.unit.extractedText, "Protokollet")
+        assertEquals(
+            listOf(3, 4, 5),
+            units.filter { it.unit.method == ExtractionMethod.OCR }.map { pageOf(it.key) },
+            "fill-missing read a page whose own text is usable",
+        )
+    }
+
+    @Test
     fun `a page image read for review is kept as the attempt's evidence`() {
         // A rescan's pages are reviewed against the image they were read from, so those images outlive the
         // attempt. A fill-missing render is working material instead, which the test above the helpers

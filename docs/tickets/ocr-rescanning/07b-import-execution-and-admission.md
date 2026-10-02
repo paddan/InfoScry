@@ -50,7 +50,33 @@ slice of its own, and the map is recorded with that item so a later run does not
   - The remote CLI import reports a waiting-approval requirement instead of enqueueing and returning success.
 - [x] Run the focused command below and record the expected behavioral failure. For an external test, first prove missing/invalid-runtime diagnostics using the fake transport; do not download private fixtures.
 - [x] Carry the admitted snapshot (engine, mode, profiles, allowance, and the probed runtime identity) into execution instead of re-deriving it, so a restart resumes the runtime it was admitted with rather than discovering a new one.
-- [ ] Build or inject an image-capable engine for an LLM attempt in the production registry, and compare/review differing pages on the import path with the same rules the rescan path already implements (identical non-blank no-op, empty pair pending, review failure keeps the baseline, pilot `PROPOSE`). — **Open.** What it concretely needs, from the run that measured it: the page's *direct* text plumbed out of `PdfExtractor`/`ImageExtractor` per page (a unit draft carries one text today); a reviewer, a store-backed `OcrDecisionPolicy` and a REVIEW-stage dispatch authority wired into the import attempt (the rescan factories exist but are built per operation and document); per-document selection of a `CandidateRevisionSink`, which currently takes `documentId` at construction that the import handler does not know when it builds the pipeline; chunking and embedding from the candidate and publication through `RevisionPublicationService` so pending pages stay unindexed; and `FILL_MISSING` left on the `StoredUnitsSink` path. Half of it would leave `DocumentIngest` publishing and staging at once.
+**Status of this ticket:** its admission, approval, claiming and status work is verified, and so is the **first
+half of the `CHECK_AND_IMPROVE` item**: a page now carries its *direct* text beside the engine's reading
+(`ContentUnitDraft.directText`, set by `PdfExtractor` only when every page is read, so `FILL_MISSING` is
+unchanged), and a `NEEDS_REVIEW` document is a finished status for import purposes, so a byte-identical
+re-import records `DUPLICATE` rather than re-reading it. My own `./gradlew check` is green on this tree
+(106 suites, 1358 tests, 0 failures, 16m43s).
+
+**What is still open is the largest remaining item**, and a run validated its shape against the code: the
+comparison *logic* already exists (`OcrComparisonService.compare` handles a text-only baseline, the
+identical-non-blank no-op, the empty-pair rule and reviewer failure), but the plumbing does not — a
+`PageComparisonInput` needs a real `PageImage` while a draft carries only `SourceImageProvenance` (so the page
+image must be reconstructed under the artifact root or carried on the draft); the candidate phases
+(chunk/embed/publish) and the decision helpers are **private inside the 986-line `RescanJobHandler`**, so reuse
+means extracting them into a shared component first; and `ImportPipeline` holds one sink for every document, so
+per-document sink selection and a per-document REVIEW-stage dispatch authority are needed. That is a
+refactor-sized slice, not a wiring change.
+
+**One product decision gates it.** Ticket 02's publication refuses a revision with *any* unapproved page
+(all-or-nothing), while the spec says an initial import "may publish approved pages while unapproved pages have
+image access and pending-review state but no searchable text". Under the current rule, a fresh
+`CHECK_AND_IMPROVE` import whose reading differs on one page ends up with no searchable text at all — even
+though its text layer exists — and shows only `NEEDS_REVIEW`. The recommended reading: **an initial import
+publishes its approved pages** (nothing is lost, because there is no earlier reading to protect) while a
+**rescan keeps all-or-nothing publication** (its base revision is serving readers, and a partial replacement
+would silently drop text they can search today). Confirm before this slice is built.
+
+- [ ] Build or inject an image-capable engine for an LLM attempt in the production registry, and compare/review differing pages on the import path with the same rules the rescan path already implements (identical non-blank no-op, empty pair pending, review failure keeps the baseline, pilot `PROPOSE`). — **Half done:** the direct text is carried and `NEEDS_REVIEW` is finished; the compare/review/publication half is open as described above, blocked on the publication question.
 - [x] Wire a store-backed `OcrDecisionPolicy(policyVersion, reviews)` wherever a comparison happens, so an accepted validation is consulted rather than defaulted away.
 - [x] Make resume and approval claim the attempt through `OcrOperationStore.startAttempt` (or an equivalent idempotent guard), so two workers cannot run against one candidate and one set of counters.
 - [x] Revalidate the whole effective settings snapshot at admission and refuse a stale preview with the existing conflict shape.

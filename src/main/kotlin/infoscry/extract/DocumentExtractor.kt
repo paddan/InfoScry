@@ -167,6 +167,15 @@ const val PAGE_IMAGES_UNSUPPORTED_CODE: String = "PAGE_IMAGES_UNSUPPORTED"
  * a raster. It is here rather than derived later because only this extractor saw which file the tool was
  * handed — the managed copy, or the bounded copy of a picture too large to hand over — and a durable page
  * that did not record it could not be told apart from one read from other pixels.
+ *
+ * [directText] is the *other* reading of one page, and it exists for exactly one mode: an attempt that reads
+ * a page image even where a text layer already exists has two readings of that page — the text layer the
+ * page carries and what the engine read from its pixels — and the first is what the second has to be
+ * compared with and decided against. It is the same form the unit's own text is in (normalised, the form a
+ * revision page holds), so the two can be compared as they stand. It is absent whenever there is no such
+ * pair: a picture and a scanned page have no text layer, a layer that could not be read is not one, and
+ * fill-missing either commits the layer as the unit or replaces it outright without ever handing two
+ * readings of one page to a sink.
  */
 data class ContentUnitDraft(
     val locator: SourceLocation,
@@ -177,6 +186,7 @@ data class ContentUnitDraft(
     val artifactSha256: String? = null,
     val meanConfidence: Double? = null,
     val sourceImage: SourceImageProvenance? = null,
+    val directText: String? = null,
 )
 
 /**

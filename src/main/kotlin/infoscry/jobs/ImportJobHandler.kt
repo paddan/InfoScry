@@ -709,10 +709,19 @@ class ImportJobHandler internal constructor(
         private const val COMPONENT_FIELD = "component"
         private const val DOCUMENT_FIELD = "document_id"
 
-        /** A document with this status has nothing left to extract. */
+        /**
+         * A document with this status has nothing left to extract.
+         *
+         * `NEEDS_REVIEW` is one of them because such a document *has* been read: its bytes are stored, its
+         * reading is on record, and what it owes is a decision no re-reading can answer. Importing the same
+         * bytes again is therefore a duplicate rather than a reason to read a document that is already
+         * waiting — and the reading a second pass would produce is exactly what a person has still to decide
+         * about, so it could not answer the question either.
+         */
         private val FINISHED_STATUSES = setOf(
             DocumentStatus.COMPLETE,
             DocumentStatus.COMPLETE_WITH_WARNINGS,
+            DocumentStatus.NEEDS_REVIEW,
         )
 
         /**

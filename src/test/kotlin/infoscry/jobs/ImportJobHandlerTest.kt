@@ -982,6 +982,27 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a byte-identical import of a review-pending document is a duplicate rather than a re-ingest`() {
+        withHarness { harness ->
+            val source = harness.writeText("pending.txt", "Ordinary text\n")
+            val first = harness.importAwaitingDecision(listOf(source), RecordingUnits(units = 2))
+
+            assertEquals(DocumentStatus.NEEDS_REVIEW, first.documents.values.single().status)
+
+            // The bytes are already stored, and the document owes a person a decision about the reading that
+            // was committed. Reading it again is neither needed nor able to answer that question, so the item
+            // is a duplicate and the document is left exactly as it was.
+            val second = RecordingUnits(units = 2)
+            val run = harness.importDurably(listOf(source), second)
+
+            assertEquals(ImportItemOutcome.DUPLICATE, run.items.single().outcome)
+            assertTrue(second.produced.isEmpty(), "a document that awaits a decision was read again")
+            assertTrue(second.skipped.isEmpty(), "the extractor is not even invoked for a finished duplicate")
+            assertEquals(DocumentStatus.NEEDS_REVIEW, run.documents.values.single().status)
+        }
+    }
+
+    @Test
     fun `a second import of a stored document reuses its units and does not chunk it again`() {
         withHarness { harness ->
             val source = harness.writeText("again.txt", "Ordinary text\n")

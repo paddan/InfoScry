@@ -172,7 +172,8 @@ class ImageExtractor(
                         locator = SourceLocation.Image(input.originalFilename),
                         extractedText = normalised.extracted,
                         searchText = normalised.search,
-                        // The picture is the document and the engine read it; there is no text layer here.
+                        // The picture is the document and the engine read it; there is no text layer here,
+                        // so this unit carries one reading and no direct text beside it.
                         method = ExtractionMethod.OCR,
                         // The engine's word boxes are named inside the attempt's own artifacts, and the
                         // unit names them from the document's artifact root.

@@ -417,6 +417,12 @@ class PdfExtractor(
                         page = page,
                         text = verified.text,
                         method = ExtractionMethod.OCR,
+                        // What this reading replaced: in check-and-improve the page's own text layer
+                        // travels beside the engine's reading of its pixels, because comparing the two —
+                        // and deciding between them — is what the mode was admitted for. Fill-missing
+                        // hands over one reading of the page, as it always has: either that layer, or
+                        // what the tool read in its place.
+                        directText = text.takeIf { readsEveryPage },
                         // The engine's reading artifact is named inside the attempt's own directory, and a
                         // unit's artifact is named from the document's artifact root: the fingerprint is
                         // what joins the two.
@@ -501,6 +507,7 @@ class PdfExtractor(
         artifactSha256: String? = null,
         meanConfidence: Double? = null,
         sourceImage: SourceImageProvenance? = null,
+        directText: String? = null,
     ) {
         val normalised = TextNormalizer.normalize(text)
         emit(
@@ -516,6 +523,13 @@ class PdfExtractor(
                     artifactSha256 = artifactSha256,
                     meanConfidence = meanConfidence,
                     sourceImage = sourceImage,
+                    // Normalised the same way as the unit's own text, and dropped when nothing visible is
+                    // left of it: a layer of whitespace is not a reading of the page, and a baseline made
+                    // of it would be a comparison against nothing.
+                    directText = directText
+                        ?.let(TextNormalizer::normalize)
+                        ?.extracted
+                        ?.takeIf(String::isNotBlank),
                 ),
             ),
         )
