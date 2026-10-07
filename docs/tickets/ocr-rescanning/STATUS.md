@@ -14,7 +14,9 @@
 Product decisions and documentation were authorized on 2026-09-30. Tickets 01, 02, 03, 04, 05, 06 and 07b are
 implemented and verified, and ticket 07 is implemented for its rescan path (its whole deliverable is covered
 with 07b); tickets 08 and 09 are implemented (backend and web) but not accepted — see their verification records, which
-list what was and was not run; tickets 02b, 03b, 10 and 11 have not started. Ticket decomposition and technical
+list what was and was not run; tickets 02b and 03b are implemented and verified by focused suites (see their
+record); tickets 10 and 11 have not started. The schema is now one baseline (`001_baseline.sql`); the migration
+numbers named in older records refer to the history it replaced. Ticket decomposition and technical
 defaults are engineering proposals within that scope, not verified product behavior. No implementation,
 installation, model download, private-data experiment, commit or push is implicitly authorized by this
 document.
@@ -35,9 +37,9 @@ document.
 |---|---|---|
 | [01 — OCR profiles and immutable attempt settings](01-profiles-and-settings.md) | None | Done — migration 017; focused suite green (67 tests: `OcrSettingsTest` 19, `OcrProfileRoutesTest` 10, `CollectionRoutesTest` 29, `SchemaMigratorTest` 9) and `./gradlew check` green (13m45s); legacy archives and legacy fingerprints unchanged |
 | [02 — Isolated revisions and recoverable publication](02-revision-publication.md) | 01 | Done — migration 018 (document/page revisions, revision chunks, publication intents, `citations.revision_id`) and the PREPARED → staged commit → authority → snapshot → PUBLISHED protocol with roll-forward/roll-back recovery; `./gradlew check` green (97 suites, 1133 tests, 0 failures, 14m) plus the focused suites; three independent review rounds drove the untagged-baseline, reader-acquire race, candidate-leak, unadmitted-cleanup, post-authority-failure, draft-source-route and recovery-window fixes |
-| [02b — Revision-aware saved evidence](02b-revision-aware-evidence.md) | 02 | Not started — carries ticket 02's evidence tail: the Ask viewer's revision-unknown fallback, the Investigate ledger's excerpt/revision columns, and the pre-switch seal test |
+| [02b — Revision-aware saved evidence](02b-revision-aware-evidence.md) | 02 | Done — the Investigate ledger stores each evidence's revision with its excerpt, history no longer joins live units, the viewer opens the named revision or shows the saved excerpt labelled revision unknown, and the pre-switch seal window has a deterministic test. jsdom only for the viewer; see the record below |
 | [03 — Page-image OCR seam and Tesseract compatibility](03-ocr-engine-contract.md) | 01, 02 | Done — `PageOcrEngine`/`PageImage`/`OcrPageResult`, `PageImageRenderer`, Tesseract behind the seam and the FILL_MISSING / CHECK_AND_IMPROVE / rescan branch, with legacy fill-missing behavior and the pinned legacy fingerprints unchanged; `./gradlew check` green (98 suites, 1176 tests, 0 failures, 14m) plus the focused suites; four review rounds drove the bounded-raster, overflow, over-cap-picture, multipage-blank, candidate-key and fingerprint-collision fixes |
-| [03b — Image provenance and artifact lifetime](03b-image-provenance.md) | 03 | Not started — carries what ticket 03's reviews left open: root-confined provenance enforced at the store and schema, no half-populated rows, and renders that staged candidates reference kept alive |
+| [03b — Image provenance and artifact lifetime](03b-image-provenance.md) | 03 | Done — root-confined, all-or-none provenance enforced by the record and by schema CHECKs, partial rows fail on read, and a fill-missing render that a candidate names is retained (otherwise no provenance is recorded); see the record below |
 | [04 — Local Surya adapter and Mac runtime proof](04-surya.md) | 03 | Done — `SuryaOcr` + `scripts/ocr/surya_worker.py` (bounded versioned JSON, one inference manager per worker, `--identity` probe, process-tree teardown) with the real runtime measured on this Mac (surya-ocr 0.22.1, llama.cpp 0.5.0 build 11146, weights 1.36 GiB; cold ~5.2 s / warm ~1.8 s per page); `./gradlew check --rerun-tasks` green (99 suites, 1197 tests, 0 failures, 14m43s), `externalTest --tests SuryaRealToolTest` green, `python3 scripts/ocr/test_surya_worker.py` ok; three review rounds drove whole-tree teardown, `OCR_EMPTY` failures instead of committed empty text, the runtime identity probe in the fingerprint, and `NEEDS_TOOL` remedies in the import queue |
 | [05 — Image-based LLM transcription and profile capability](05-image-llm.md) | 03 | Done — `ImageLlmClient` speaks both image protocols from the page's own bytes (hash-checked, format-checked, `max_tokens`-bounded, response-size bounded, per-attempt timeout, bounded retries on 429/5xx only, redirects refused unfollowed, whole request budgeted against the window and reserved output, resolved model version carried back) and refuses a non-local destination without ticket 07's permit validator; `LlmOcr` reads only through the snapshotted revision and the shipped prompt version; `prompts/ocr-transcription.txt` v1 ships with the transcription schema; `POST /api/ocr/profiles/{profileId}/probe` sends only the synthetic image and records `imageCapabilityMeasured`/`imageCapabilityCheckedAt`; focused suites green with both key invariants proven by guard-revert runs, and `./gradlew check` green (102 suites, 1268 tests, 0 failures, 15m55s); a security round closed the credentialed-endpoint hole across the OCR, LLM and catalog validators and remediated stored ones with migration 020 (credential removed, repaired conversation snapshots marked, repaired profiles switched off), and made "a switched-off profile is not a dispatch destination" hold at the routes, the CLI and the services that dispatch; a migration delimiter bug the parent found (`COALESCE` order, which would have rewritten `https://host?email=a@b/c` into `https://b/c`) was fixed and is covered by regression cases. Unverified: no real provider gate (ticket 10), and the engine is deliberately not wired into `ExtractorRegistry` — that is ticket 07's admission path (external-page accounting, previews, approval) |
 | [06 — Image-grounded comparison and pilot decisions](06-comparison.md) | 03, 05 | Done — deterministic diagnostics, the side-neutral A/B review call (prompt v2) with its answer mapped to the application's vocabulary in code, pilot mode enforced server-side so every difference is `PROPOSE`, durable reviews keyed by baseline/candidate/reviewer/prompt/policy, identical-nonblank no-ops, empty pairs pending and unsearchable, and failures that keep the baseline with zero re-transcription; `./gradlew check` green (104 suites, 1313 tests, 0 failures, 15m53s); four review rounds made approval structural (a policy that holds the review store, whose acceptance can only be resolved from a live row) and verified baselines against the stored revision page before every shortcut |
@@ -389,3 +391,56 @@ server, through `externalTest` or `gpuIntegrationTest`, or with the real CoreML 
   and `OfficeExtractorsTest` (the POI language tag follows the default locale). The last full backend run
   (1,362 tests) predates tickets 08 and 09; it had only those three failures. No full `./gradlew check` has
   been run since.
+
+## Tickets 03b and 02b and the schema baseline — verification record
+
+Same environment and limits as the 08/09 record: Linux container, JDK 25, non-root with a UTF-8 locale unless
+stated; no macOS, real browser, live server, `externalTest`, `gpuIntegrationTest` or real CoreML run.
+
+### 03b
+
+- `SourceImageProvenance` refuses blank, NUL-containing, absolute (leading separator or drive letter) and
+  `.`/`..`/empty-segment references when it is constructed, so at every write. The schema enforces the same
+  shape and all-or-none root, path, hash and render version, with width and height as their own pair (an
+  unmeasured picture stays legal; requiring dimensions would be a product change). A row that something wrote
+  around the store with partial or malformed provenance fails loudly on read instead of reading as "no image".
+- Artifact lifetime: a check-and-improve render is retained as before; a fill-missing render is retained under
+  `pages/` when the attempt stages for review and recorded, otherwise it is deleted and the page records no
+  provenance (before, it recorded a dead `working/` path). A retained render lives as long as any revision row
+  names it, which in practice is until the document or collection is deleted: withdrawn candidates keep their
+  pages so that a stager may resume, so no per-candidate sweep was added. No test asserts that deleting a
+  document removes retained renders; that rests on deletion removing the document's artifact directory.
+- Run: the extract, ocr, document, storage, server and jobs packages, 952 tests, 3 failures, all environmental
+  (`ExternalProcessTest` twice, `OfficeExtractorsTest`).
+
+### Schema baseline
+
+- The 26 migrations were replaced by `src/main/resources/db/migration/001_baseline.sql` (`user_version` 1). Before
+  the old files were removed, a temporary test applied the old chain and the baseline to two fresh databases and
+  compared every schema object, column (order, type, default, nullability, key), foreign key, index and row, plus
+  the normalized CHECK text: no difference apart from the version number. A fresh archive has no collection.
+- There is no upgrade path and no handling of existing databases (an owner decision: the application is not in
+  production); future schema changes edit the baseline. Upgrade-path tests were removed; the behavioural schema
+  tests run against the baseline. `conversations.profile_endpoint_repaired`, which only the removed repair
+  migration wrote, was dropped with its read path; reading still strips a credential from a stored endpoint
+  that something wrote around the profile type.
+- Run: storage, document, jobs, server, ocr, extract, llm, ask, investigate, search and library packages,
+  1,211 tests, 3 failures, all environmental. `CollectionsBrowserAcceptanceTest` was edited (its legacy-Default
+  scenario now builds on the baseline) but only compiled: it needs `externalTest`.
+
+### 02b
+
+- `evidence_ledger.revision_id` (nullable, not a foreign key, like `citations.revision_id`) stores the revision
+  each Investigate evidence was taken from: a search hit's own revision, or the document's active revision for a
+  directly read unit, set to unknown if that revision or the unit's text changed during the read. The ledger
+  already had an `excerpt` column, contrary to the ticket. History reads both from the ledger and resolves the
+  document without joining live units, so a removed unit no longer drops its evidence.
+- The viewer (Ask and Investigate) opens the named revision; with no revision but a saved excerpt it shows the
+  excerpt labelled "Revision unknown" and does not fetch today's text; a citation with neither (a live, just
+  streamed one) still opens the live unit.
+- `RevisionPublicationTest` covers the pre-switch seal window with a counter-based hook: reads and search refuse
+  while sealed, and recovery publishes the candidate and unseals. It passed without a production change and has
+  no mutation proof. An index on `page_text_revisions (unit_id)` serves the unit-to-document fallback lookup.
+- Run: `RevisionPublication*`, storage, investigate, `Ask*`, `Investigation*` and `LlmStoreTest`, 272 tests, no
+  failure; web 16 files, 383 Vitest tests, `npm run check` 0 errors and 0 warnings, build succeeded. The backend
+  tests for the ledger were not seen failing before the change (they did not compile without the new fields).
