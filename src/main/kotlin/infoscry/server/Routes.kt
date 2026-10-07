@@ -778,6 +778,16 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = "DUPLICATE_LLM_PROFILE_NAME", message = "an LLM profile with that name already exists")),
         )
+    } catch (stale: infoscry.storage.StaleOcrProfileRevisionException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(
+                ApiError(
+                    code = "STALE_OCR_PROFILE_REVISION",
+                    message = "this profile was edited after the revision you were editing; reload it and edit again",
+                ),
+            ),
+        )
     } catch (duplicate: DuplicateOcrProfileNameException) {
         respondJson(
             HttpStatusCode.Conflict,

@@ -15,6 +15,11 @@ import java.util.UUID
 class DuplicateOcrProfileNameException(val name: String) :
     IllegalStateException("an OCR profile named '$name' already exists")
 
+/** An edit named a revision the profile no longer reads through. */
+class StaleOcrProfileRevisionException : IllegalStateException(
+    "the profile was edited by someone else after this edit was prepared",
+)
+
 /**
  * Persistence for OCR profiles and their immutable revisions.
  *
@@ -104,15 +109,30 @@ class OcrProfileStore(private val database: Database) {
     /**
      * Edits a profile: a new immutable revision, then the profile's name, enabled flag and pointer.
      *
+     * When [expectedRevisionId] is given it must be the revision the profile reads through *now*, checked in
+     * the same transaction as the write; otherwise [StaleOcrProfileRevisionException] is thrown and nothing
+     * changes. Absent keeps the unguarded last-writer behaviour older clients rely on.
+     *
      * Null when no profile has that id, so a route can answer not-found without touching anything. The
      * revision the profile pointed at before is left exactly as it was, because an attempt that already
      * snapshotted it still describes that attempt.
      */
-    fun update(id: String, name: String, draft: OcrProfileRevisionDraft, enabled: Boolean): OcrProfile? {
+    fun update(
+        id: String,
+        name: String,
+        draft: OcrProfileRevisionDraft,
+        enabled: Boolean,
+        expectedRevisionId: String? = null,
+    ): OcrProfile? {
         require(id.isNotBlank()) { "an OCR profile needs an id" }
         val trimmedName = requireName(name)
         val updated = database.transaction { connection ->
             val existing = selectProfile(connection, id) ?: return@transaction null
+            // The guard and the write share this transaction (and the database's one writer lock), so an
+            // edit prepared against a revision that has since been replaced cannot slip in between.
+            if (expectedRevisionId != null && existing.revision.revisionId != expectedRevisionId) {
+                throw StaleOcrProfileRevisionException()
+            }
             val revisionId = UUID.randomUUID().toString()
             val now = Instants.now()
             insertRevision(

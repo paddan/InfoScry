@@ -633,6 +633,23 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         }
     }
 
+    /** A second, different picture document in the same collection, for the tests that need a neighbour. */
+    fun importAnotherPicture(text: String): Picture {
+        val file = harness.sourcesDir.resolve("another-page.png")
+        val image = BufferedImage(8, 8, BufferedImage.TYPE_INT_RGB)
+        for (x in 0 until 8) {
+            for (y in 0 until 8) image.setRGB(x, y, 0xEEEEEE)
+        }
+        ImageIO.write(image, "png", file.toFile())
+        val run = harness.importDurably(listOf(file), PictureUnits(text))
+        val documentId = run.items.single().documentId!!
+        AppContext.open(harness.dataDir).use { context ->
+            val revisionId = context.revisions.activeRevisionId(documentId)!!
+            val page = context.revisions.pages(revisionId).single()
+            return Picture(documentId, revisionId, page.unitId.value, file)
+        }
+    }
+
     /** The text the document publishes now, as its active revision holds it. */
     fun publishedTextOf(picture: Picture): String = AppContext.open(harness.dataDir).use { context ->
         val revisionId = context.revisions.activeRevisionId(picture.documentId)!!

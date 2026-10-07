@@ -1,6 +1,7 @@
 package infoscry.server
 
 import infoscry.AppContext
+import infoscry.document.PendingReview
 import infoscry.document.ReviewChoice
 import infoscry.document.ReviewDecision
 import infoscry.domain.DocumentId
@@ -14,10 +15,13 @@ import infoscry.ocr.ReviewReason
 import infoscry.document.RevisionHistoryEntry
 import infoscry.storage.RevisionRestoreRecord
 import infoscry.storage.StaleRescanPreviewException
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
 import io.ktor.server.request.receiveText
+import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -96,6 +100,28 @@ data class PendingReviewView(
     val reviewPromptVersion: Int,
     val policyVersion: Int,
     val searchable: Boolean,
+    /**
+     * Whether `GET .../reviews/{unitId}/image` can be asked for this page. It is a listing-time answer from the
+     * page's record (the image exists inside its document and is the one the review was made against); the
+     * route verifies the bytes and is the authority, so a client still handles a refusal.
+     */
+    val imageAvailable: Boolean = false,
+)
+
+/** One pending page's candidate text, bounded, as the review surface shows it next to the page image. */
+@Serializable
+data class PendingCandidateResponse(
+    val operationId: String,
+    val unitId: String,
+    val ordinal: Int,
+    /** The hash of the whole candidate text, which a decision on this page must quote. */
+    val candidateHash: String,
+    /** The revision a decision's `expectedRevisionId` names while this proposal is pending. */
+    val baselineRevisionId: String? = null,
+    val text: String,
+    /** The candidate's full length in characters; larger than `text` when [truncated]. */
+    val totalChars: Int,
+    val truncated: Boolean,
 )
 
 /** One bounded reason behind a review, as the comparison recorded it. */
@@ -117,6 +143,8 @@ data class ReviewsResponse(
     val total: Int,
     val pendingPages: Int,
     val pendingReviewCount: Int,
+    /** Pages already decided whose decisions are not published yet; Publish is offered while this is above zero. */
+    val decidedUnpublishedCount: Int = 0,
     /** How the two external counters differ, in the words the UI shows beside them. */
     val externalAccounting: String,
 )
@@ -354,13 +382,59 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                 call.respondJson(
                     HttpStatusCode.OK,
                     ReviewsResponse(
-                        reviews = pending.drop(offset).take(limit).map(PageReview::toApiView),
+                        reviews = pending.drop(offset).take(limit).map(PendingReview::toApiView),
                         total = pending.size,
                         pendingPages = operation.pendingReviewCount,
                         pendingReviewCount = operation.pendingReviewCount,
+                        decidedUnpublishedCount = operation.decidedUnpublishedCount,
                         externalAccounting = externalAccountingOf(operation),
                     ),
                 )
+            }
+        }
+
+        // The text a person is deciding about. JSON only, bounded, and only for a page that is still pending.
+        get("/reviews/{unitId}/candidate") {
+            call.handle {
+                val operationId = call.reviewOperationId()
+                val reading = context.rescanService.pendingCandidate(
+                    collectionId = call.collectionId(),
+                    documentId = call.documentId(),
+                    operationId = operationId,
+                    unitId = call.reviewUnitId(),
+                )
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.response.headers.append("X-Content-Type-Options", "nosniff")
+                call.respondJson(
+                    HttpStatusCode.OK,
+                    PendingCandidateResponse(
+                        operationId = operationId,
+                        unitId = reading.unitId,
+                        ordinal = reading.ordinal,
+                        candidateHash = reading.candidateHash,
+                        baselineRevisionId = reading.baselineRevisionId,
+                        text = reading.text,
+                        totalChars = reading.totalChars,
+                        truncated = reading.truncated,
+                    ),
+                )
+            }
+        }
+
+        // The image that reading was made from: the managed artifact, resolved server-side from the page's own
+        // record. The type is one of a fixed list, never a stored value, and nothing here names a file.
+        get("/reviews/{unitId}/image") {
+            call.handle {
+                val image = context.rescanService.pendingImage(
+                    collectionId = call.collectionId(),
+                    documentId = call.documentId(),
+                    operationId = call.reviewOperationId(),
+                    unitId = call.reviewUnitId(),
+                )
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.response.headers.append("X-Content-Type-Options", "nosniff")
+                call.response.headers.append("Content-Security-Policy", "default-src 'none'; sandbox")
+                call.respondBytes(image.bytes, ContentType.parse(image.mediaType), HttpStatusCode.OK)
             }
         }
 
@@ -618,7 +692,9 @@ private fun RevisionRestoreRecord.toApiView(): RestoreOperationView = RestoreOpe
     updatedAt = updatedAt,
 )
 
-private fun PageReview.toApiView(): PendingReviewView = PendingReviewView(
+private fun PendingReview.toApiView(): PendingReviewView = review.toApiView(imageAvailable)
+
+private fun PageReview.toApiView(imageAvailable: Boolean): PendingReviewView = PendingReviewView(
     unitId = unitId,
     ordinal = ordinal,
     recommendation = recommendation.name,
@@ -633,6 +709,7 @@ private fun PageReview.toApiView(): PendingReviewView = PendingReviewView(
     reviewPromptVersion = reviewPromptVersion,
     policyVersion = policyVersion,
     searchable = searchable,
+    imageAvailable = imageAvailable,
 )
 
 private fun ReviewReason.toApiView(): ReviewReasonView = ReviewReasonView(
@@ -651,6 +728,14 @@ private fun ApplicationCall.documentId(): DocumentId {
         ?: throw BadRequestException("a document id is required in the path")
     return DocumentId(raw)
 }
+
+private fun ApplicationCall.reviewOperationId(): String =
+    request.queryParameters["operationId"]?.takeIf { it.isNotBlank() }
+        ?: throw BadRequestException("the review routes need the operation they are about")
+
+private fun ApplicationCall.reviewUnitId(): String =
+    parameters["unitId"]?.takeIf { it.isNotBlank() }
+        ?: throw BadRequestException("a page id is required in the path")
 
 private fun ApplicationCall.operationId(): String =
     parameters["operationId"]?.takeIf { it.isNotBlank() }
