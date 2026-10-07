@@ -15,6 +15,7 @@ import infoscry.search.SearchOutcome
 import infoscry.search.SearchService
 import infoscry.search.SearchUnavailableException
 import infoscry.storage.ContentStore
+import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.ContentUnitSummary
 import infoscry.storage.DocumentStore
 import java.nio.charset.StandardCharsets
@@ -34,6 +35,8 @@ data class ToolEvidence(
     val locatorLabel: String,
     val text: String,
     val truncated: Boolean,
+    /** The revision this excerpt was read from, or `null` when nobody recorded one. */
+    val revisionId: String? = null,
 )
 
 /** The outcome of one tool call: either the exact JSON [payloadJson] the model receives, or a typed failure. */
@@ -45,6 +48,14 @@ sealed interface ToolResult {
 /** The retrieval boundary the tools read through; kept separable so the tools are testable without an index. */
 fun interface InvestigationSearch {
     fun search(queryText: String, mode: SearchMode, filters: SearchFilters): SearchOutcome
+}
+
+/**
+ * The revision boundary evidence is attributed to: which reading the live content a tool served belongs
+ * to. Separable like [InvestigationSearch] so the tools stay testable without a revision store.
+ */
+fun interface InvestigationRevisions {
+    fun activeRevisionId(documentId: DocumentId): String?
 }
 
 /**
@@ -62,6 +73,7 @@ class InvestigationTools(
     private val search: InvestigationSearch,
     private val content: ContentStore,
     private val documents: DocumentStore,
+    private val revisions: InvestigationRevisions,
     private val maxResultBytes: Int = DEFAULT_MAX_RESULT_BYTES,
 ) {
     constructor(
@@ -69,8 +81,16 @@ class InvestigationTools(
         search: SearchService,
         content: ContentStore,
         documents: DocumentStore,
+        revisions: DocumentRevisionStore,
         maxResultBytes: Int = DEFAULT_MAX_RESULT_BYTES,
-    ) : this(collectionId, InvestigationSearch(search::search), content, documents, maxResultBytes)
+    ) : this(
+        collectionId,
+        InvestigationSearch(search::search),
+        content,
+        documents,
+        InvestigationRevisions(revisions::activeRevisionId),
+        maxResultBytes,
+    )
 
     init {
         require(maxResultBytes > 0) { "maxResultBytes must be positive, was $maxResultBytes" }
@@ -110,7 +130,7 @@ class InvestigationTools(
             .filter { it.collectionId == collectionId } // never trust a hit to name our scope
             .take(limit)
             .map { hit ->
-                EvidenceItem(hit.unitId.value, hit.locator, hit.locatorLabel, escape(hit.text))
+                EvidenceItem(hit.unitId.value, hit.locator, hit.locatorLabel, escape(hit.text), revisionId = hit.revisionId)
             }
             .toMutableList()
         bounded(items, { size -> size - 1 }, nextEvidenceId) // drop the lowest-ranked hit only as a last resort
@@ -194,7 +214,13 @@ class InvestigationTools(
     }
 
     private fun itemOf(unit: ContentUnit): EvidenceItem =
-        EvidenceItem(unit.id.value, unit.locator, unit.locator.describe(), escape(unit.extractedText))
+        EvidenceItem(
+            unit.id.value,
+            unit.locator,
+            unit.locator.describe(),
+            escape(unit.extractedText),
+            revisionId = revisions.activeRevisionId(unit.documentId),
+        )
 
     private fun filtersOf(arg: SearchFiltersArg?): SearchFilters = SearchFilters(
         collectionId = collectionId,
@@ -320,8 +346,9 @@ class InvestigationTools(
         var text: String,
         var truncated: Boolean = false,
         var evidenceId: String = "",
+        val revisionId: String? = null,
     ) {
-        val entry: ToolEvidence get() = ToolEvidence(evidenceId, sourceUnitId, locator, locatorLabel, text, truncated)
+        val entry: ToolEvidence get() = ToolEvidence(evidenceId, sourceUnitId, locator, locatorLabel, text, truncated, revisionId)
     }
 
     /** Drops the farther of the two outer neighbours first, so the requested unit keeps its context. */

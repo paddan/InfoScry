@@ -1,0 +1,13 @@
+-- Evidence revision provenance: which reading an excerpt was supplied from.
+--
+-- The ledger already stores the excerpt a citation saved — its own copy of the text, the only one left
+-- once a replacement has removed the unit it names. What it lacked was which reading that excerpt came
+-- from: without it, a later reader could only open the text the document publishes now and attribute
+-- today's wording to yesterday's answer. One nullable column adds the provenance beside the excerpt that
+-- is already there; it is never a second excerpt column.
+--
+-- Null is a real answer and not a default: an excerpt saved before this migration ran belongs to a
+-- reading nobody recorded, and the viewer says "revision unknown" and shows the saved excerpt rather
+-- than inventing a provenance. Nothing else moves: every conversation and every evidence row survives
+-- this migration exactly as it was, and deletion still cascades through the same foreign keys.
+ALTER TABLE evidence_ledger ADD COLUMN revision_id TEXT;

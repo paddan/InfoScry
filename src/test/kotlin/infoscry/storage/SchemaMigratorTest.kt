@@ -73,8 +73,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(27, database.userVersion())
-            assertEquals(27, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(28, database.userVersion())
+            assertEquals(28, SchemaMigrator.SUPPORTED_VERSION)
         }
     }
 
@@ -120,7 +120,7 @@ class SchemaMigratorTest {
                 "missing tables, found $tables",
             )
 
-            assertEquals(27, count(database, "schema_version"))
+            assertEquals(28, count(database, "schema_version"))
             assertEquals(0, count(database, "collections"), "a new archive must expose no collection")
         }
     }
@@ -183,12 +183,17 @@ class SchemaMigratorTest {
                     statement.executeQuery().use { results ->
                         buildList {
                             while (results.next()) {
+                                // `wasNull` reports on the column read last, so the seq's null-ness has to be
+                                // captured before any other column is touched.
                                 val seq = results.getInt("message_seq")
+                                val seqWasNull = results.wasNull()
+                                val excerpt = results.getString("excerpt")
+                                val revisionId = results.getString("revision_id")
                                 add(
                                     Row(
-                                        excerpt = results.getString("excerpt"),
-                                        messageSeq = if (results.wasNull()) null else seq,
-                                        revisionId = results.getString("revision_id"),
+                                        excerpt = excerpt,
+                                        messageSeq = if (seqWasNull) null else seq,
+                                        revisionId = revisionId,
                                     ),
                                 )
                             }
@@ -1080,6 +1085,7 @@ class SchemaMigratorTest {
         }
     }
 
+    /** Migration 028 is the evidence revision provenance column; the schema version moves with it. */
     @Test
     fun `sql splitting keeps quoted semicolons and drops comments`() {
         val script = """

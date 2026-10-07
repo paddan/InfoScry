@@ -73,6 +73,9 @@ class InvestigationServiceTest {
 
     private fun tools(collectionId: CollectionId) = InvestigationTools(
         collectionId, FakeSearch(collectionId), contentStore, documentStore,
+        // These scenarios pin conversation mechanics, not evidence provenance: no test here reads at a
+        // published revision, so nothing records one.
+        InvestigationRevisions { null },
     )
 
     private fun service(
@@ -1127,7 +1130,7 @@ class InvestigationServiceTest {
             LlmEvent.Completed,
         )
         val sv = service(
-            tools = InvestigationTools(CollectionId("collection"), SlowSearch(delayMs = 1_000), contentStore, documentStore),
+            tools = InvestigationTools(CollectionId("collection"), SlowSearch(delayMs = 1_000), contentStore, documentStore, InvestigationRevisions { null }),
             provider = provider,
             turnTimeoutMs = 300,
         )

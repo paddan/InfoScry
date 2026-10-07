@@ -153,7 +153,10 @@ Read the cited passages to assess whether they support the answer's claims.
 In **Investigate**, select a collection and profile and start a conversation.
 The model can search and read sources over several tool steps. Follow-ups can
 reuse retained evidence, and saved conversations can be reopened after reload.
-Each completed turn displays one adopted final answer.
+Each completed turn displays one adopted final answer. Opening saved evidence
+follows the same rule as Ask: evidence recorded with its revision opens that
+exact reading, and evidence naming no revision shows its saved excerpt under a
+“Revision unknown” label.
 
 The sidebar sets the limits for the next question or follow-up:
 

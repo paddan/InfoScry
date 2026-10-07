@@ -152,9 +152,21 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             }
             val evidence = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT e.evidence_id, e.source_unit_id, e.locator_json, u.document_id " +
-                        "FROM evidence_ledger e JOIN content_units u ON u.id = e.source_unit_id " +
-                        "JOIN documents d ON d.id = u.document_id " +
+                    "SELECT e.evidence_id, e.source_unit_id, e.locator_json, e.excerpt, e.revision_id, d.id AS document_id " +
+                        "FROM evidence_ledger e " +
+                        // Saved evidence is read back from its own ledger row, because the unit it names may be
+                        // gone: a replacement can remove the page a saved excerpt came from. The excerpt and its
+                        // revision therefore come from the row itself.
+                        "LEFT JOIN content_units u ON u.id = e.source_unit_id " +
+                        "LEFT JOIN document_revisions r ON r.id = e.revision_id " +
+                        // Only the *document* may be resolved from the revision history: an entry that recorded no
+                        // revision is placed by the revision that once held its unit — so it stays in the reopened
+                        // conversation — but it keeps naming no revision, because which reading its excerpt came
+                        // from was never recorded.
+                        "JOIN documents d ON d.id = COALESCE(u.document_id, r.document_id, (" +
+                        "SELECT h.document_id FROM page_text_revisions p " +
+                        "JOIN document_revisions h ON h.id = p.revision_id " +
+                        "WHERE p.unit_id = e.source_unit_id LIMIT 1)) " +
                         "WHERE e.conversation_id = ? AND d.collection_id = ? ORDER BY e.evidence_id",
                 ).use { statement ->
                     statement.setString(1, conversationId)
@@ -170,6 +182,8 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                                         unitId = rows.getString("source_unit_id"),
                                         locator = locator,
                                         locatorLabel = locator.describe(),
+                                        revisionId = rows.getString("revision_id"),
+                                        excerpt = rows.getString("excerpt"),
                                     ),
                                 )
                             }
@@ -366,6 +380,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
             snapshot.evidenceEntries.forEach { entry ->
                 context.llm.persistEvidenceLedgerEntry(
                     conversationId, entry.evidenceId, entry.sourceUnitId, entry.locatorJson, entry.excerpt, entry.messageSeq,
+                    revisionId = entry.revisionId,
                 )
             }
             snapshot.limitEvents.forEach { event ->
@@ -386,7 +401,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
         override fun loadHistory(conversationId: String) = context.llm.loadInvestigateHistory(conversationId)
     }
     return InvestigationService(
-        tools = InvestigationTools(collectionId, context.search, context.content, context.documents),
+        tools = InvestigationTools(collectionId, context.search, context.content, context.documents, context.revisions),
         prompt = PromptService(context.llm),
         promptVersion = context.llm.effectivePromptVersion(LlmPromptRole.INVESTIGATE),
         streamingClient = { selected ->
@@ -503,6 +518,7 @@ internal fun InvestigateEvent.toWire() = when (this) {
             unitId = it.unitId,
             locator = it.locator,
             locatorLabel = it.locatorLabel,
+            revisionId = it.revisionId,
         )
     })
     is InvestigateEvent.Error -> InvestigateWire("error", code = code, message = message)

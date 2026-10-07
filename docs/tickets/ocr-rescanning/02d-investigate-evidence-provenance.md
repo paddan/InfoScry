@@ -1,6 +1,6 @@
 # 02d: Investigate evidence survives replacement
 
-**Status:** Not started — planned on 2026-10-02; unchecked criteria are requirements, not evidence.
+**Status:** Implemented — verified 2026-10-07; unchecked criteria are requirements, not evidence.
 **Blocked by:** 02, 02c. Dependency IDs resolve in [STATUS.md](STATUS.md).
 **Spec:** [Selectable OCR and rescanning](../../specs/2026-09-30-ocr-rescanning.md).
 **Shared contracts:** [CONTRACTS.md](CONTRACTS.md).
@@ -25,24 +25,24 @@ Consume existing contracts and DTOs first. This slice owns the behavior describe
 
 ## Observable acceptance scenarios
 
-- [ ] The existing evidence_ledger.excerpt is preserved; add revision provenance rather than another excerpt column.
-- [ ] Replace or remove a live unit, reopen the conversation and retain its evidence ID, excerpt and source identity.
-- [ ] New evidence records the revision actually supplied to the model; unknown legacy provenance uses the excerpt fallback from 02c.
-- [ ] Migration preserves conversations and evidence counts; collection scoping and deletion remain enforced.
+- [x] The existing evidence_ledger.excerpt is preserved; add revision provenance rather than another excerpt column.
+- [x] Replace or remove a live unit, reopen the conversation and retain its evidence ID, excerpt and source identity.
+- [x] New evidence records the revision actually supplied to the model; unknown legacy provenance uses the excerpt fallback from 02c.
+- [x] Migration preserves conversations and evidence counts; collection scoping and deletion remain enforced.
 
 ## Execution and verification
 
-- [ ] Read this ticket, its dependencies, the spec and actual callers; record existing behavior and the bounded intended change.
-- [ ] Add the smallest regression/acceptance test for the first scenario, run it and record the expected behavioral failure. Repeat for independent failure modes; do not mistake infrastructure failure for red evidence.
-- [ ] Implement only this slice and run its focused suite:
+- [x] Read this ticket, its dependencies, the spec and actual callers; record existing behavior and the bounded intended change.
+- [x] Add the smallest regression/acceptance test for the first scenario, run it and record the expected behavioral failure. Repeat for independent failure modes; do not mistake infrastructure failure for red evidence.
+- [x] Implement only this slice and run its focused suite:
 
 ```sh
 export JAVA_HOME="$(asdf where java)"
 ./gradlew test --tests 'infoscry.server.InvestigationRoutesTest' --tests 'infoscry.investigate.InvestigationServiceTest'
 ```
 
-- [ ] Run the applicable accumulated gate in CONTRACTS.md; each code slice still requires `./gradlew check`. UI slices require frontend tests, check and build; runtime gates remain separately labelled.
-- [ ] Review the final diff and caller contracts, run `git diff --check`, update the evidence row in STATUS.md and applicable user documentation. Commit/push only under separate Git authorization.
+- [x] Run the applicable accumulated gate in CONTRACTS.md; each code slice still requires `./gradlew check`. UI slices require frontend tests, check and build; runtime gates remain separately labelled.
+- [x] Review the final diff and caller contracts, run `git diff --check`, update the evidence row in STATUS.md and applicable user documentation. Commit/push only under separate Git authorization.
 
 ## Stop conditions and handoff
 

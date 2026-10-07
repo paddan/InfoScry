@@ -1573,6 +1573,31 @@ describe('app shell', () => {
     expect(calls.some((call) => call.url.includes('/sources/'))).toBe(false);
   });
 
+  it('shows the saved excerpt for investigate evidence that names no revision', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigateStart: () => eventResponse([
+        { type: 'citation', id: 'S1', valid: true },
+        {
+          type: 'done',
+          text: 'Mira signed [S1].',
+          evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4', excerpt: 'Signed by Mira in 1998.' }],
+        },
+      ]),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'Who signed?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Open source S1/ }));
+
+    expect(await screen.findByText('Signed by Mira in 1998.')).toBeTruthy();
+    expect(screen.getByText(/Revision unknown/)).toBeTruthy();
+    // Nobody recorded which reading the excerpt came from, so the viewer asks for nothing at all.
+    expect(calls.some((call) => call.url.includes('/sources/'))).toBe(false);
+  });
+
   it('renders a saved excerpt literally rather than interpreting its markup', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),

@@ -721,3 +721,43 @@ link still points at the managed original in the fallback view and 404s if the d
 pre-existing, advisory-only, untouched files; `svelte-check` itself is clean. No browser acceptance
 (10a) and no real OCR/CoreML/external-provider gate applies to this frontend-only slice and none is
 claimed. Nothing was committed or staged.
+
+## Ticket 02d verification record
+
+Investigate evidence survives replacement. Migration 028 (`028_evidence_revision_provenance.sql`, registered
+in `SchemaMigrator.MIGRATIONS`; `SUPPORTED_VERSION` now 28) adds exactly one nullable `revision_id` column
+beside the stored excerpt — never a second excerpt column. `LlmStore.persistEvidenceLedgerEntry(...,
+revisionId =)` writes it and `loadHistory` reads it into `EvidenceLedgerSnapshot.revisionId`. The revision
+recorded is the one supplied to the model: search evidence carries `hit.revisionId`, read-tool evidence
+resolves the document's active revision through the new `InvestigationRevisions` seam (`InvestigationTools`'
+fifth constructor parameter, wired from `context.revisions`). The reopened-conversation read no longer INNER
+JOINS live units: every entry is served from its own ledger row (id, excerpt, revision_id) and its document
+is placed through `COALESCE(live unit, recorded revision, the revision that once held the unit)` — the Ask
+history pattern — so collection scoping and deletion stay enforced while a replacement that removed a unit
+no longer drops its evidence. History `EvidenceWire` carries `excerpt` + `revisionId`; the `done` wire carries
+`revisionId`; the web viewer routes Investigate evidence exactly like saved Ask citations (recorded revision
+read at that reading; unknown provenance shows the saved excerpt under the revision-unknown label with no
+request — usage documentation updated).
+
+Red first (2026-10-07): `reopened conversation keeps evidence whose unit a replacement removed` and `new
+evidence records the revision the turn supplied to the model` failed on the absent `excerpt`/`revisionId`
+wire fields, and the two migration scenarios failed with `no such column: revision_id`;
+`evidence of a deleted document does not resurface in the conversation` was already green — a regression pin.
+Two of the four scenario tests are the drafts the first, abandoned 02d run left in `SchemaMigratorTest` and
+commit `8dc876d` carried while shipping no migration (that commit's green-gate claim did not cover them;
+this record completes them); one test-authoring defect in those drafts was corrected — `wasNull()` reported
+on the excerpt read instead of the seq (`expected: <[null, 4]> but was: <[0, 4]>`). The first implementation
+run then failed broadly with `INTERNAL_ERROR` / `no such column: revision_id`: the new migration was missing
+from `SchemaMigrator.MIGRATIONS` and never applied; registering it turned every suite green. The web pin
+`shows the saved excerpt for investigate evidence that names no revision` first failed on a stub defect (the
+panel renders evidence only for ids referenced by a valid `citation` event and an answer marker); corrected,
+it passes and asserts that no `/sources/` request is made.
+
+Focused gate green: `./gradlew test --tests 'infoscry.server.InvestigationRoutesTest' --tests
+'infoscry.storage.SchemaMigratorTest' --tests 'infoscry.investigate.InvestigationServiceTest' --tests
+'infoscry.investigate.InvestigationToolsTest'` = 33 + 16 + 53 + 15 = 117 tests, 0 failures. Web:
+`npx vitest --run` = 10 files / 220 tests passed. Accumulated: `timeout 3000 ./gradlew check` → BUILD
+SUCCESSFUL in 17m26s (backend 107 suites / 1412 tests / 0 failures, frontend 220). `git diff --check` clean.
+Residuals: the `done` mapping for retained evidence still names `documentId = ""` (pre-existing shape,
+unchanged); evidence whose unit is gone and was never part of any revision resolves no document and stays
+out of the reopened conversation (deletion semantics); no browser or real-runtime gate applies or is claimed.

@@ -282,6 +282,14 @@ response dropped after the reader opens a second citation; and focus entering th
 excerpt opens it. UI gates: `npm test -- --run` (219 passed), `npm run check`, `npm run build`, plus
 the final-tree `./gradlew check` — counts in STATUS.md.
 
+### 02d: Investigate evidence revision provenance
+
+- Migration 028: `evidence_ledger` gains one nullable `revision_id` column beside `excerpt` (legacy rows stay NULL — the honest “revision unknown”). `SchemaMigrator.SUPPORTED_VERSION` = 28.
+- `LlmStore.persistEvidenceLedgerEntry(conversationId, evidenceId, sourceUnitId, locatorJson, excerpt, messageSeq: Int? = null, revisionId: String? = null)`; `loadHistory` returns `EvidenceLedgerSnapshot.revisionId: String? = null`.
+- `ToolEvidence.revisionId: String? = null` — search evidence carries `hit.revisionId`, read evidence the document's active revision at read time via the new `fun interface InvestigationRevisions`; `InvestigationTools(collectionId, search, content, documents, revisions, maxResultBytes)`.
+- Reopened-conversation read serves each entry from its own row (`excerpt`, `revision_id`) and places the document via `COALESCE(live unit, recorded revision, the revision that once held the unit)` with an INNER JOIN on `documents` (deletion) and `d.collection_id` scoping. History `EvidenceWire` now returns `excerpt` + `revisionId`; the `done` wire returns `revisionId`.
+- Web: `openInvestigationSource` routes like saved Ask citations — recorded revision opens that reading, unknown provenance shows the saved excerpt under the revision-unknown label without any request.
+
 ### Known publication wording conflict
 
 The spec, “Publication and history”, says a whole rescan revision may combine approved new text with retained baseline text on uncertain pages. The implementation (`RevisionPublicationService.refusalFor`, `CandidateRevisionPhases.publishCandidate`) and the recorded owner decision in 07b instead refuse a rescan with any pending page. Initial imports may publish approved pages while others remain pending. This plan preserves current behavior and does not silently reinterpret either contract. Before changing the rescan publication rule, reconcile that exact spec/recorded-decision conflict with the owner and update spec, publisher, tests and consumers together. It does not block checkpoint/provenance repairs, UI profile management or proof of the existing publication rule.

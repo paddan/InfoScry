@@ -617,7 +617,7 @@
   }
 
   function openInvestigationSource(evidence: InvestigateEvidence): Promise<void> {
-    return openSource({
+    const hit: SearchHit = {
       collectionId: selectedCollectionId,
       documentId: evidence.documentId,
       title: evidence.locatorLabel,
@@ -628,7 +628,16 @@
       locator: evidence.locator,
       locatorLabel: evidence.locatorLabel,
       matchedBy: [],
-    });
+      revisionId: evidence.revisionId,
+    };
+    // Stored evidence that names no revision belongs to a reading nobody recorded: its own saved
+    // excerpt is the only text that can be shown without attributing the document's current wording
+    // to yesterday's answer — the same rule a saved Ask citation follows.
+    if (evidence.revisionId == null && typeof evidence.excerpt === 'string') {
+      openRevisionUnknownExcerpt(hit, evidence.excerpt);
+      return Promise.resolve();
+    }
+    return openSource(hit);
   }
 
   /**

@@ -369,7 +369,9 @@ class InvestigationToolsTest {
     }
 
     private fun tools(collection: CollectionId, search: InvestigationSearch, maxResultBytes: Int = 2_048): InvestigationTools =
-        InvestigationTools(collection, search, content, documents, maxResultBytes)
+        // Provenance attribution is pinned end to end in InvestigationRoutesTest; these scenarios pin
+        // tool payloads and bounds, so nothing here reads at a published revision.
+        InvestigationTools(collection, search, content, documents, InvestigationRevisions { null }, maxResultBytes)
 
     private fun document(collection: CollectionId, title: String? = null): DocumentId {
         val document = Document(

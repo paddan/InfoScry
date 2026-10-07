@@ -2,6 +2,7 @@ package infoscry.server
 
 import infoscry.ask.Evidence
 import infoscry.ask.RetrievalSnapshot
+import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -17,7 +18,11 @@ import infoscry.llm.LlmCapabilityProbe
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
+import infoscry.search.vectorFor
 import infoscry.storage.Instants
+import infoscry.storage.PageApproval
+import infoscry.storage.RevisionChunkDraft
+import infoscry.storage.RevisionPageDraft
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -35,6 +40,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1435,6 +1441,259 @@ class InvestigationRoutesTest {
             ),
             artifactRoot = harness.context.paths.libraryDir,
         ).unit.id.value
+    }
+
+    /**
+     * Saved evidence is served from its own ledger row, so a replacement that removed the unit it names
+     * can neither drop it from the reopened conversation nor turn its excerpt into the text published
+     * now. Three entries: one that recorded its revision, one that recorded none whose unit the
+     * replacement removed, and one that recorded none whose unit is still live. Each has to come back
+     * with the excerpt it saved and the identity of its source.
+     */
+    @Test
+    fun `reopened conversation keeps evidence whose unit a replacement removed`() = runBlocking {
+        val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+        val (replacedDocument, replacedUnit) =
+            seedEvidenceDocument(collection.id, "replaced-notes.txt", "the page as it was published")
+        val (keptDocument, keptUnit) =
+            seedEvidenceDocument(collection.id, "kept-notes.txt", "the kept live page text")
+        val recordedRevision = assertNotNull(harness.context.revisions.recordPublishedContent(replacedDocument, "TEST_IMPORT"))
+
+        // The replacement names a page of its own rather than the one it replaces, which is what removes
+        // the unit the evidence rows hold from the document's published reading.
+        val replacementText = "the page as it was replaced"
+        val candidate = harness.context.revisions.openCandidate(replacedDocument, recordedRevision, "TEST_REPLACEMENT")
+        harness.context.revisions.appendPage(
+            candidate,
+            RevisionPageDraft(
+                ordinal = 0,
+                unitId = ContentUnitId.new(),
+                locator = SourceLocation.TextLines(1, 1),
+                extractedText = replacementText,
+                searchText = replacementText,
+                extractionMethod = ExtractionMethod.OCR,
+                approval = PageApproval.APPROVED,
+                chunks = listOf(
+                    RevisionChunkDraft(
+                        ordinal = 0,
+                        text = replacementText,
+                        startOffset = 0,
+                        endOffset = replacementText.length,
+                        tokenCount = 5,
+                        tokenStart = 0,
+                        tokenEnd = 4,
+                        embedding = vectorFor(replacementText),
+                    ),
+                ),
+            ),
+        )
+        harness.context.revisionPublication.publish(replacedDocument, recordedRevision, candidate)
+        assertNull(
+            harness.context.content.readUnit(replacedUnit),
+            "the replacement has to remove the cited unit for this case to be what it says",
+        )
+
+        createProfile("evidence-keeper")
+        val profile = harness.context.llm.findByName("evidence-keeper")!!
+        val conversationId = harness.context.llm.persistInvestigateConversation(
+            collectionId = collection.id,
+            profile = profile,
+            promptVersion = 1,
+            retrievalSnapshot = RetrievalSnapshot.value(),
+        )
+        val locatorJson = Json.encodeToString(SourceLocation.serializer(), SourceLocation.TextLines(1, 1))
+        harness.context.llm.persistEvidenceLedgerEntry(
+            conversationId, "S1", replacedUnit.value, locatorJson, "the excerpt S1 saved",
+            revisionId = recordedRevision,
+        )
+        harness.context.llm.persistEvidenceLedgerEntry(conversationId, "S2", keptUnit.value, locatorJson, "the excerpt S2 saved")
+        harness.context.llm.persistEvidenceLedgerEntry(conversationId, "S3", replacedUnit.value, locatorJson, "the excerpt S3 saved")
+
+        val history = harness.request(
+            HttpMethod.Get,
+            "/api/collections/Default/investigations/$conversationId",
+            credential = Credential.BEARER,
+        )
+        assertEquals(HttpStatusCode.OK, history.status, history.bodyAsText())
+        val body = history.bodyAsText()
+        val evidence = Json.parseToJsonElement(body).jsonObject.getValue("investigation").jsonObject
+            .getValue("evidence").jsonArray.map { it.jsonObject }
+            .associateBy { it.getValue("id").jsonPrimitive.content }
+
+        assertEquals(setOf("S1", "S2", "S3"), evidence.keys, "every saved entry stays in the reopened conversation: $body")
+        assertEquals(
+            "the excerpt S1 saved",
+            evidence.getValue("S1")["excerpt"]?.jsonPrimitive?.content,
+            "the entry carries the excerpt its own row saved",
+        )
+        assertEquals("the excerpt S3 saved", evidence.getValue("S3")["excerpt"]?.jsonPrimitive?.content)
+        assertEquals(
+            recordedRevision,
+            evidence.getValue("S1")["revisionId"]?.jsonPrimitive?.content,
+            "an entry that recorded its revision keeps it",
+        )
+        assertEquals(
+            replacedDocument.value,
+            evidence.getValue("S1")["documentId"]?.jsonPrimitive?.content,
+        )
+        assertEquals(
+            replacedDocument.value,
+            evidence.getValue("S3")["documentId"]?.jsonPrimitive?.content,
+            "the revision that once held the unit is what places an entry the replacement removed",
+        )
+        assertEquals(
+            keptDocument.value,
+            evidence.getValue("S2")["documentId"]?.jsonPrimitive?.content,
+        )
+        assertFalse(
+            body.contains(replacementText),
+            "history must not attribute the text published now to saved evidence: $body",
+        )
+    }
+
+    /**
+     * New evidence records the revision the turn read it at: the reading the model was supplied with is
+     * what a later reader must open, not whatever the document publishes by then.
+     */
+    @Test
+    fun `new evidence records the revision the turn supplied to the model`() = runBlocking {
+        val sourceText = "Mira signed the note."
+        val contentUnitId = addEvidenceUnit(sourceText)
+        val documentId = harness.context.database.read { connection ->
+            connection.prepareStatement("SELECT document_id FROM content_units WHERE id = ?").use { statement ->
+                statement.setString(1, contentUnitId)
+                statement.executeQuery().use { rows -> rows.next(); rows.getString(1) }
+            }
+        }
+        val revisionId = assertNotNull(
+            harness.context.revisions.recordPublishedContent(DocumentId(documentId), "TEST_IMPORT"),
+            "the turn has to read the unit at a published revision for its provenance to be known",
+        )
+
+        val arguments = """{"contentUnitId":"$contentUnitId"}""".replace("\"", "\\\"")
+        val call = """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_content_unit","arguments":"$arguments"}}]},"finish_reason":null}]}"""
+        val finish = """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"""
+        val usage = """{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}"""
+        val synthesis = sse(listOf(
+            """{"choices":[{"delta":{"content":"Mira signed the note [S1]."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}""",
+        ))
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = sse(listOf(call, finish, usage))),
+                FakeOpenAiResponse(stream = true, body = synthesis),
+                FakeOpenAiResponse(body = titleCompletion("The signed note")),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+            val response = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = createBody(question = "Who signed the note?"),
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            val events = response.bodyAsText().lineSequence()
+                .filter { it.startsWith("data: ") }
+                .map { Json.parseToJsonElement(it.removePrefix("data: ")).jsonObject }
+                .toList()
+            val conversationId = events.first().getValue("id").jsonPrimitive.content
+
+            val history = harness.request(
+                HttpMethod.Get,
+                "/api/collections/Default/investigations/$conversationId",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, history.status, history.bodyAsText())
+            val body = history.bodyAsText()
+            val evidence = Json.parseToJsonElement(body).jsonObject.getValue("investigation").jsonObject
+                .getValue("evidence").jsonArray.map { it.jsonObject }
+            assertEquals(1, evidence.size, "the turn read one unit: $body")
+            val entry = evidence.single()
+            assertEquals(sourceText, entry["excerpt"]?.jsonPrimitive?.content, "the excerpt the model was supplied with is kept")
+            assertEquals(
+                revisionId,
+                entry["revisionId"]?.jsonPrimitive?.content,
+                "new evidence records the revision the turn read it at",
+            )
+        }
+    }
+
+    /** Deletion stays enforced: evidence whose document is gone must not resurface on reopen. */
+    @Test
+    fun `evidence of a deleted document does not resurface in the conversation`() = runBlocking {
+        val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+        val (documentId, unitId) = seedEvidenceDocument(collection.id, "doomed-notes.txt", "text that will be deleted")
+        createProfile("doomed-keeper")
+        val profile = harness.context.llm.findByName("doomed-keeper")!!
+        val conversationId = harness.context.llm.persistInvestigateConversation(
+            collectionId = collection.id,
+            profile = profile,
+            promptVersion = 1,
+            retrievalSnapshot = RetrievalSnapshot.value(),
+        )
+        val locatorJson = Json.encodeToString(SourceLocation.serializer(), SourceLocation.TextLines(1, 1))
+        harness.context.llm.persistEvidenceLedgerEntry(conversationId, "S1", unitId.value, locatorJson, "the excerpt S1 saved")
+
+        harness.context.database.transaction { connection ->
+            connection.prepareStatement("DELETE FROM documents WHERE id = ?").use { statement ->
+                statement.setString(1, documentId.value)
+                statement.executeUpdate()
+            }
+        }
+
+        val history = harness.request(
+            HttpMethod.Get,
+            "/api/collections/Default/investigations/$conversationId",
+            credential = Credential.BEARER,
+        )
+        assertEquals(HttpStatusCode.OK, history.status, history.bodyAsText())
+        val body = history.bodyAsText()
+        assertFalse(body.contains("\"S1\""), "evidence of a deleted document must not resurface: $body")
+        assertFalse(body.contains("the excerpt S1 saved"), "nor its saved excerpt: $body")
+    }
+
+    /** A document and its committed unit in one call, mirroring the Ask suite's seeding shape. */
+    private fun seedEvidenceDocument(
+        collectionId: infoscry.domain.CollectionId,
+        filename: String,
+        text: String,
+    ): Pair<DocumentId, ContentUnitId> {
+        val documentId = DocumentId.new()
+        val now = Instants.now()
+        harness.context.documents.insert(
+            Document(
+                id = documentId,
+                collectionId = collectionId,
+                sha256 = "sha-$filename",
+                mediaType = "text/plain",
+                originalFilename = filename,
+                sourcePath = "tmp/original/$filename",
+                sizeBytes = 1L,
+                status = DocumentStatus.COMPLETE,
+                title = filename,
+                author = null,
+                language = null,
+                createdAt = now,
+                updatedAt = now,
+            ),
+        )
+        val unit = harness.context.content.commitExtractedUnit(
+            documentId = documentId,
+            fingerprint = ExtractionFingerprint.of(
+                "sha-$filename",
+                ExtractionSettings(ocrLanguages = "eng", extractorSchemaVersion = "investigate-evidence-test"),
+            ),
+            key = "evidence-unit-$filename",
+            ordinal = 0,
+            draft = ContentUnitDraft(
+                locator = SourceLocation.TextLines(1, 1),
+                extractedText = text,
+                searchText = text,
+                method = ExtractionMethod.DIRECT_TEXT,
+            ),
+            artifactRoot = harness.context.paths.libraryDir,
+        ).unit.id
+        return documentId to unit
     }
 
     private data class ConversationRow(
