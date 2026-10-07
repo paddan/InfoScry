@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { continueInvestigation, readInvestigationEvents, readSource, startInvestigation } from './api';
+import { continueInvestigation, getCollectionDocumentSummary, readInvestigationEvents, readSource, startInvestigation } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -44,6 +44,30 @@ describe('readSource', () => {
       '/api/collections/Default%20collection/sources/unit%2F1?offset=0&limit=16384&revision=revision-7',
       '/api/collections/Default%20collection/sources/unit%2F1?offset=0&limit=16384',
     ]);
+  });
+});
+
+describe('getCollectionDocumentSummary', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('reads the collection-wide summary through its own filterless request', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return {
+        ok: true,
+        status: 200,
+        statusText: '',
+        text: async () => JSON.stringify({ total: 75, byStatus: { FAILED: 2, COMPLETE: 73 } }),
+      } as Response;
+    }));
+
+    const summary = await getCollectionDocumentSummary('Collection One');
+
+    // One static route beside the listing; no q/status/limit parameters can reach the aggregate.
+    expect(urls).toEqual(['/api/collections/Collection%20One/documents/summary']);
+    expect(summary.total).toBe(75);
+    expect(summary.byStatus.FAILED).toBe(2);
   });
 });
 

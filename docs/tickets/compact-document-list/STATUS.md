@@ -10,7 +10,8 @@
 
 **Spec:** [Compact document list](../../specs/2026-09-30-compact-document-list.md).
 
-Design and documentation authorized on 2026-09-30. Implementation has not started.
+Design and documentation authorized on 2026-09-30. Ticket 01 was implemented on
+2026-10-07; tickets 02–04 have not started.
 The existing OCR plan is separate; none of these tickets depends on OCR work.
 
 ## Global constraints
@@ -27,7 +28,7 @@ The existing OCR plan is separate; none of these tickets depends on OCR work.
 
 | Ticket | Blocked by | State |
 |---|---|---|
-| [01 — Collection-wide summary](01-summary.md) | None | Not started |
+| [01 — Collection-wide summary](01-summary.md) | None | Implemented |
 | [02 — Collapse, bounded layout and session memory](02-collapse-and-session.md) | 01 | Not started |
 | [03 — Live search and inline details](03-live-search-and-details.md) | 02 | Not started |
 | [04 — Browser acceptance and documentation](04-acceptance.md) | 03 | Not started |
@@ -85,5 +86,87 @@ and other manual gates remain open.
 
 ## Current evidence
 
-Planning documents only. All implementation tickets are unstarted; no application
-or browser test was run for this feature during planning.
+Ticket 01 is implemented and its commands, counts and red evidence are in the
+verification record below. Tickets 02–04 are unstarted: no browser acceptance has
+run for this feature, and the existing Ask/source-viewer and manual accessibility
+gates remain open.
+
+## Verification record
+
+### Ticket 01 — collection-wide document summary (2026-10-07)
+
+Worktree branched at `8dc876d`; JDK 25 selected with
+`export JAVA_HOME="$(asdf where java)"`; `./gradlew` only, one invocation at a time.
+
+Red before implementation (the wire type `DocumentSummaryResponse` was added together
+with the tests so they compile; no route or store read existed yet):
+
+```sh
+./gradlew test --tests 'infoscry.server.DocumentRoutesTest' --console=plain -q
+```
+
+Result: `24 tests completed, 5 failed` — all five new summary tests, each with the same
+behavioral assertion:
+
+```text
+{"error":{"code":"NOT_FOUND","message":"no document with id summary exists in this collection"}} ==> expected: <200 OK> but was: <404 Not Found>
+```
+
+`/documents/summary` fell through to the document-ID route — the exact conflation the
+spec's "place/resolve the static summary route safely" forbids.
+
+Focused green for this ticket's classes:
+
+```sh
+./gradlew test --tests 'infoscry.server.DocumentRoutesTest' --tests 'infoscry.storage.DocumentStoreTest' --console=plain
+```
+
+Result: BUILD SUCCESSFUL — `DocumentRoutesTest` 24 tests / 0 failures,
+`DocumentStoreTest` 3 tests / 0 failures.
+
+The ticket's full focused command was also run:
+
+```sh
+./gradlew test --tests 'infoscry.server.DocumentRoutesTest' --tests 'infoscry.storage.*' --console=plain
+```
+
+Result: 135 tests, 133 passed, 2 failed — only the pre-existing `SchemaMigratorTest`
+incidents recorded below; every test of this ticket passed.
+
+Web frontend, from `web/`:
+
+```sh
+npm test -- --run   # 10 files, 220 tests passed (219 existing + 1 new)
+npm run check       # svelte-check found 0 errors and 0 warnings
+npm run build       # vite build ok; adapter-static wrote build/
+```
+
+Accumulated gate:
+
+```sh
+./gradlew check --console=plain
+```
+
+Result: BUILD FAILED in 18m — `:frontendTest` passed (10 files, 220 tests); backend
+`:test` ran 108 suites / 1417 tests with 2 failed, both the pre-existing
+`SchemaMigratorTest` cases below; no other suite failed and there was no
+OutOfMemoryError.
+
+#### Infrastructure incidents (separate from this ticket's behavior)
+
+- `infoscry.storage.SchemaMigratorTest` has two cases requiring migration 028
+  (`revision_id` on `evidence_ledger`, `user_version = 28`), but the branch point
+  `8dc876d` contains no `028_*.sql` and `SchemaMigrator.SUPPORTED_VERSION` is still 27;
+  the test file is untouched by this ticket (`8dc876d` introduced those cases,
+  `8dc876d^` has none). Observed failing twice — the ticket's full focused command and
+  the accumulated check — and deliberately not retried or fixed here: migration 028 is
+  OCR ticket 02d's work ("Not started"), this plan does not allocate migrations it does
+  not own, and these tickets are independent of OCR work. A green accumulated gate
+  needs 028 landed by the OCR side first.
+
+#### Not claimed
+
+No hardware or real-provider gate was run or claimed: this is a presentation/aggregate
+feature tested with fake providers and local fixtures only. Human keyboard/screen-reader
+checks and viewport measurements remain for ticket 04; the existing Ask/source-viewer
+and manual accessibility gates remain open.

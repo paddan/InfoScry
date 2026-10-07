@@ -79,6 +79,21 @@ data class DocumentProgressView(
 data class DocumentsResponse(val documents: List<DocumentListItem>, val total: Int)
 
 /**
+ * One collection's whole-document summary: every current status counted across the entire collection,
+ * and the total those counts came from.
+ *
+ * The counts are an aggregate read of the collection's own managed documents — never a page and never a
+ * filtered listing — and [byStatus] names every status the domain knows, including the ones no document
+ * has, so a caller can show an absent status as zero rather than as an unknown. Nothing else travels:
+ * no paths, no filenames, no stored text.
+ */
+@Serializable
+data class DocumentSummaryResponse(
+    val total: Int,
+    val byStatus: Map<DocumentStatus, Int>,
+)
+
+/**
  * One document's collection-scoped detail: the same safe row the listing carries, the sentence for its
  * error code, and the first content unit a reader can open.
  *
@@ -167,6 +182,25 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                         documents = documents.map { it.toListItem(progress[it.id]?.toView()) },
                         total = context.documents.countListing(listing),
                     ),
+                )
+            }
+        }
+
+        // The collection-wide aggregate. A static segment resolves ahead of `{documentId}` (a constant
+        // path segment outranks a path parameter in Ktor's routing quality), so `/summary` can never be
+        // mistaken for a document id, and it is declared beside the document route it must coexist with.
+        // The guards are the listing's own: loopback (in `configureRoutes`), no credential, and
+        // `requireActiveByNameOrId` answering an unknown or deleting collection with the same 404.
+        get("/summary") {
+            call.handle {
+                val collection = context.collectionService.requireActiveByNameOrId(call.collectionId().value)
+                val byStatus = context.documents.statusCountsByCollection(collection.id)
+                // The total is the same grouped snapshot the counts came from, so the two agree by
+                // construction. Listing query parameters are not read here by design: a summary that
+                // answered to `q` or `status` would describe a filtered subset of rows, not the collection.
+                call.respondJson(
+                    HttpStatusCode.OK,
+                    DocumentSummaryResponse(total = byStatus.values.sum(), byStatus = byStatus),
                 )
             }
         }

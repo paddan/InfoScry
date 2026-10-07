@@ -9,6 +9,7 @@ import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.ResultSet
 import java.sql.SQLException
+import java.util.EnumMap
 
 /**
  * The collection already holds a document with these bytes. The unique constraint is
@@ -251,6 +252,33 @@ class DocumentStore(private val database: Database) {
             }
         }
     }
+
+    /**
+     * How many of [collectionId]'s documents are in each status, from one grouped SQL read.
+     *
+     * Every [DocumentStatus] is present, zero-filled: a status no document has is a zero count, not an
+     * absent one, so a caller never has to distinguish "none" from "unknown". The eligibility is the
+     * listing's own — this collection's rows in `documents` — so a file an import has queued but not yet
+     * published is not a document, and another collection's documents are never here.
+     *
+     * One grouped statement is what lets a caller derive the collection's total from this same snapshot
+     * (`values.sum()`): a total and its own breakdown can then never describe different instants during
+     * an import, Retry or deletion. The read returns counts only — no paths, filenames or stored text.
+     */
+    fun statusCountsByCollection(collectionId: CollectionId): Map<DocumentStatus, Int> =
+        database.read { connection ->
+            connection.prepareStatement(
+                "SELECT status, COUNT(*) FROM documents WHERE collection_id = ? GROUP BY status",
+            ).use { statement ->
+                statement.setString(1, collectionId.value)
+                statement.executeQuery().use { rows ->
+                    val counts = EnumMap<DocumentStatus, Int>(DocumentStatus::class.java)
+                    DocumentStatus.entries.forEach { status -> counts[status] = 0 }
+                    while (rows.next()) counts[DocumentStatus.valueOf(rows.getString(1))] = rows.getInt(2)
+                    counts
+                }
+            }
+        }
 
     /**
      * One page of a collection's documents under [listing].
