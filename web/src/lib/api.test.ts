@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { continueInvestigation, getCollectionDocumentSummary, readInvestigationEvents, readSource, startInvestigation } from './api';
+import { continueInvestigation, getCollectionDocumentSummary, listOcrProfiles, readInvestigationEvents, readSource, startInvestigation } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -98,5 +98,27 @@ describe('investigation limit payloads', () => {
       profile: 'local-cheap',
       limits: { maxToolRounds: 4, maxToolCalls: 7, maxTurnSeconds: 90 },
     });
+  });
+});
+
+describe('listOcrProfiles', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('reads the fields the server leaves out as null, so a keyless profile is not a missing key', async () => {
+    // The server omits null fields from its JSON; the panels compare with null.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: '',
+      text: async () => JSON.stringify({
+        profiles: [{ id: 'p1', name: 'Local reader', enabled: true, scope: 'LOCAL', keyAvailable: false }],
+      }),
+    } as Response)));
+
+    const [profile] = await listOcrProfiles();
+
+    expect(profile.apiKeyEnvironmentVariable).toBeNull();
+    expect(profile.imageCapabilityMeasured).toBeNull();
+    expect(profile.imageCapabilityCheckedAt).toBeNull();
   });
 });

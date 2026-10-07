@@ -551,14 +551,28 @@ export async function deleteLlmProfile(id: string): Promise<void> {
   await mutate(`/api/llm/profiles/${encodeURIComponent(id)}`, 'DELETE');
 }
 
+/**
+ * The server leaves a null field out of its JSON, and the panels tell "no key variable" and "never measured"
+ * from a value by comparing with null. An absent field is therefore read as null here, once, where profiles
+ * enter the app; otherwise a profile with no key variable would be shown as a missing one.
+ */
+function normaliseOcrProfile(profile: OcrProfile): OcrProfile {
+  return {
+    ...profile,
+    apiKeyEnvironmentVariable: profile.apiKeyEnvironmentVariable ?? null,
+    imageCapabilityMeasured: profile.imageCapabilityMeasured ?? null,
+    imageCapabilityCheckedAt: profile.imageCapabilityCheckedAt ?? null,
+  };
+}
+
 export async function listOcrProfiles(): Promise<OcrProfile[]> {
   const body = (await readJson(await fetch('/api/ocr/profiles'))) as { profiles: OcrProfile[] };
-  return body.profiles;
+  return body.profiles.map(normaliseOcrProfile);
 }
 
 export async function createOcrProfile(profile: OcrProfileInput): Promise<OcrProfile> {
   const body = (await mutate('/api/ocr/profiles', 'POST', profile)) as { profile: OcrProfile };
-  return body.profile;
+  return normaliseOcrProfile(body.profile);
 }
 
 /**
@@ -576,7 +590,7 @@ export async function updateOcrProfile(
     'PATCH',
     expectedRevisionId === undefined ? profile : { ...profile, expectedRevisionId },
   )) as { profile: OcrProfile };
-  return body.profile;
+  return normaliseOcrProfile(body.profile);
 }
 
 /** Retire a profile from new selection; its revisions stay for jobs and history that reference them. */
@@ -586,7 +600,8 @@ export async function disableOcrProfile(id: string): Promise<void> {
 
 /** Check image transport with the server's synthetic image; the route takes no body by design. */
 export async function probeOcrProfile(id: string): Promise<OcrProfileProbe> {
-  return (await mutate(`/api/ocr/profiles/${encodeURIComponent(id)}/probe`, 'POST')) as OcrProfileProbe;
+  const probe = (await mutate(`/api/ocr/profiles/${encodeURIComponent(id)}/probe`, 'POST')) as OcrProfileProbe;
+  return { ...probe, profile: normaliseOcrProfile(probe.profile) };
 }
 
 /** Delete one stored conversation (a kept Ask answer or an Investigate conversation) from its collection. */

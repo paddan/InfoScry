@@ -129,6 +129,7 @@ val externalTest = tasks.register<Test>("externalTest") {
     inputs.file(layout.projectDirectory.file("web/e2e/investigate-browser-acceptance.mjs"))
     inputs.file(layout.projectDirectory.file("web/e2e/collections-browser-acceptance.mjs"))
     inputs.file(layout.projectDirectory.file("web/e2e/search-browser-acceptance.mjs"))
+    inputs.file(layout.projectDirectory.file("web/e2e/ocr-browser-acceptance.mjs"))
 }
 
 /*
