@@ -992,7 +992,8 @@ describe('collections panel', () => {
     expect(within(running).getByText('Copying · report.pdf')).toBeTruthy();
     expect(within(running).getByText('1 of 4 files')).toBeTruthy();
     const finished = within(area).getByRole('row', { name: /Complete/ });
-    expect(within(finished).getByText('Indexing')).toBeTruthy();
+    // A finished import reports no stage: the stage it last ran in is not what it is doing now.
+    expect(within(finished).queryByText('Indexing')).toBeNull();
     expect(within(finished).queryByText(/done\.pdf/)).toBeNull();
     expect(within(area).getByText('3 of 3 files')).toBeTruthy();
     expect(within(area).getByText('Showing 1–2 of 2 imports')).toBeTruthy();
@@ -1005,6 +1006,27 @@ describe('collections panel', () => {
     expect(await screen.findByRole('region', { name: 'Import history for Nightfall' })).toBeTruthy();
     expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
     expect(await screen.findByText('1 of 4 files')).toBeTruthy();
+  });
+
+  it('never reads a finished import as still queued, and keeps the wait for an approval', async () => {
+    api.listCollectionImports.mockResolvedValue(history([
+      importEntry('job-waiting', { state: 'COMPLETE', stage: 'awaiting-approval', filesCompleted: 1, filesTotal: 3 }),
+      // The stage an import last entered before it finished: the row reads its outcome, not that stage.
+      importEntry('job-done', { state: 'COMPLETE', stage: 'queue', filesCompleted: 2, filesTotal: 2 }),
+      importEntry('job-failed', { state: 'FAILED', stage: 'queue', errorCode: 'IMPORT_FAILED' }),
+    ]));
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
+
+    const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
+    await screen.findByText('2 of 2 files');
+    expect(within(area).queryByText('Queued')).toBeNull();
+    // Newest first: the waiting import is listed before the one that finished with a stale stage.
+    const [waiting, done] = within(area).getAllByRole('row', { name: /Complete/ });
+    expect(within(waiting).getByText('Awaiting approval')).toBeTruthy();
+    expect(within(done).queryByText(/Queued|Awaiting/)).toBeNull();
+    const failed = within(area).getByRole('row', { name: /Failed/ });
+    expect(within(failed).queryByText('Queued')).toBeNull();
   });
 
   it('shows no imports yet for a collection that never imported anything', async () => {

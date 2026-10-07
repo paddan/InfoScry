@@ -117,6 +117,26 @@ class ImportHistoryRoutesTest {
     }
 
     @Test
+    fun `a finished import shows no stage of the attempt that ended`() = runBlocking {
+        val id = newCollection()
+        val completed = harness.context.jobs.enqueue(JobType.IMPORT, collectionId = id).id
+        harness.context.jobs.claim(completed)
+        harness.context.jobs.progress(completed, stage = "queue", completed = 2, total = 2, currentItem = "a.pdf")
+        harness.context.jobs.complete(completed)
+        val failed = harness.context.jobs.enqueue(JobType.IMPORT, collectionId = id).id
+        harness.context.jobs.claim(failed)
+        harness.context.jobs.progress(failed, stage = "queue", completed = 0, total = 1)
+        harness.context.jobs.fail(failed, code = "IMPORT_FAILED", message = "the file could not be read")
+
+        val entries = page(id, "").imports.associateBy { it.id }
+
+        assertEquals("COMPLETE", entries.getValue(completed).state.name)
+        assertNull(entries.getValue(completed).stage)
+        assertEquals("FAILED", entries.getValue(failed).state.name)
+        assertNull(entries.getValue(failed).stage)
+    }
+
+    @Test
     fun `a pending file and a pre-copy failure stay import items and carry no document`() = runBlocking {
         val id = newCollection()
         val job = harness.context.jobs.enqueue(JobType.IMPORT, collectionId = id)

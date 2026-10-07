@@ -5,7 +5,7 @@
 | Ticket | Blocked by | State |
 |---|---|---|
 | [01 — Measure tool calling from Admin and explain an unmeasured profile in Investigate](01-measure-tool-calling-in-admin.md) | None | Implemented; browser scenario not done |
-| [02 — Import history shows the final stage of a finished import](02-import-history-final-stage.md) | None | Not started |
+| [02 — Import history shows the final stage of a finished import](02-import-history-final-stage.md) | None | Implemented; browser scenario not done |
 | [03 — Revision history names the OCR method an import used](03-import-reading-in-history.md) | None | Implemented; browser scenario not done |
 | [04 — OCR profiles offer the LLM providers and only image-capable models](04-ocr-profile-providers-and-catalog.md) | None | Not started |
 | [05 — Files that cannot be imported are skipped and not shown](05-skip-unsupported-files.md) | None | Not started |

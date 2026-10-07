@@ -126,6 +126,19 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `an import that finishes carries no stage of the work it did last`() {
+        withHarness { harness ->
+            val good = harness.writeText("good.txt", "Alpha\nBeta\n")
+            val blob = harness.writeBinary("blob.bin")
+
+            val run = harness.import(listOf(good, blob), harness.pipeline(RecordingUnits(units = 2)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertNull(run.job.stage, "a finished import must not report the stage it last worked in")
+        }
+    }
+
+    @Test
     fun `the same bytes from two paths are stored once and the second item is a duplicate`() {
         withHarness { harness ->
             val first = harness.writeText("first.txt", "identical\n")
