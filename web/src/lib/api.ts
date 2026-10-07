@@ -1272,3 +1272,139 @@ export async function resumeRescan(
     'POST',
   )) as OcrOperation;
 }
+
+// ---- reviewing proposed pages ----
+
+/** One bounded reason behind a review, as the comparison recorded it; spans are character offsets. */
+export type ReviewReason = {
+  code: string;
+  origin: string;
+  baselineStart?: number | null;
+  baselineEnd?: number | null;
+  candidateStart?: number | null;
+  candidateEnd?: number | null;
+  explanation?: string | null;
+};
+
+/** One proposed page. The wire carries hashes and reasons, not the candidate text and not an image. */
+export type PendingReview = {
+  unitId: string;
+  ordinal: number;
+  recommendation: string;
+  disposition: string;
+  baselineRevisionId?: string | null;
+  baselineTextHash?: string | null;
+  candidateHash: string;
+  outcomeCode?: string | null;
+  confidence?: number | null;
+  reasons: ReviewReason[];
+  reviewerRevisionId: string;
+  reviewPromptVersion: number;
+  policyVersion: number;
+  searchable: boolean;
+};
+
+export type ReviewsResponse = {
+  reviews: PendingReview[];
+  total: number;
+  pendingPages: number;
+  pendingReviewCount: number;
+  externalAccounting: string;
+};
+
+export type ReviewChoice = 'KEEP' | 'USE_NEW' | 'EDIT';
+
+export type ReviewDecisionInput = {
+  unitId: string;
+  ordinal: number;
+  candidateHash: string;
+  choice: ReviewChoice;
+  /** The person's own text; sent only for EDIT. */
+  text?: string | null;
+};
+
+export type ReviewDecisionsBody = {
+  requestId: string;
+  expectedRevisionId: string;
+  decisions?: ReviewDecisionInput[];
+  /** One choice for the document's whole server-side pending set; KEEP or USE_NEW. */
+  documentWide?: ReviewChoice | null;
+};
+
+export type ReviewDecisionsResponse = {
+  operation: OcrOperation;
+  applied: { ordinal: number; choice: string; unitId: string }[];
+};
+
+export type PublicationDecisionResponse = {
+  operation: OcrOperation;
+  publicationId: string;
+  phase: string;
+  errorCode?: string | null;
+};
+
+export type RevisionsResponse = {
+  revisions: {
+    revisionId: string;
+    parentRevisionId?: string | null;
+    state: string;
+    provenance: string;
+    createdAt: string;
+    active: boolean;
+    pageCount: number;
+  }[];
+  total: number;
+  activeRevisionId?: string | null;
+};
+
+/** One bounded page of the operation's proposals that still wait for a decision. */
+export async function listPendingReviews(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  offset: number,
+  limit: number,
+): Promise<ReviewsResponse> {
+  const query = `operationId=${encodeURIComponent(operationId)}&offset=${offset}&limit=${limit}`;
+  return (await readJson(await fetch(`${ocrPath(collectionId, documentId)}/reviews?${query}`))) as ReviewsResponse;
+}
+
+/** The document's published history; the review reads the active revision id from it, nothing else. */
+export async function listDocumentRevisions(
+  collectionId: string,
+  documentId: string,
+  offset = 0,
+  limit = 1,
+): Promise<RevisionsResponse> {
+  return (await readJson(
+    await fetch(`${ocrPath(collectionId, documentId)}/revisions?offset=${offset}&limit=${limit}`),
+  )) as RevisionsResponse;
+}
+
+/** Saves one decision batch; a 409 means the active revision or a page's candidate is no longer the one decided on. */
+export async function decideReviews(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  body: ReviewDecisionsBody,
+): Promise<ReviewDecisionsResponse> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/review-decisions?operationId=${encodeURIComponent(operationId)}`,
+    'POST',
+    body,
+  )) as ReviewDecisionsResponse;
+}
+
+/** Admits the publication of the decided pages; searchable text changes only when it reports PUBLISHED. */
+export async function publishReviewDecisions(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  expectedRevisionId: string,
+): Promise<PublicationDecisionResponse> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/publish-decisions?operationId=${encodeURIComponent(operationId)}`,
+    'POST',
+    { expectedRevisionId },
+  )) as PublicationDecisionResponse;
+}

@@ -28,6 +28,7 @@
     pageCount,
     sameSnapshot,
   } from './ocrRescan';
+  import OcrReviewPanel from './OcrReviewPanel.svelte';
 
   /** The document is named by both ids, because an operation is only ever read under its own collection. */
   export let collectionId: string;
@@ -90,6 +91,8 @@
   let latestGroup: HTMLElement | null = null;
   let approvalHeading: HTMLElement | null = null;
   let reviewButton: HTMLButtonElement | null = null;
+  let reviewPagesButton: HTMLButtonElement | null = null;
+  let reviewOpen = false;
 
   $: key = `${collectionId}\u0000${documentId}`;
   $: if (key !== boundKey) start(key);
@@ -127,6 +130,7 @@
     approvalPages = '';
     approvalError = null;
     approving = false;
+    reviewOpen = false;
     void loadOperations();
   }
 
@@ -448,6 +452,17 @@
     }
   }
 
+  async function closeReview(): Promise<void> {
+    reviewOpen = false;
+    await tick();
+    reviewPagesButton?.focus();
+  }
+
+  /** A publication changes the pending count, so the scan is read again from the server. */
+  function reviewPublished(operation: OcrOperation): void {
+    setLatest(operation);
+  }
+
   function plural(count: number, noun: string): string {
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
   }
@@ -505,6 +520,11 @@
             Review approval
           </button>
         {/if}
+        {#if latest.stage === 'COMPLETE' && latest.pendingReviewCount > 0}
+          <button type="button" class="primary" bind:this={reviewPagesButton} onclick={() => (reviewOpen = true)}>
+            Review pages
+          </button>
+        {/if}
         {#if !isTerminalStage(latest.stage)}
           <button
             type="button"
@@ -521,6 +541,17 @@
       </div>
       {#if controlError !== null}<p role="alert">{controlError}</p>{/if}
     </div>
+  {/if}
+
+  {#if reviewOpen && latest !== null}
+    <OcrReviewPanel
+      {collectionId}
+      {documentId}
+      {documentName}
+      operationId={latest.operationId}
+      onclose={() => void closeReview()}
+      onpublished={reviewPublished}
+    />
   {/if}
 
   {#if approvalOpen && latest !== null}

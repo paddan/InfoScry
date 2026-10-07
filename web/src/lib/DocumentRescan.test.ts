@@ -12,6 +12,11 @@ const api = vi.hoisted(() => ({
   approveRescanExternal: vi.fn(),
   cancelRescan: vi.fn(),
   resumeRescan: vi.fn(),
+  listPendingReviews: vi.fn(),
+  listDocumentRevisions: vi.fn(),
+  readSource: vi.fn(),
+  decideReviews: vi.fn(),
+  publishReviewDecisions: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -32,6 +37,11 @@ vi.mock('./api', () => ({
   approveRescanExternal: api.approveRescanExternal,
   cancelRescan: api.cancelRescan,
   resumeRescan: api.resumeRescan,
+  listPendingReviews: api.listPendingReviews,
+  listDocumentRevisions: api.listDocumentRevisions,
+  readSource: api.readSource,
+  decideReviews: api.decideReviews,
+  publishReviewDecisions: api.publishReviewDecisions,
 }));
 
 async function apiError(code: string, message: string, status: number): Promise<Error> {
@@ -433,6 +443,30 @@ describe('document rescan', () => {
 
       expect((screen.getByRole('button', { name: 'Scan again' }) as HTMLButtonElement).disabled).toBe(true);
       expect(screen.getByRole('group', { name: 'Latest scan' }).textContent).toContain('Needs review');
+    });
+
+    it('offers Review pages only for a completed scan with pages waiting, and returns focus when it is closed', async () => {
+      api.listRescanOperations.mockResolvedValue([operation('COMPLETE', { pendingReviewCount: 0 })]);
+      const none = await renderRescan();
+      expect(screen.queryByRole('button', { name: 'Review pages' })).toBeNull();
+      none.unmount();
+
+      api.listRescanOperations.mockResolvedValue([operation('COMPLETE', { pendingReviewCount: 3 })]);
+      api.listDocumentRevisions.mockResolvedValue({ revisions: [], total: 1, activeRevisionId: 'rev-1' });
+      api.listPendingReviews.mockResolvedValue({
+        reviews: [], total: 0, pendingPages: 0, pendingReviewCount: 0, externalAccounting: '',
+      });
+      await renderRescan();
+      await fireEvent.click(screen.getByRole('button', { name: 'Review pages' }));
+      await act(async () => {});
+      await act(async () => {});
+
+      expect(screen.getByRole('region', { name: 'Review pages' })).toBeTruthy();
+      expect(api.listPendingReviews).toHaveBeenCalledWith('nightfall', 'doc-1', 'op-1', 0, 1);
+      await fireEvent.click(screen.getByRole('button', { name: 'Close review' }));
+      await act(async () => {});
+      expect(screen.queryByRole('region', { name: 'Review pages' })).toBeNull();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Review pages' }));
     });
 
     it('says when the earlier scans cannot be read instead of offering a scan blindly', async () => {
