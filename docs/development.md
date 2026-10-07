@@ -23,7 +23,7 @@ export JAVA_HOME="$(asdf where java)"
 | Path | Purpose |
 |---|---|
 | `src/main/kotlin/infoscry/` | Services, HTTP routes and CLI commands |
-| `src/main/resources/` | Database migrations, prompts and provider metadata |
+| `src/main/resources/` | Database baseline schema, prompts and provider metadata |
 | `src/test/kotlin/infoscry/` | JVM tests and acceptance harnesses |
 | `src/test/resources/fixtures/` | Redistributable test documents |
 | `web/src/` | Svelte reader and frontend tests |

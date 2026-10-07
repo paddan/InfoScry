@@ -40,6 +40,14 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 | `logs/` | Structured application logs |
 | `tmp/` | Temporary work and GPU profiling artifacts |
 
+The SQLite schema is one baseline,
+[001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql), applied
+to an empty database by [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
+and recorded as `PRAGMA user_version = 1`. It is edited in place when the schema
+changes: there are no incremental migrations and no upgrade path, because no
+deployed archive has to be preserved. A database whose version is newer than the
+build is refused rather than written to.
+
 Import deduplicates by collection and SHA-256. External originals are never
 modified or deleted. Content-unit IDs remain stable; extraction results and
 checkpoints are committed per unit with durable artifact references. Restarting

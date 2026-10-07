@@ -1,11 +1,5 @@
 package infoscry.storage
 
-import infoscry.domain.ContentUnitId
-import infoscry.domain.ExtractionMethod
-import infoscry.domain.SourceImageProvenance
-import infoscry.domain.SourceImageRoot
-import infoscry.domain.SourceLocation
-import infoscry.llm.endpointCarriesUserInfo
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -13,8 +7,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SchemaMigratorTest {
@@ -49,15 +41,6 @@ class SchemaMigratorTest {
         }
     }
 
-    /** Whether each conversation is marked, by id, as one whose snapshot migration 020 had to repair. */
-    private fun repairedSnapshots(database: Database): Map<String, Boolean> = database.read { connection ->
-        connection.createStatement().use { statement ->
-            statement.executeQuery("SELECT id, profile_endpoint_repaired FROM conversations").use { rows ->
-                buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2) != 0) }
-            }
-        }
-    }
-
     private fun pragma(database: Database, name: String): String = database.read { connection ->
         connection.createStatement().use { statement ->
             statement.executeQuery("PRAGMA $name").use { rows ->
@@ -68,13 +51,26 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `migration is idempotent`() {
+    fun `a fresh database gets the baseline at version one`() {
+        newDatabase().use { database ->
+            assertEquals(0, database.userVersion())
+
+            SchemaMigrator(database).migrate()
+
+            assertEquals(1, database.userVersion())
+            assertEquals(1, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(1, count(database, "schema_version"))
+        }
+    }
+
+    @Test
+    fun `migration is idempotent on an already migrated database`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(26, database.userVersion())
-            assertEquals(26, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(1, database.userVersion())
+            assertEquals(1, count(database, "schema_version"), "the baseline must not be applied twice")
         }
     }
 
@@ -120,7 +116,6 @@ class SchemaMigratorTest {
                 "missing tables, found $tables",
             )
 
-            assertEquals(26, count(database, "schema_version"))
             assertEquals(0, count(database, "collections"), "a new archive must expose no collection")
         }
     }
@@ -220,41 +215,6 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `a legacy collection gains the OCR defaults and keeps its language`() {
-        newDatabase().use { database ->
-            val now = "2026-09-30T07:00:00Z"
-            SchemaMigrator(database).migrate(upToVersion = 16)
-            database.transaction { connection ->
-                connection.createStatement().use { statement ->
-                    statement.execute(
-                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
-                            "VALUES ('c1', 'Case', 'deu+eng', 'ACTIVE', '$now', '$now')",
-                    )
-                }
-            }
-
-            SchemaMigrator(database).migrate()
-
-            database.transaction { connection ->
-                connection.createStatement().use { statement ->
-                    statement.executeQuery(
-                        "SELECT ocr_languages, ocr_engine, ocr_import_mode, ocr_transcription_profile_id, " +
-                            "ocr_review_profile_id, ocr_external_page_limit FROM collections WHERE id = 'c1'",
-                    ).use { rows ->
-                        assertTrue(rows.next())
-                        assertEquals("deu+eng", rows.getString("ocr_languages"), "the language an archive had stays")
-                        assertEquals("TESSERACT", rows.getString("ocr_engine"))
-                        assertEquals("FILL_MISSING", rows.getString("ocr_import_mode"))
-                        assertNull(rows.getString("ocr_transcription_profile_id"))
-                        assertNull(rows.getString("ocr_review_profile_id"), "no reviewer is selected implicitly")
-                        assertEquals(0, rows.getInt("ocr_external_page_limit"))
-                    }
-                }
-            }
-        }
-    }
-
-    @Test
     fun `the OCR schema refuses values the application would reject`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
@@ -299,93 +259,10 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `a revision page staged before source images were recorded keeps them absent and the archive works`() {
+    fun `the page table refuses a reference outside its root and a document owns its pages`() {
         newDatabase().use { database ->
-            val now = "2026-09-30T07:00:00Z"
-            // An archive as version 18 left it, with a candidate revision already staged in it.
-            SchemaMigrator(database).migrate(upToVersion = 18)
-            database.transaction { connection ->
-                connection.createStatement().use { statement ->
-                    listOf(
-                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
-                            "VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now')",
-                        "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, " +
-                            "original_path, size_bytes, status, created_at, updated_at) VALUES ('d1', 'c1', " +
-                            "'${"a".repeat(64)}', 'image/png', 'scan.png', '/tmp/scan.png', 42, 'COMPLETE', " +
-                            "'$now', '$now')",
-                        "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, " +
-                            "provenance, created_at) VALUES ('r1', 'd1', NULL, 'CANDIDATE', 'RESCAN', '$now')",
-                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
-                            "extracted_text, search_text, approval, created_at) VALUES ('r1', 0, 'unit-1', " +
-                            "'{\"type\":\"pdf_page\",\"page\":1}', 'staged before this schema', " +
-                            "'staged before this schema', 'PENDING', '$now')",
-                    ).forEach(statement::execute)
-                }
-            }
-
             SchemaMigrator(database).migrate()
-
-            val revisions = DocumentRevisionStore(database, ContentStore(database))
-            val staged = assertNotNull(revisions.page("r1", 0), "the migrated archive lost its staged page")
-            assertEquals("staged before this schema", staged.extractedText)
-            assertNull(
-                staged.sourceImage,
-                "a page staged before source images were recorded was given a source image",
-            )
-            assertEquals(
-                0,
-                database.read { connection ->
-                    connection.createStatement().use { statement ->
-                        statement.executeQuery(
-                            "SELECT count(*) FROM page_text_revisions WHERE revision_id = 'r1' AND " +
-                                "(source_image_root IS NOT NULL OR source_image_relative_path IS NOT NULL OR " +
-                                "source_image_sha256 IS NOT NULL OR source_image_width IS NOT NULL OR " +
-                                "source_image_height IS NOT NULL OR source_image_render_version IS NOT NULL)",
-                        ).use { rows ->
-                            rows.next()
-                            rows.getInt(1)
-                        }
-                    }
-                },
-                "a migrated row carries a source image column that was never written",
-            )
-
-            // And the migrated archive still works: a page staged now names the pixels it was read from.
-            revisions.appendPage(
-                "r1",
-                RevisionPageDraft(
-                    ordinal = 1,
-                    unitId = ContentUnitId.new(),
-                    locator = SourceLocation.PdfPage(2),
-                    extractedText = "read from a rendered page",
-                    searchText = "read from a rendered page",
-                    extractionMethod = ExtractionMethod.OCR,
-                    sourceImage = SourceImageProvenance(
-                        root = SourceImageRoot.ARTIFACTS,
-                        relativePath = "attempt/pages/page-000002.png",
-                        sha256 = "b".repeat(64),
-                        width = 1200,
-                        height = 1600,
-                        renderVersion = 1,
-                    ),
-                ),
-            )
-
-            val read = assertNotNull(revisions.page("r1", 1)).sourceImage
-            assertEquals(SourceImageRoot.ARTIFACTS, assertNotNull(read).root)
-            assertEquals("attempt/pages/page-000002.png", read.relativePath)
-            assertEquals("b".repeat(64), read.sha256)
-            assertEquals(1200, read.width)
-            assertEquals(1600, read.height)
-            assertEquals(1, read.renderVersion)
-        }
-    }
-
-    @Test
-    fun `an archive migrated from 019 keeps every page readable, with the provenance it had or none`() {
-        newDatabase().use { database ->
             val now = "2026-10-07T07:00:00Z"
-            SchemaMigrator(database).migrate(upToVersion = 19)
             database.transaction { connection ->
                 connection.createStatement().use { statement ->
                     listOf(
@@ -397,50 +274,15 @@ class SchemaMigratorTest {
                             "'$now', '$now')",
                         "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, " +
                             "provenance, created_at) VALUES ('r1', 'd1', NULL, 'CANDIDATE', 'RESCAN', '$now')",
-                        // A page with no image, a page with a whole provenance, and a page whose reading was
-                        // made from a picture that is its own managed copy and was never measured.
-                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
-                            "extracted_text, search_text, approval, created_at) VALUES ('r1', 0, 'unit-0', " +
-                            "'{\"type\":\"pdf_page\",\"page\":1}', 'no image', 'no image', 'PENDING', '$now')",
-                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
-                            "extracted_text, search_text, approval, created_at, source_image_root, " +
-                            "source_image_relative_path, source_image_sha256, source_image_width, " +
-                            "source_image_height, source_image_render_version) VALUES ('r1', 1, 'unit-1', " +
-                            "'{\"type\":\"pdf_page\",\"page\":2}', 'rendered', 'rendered', 'APPROVED', '$now', " +
-                            "'ARTIFACTS', 'fp/pages/page-000002.png', '${"b".repeat(64)}', 1200, 1600, 1)",
                         "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
                             "extracted_text, search_text, approval, created_at, source_image_root, " +
                             "source_image_relative_path, source_image_sha256, source_image_render_version) " +
-                            "VALUES ('r1', 2, 'unit-2', '{\"type\":\"image\",\"name\":\"scan.png\"}', " +
-                            "'managed', 'managed', 'PENDING', '$now', 'MANAGED_COPY', 'scan.png', " +
-                            "'${"c".repeat(64)}', 1)",
+                            "VALUES ('r1', 0, 'unit-0', '{\"type\":\"pdf_page\",\"page\":1}', 't', 't', " +
+                            "'PENDING', '$now', 'ARTIFACTS', 'fp/pages/page-000001.png', '${"b".repeat(64)}', 1)",
                     ).forEach(statement::execute)
                 }
             }
 
-            SchemaMigrator(database).migrate()
-
-            val revisions = DocumentRevisionStore(database, ContentStore(database))
-            val pages = revisions.pages("r1")
-            assertEquals(listOf(0, 1, 2), pages.map { it.ordinal }, "the migration lost a page")
-            assertEquals(listOf("no image", "rendered", "managed"), pages.map { it.extractedText })
-            assertEquals(
-                listOf(PageApproval.PENDING, PageApproval.APPROVED, PageApproval.PENDING),
-                pages.map { it.approval },
-            )
-            assertNull(pages[0].sourceImage, "a page with no image was given one by the migration")
-            val rendered = assertNotNull(pages[1].sourceImage)
-            assertEquals(SourceImageRoot.ARTIFACTS, rendered.root)
-            assertEquals("fp/pages/page-000002.png", rendered.relativePath)
-            assertEquals("b".repeat(64), rendered.sha256)
-            assertEquals(1200, rendered.width)
-            assertEquals(1600, rendered.height)
-            val managed = assertNotNull(pages[2].sourceImage)
-            assertEquals(SourceImageRoot.MANAGED_COPY, managed.root)
-            assertNull(managed.width, "an unmeasured picture was given dimensions by the migration")
-            assertNull(managed.height)
-
-            // The rebuilt table is the one that refuses a reference outside its root.
             assertFailsWith<java.sql.SQLException> {
                 database.transaction { connection ->
                     connection.createStatement().use { statement ->
@@ -448,258 +290,18 @@ class SchemaMigratorTest {
                             "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
                                 "extracted_text, search_text, approval, created_at, source_image_root, " +
                                 "source_image_relative_path, source_image_sha256, source_image_render_version) " +
-                                "VALUES ('r1', 3, 'unit-3', '{\"type\":\"pdf_page\",\"page\":4}', 't', 't', " +
+                                "VALUES ('r1', 1, 'unit-1', '{\"type\":\"pdf_page\",\"page\":2}', 't', 't', " +
                                 "'PENDING', '$now', 'ARTIFACTS', '/abs/page.png', '${"d".repeat(64)}', 1)",
                         )
                     }
                 }
             }
-            // The revision still owns its pages after the rebuild: deleting the document cascades to them.
+            assertEquals(1, count(database, "page_text_revisions"))
+
             database.transaction { connection ->
                 connection.createStatement().use { statement -> statement.execute("DELETE FROM documents") }
             }
-            assertEquals(0, count(database, "page_text_revisions"), "the rebuilt table lost its cascade")
-        }
-    }
-
-    /**
-     * Every non-null value of the four columns a legacy archive could have stored a credentialed endpoint in.
-     *
-     * The pair is the column's SQL name and the value it holds, so a failure can name the column without
-     * printing an address — after this migration none of them carries a credential, and before it one does.
-     */
-    private fun storedEndpoints(database: Database): List<Pair<String, String>> = database.read { connection ->
-        connection.createStatement().use { statement ->
-            statement.executeQuery(
-                "SELECT 'llm_profiles.endpoint', endpoint FROM llm_profiles WHERE endpoint IS NOT NULL " +
-                    "UNION ALL SELECT 'conversations.profile_endpoint', profile_endpoint FROM conversations " +
-                    "WHERE profile_endpoint IS NOT NULL " +
-                    "UNION ALL SELECT 'model_calls.endpoint', endpoint FROM model_calls " +
-                    "WHERE endpoint IS NOT NULL " +
-                    "UNION ALL SELECT 'ocr_profile_revisions.endpoint', endpoint FROM ocr_profile_revisions " +
-                    "WHERE endpoint IS NOT NULL",
-            ).use { rows ->
-                buildList { while (rows.next()) add(rows.getString(1) to rows.getString(2)) }
-            }
-        }
-    }
-
-    @Test
-    fun `a credential a legacy archive stored in an endpoint is removed and its profile is switched off`() {
-        newDatabase().use { database ->
-            val now = "2026-09-30T07:00:00Z"
-            val secret = "hunter2-not-a-real-credential"
-            // An archive as version 19 left it: a profile whose endpoint carries a credential, a conversation
-            // and a model call that snapshotted that address, and an OCR profile whose revision reads through
-            // one. The rows are written directly because that is how the build that stored them wrote them:
-            // today's profile types refuse such a URL, so going through one is not possible any more.
-            SchemaMigrator(database).migrate(upToVersion = 19)
-            database.transaction { connection ->
-                connection.createStatement().use { statement ->
-                    listOf(
-                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
-                            "VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now')",
-                        "INSERT INTO llm_profiles (id, name, provider, endpoint, model, " +
-                            "api_key_environment_variable, context_window, max_output_tokens, " +
-                            "supports_tool_calling, input_price_per_million, output_price_per_million, " +
-                            "cache_read_price_per_million, enabled, created_at, updated_at) VALUES " +
-                            "('legacy-credentialed', 'Legacy credentialed', 'OPENAI_COMPATIBLE', " +
-                            "'https://user:$secret@127.0.0.1:11434/v1', 'model', 'MY_SECRET_KEY', 128000, 4096, " +
-                            "0, 0.0, 0.0, 0.0, 1, '$now', '$now')",
-                        // An authority holding two `@`s: the credential ends at the *last* one, exactly as the
-                        // lenient parse these rows are read back through decides it, so the host survives.
-                        "INSERT INTO llm_profiles (id, name, provider, endpoint, model, " +
-                            "api_key_environment_variable, context_window, max_output_tokens, " +
-                            "supports_tool_calling, input_price_per_million, output_price_per_million, " +
-                            "cache_read_price_per_million, enabled, created_at, updated_at) VALUES " +
-                            "('legacy-two-at-signs', 'Legacy two at signs', 'OPENAI_COMPATIBLE', " +
-                            "'https://first@second@host.example.com/v1', 'model', null, 128000, 4096, " +
-                            "0, 0.0, 0.0, 0.0, 1, '$now', '$now')",
-                        "INSERT INTO llm_profiles (id, name, provider, endpoint, model, " +
-                            "api_key_environment_variable, context_window, max_output_tokens, " +
-                            "supports_tool_calling, input_price_per_million, output_price_per_million, " +
-                            "cache_read_price_per_million, enabled, created_at, updated_at) VALUES " +
-                            "('legacy-clean', 'Legacy clean', 'OPENAI_COMPATIBLE', " +
-                            "'https://api.example.com/v1', 'model', null, 128000, 4096, " +
-                            "0, 0.0, 0.0, 0.0, 1, '$now', '$now')",
-                        // An `@` in the *path* is not userinfo: the authority ends at the first `/`, so an
-                        // `@` after it belongs to the path and the value must survive byte for byte.
-                        "INSERT INTO llm_profiles (id, name, provider, endpoint, model, " +
-                            "api_key_environment_variable, context_window, max_output_tokens, " +
-                            "supports_tool_calling, input_price_per_million, output_price_per_million, " +
-                            "cache_read_price_per_million, enabled, created_at, updated_at) VALUES " +
-                            "('legacy-at-in-path', 'Legacy at in path', 'OPENAI_COMPATIBLE', " +
-                            "'https://host/a@b/v1', 'model', null, 128000, 4096, " +
-                            "0, 0.0, 0.0, 0.0, 1, '$now', '$now')",
-                        // And neither is one in the *query*: this address has a `?` before its `/`, so the
-                        // authority is `host` and the `@` after the `?` is query text. An authority found by
-                        // looking for the first `/` instead would swallow the query, take that `@` for a
-                        // credential and rewrite this address into a different host (`https://b/c`).
-                        "INSERT INTO llm_profiles (id, name, provider, endpoint, model, " +
-                            "api_key_environment_variable, context_window, max_output_tokens, " +
-                            "supports_tool_calling, input_price_per_million, output_price_per_million, " +
-                            "cache_read_price_per_million, enabled, created_at, updated_at) VALUES " +
-                            "('legacy-at-in-query', 'Legacy at in query', 'OPENAI_COMPATIBLE', " +
-                            "'https://host?email=a@b/c', 'model', null, 128000, 4096, " +
-                            "0, 0.0, 0.0, 0.0, 1, '$now', '$now')",
-                        "INSERT INTO conversations (id, collection_id, mode, profile_provider, " +
-                            "profile_endpoint, profile_model, profile_name, prompt_version, retrieval_snapshot, " +
-                            "created_at) VALUES ('legacy-conversation', 'c1', 'ASK', 'OPENAI_COMPATIBLE', " +
-                            "'https://user:$secret@127.0.0.1:11434/v1', 'model', 'Legacy credentialed', 1, " +
-                            "'{}', '$now')",
-                        // A conversation whose snapshot is repaired while the profile it names is not: 'Legacy clean'
-                        // stays enabled, so the only thing that stops this snapshot from dispatching to the address
-                        // the migration rewrote is the marker the cleanup leaves on the row.
-                        "INSERT INTO conversations (id, collection_id, mode, profile_provider, " +
-                            "profile_endpoint, profile_model, profile_name, prompt_version, retrieval_snapshot, " +
-                            "created_at) VALUES ('repaired-snapshot', 'c1', 'INVESTIGATE', 'OPENAI_COMPATIBLE', " +
-                            "'https://user:$secret@clean.example.com/v1', 'model', 'Legacy clean', 1, " +
-                            "'{}', '$now')",
-                        "INSERT INTO conversations (id, collection_id, mode, profile_provider, " +
-                            "profile_endpoint, profile_model, profile_name, prompt_version, retrieval_snapshot, " +
-                            "created_at) VALUES ('clean-conversation', 'c1', 'ASK', 'OPENAI_COMPATIBLE', " +
-                            "'https://api.example.com/v1', 'model', 'Legacy clean', 1, " +
-                            "'{}', '$now')",
-                        "INSERT INTO model_calls (id, conversation_id, provider, endpoint, model, profile_name, " +
-                            "prompt_version, requested_at, response_at, status, input_tokens, output_tokens, " +
-                            "cache_read_tokens, cost_usd) VALUES ('legacy-call', 'legacy-conversation', " +
-                            "'OPENAI_COMPATIBLE', 'https://user:$secret@host.example.com/v1', 'model', " +
-                            "'Legacy credentialed', 1, '$now', '$now', 'SUCCEEDED', 1, 1, 0, 0.0)",
-                        "INSERT INTO ocr_profile_revisions (revision_id, profile_id, sequence, provider, " +
-                            "endpoint, model, api_key_environment_variable, context_window, max_output_tokens, " +
-                            "input_price_per_million, output_price_per_million, created_at) VALUES " +
-                            "('legacy-revision', 'legacy-ocr', 1, 'OPENAI_COMPATIBLE', " +
-                            "'https://user:$secret@vision.example.com/v1', 'vision-model', 'MY_SECRET_KEY', " +
-                            "32000, 4096, 0.0, 0.0, '$now')",
-                        "INSERT INTO ocr_profile_revisions (revision_id, profile_id, sequence, provider, " +
-                            "endpoint, model, context_window, max_output_tokens, input_price_per_million, " +
-                            "output_price_per_million, created_at) VALUES ('clean-revision', 'clean-ocr', 1, " +
-                            "'OPENAI_COMPATIBLE', 'https://vision.internal.example.com/v1', 'vision-model', " +
-                            "32000, 4096, 0.0, 0.0, '$now')",
-                        // A profile whose *current* revision is clean but whose older revision carried a
-                        // credential: the profile is still stopped, because a job or a collection that
-                        // snapshotted the older revision would dispatch through that address.
-                        "INSERT INTO ocr_profile_revisions (revision_id, profile_id, sequence, provider, " +
-                            "endpoint, model, api_key_environment_variable, context_window, max_output_tokens, " +
-                            "input_price_per_million, output_price_per_million, created_at) VALUES " +
-                            "('mixed-old-revision', 'mixed-ocr', 1, 'OPENAI_COMPATIBLE', " +
-                            "'https://user:$secret@vision-old.example.com/v1', 'vision-model', 'MY_SECRET_KEY', " +
-                            "32000, 4096, 0.0, 0.0, '$now')",
-                        "INSERT INTO ocr_profile_revisions (revision_id, profile_id, sequence, provider, " +
-                            "endpoint, model, context_window, max_output_tokens, input_price_per_million, " +
-                            "output_price_per_million, created_at) VALUES ('mixed-current-revision', " +
-                            "'mixed-ocr', 2, 'OPENAI_COMPATIBLE', 'https://vision-current.example.com/v1', " +
-                            "'vision-model', 32000, 4096, 0.0, 0.0, '$now')",
-                        "INSERT INTO ocr_profiles (id, name, enabled, current_revision_id, created_at, " +
-                            "updated_at) VALUES ('legacy-ocr', 'Legacy vision', 1, 'legacy-revision', " +
-                            "'$now', '$now')",
-                        "INSERT INTO ocr_profiles (id, name, enabled, current_revision_id, created_at, " +
-                            "updated_at) VALUES ('mixed-ocr', 'Mixed vision', 1, 'mixed-current-revision', " +
-                            "'$now', '$now')",
-                        "INSERT INTO ocr_profiles (id, name, enabled, current_revision_id, created_at, " +
-                            "updated_at) VALUES ('clean-ocr', 'Clean vision', 1, 'clean-revision', " +
-                            "'$now', '$now')",
-                    ).forEach(statement::execute)
-                }
-            }
-
-            SchemaMigrator(database).migrate()
-
-            // Nothing in the archive still carries the credential, in any of the four columns: the snapshots
-            // are cleaned like the profile's own address, and every repaired value keeps what was never
-            // secret — the scheme, host, port, path, query and fragment.
-            val endpoints = storedEndpoints(database)
-            assertEquals(13, endpoints.size, "no endpoint was dropped, only repaired: ${endpoints.map { it.first }}")
-            // The two addresses whose `@` is not a credential are byte-identical after the migration, not
-            // merely still valid: a rewrite of either would have changed which host is named.
-            assertTrue(endpoints.contains("llm_profiles.endpoint" to "https://host/a@b/v1"))
-            assertTrue(endpoints.contains("llm_profiles.endpoint" to "https://host?email=a@b/c"))
-            assertTrue(endpoints.contains("ocr_profile_revisions.endpoint" to "https://vision-current.example.com/v1"))
-            assertEquals(
-                emptyList(),
-                endpoints.filter { (_, value) -> endpointCarriesUserInfo(value) }.map { it.first },
-                "userinfo survives in the columns that carried it",
-            )
-            assertEquals(
-                emptyList(),
-                endpoints.filter { (_, value) -> value.contains(secret) }.map { it.first },
-                "the stored credential survives, so the archive still holds what this migration removed",
-            )
-            assertTrue(endpoints.contains("conversations.profile_endpoint" to "https://127.0.0.1:11434/v1"))
-            assertTrue(endpoints.contains("model_calls.endpoint" to "https://host.example.com/v1"))
-
-            assertFalse(
-                tableNames(database).contains("endpoint_userinfo_repair"),
-                "the repair plan is not left behind in the finished schema",
-            )
-
-            // The repair is invisible in the cleaned address — there is no longer a credential in it for the read
-            // path to find — so the row records the fact itself, and only for the rows the cleanup touched.
-            assertEquals(
-                mapOf("legacy-conversation" to true, "repaired-snapshot" to true, "clean-conversation" to false),
-                repairedSnapshots(database),
-                "exactly the conversations whose stored address was repaired are marked repaired",
-            )
-            // And the read path believes the marker: 'Legacy clean' was never repaired and is still enabled, yet
-            // the conversation that locked the repaired address reopens as a switched-off profile, so a continue
-            // through it is refused instead of dispatching to an address the migration chose for somebody.
-            assertFalse(
-                assertNotNull(LlmStore(database).loadInvestigateHistory("repaired-snapshot")).profile.enabled,
-                "a migrated snapshot reopens switched off even when its own profile row is clean and enabled",
-            )
-
-            // And what the credential broke was reading: both profile listings load the archived rows, and the
-            // address each of them now reports is the one that was stored without its credential.
-            val profiles = LlmStore(database).list().associateBy { profile -> profile.name }
-            assertEquals(5, profiles.size, "a legacy profile is listed, never skipped")
-            assertEquals("https://127.0.0.1:11434/v1", profiles.getValue("Legacy credentialed").endpoint)
-            assertEquals("https://host.example.com/v1", profiles.getValue("Legacy two at signs").endpoint)
-            assertFalse(
-                profiles.getValue("Legacy credentialed").enabled,
-                "a repaired address is not dispatched to until a person reviews it",
-            )
-            assertFalse(profiles.getValue("Legacy two at signs").enabled, "every repaired profile is switched off")
-            assertEquals("https://api.example.com/v1", profiles.getValue("Legacy clean").endpoint)
-            assertTrue(
-                profiles.getValue("Legacy clean").enabled,
-                "a profile whose address was never repaired keeps its switch",
-            )
-            // An `@` in the path or in the query is not a credential, so nothing was repaired for these two:
-            // the address is the one that was stored and the profile is not switched off.
-            assertEquals("https://host/a@b/v1", profiles.getValue("Legacy at in path").endpoint)
-            assertTrue(
-                profiles.getValue("Legacy at in path").enabled,
-                "an `@` in the path is not a credential, so no profile is stopped for it",
-            )
-            assertEquals("https://host?email=a@b/c", profiles.getValue("Legacy at in query").endpoint)
-            assertTrue(
-                profiles.getValue("Legacy at in query").enabled,
-                "an `@` in the query is not a credential, so no profile is stopped for it",
-            )
-
-            val ocrProfiles = OcrProfileStore(database).list().associateBy { profile -> profile.name }
-            assertEquals("https://vision.example.com/v1", ocrProfiles.getValue("Legacy vision").revision.endpoint)
-            assertFalse(ocrProfiles.getValue("Legacy vision").enabled, "the owner of a repaired revision is stopped")
-            assertEquals("https://vision.internal.example.com/v1", ocrProfiles.getValue("Clean vision").revision.endpoint)
-            assertTrue(ocrProfiles.getValue("Clean vision").enabled, "an untouched revision keeps its profile usable")
-
-            // A clean current revision does not save a profile that owns a repaired older one: a snapshot
-            // could still dispatch through the older address, so the profile is stopped and every revision
-            // the migration touched has lost its credential while the current one is left exactly as stored.
-            assertFalse(
-                ocrProfiles.getValue("Mixed vision").enabled,
-                "a profile owning any repaired revision is stopped, not only one pointing at it",
-            )
-            assertEquals(
-                "https://vision-current.example.com/v1",
-                ocrProfiles.getValue("Mixed vision").revision.endpoint,
-                "the current revision of a stopped profile is not rewritten",
-            )
-            assertEquals(
-                "https://vision-old.example.com/v1",
-                assertNotNull(OcrProfileStore(database).findRevision("mixed-old-revision")).endpoint,
-                "the older revision's credential is gone",
-            )
+            assertEquals(0, count(database, "page_text_revisions"), "deleting a document must remove its pages")
         }
     }
 

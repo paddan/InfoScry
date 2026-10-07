@@ -257,7 +257,7 @@ class OcrProfileStore(private val database: Database) {
         id = getString("id"),
         name = getString("name"),
         // A credential in the revision's URL is not a state to read back as one: the credential is dropped
-        // and the profile is shown disabled, exactly as migration 020 leaves such a row, so a row written
+        // and the profile is shown disabled, the way a cleaned row is read, so a row written
         // before the endpoint rule existed cannot fail the whole listing on the way out.
         enabled = getInt("enabled") != 0 && !credentialInEndpoint(),
         revision = toRevision(),
@@ -287,8 +287,8 @@ class OcrProfileStore(private val database: Database) {
     /**
      * The endpoint column as it may be read: a stored credential is dropped rather than returned.
      *
-     * Migration 020 repairs what a legacy archive already holds, and this is the second line of defence for
-     * a row that arrived some other way — written by hand, or by a future version with its own bug. Only the
+     * This is a defence for a row that arrived some way around the profile type — written by hand, or by a
+     * future version with its own bug. Only the
      * RFC 3986 `userinfo` component is removed, so an endpoint whose path or query merely contains an `@`
      * keeps it.
      */

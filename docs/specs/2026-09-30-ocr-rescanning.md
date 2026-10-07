@@ -154,8 +154,8 @@ answers. Requests already using a revision can finish against that revision.
 
 SQLite owns immutable document revisions, page text revisions, candidates,
 review decisions, job settings snapshots and publication intents. Existing
-content becomes an initial published revision through forward migrations.
-Do not edit applied migrations; determine the next migration number when coding.
+content becomes an initial published revision when it is written.
+The schema is the single baseline, edited in place; there are no incremental migrations.
 Preserve stable content-unit IDs using revision-owned text/chunks, not replacement
 unit identities. Rendering/checkpoint artifacts are verified by hash before reuse.
 

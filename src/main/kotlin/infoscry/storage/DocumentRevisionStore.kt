@@ -1158,7 +1158,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
      * The source image the row names, or `null` when it names none.
      *
      * "None" is a claim that no image was read, so it is only the answer when *every* provenance column is
-     * absent. The schema (migration 026) and the record both refuse a row that carries only some of them,
+     * absent. The schema and the record both refuse a row that carries only some of them,
      * but a row can still reach this read through a damaged archive or a writer that went around the store,
      * and answering "no image" for it would hide an artifact nobody can reopen. Such a row is corrupt and
      * says so, naming the revision and page but never the reference.

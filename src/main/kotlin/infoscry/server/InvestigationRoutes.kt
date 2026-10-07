@@ -223,7 +223,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             // A switched-off profile is refused before the capability gate, the conversation or the SSE
-            // stream: retired by a person, or repaired by migration 020 and left off until a review.
+            // stream: retired by a person, or because its address carried a credential.
             profile.requireDispatchable()
             if (!profile.toolCallingSupported) {
                 // The gate fires before the service is built, so no provider call and no conversation

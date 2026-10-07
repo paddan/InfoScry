@@ -606,7 +606,7 @@ class InvestigationRoutesTest {
                 promptVersion = 1,
                 retrievalSnapshot = RetrievalSnapshot.value(),
             )
-            // Exactly what migration 020 leaves for a conversation whose snapshot carried a credential: the
+            // Exactly what a cleaned row looks like for a conversation whose snapshot carried a credential: the
             // address is cleaned, so it no longer carries `userinfo` for the read path to find, and the row is
             // marked, which is the only record left that the address was rewritten. The repaired address is the
             // live profile's own clean one, so a gate that consults the stored address alone sees a conversation

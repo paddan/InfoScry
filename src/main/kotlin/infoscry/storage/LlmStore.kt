@@ -491,7 +491,7 @@ class LlmStore(private val database: Database) {
         // A row written before the endpoint rules existed can still carry a credential in its URL, and the
         // profile type refuses such a value. Reading it through anyway would fail the whole listing — and any
         // screen or CLI command that lists profiles — while the credential stayed in the file, so the value
-        // is read back the way migration 020 leaves one: credential removed, profile disabled until a person
+        // is read back with the credential removed, and the profile disabled until a person
         // reviews the address. No endpoint is ever returned with its userinfo component still on it.
         val credentialRemoved = endpointCarriesUserInfo(storedEndpoint)
         val enabled = results.getInt("enabled") != 0 && !credentialRemoved
@@ -713,9 +713,9 @@ class LlmStore(private val database: Database) {
      * dispatch to until somebody reviews it — whoever fixed the profile row in the meantime.
      *
      * "Had to be repaired" is read from two places, because the repair removes the first one's
-     * evidence: `profile_endpoint_repaired`, the marker migration 020 sets on every row whose
-     * credential it stripped, and the stored address itself, for a row that still carries `userinfo`
-     * — a hand edit, or a row the migration never saw. A snapshot the migration cleaned holds no
+     * evidence: `profile_endpoint_repaired`, the marker on every row whose
+     * credential was stripped, and the stored address itself, for a row that still carries `userinfo`
+     * — a hand edit, or a row written before the marker. A snapshot that was cleaned holds no
      * credential any more, so without the marker it would look untouched and could dispatch again.
      */
     fun loadInvestigateHistory(conversationId: String): InvestigateHistory? = database.read { connection ->
@@ -804,9 +804,9 @@ class LlmStore(private val database: Database) {
         }
         val messages = visibleMessages.map { it.message }
         val messageSeqs = visibleMessages.map { it.seq }
-        // Legacy rows written before migration 009 carry no introducing seq. Recover it from the
-        // visible tool result that names the evidence id, so a reopened pre-migration conversation
-        // keeps the same citation eligibility as one created after the migration. An entry whose
+        // Rows written without an introducing seq (`message_seq` NULL) carry none. Recover it from the
+        // visible tool result that names the evidence id, so a reopened conversation without it
+        // keeps the same citation eligibility as one that recorded it. An entry whose
         // tool exchange was dropped from provider history stays unassociated and ineligible.
         val legacyEvidenceSeqs = visibleMessages
             .filter { it.message.role == "tool" && it.message.toolCallId != null }
@@ -852,10 +852,10 @@ class LlmStore(private val database: Database) {
         // case that matters: a person may have fixed the profile after the conversation was created, which
         // leaves the row clean and enabled while the address this conversation locked is still the repaired
         // one. Nothing dispatches to a repaired address until somebody reviews it, so the gate has to see this
-        // whatever the current row says. Both the migration's marker and a stored address that still carries
+        // whatever the current row says. Both the repair marker and a stored address that still carries
         // `userinfo` count, because the repair itself strips the credential the second test looks for: without
-        // the marker a row migration 020 cleaned reads as untouched, and without the address test a hand-edited
-        // row the migration never reached would.
+        // the marker a cleaned row reads as untouched, and without the address test a hand-edited
+        // row would.
         val repairedSnapshot = conversation.profileEndpointRepaired ||
             endpointCarriesUserInfo(conversation.profileEndpoint ?: "")
 

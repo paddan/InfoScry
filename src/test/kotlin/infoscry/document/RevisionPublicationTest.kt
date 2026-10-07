@@ -7,7 +7,6 @@ import infoscry.domain.ChunkId
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
-import infoscry.domain.DocumentStatus
 import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.embedding.TestDocumentEmbedder
@@ -19,20 +18,12 @@ import infoscry.search.DocumentRow
 import infoscry.search.RevisionSnapshotUnavailableException
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
-import infoscry.storage.ContentStore
-import infoscry.storage.Database
 import infoscry.storage.DocumentRevisionStore
-import infoscry.storage.DocumentStore
-import infoscry.storage.Instants
 import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.PageApproval
 import infoscry.storage.PublicationPhase
 import infoscry.storage.RevisionChunkDraft
 import infoscry.storage.RevisionState
-import infoscry.storage.SchemaMigrator
-import infoscry.storage.CollectionStore
-import infoscry.domain.Collection
-import infoscry.domain.Document
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
@@ -64,90 +55,19 @@ import kotlinx.coroutines.runBlocking
 class RevisionPublicationTest {
 
     private lateinit var dataDir: Path
-    private lateinit var legacyDir: Path
 
     @BeforeTest
     fun createTemporaryDataDirectory() {
         dataDir = Files.createTempDirectory("infoscry-revision-publication")
         AppContext.open(dataDir).use { context -> context.seedCollectionWithId("default", "Default") }
-        // A second directory that is never opened as an archive until a version-17 schema has been built
-        // in it: the backfill can only be observed from an archive the new migration has not touched yet.
-        legacyDir = Files.createTempDirectory("infoscry-revision-backfill")
     }
 
     @AfterTest
     fun removeTemporaryDataDirectory() {
         dataDir.toFile().deleteRecursively()
-        legacyDir.toFile().deleteRecursively()
     }
 
-    // ---- M1: the backfill and the isolated candidate sink ----
-
-    @Test
-    fun existingPublishedContentBecomesAnInitialPublishedRevision() {
-        // An archive as version 17 left it: text and chunks committed, and no revision anywhere.
-        val database = Database(legacyDir.resolve("infoscry.db"))
-        SchemaMigrator(database).migrate(upToVersion = 17)
-        val collections = CollectionStore(database)
-        val documents = DocumentStore(database)
-        val content = ContentStore(database)
-        val collection = collections.create("Legacy")
-        val document = documents.insert(
-            Document(
-                id = DocumentId("legacy-document"),
-                collectionId = collection.id,
-                sha256 = "b".repeat(64),
-                mediaType = "text/plain",
-                originalFilename = "legacy.txt",
-                sourcePath = "/tmp/legacy.txt",
-                sizeBytes = 12,
-                status = DocumentStatus.COMPLETE,
-                createdAt = Instants.now(),
-                updatedAt = Instants.now(),
-            ),
-        )
-        val unit = content.commitExtractedUnit(
-            documentId = document.id,
-            fingerprint = ExtractionFingerprint.of(document.sha256, ExtractionSettings(ocrLanguages = "eng")),
-            key = "page-1",
-            ordinal = 0,
-            draft = ContentUnitDraft(
-                locator = SourceLocation.TextLines(1, 1),
-                extractedText = "the legacy reading",
-                searchText = "the legacy reading",
-                method = ExtractionMethod.DIRECT_TEXT,
-            ),
-            artifactRoot = legacyDir.resolve("artifacts"),
-        ).unit
-        content.replaceUnitChunks(
-            unitId = unit.id,
-            drafts = listOf(chunkDraft(0, "the legacy reading")),
-            chunkerVersion = "test",
-            tokenizerId = "test",
-            maxSequenceTokens = 512,
-            overlapTokens = 0,
-        )
-        database.close()
-
-        AppContext.open(legacyDir).use { context ->
-            val active = assertNotNull(context.revisions.activeRevisionId(document.id))
-            assertEquals("revision-backfill-${document.id.value}", active)
-            val revision = assertNotNull(context.revisions.revision(active))
-            assertEquals(RevisionState.PUBLISHED, revision.state)
-            assertEquals("MIGRATION_BACKFILL", revision.provenance)
-
-            val page = assertNotNull(context.revisions.page(active, 0))
-            assertEquals(unit.id, page.unitId, "a backfilled page keeps the published unit identity")
-            assertEquals("the legacy reading", page.extractedText)
-            assertEquals(PageApproval.APPROVED, page.approval)
-            assertNull(page.textSha256, "a legacy page has no hash, which is not the same as a zero hash")
-            assertNull(
-                page.sourceImage,
-                "a page backfilled from a version 17 archive was given a source image it was never read from",
-            )
-            assertEquals(1, context.revisions.chunkCount(active))
-        }
-    }
+    // ---- M1: the isolated candidate sink ----
 
     @Test
     fun stagingACandidateCannotTouchPublishedContent() {

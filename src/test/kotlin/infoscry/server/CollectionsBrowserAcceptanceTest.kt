@@ -101,26 +101,21 @@ class CollectionsBrowserAcceptanceTest {
     }
 
     /**
-     * The legacy `Default` collection: unused archives lose it at startup, used ones are kept until the
-     * reader renames or deletes it themselves.
+     * A `Default` collection that already holds a document is kept until the reader renames or deletes it
+     * themselves.
      *
-     * The archives are built the way [DefaultRetirementTest] builds them — migrated up to version 12 so
-     * the seed row exists as an earlier build left it — and then handed to a real server, whose startup
-     * runs the rest of the migration. What the browser sees is therefore the archive's own state, not a
+     * The archive is built straight on the baseline schema with that collection and document in it, and
+     * then handed to a real server. What the browser sees is therefore the archive's own state, not a
      * seeded imitation of it.
      */
     @Test
-    fun `an unused legacy Default is retired and a used one is kept until the reader chooses`() {
-        startServerOver(legacyArchive("unused-legacy"))
-        seedProfile("acceptance-profile")
-        // The browser scenario for a fresh archive also asserts what an empty archive looks like, which is
-        // exactly what a retired Default leaves behind.
-        runScenario("collection-creation")
-        assertEquals(listOf("Notes"), collectionNames(), "an unused legacy Default must be retired at startup")
-
-        stopServer()
-        val usedArchive = legacyArchive("used-legacy") { connection ->
+    fun `a used Default collection is kept until the reader chooses`() {
+        val usedArchive = usedDefaultArchive("used-default") { connection ->
             connection.createStatement().use { statement ->
+                statement.execute(
+                    "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                        "VALUES ('default', 'Default', 'eng', 'ACTIVE', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')",
+                )
                 statement.execute(
                     "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
                         "VALUES ('notes', 'Notes', 'eng', 'ACTIVE', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')",
@@ -341,8 +336,7 @@ class CollectionsBrowserAcceptanceTest {
     /**
      * A server over one archive directory.
      *
-     * The legacy cases start it over an archive they built at an earlier schema version, so the
-     * migration that retires the automatic `Default` is the server's own startup, not a test's imitation.
+     * The used-Default case starts it over an archive it built on the baseline schema beforehand.
      */
     private fun startServerOver(dataDir: Path, vararg collections: String) {
         val started = ApiTestServer(
@@ -485,16 +479,13 @@ class CollectionsBrowserAcceptanceTest {
 
     private fun quoted(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
-    /**
-     * An archive as a build before the submissions this ticket verifies left it: schema version 12, so the
-     * automatic `Default` row migration 001 seeded is still there and migration 013 has not run.
-     */
-    private fun legacyArchive(name: String, seed: (java.sql.Connection) -> Unit = {}): Path {
+    /** An archive directory whose baseline-schema database [seed] has filled before any server opens it. */
+    private fun usedDefaultArchive(name: String, seed: (java.sql.Connection) -> Unit): Path {
         val dataDir = tempDir.resolve(name)
         Files.createDirectories(dataDir)
         val database = Database(dataDir.resolve("infoscry.db"))
         try {
-            SchemaMigrator(database).migrate(upToVersion = 12)
+            SchemaMigrator(database).migrate()
             database.transaction { connection -> seed(connection) }
         } finally {
             database.close()

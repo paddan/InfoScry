@@ -34,8 +34,8 @@ fun Routing.configureAskRoutes(context: AppContext) {
             val body = call.receiveJson<AskApiRequest>()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
-            // A profile that is switched off — retired by a person, or repaired by migration 020 and left
-            // switched off until somebody reviews the address — is refused before any dispatch, as a 400 the
+            // A profile that is switched off — retired by a person, or because its address carried a credential
+            // that was removed and has not been reviewed — is refused before any dispatch, as a 400 the
             // caller can act on rather than an answer from an address nobody chose.
             profile.requireDispatchable()
             val prompt = PromptService(context.llm)

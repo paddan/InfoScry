@@ -105,7 +105,7 @@ data class SourceImageProvenance(
         require(relativePath.isNotBlank()) { "a source image reference must not be blank" }
         // The reference is what a reviewer-facing route serves an image from, so it is confined where it is
         // *written*: an absolute path, a `..` or `.` segment, or an empty one is refused here rather than
-        // only where an image is later resolved. Migration 026 enforces the same rule in the schema.
+        // only where an image is later resolved. The schema enforces the same rule.
         require(isRootConfined(relativePath)) {
             "a source image reference is relative to its root and stays inside it, " +
                 "was '${relativePath.take(MAX_REPORTED_REFERENCE_CHARACTERS)}'"

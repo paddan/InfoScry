@@ -631,7 +631,7 @@ class AskRoutesTest {
                     val secret = "hunter2-not-a-real-credential"
                     // The row a legacy archive holds, written around the profile type that now refuses such a
                     // URL: read back through the store it is repaired and switched off, which is the state
-                    // migration 020 leaves behind. A repaired address is not one a person chose, so nothing
+                    // of a repaired row. A repaired address is not one a person chose, so nothing
                     // may dispatch to it until the profile has been reviewed and switched back on.
                     harness.context.database.transaction { connection ->
                         connection.prepareStatement(

@@ -1,7 +1,7 @@
 package infoscry.storage
 
 /**
- * A migration's version is newer than this build understands. Raising it means an older InfoScry
+ * The database schema version is newer than this build understands. Raising it means an older InfoScry
  * would silently write against a schema it does not know, so migration stops instead.
  */
 class SchemaVersionTooNewException(val found: Int, val supported: Int) : IllegalStateException(
@@ -10,143 +10,56 @@ class SchemaVersionTooNewException(val found: Int, val supported: Int) : Illegal
 )
 
 /**
- * Applies the numbered migrations under `db/migration/` in ascending order.
+ * Creates the database schema from the single baseline script `db/migration/001_baseline.sql`.
  *
- * Migrations are forward-only and idempotent: each one runs inside a transaction that also records
- * `PRAGMA user_version`, so a crash leaves either the previous version or the new one. The list is
- * explicit rather than discovered by scanning the classpath, because a jar cannot be scanned
- * reliably and an unordered migration is a data-loss bug.
+ * There is one schema version and no upgrade path: the baseline is edited in place when the schema
+ * changes, and a database that already has it is left alone. The baseline runs inside one transaction
+ * that also records `PRAGMA user_version`, so a crash leaves either an empty database or a complete
+ * one. A database whose `user_version` is newer than this build understands is refused rather than
+ * written to, because an older InfoScry would silently write against a schema it does not know.
  */
 class SchemaMigrator(private val database: Database) {
 
-    /**
-     * Applies every migration newer than the database up to [upToVersion].
-     *
-     * Production always migrates to [SUPPORTED_VERSION]. The parameter exists so a test can reproduce an
-     * archive as an older build left it — insert the state a later migration is about, then migrate the
-     * rest of the way — because the state a cleanup migration removes cannot be observed once that
-     * migration has run.
-     */
-    fun migrate(upToVersion: Int = SUPPORTED_VERSION) {
+    /** Creates the baseline schema in an empty database; does nothing when it is already there. */
+    fun migrate() {
         val currentVersion = database.userVersion()
         if (currentVersion > SUPPORTED_VERSION) {
             throw SchemaVersionTooNewException(found = currentVersion, supported = SUPPORTED_VERSION)
         }
+        if (currentVersion == SUPPORTED_VERSION) return
 
-        MIGRATIONS
-            .filter { it.version > currentVersion && it.version <= upToVersion }
-            .sortedBy { it.version }
-            .forEach(::apply)
-    }
-
-    private fun apply(migration: Migration) {
-        if (migration.foreignKeysOff) {
-            applyWithForeignKeysOff(migration)
-        } else {
-            applyWithForeignKeysOn(migration)
-        }
-    }
-
-    /**
-     * Runs a migration that must not be checked against foreign keys.
-     *
-     * Rebuilding a referenced table — the only way SQLite can widen a CHECK constraint — needs the
-     * pragma off while the rows are copied, and a `PRAGMA foreign_keys` assignment is a no-op inside
-     * a transaction, so the pragma is set on the connection before the migration's own transaction
-     * opens and restored after it closes. The copy runs in one transaction of its own, so a crash
-     * still leaves either the previous version or the new one.
-     */
-    private fun applyWithForeignKeysOff(migration: Migration) {
-        database.read { connection ->
-            connection.createStatement().use { statement -> statement.execute(PRAGMA_FOREIGN_KEYS_OFF) }
-        }
-        try {
-            applyStatements(migration)
-        } finally {
-            database.read { connection ->
-                connection.createStatement().use { statement -> statement.execute(PRAGMA_FOREIGN_KEYS_ON) }
-            }
-        }
-    }
-
-    private fun applyWithForeignKeysOn(migration: Migration) {
-        applyStatements(migration)
-    }
-
-    private fun applyStatements(migration: Migration) {
-        val statements = splitSqlStatements(readResourceText(migration.resource))
+        val statements = splitSqlStatements(readBaseline())
         database.transaction { connection ->
             connection.createStatement().use { statement ->
                 statements.forEach { sql -> statement.execute(sql) }
             }
             connection.createStatement().use { statement ->
-                statement.execute("PRAGMA user_version = ${migration.version}")
+                statement.execute("PRAGMA user_version = $SUPPORTED_VERSION")
             }
             connection.prepareStatement(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
             ).use { statement ->
-                statement.setInt(1, migration.version)
+                statement.setInt(1, SUPPORTED_VERSION)
                 statement.setString(2, Instants.now())
                 statement.executeUpdate()
             }
         }
     }
 
-    private fun readResourceText(resource: String): String =
-        javaClass.classLoader.getResourceAsStream(resource)?.use { it.readBytes().decodeToString() }
-            ?: error("migration resource $resource is missing from the classpath")
-
-    private data class Migration(val version: Int, val resource: String, val foreignKeysOff: Boolean = false)
+    private fun readBaseline(): String =
+        javaClass.classLoader.getResourceAsStream(BASELINE_RESOURCE)?.use { it.readBytes().decodeToString() }
+            ?: error("schema resource $BASELINE_RESOURCE is missing from the classpath")
 
     companion object {
         /** The schema version this build writes and understands. */
-        const val SUPPORTED_VERSION = 26
+        const val SUPPORTED_VERSION = 1
 
-        private const val PRAGMA_FOREIGN_KEYS_OFF = "PRAGMA foreign_keys = OFF"
-
-        private const val PRAGMA_FOREIGN_KEYS_ON = "PRAGMA foreign_keys = ON"
-
-        private val MIGRATIONS = listOf(
-            Migration(version = 1, resource = "db/migration/001_core.sql"),
-            Migration(version = 2, resource = "db/migration/002_content.sql"),
-            Migration(version = 3, resource = "db/migration/003_job_types.sql", foreignKeysOff = true),
-            Migration(version = 4, resource = "db/migration/004_llm.sql"),
-            Migration(version = 5, resource = "db/migration/005_ask_audit.sql"),
-            Migration(version = 6, resource = "db/migration/006_investigate_activity.sql"),
-            Migration(version = 7, resource = "db/migration/007_investigate_tool_messages.sql"),
-            Migration(version = 8, resource = "db/migration/008_conversation_titles.sql"),
-            Migration(version = 9, resource = "db/migration/009_adopted_answers.sql"),
-            Migration(version = 10, resource = "db/migration/010_extraction_progress.sql"),
-            Migration(version = 11, resource = "db/migration/011_deletion_error_code.sql"),
-            Migration(version = 12, resource = "db/migration/012_document_deletion.sql", foreignKeysOff = true),
-            Migration(version = 13, resource = "db/migration/013_retire_automatic_default.sql"),
-            Migration(version = 14, resource = "db/migration/014_retry_job_type.sql", foreignKeysOff = true),
-            Migration(version = 15, resource = "db/migration/015_document_deletion_paths.sql"),
-            Migration(version = 16, resource = "db/migration/016_job_current_item.sql"),
-            Migration(version = 17, resource = "db/migration/017_ocr_profiles.sql"),
-            Migration(version = 18, resource = "db/migration/018_document_revisions.sql"),
-            Migration(version = 19, resource = "db/migration/019_revision_page_source_image.sql"),
-            Migration(version = 20, resource = "db/migration/020_endpoint_userinfo_repair.sql"),
-            Migration(version = 21, resource = "db/migration/021_page_reviews.sql"),
-            Migration(version = 22, resource = "db/migration/022_ocr_validation_records.sql"),
-            Migration(version = 23, resource = "db/migration/023_rescan_operations.sql", foreignKeysOff = true),
-            Migration(
-                version = 24,
-                resource = "db/migration/024_review_pending_imports.sql",
-                foreignKeysOff = true,
-            ),
-            Migration(version = 25, resource = "db/migration/025_revision_restores.sql"),
-            Migration(
-                version = 26,
-                resource = "db/migration/026_source_image_integrity.sql",
-                foreignKeysOff = true,
-            ),
-        )
+        private const val BASELINE_RESOURCE = "db/migration/001_baseline.sql"
     }
 }
 
 /**
- * Splits a migration script into single statements. SQLite's JDBC driver executes one statement per
+ * Splits a SQL script into single statements. SQLite's JDBC driver executes one statement per
  * call, so the boundary has to be found here: a semicolon inside a string literal or a `--` comment
  * must not end a statement.
  */

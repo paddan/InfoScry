@@ -1312,7 +1312,7 @@ internal data class RetryRun(val job: Job, val documents: Map<DocumentId, Docume
 /**
  * Seeds a collection with a fixed identifier.
  *
- * Migration 013 retires the automatic Default, and tests that name `default` in job payloads or
+ * A new archive has no automatic Default collection, and tests that name `default` in job payloads or
  * assertions still need the row to exist. The collection store generates its own id, so this writes the
  * row a person would have created and keeps [id] as the test already names it.
  */
