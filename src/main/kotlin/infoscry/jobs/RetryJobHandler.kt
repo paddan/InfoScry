@@ -168,6 +168,8 @@ class RetryJobHandler internal constructor(
                 collection = collection,
                 snapshot = snapshot,
             ),
+            // The selection this retry was admitted with, which the revision it publishes records as its reading.
+            reading = snapshot,
         )
     }
 

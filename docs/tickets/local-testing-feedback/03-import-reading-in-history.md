@@ -1,6 +1,18 @@
 # 03: Revision history names the OCR method an import used
 
-**Status:** Not started. Unchecked criteria are requirements, not evidence.
+**Status:** Implemented; the text-history browser scenario is not done. Unchecked criteria are requirements, not evidence.
+
+Design: the import's or retry's frozen OCR snapshot (from its job payload) is stored on the revision it publishes
+(`document_revisions.reading_snapshot`, set by `openCandidate` for a check-and-improve candidate and by
+`recordPublishedContent` for a fill-missing import). The history reads a rescan's operation first, then that
+snapshot, and says "No page needed OCR" when no approved page was read by OCR. Legacy imports with no snapshot
+still say "Not recorded".
+
+Verified: `infoscry.jobs.ImportJobHandlerTest` (the four new reading tests pass; the one failing test,
+"a file that cannot be copied", is a root-permission case), `infoscry.server.OcrRestoreRoutesTest` (new route test:
+engine/mode/language/tool shown, no endpoint, key variable or path in the body), the document and OCR route
+classes (two `DocumentDeletionRecoveryTest` permission cases fail under root and are environmental), `RetryJobHandlerTest`, `RescanJobHandlerTest`; `web` `npm test -- --run` (387 passed) and `npm run check`
+(0 errors). The new tests were written before the implementation but their red run was not captured.
 **Blocked by:** None.
 **Plan:** [Local testing feedback](../../plans/2026-10-07-local-testing-feedback.md).
 
@@ -24,11 +36,11 @@ was read with, or says honestly that a page needed no OCR.
 
 ## Test-first implementation
 
-- [ ] Failing tests first: an imported document's history names its engine/mode/language; a retry's revision names
+- [x] Failing tests first: an imported document's history names its engine/mode/language; a retry's revision names
   the retry's settings; a direct-text-only document says no page needed OCR; no endpoint, key variable or path is
-  exposed.
-- [ ] Implement from a durable record, never by reading today's collection settings.
-- [ ] Extend the text-history browser scenario.
+  exposed. (Written first; their red run was not captured, see the note above.)
+- [x] Implement from a durable record, never by reading today's collection settings.
+- [ ] Extend the text-history browser scenario. Not done in this change (Playwright item skipped by instruction).
 
 ## Focused verification
 

@@ -2000,6 +2000,108 @@ class ImportJobHandlerTest {
         }
     }
 
+    /** Each revision the document's history lists, as the history reads it back. */
+    private fun historyOf(harness: Harness, documentId: DocumentId): List<infoscry.document.RevisionHistoryEntry> =
+        AppContext.open(harness.dataDir).use { context ->
+            context.revisionHistory.history(CollectionId("default"), documentId)
+        }
+
+    private fun ocrSnapshot(
+        language: String,
+        toolVersion: String? = null,
+        mode: OcrImportMode = OcrImportMode.FILL_MISSING,
+    ): OcrSettingsSnapshot = OcrSettingsSnapshot(
+        engine = OcrEngine.TESSERACT,
+        mode = mode,
+        language = language,
+        extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+        toolVersion = toolVersion,
+    )
+
+    @Test
+    fun `an imported document's history names the OCR engine, mode, language and tool it was read with`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("scan.txt")
+            Files.writeString(source, "a scanned page")
+            val run = harness.importDurably(
+                listOf(source),
+                ModeRecordingUnits(),
+                settings = ExtractionSettings(ocrLanguages = "swe"),
+                ocr = ocrSnapshot(language = "swe", toolVersion = "tesseract 5.5"),
+            )
+            val entry = historyOf(harness, run.documents.keys.single()).single()
+
+            assertEquals(listOf("OCR"), entry.extractionMethods)
+            val reading = assertNotNull(entry.reading, "an import that read by OCR names no reading")
+            assertEquals("TESSERACT", reading.engine)
+            assertEquals("FILL_MISSING", reading.mode)
+            assertEquals("swe", reading.language)
+            assertEquals("tesseract 5.5", reading.toolVersion)
+            assertFalse(entry.noOcrNeeded, "a page was read by OCR, so no page needed no OCR")
+        }
+    }
+
+    @Test
+    fun `a retry's revision names the settings the retry was read with, not the import's`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("scan.txt")
+            Files.writeString(source, "a scanned page")
+            val imported = harness.importDurably(
+                listOf(source),
+                ModeRecordingUnits(),
+                settings = ExtractionSettings(ocrLanguages = "eng"),
+                ocr = ocrSnapshot(language = "eng", toolVersion = "tesseract 5.4"),
+            )
+            val documentId = imported.documents.keys.single()
+
+            harness.retry(
+                listOf(documentId),
+                ModeRecordingUnits(),
+                settings = ExtractionSettings(ocrLanguages = "swe"),
+                ocr = ocrSnapshot(language = "swe", toolVersion = "tesseract 5.5"),
+            )
+            val readings = historyOf(harness, documentId).map {
+                assertNotNull(it.reading, "a revision produced by OCR names no reading")
+            }
+
+            assertEquals(listOf("tesseract 5.4", "tesseract 5.5"), readings.map { it.toolVersion })
+            assertEquals(listOf("eng", "swe"), readings.map { it.language })
+            assertEquals(listOf("TESSERACT", "TESSERACT"), readings.map { it.engine })
+        }
+    }
+
+    @Test
+    fun `a document that needed no OCR says so instead of naming an engine`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("ledger.txt")
+            Files.writeString(source, "text the file already holds")
+            val run = harness.importDurably(
+                listOf(source),
+                RecordingUnits(units = 1),
+                ocr = ocrSnapshot(language = "eng", toolVersion = "tesseract 5.5"),
+            )
+            val entry = historyOf(harness, run.documents.keys.single()).single()
+
+            assertEquals(listOf("DIRECT_TEXT"), entry.extractionMethods)
+            assertNull(entry.reading, "no page was read by OCR, so no engine is named for this revision")
+            assertTrue(entry.noOcrNeeded, "the history must say that no page needed OCR")
+        }
+    }
+
+    @Test
+    fun `an import with no recorded OCR settings says the reading was not recorded and invents none`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("scan.txt")
+            Files.writeString(source, "a scanned page")
+            val run = harness.importDurably(listOf(source), ModeRecordingUnits())
+            val entry = historyOf(harness, run.documents.keys.single()).single()
+
+            assertEquals(listOf("OCR"), entry.extractionMethods)
+            assertNull(entry.reading, "a legacy import recorded no settings, so none may be named")
+            assertFalse(entry.noOcrNeeded)
+        }
+    }
+
     private fun withHarness(block: (Harness) -> Unit) {
         val directory = Files.createTempDirectory("infoscry-import")
         try {
@@ -2118,8 +2220,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
         embedder: DocumentEmbedder = TestDocumentEmbedder(),
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
         recursive: Boolean = false,
+        ocr: OcrSettingsSnapshot? = null,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId, recursive)
+        val job = enqueue(context, sources, settings, collectionId, recursive, ocr)
         attach(context, storedPipeline(context, extractor), embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -2142,11 +2245,12 @@ internal class Harness(val directory: Path) : AutoCloseable {
             detector = MediaTypeDetector(),
             registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
             sink = committed,
-            candidateSinkFor = { documentId ->
+            candidateSinkFor = { documentId, reading ->
                 CandidateRevisionSink(
                     revisions = context.revisions,
                     documentId = documentId,
                     provenance = ImportPipeline.PROVENANCE_CHECK_AND_IMPROVE,
+                    readingSnapshot = reading,
                 ).also(onCandidate)
             },
         )
@@ -2168,9 +2272,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
             detector = MediaTypeDetector(),
             registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
             sink = StoredUnitsSink(context.paths, context.documents, context.content),
-            candidateSinkFor = { documentId ->
+            candidateSinkFor = { documentId, reading ->
                 ParkAfterStaging(
-                    base.sinkFor(documentId, OcrImportMode.CHECK_AND_IMPROVE, extractor.pageImageSupport),
+                    base.sinkFor(documentId, OcrImportMode.CHECK_AND_IMPROVE, extractor.pageImageSupport, reading),
                     staged,
                 )
             },

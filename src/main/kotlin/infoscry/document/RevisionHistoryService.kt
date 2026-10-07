@@ -2,8 +2,10 @@ package infoscry.document
 
 import infoscry.domain.CollectionId
 import infoscry.domain.DocumentId
+import infoscry.domain.ExtractionMethod
 import infoscry.ocr.OcrOperation
 import infoscry.ocr.OcrProfileRevision
+import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PublicationDisposition
 import infoscry.storage.DocumentRevision
 import infoscry.storage.DocumentRevisionStore
@@ -15,12 +17,13 @@ import infoscry.storage.PageDigest
 import infoscry.storage.RevisionState
 
 /**
- * What the rescan that produced a revision was configured with, as its operation recorded it.
+ * What the OCR attempt that produced a revision was configured with, as that attempt recorded it.
  *
- * Only what the operation's frozen snapshot holds: nothing about an endpoint, a key or a path, and nothing at
- * all for a revision no operation produced — an import's and a restore's carry no engine, and are not given
- * one. [transcriptionModel] and [reviewModel] are the model names of the immutable profile revisions the
- * snapshot named, and are absent when that profile revision no longer resolves.
+ * It is read from the attempt's own frozen snapshot — a rescan operation's, or the snapshot an import or retry
+ * stored on the revision it published — and never from the collection's current settings. It holds nothing
+ * about an endpoint, a key or a path. A restore carries no reading, and neither does a revision whose attempt
+ * recorded no settings. [transcriptionModel] and [reviewModel] are the model names of the immutable profile
+ * revisions the snapshot named, and are absent when that profile revision no longer resolves.
  */
 data class RevisionReading(
     val engine: String,
@@ -65,6 +68,14 @@ data class RevisionHistoryEntry(
     /** How each page of the revision was read: direct text, OCR, or both, as its pages record it. */
     val extractionMethods: List<String>,
     val pageChanges: PageChangeCounts,
+    /**
+     * True when the revision's published pages were all read without OCR, so no engine was used for it.
+     *
+     * It is set only from what the pages record, never from a missing reading: a revision whose pages include
+     * an OCR page, or whose pages record no method, is not told that no page needed OCR. When it is true,
+     * [reading] is absent even if the attempt that published the text recorded a snapshot.
+     */
+    val noOcrNeeded: Boolean = false,
 )
 
 /**
@@ -103,17 +114,24 @@ class RevisionHistoryService(
             it.state == RevisionState.PUBLISHED || it.state == RevisionState.SUPERSEDED
         }
         val digests = all.associate { it.id to revisions.pageDigests(it.id) }
+        val snapshots = revisions.readingSnapshots(documentId)
         return all.map { revision ->
             val pages = digests.getValue(revision.id)
+            val methods = pages.filter { it.approval == PageApproval.APPROVED }
+                .mapNotNull { it.extractionMethod?.name }.distinct().sorted()
+            val operationReading = readings[revision.id]?.let { readingOfSnapshot(it.snapshot) }
+            // A page that was read without OCR says so: the engine an attempt was configured with is not a
+            // reading of that page, and a rescan's own pages are always read by OCR.
+            val noOcrNeeded = operationReading == null && methods.isNotEmpty() && ExtractionMethod.OCR.name !in methods
             RevisionHistoryEntry(
                 revision = revision,
                 active = revision.id == active,
                 pageCount = pages.size,
                 publishedAt = published[revision.id],
                 restoredFromRevisionId = restores[revision.id]?.restoredFromRevisionId,
-                reading = readings[revision.id]?.let(::readingOf),
-                extractionMethods = pages.filter { it.approval == PageApproval.APPROVED }
-                    .mapNotNull { it.extractionMethod?.name }.distinct().sorted(),
+                reading = operationReading
+                    ?: if (noOcrNeeded) null else snapshots[revision.id]?.let(::readingOfSnapshot),
+                extractionMethods = methods,
                 pageChanges = changesOf(
                     documentId = documentId,
                     revision = revision,
@@ -121,12 +139,12 @@ class RevisionHistoryService(
                     parentPages = revision.parentRevisionId?.let { parent -> digests[parent] ?: revisions.pageDigests(parent) },
                     isRestore = revision.id in restores,
                 ),
+                noOcrNeeded = noOcrNeeded,
             )
         }
     }
 
-    private fun readingOf(operation: OcrOperation): RevisionReading {
-        val snapshot = operation.snapshot
+    private fun readingOfSnapshot(snapshot: OcrSettingsSnapshot): RevisionReading {
         return RevisionReading(
             engine = snapshot.engine.name,
             mode = snapshot.mode.name,

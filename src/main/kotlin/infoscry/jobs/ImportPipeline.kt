@@ -8,6 +8,7 @@ import infoscry.extract.MediaTypeDetector
 import infoscry.extract.PageImageSupport
 import infoscry.ocr.CandidateRevisionSink
 import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrSettingsSnapshot
 
 /**
  * What an import runs with: how a file's type is read, which extractor handles that type, and where the
@@ -32,7 +33,7 @@ class ImportPipeline(
      * stages nothing — every attempt commits through [sink], which is where an attempt committed before this
      * seam existed and what a pipeline wired with a recording sink still does.
      */
-    private val candidateSinkFor: ((DocumentId) -> ExtractionSink)? = null,
+    private val candidateSinkFor: ((DocumentId, OcrSettingsSnapshot?) -> ExtractionSink)? = null,
 ) {
 
     /**
@@ -51,9 +52,10 @@ class ImportPipeline(
         documentId: DocumentId,
         mode: OcrImportMode,
         pageImageSupport: PageImageSupport,
+        reading: OcrSettingsSnapshot? = null,
     ): ExtractionSink =
         if (mode == OcrImportMode.CHECK_AND_IMPROVE && pageImageSupport is PageImageSupport.Supported) {
-            candidateSinkFor?.invoke(documentId) ?: sink
+            candidateSinkFor?.invoke(documentId, reading) ?: sink
         } else {
             sink
         }
@@ -92,11 +94,12 @@ class ImportPipeline(
                 // What a check-and-improve attempt reads is held for review instead of replacing the
                 // document's text: its pages become a candidate revision of that document, and which document
                 // that is is a fact of the file rather than of the pipeline.
-                candidateSinkFor = { documentId ->
+                candidateSinkFor = { documentId, reading ->
                     CandidateRevisionSink(
                         revisions = context.revisions,
                         documentId = documentId,
                         provenance = PROVENANCE_CHECK_AND_IMPROVE,
+                        readingSnapshot = reading,
                     )
                 },
             )
