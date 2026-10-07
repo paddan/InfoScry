@@ -122,8 +122,8 @@ class DefaultRetirementTest {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
 
-            assertEquals(25, SchemaMigrator.SUPPORTED_VERSION)
-            assertEquals(25, database.userVersion())
+            assertEquals(26, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(26, database.userVersion())
             assertEquals(emptyList(), collectionIds(database), "a new archive must expose no collection")
         }
     }

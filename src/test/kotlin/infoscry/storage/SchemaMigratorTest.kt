@@ -73,8 +73,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(25, database.userVersion())
-            assertEquals(25, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(26, database.userVersion())
+            assertEquals(26, SchemaMigrator.SUPPORTED_VERSION)
         }
     }
 
@@ -120,7 +120,7 @@ class SchemaMigratorTest {
                 "missing tables, found $tables",
             )
 
-            assertEquals(25, count(database, "schema_version"))
+            assertEquals(26, count(database, "schema_version"))
             assertEquals(0, count(database, "collections"), "a new archive must expose no collection")
         }
     }
@@ -378,6 +378,87 @@ class SchemaMigratorTest {
             assertEquals(1200, read.width)
             assertEquals(1600, read.height)
             assertEquals(1, read.renderVersion)
+        }
+    }
+
+    @Test
+    fun `an archive migrated from 019 keeps every page readable, with the provenance it had or none`() {
+        newDatabase().use { database ->
+            val now = "2026-10-07T07:00:00Z"
+            SchemaMigrator(database).migrate(upToVersion = 19)
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    listOf(
+                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                            "VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now')",
+                        "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, " +
+                            "original_path, size_bytes, status, created_at, updated_at) VALUES ('d1', 'c1', " +
+                            "'${"a".repeat(64)}', 'image/png', 'scan.png', '/tmp/scan.png', 42, 'COMPLETE', " +
+                            "'$now', '$now')",
+                        "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, " +
+                            "provenance, created_at) VALUES ('r1', 'd1', NULL, 'CANDIDATE', 'RESCAN', '$now')",
+                        // A page with no image, a page with a whole provenance, and a page whose reading was
+                        // made from a picture that is its own managed copy and was never measured.
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, approval, created_at) VALUES ('r1', 0, 'unit-0', " +
+                            "'{\"type\":\"pdf_page\",\"page\":1}', 'no image', 'no image', 'PENDING', '$now')",
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, approval, created_at, source_image_root, " +
+                            "source_image_relative_path, source_image_sha256, source_image_width, " +
+                            "source_image_height, source_image_render_version) VALUES ('r1', 1, 'unit-1', " +
+                            "'{\"type\":\"pdf_page\",\"page\":2}', 'rendered', 'rendered', 'APPROVED', '$now', " +
+                            "'ARTIFACTS', 'fp/pages/page-000002.png', '${"b".repeat(64)}', 1200, 1600, 1)",
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, approval, created_at, source_image_root, " +
+                            "source_image_relative_path, source_image_sha256, source_image_render_version) " +
+                            "VALUES ('r1', 2, 'unit-2', '{\"type\":\"image\",\"name\":\"scan.png\"}', " +
+                            "'managed', 'managed', 'PENDING', '$now', 'MANAGED_COPY', 'scan.png', " +
+                            "'${"c".repeat(64)}', 1)",
+                    ).forEach(statement::execute)
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+
+            val revisions = DocumentRevisionStore(database, ContentStore(database))
+            val pages = revisions.pages("r1")
+            assertEquals(listOf(0, 1, 2), pages.map { it.ordinal }, "the migration lost a page")
+            assertEquals(listOf("no image", "rendered", "managed"), pages.map { it.extractedText })
+            assertEquals(
+                listOf(PageApproval.PENDING, PageApproval.APPROVED, PageApproval.PENDING),
+                pages.map { it.approval },
+            )
+            assertNull(pages[0].sourceImage, "a page with no image was given one by the migration")
+            val rendered = assertNotNull(pages[1].sourceImage)
+            assertEquals(SourceImageRoot.ARTIFACTS, rendered.root)
+            assertEquals("fp/pages/page-000002.png", rendered.relativePath)
+            assertEquals("b".repeat(64), rendered.sha256)
+            assertEquals(1200, rendered.width)
+            assertEquals(1600, rendered.height)
+            val managed = assertNotNull(pages[2].sourceImage)
+            assertEquals(SourceImageRoot.MANAGED_COPY, managed.root)
+            assertNull(managed.width, "an unmeasured picture was given dimensions by the migration")
+            assertNull(managed.height)
+
+            // The rebuilt table is the one that refuses a reference outside its root.
+            assertFailsWith<java.sql.SQLException> {
+                database.transaction { connection ->
+                    connection.createStatement().use { statement ->
+                        statement.execute(
+                            "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                                "extracted_text, search_text, approval, created_at, source_image_root, " +
+                                "source_image_relative_path, source_image_sha256, source_image_render_version) " +
+                                "VALUES ('r1', 3, 'unit-3', '{\"type\":\"pdf_page\",\"page\":4}', 't', 't', " +
+                                "'PENDING', '$now', 'ARTIFACTS', '/abs/page.png', '${"d".repeat(64)}', 1)",
+                        )
+                    }
+                }
+            }
+            // The revision still owns its pages after the rebuild: deleting the document cascades to them.
+            database.transaction { connection ->
+                connection.createStatement().use { statement -> statement.execute("DELETE FROM documents") }
+            }
+            assertEquals(0, count(database, "page_text_revisions"), "the rebuilt table lost its cascade")
         }
     }
 

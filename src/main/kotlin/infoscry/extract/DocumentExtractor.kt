@@ -510,6 +510,14 @@ data class ExtractionInput(
      * "unlimited": a destination off this machine with no authority is refused.
      */
     val dispatch: infoscry.ocr.OcrDispatchAuthority? = null,
+    /**
+     * Whether the page images this attempt renders are named by durable page records and so must outlive it.
+     *
+     * It is the sink's statement ([ExtractionSink.stagesForReview]): a staged candidate's page records the
+     * image it was read from, and a record may never name a file the attempt deleted. When it is false a
+     * working render is deleted with the attempt and the page records no image at all.
+     */
+    val retainsPageImages: Boolean = false,
 ) {
 
     /** Whether an earlier attempt already committed this unit under the same fingerprint. */

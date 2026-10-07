@@ -1157,21 +1157,40 @@ class DocumentRevisionStore(private val database: Database, private val content:
     /**
      * The source image the row names, or `null` when it names none.
      *
-     * The columns are written together and read together, so a row whose reference is absent has no image
-     * even if one of the other columns were somehow set: a reference is the only thing that can name a file,
-     * and a hash beside no reference names nothing. The dimensions are read as a pair for the same reason a
-     * page image carries them as one statement.
+     * "None" is a claim that no image was read, so it is only the answer when *every* provenance column is
+     * absent. The schema (migration 026) and the record both refuse a row that carries only some of them,
+     * but a row can still reach this read through a damaged archive or a writer that went around the store,
+     * and answering "no image" for it would hide an artifact nobody can reopen. Such a row is corrupt and
+     * says so, naming the revision and page but never the reference.
      */
     private fun ResultSet.toSourceImage(): SourceImageProvenance? {
-        val relativePath = getString("source_image_relative_path") ?: return null
-        return SourceImageProvenance(
-            root = SourceImageRoot.valueOf(getString("source_image_root")),
-            relativePath = relativePath,
-            sha256 = getString("source_image_sha256"),
-            width = getInt("source_image_width").takeUnless { wasNull() },
-            height = getInt("source_image_height").takeUnless { wasNull() },
-            renderVersion = getInt("source_image_render_version"),
-        )
+        val root = getString("source_image_root")
+        val relativePath = getString("source_image_relative_path")
+        val sha256 = getString("source_image_sha256")
+        val width = getInt("source_image_width").takeUnless { wasNull() }
+        val height = getInt("source_image_height").takeUnless { wasNull() }
+        val renderVersion = getInt("source_image_render_version").takeUnless { wasNull() }
+        if (root == null && relativePath == null && sha256 == null && width == null && height == null &&
+            renderVersion == null
+        ) {
+            return null
+        }
+        val where = "revision ${getString("revision_id")} page ${getInt("ordinal")}"
+        check(root != null && relativePath != null && sha256 != null && renderVersion != null) {
+            "$where carries only part of a source image provenance, so it names no image it can be trusted to"
+        }
+        return try {
+            SourceImageProvenance(
+                root = SourceImageRoot.valueOf(root),
+                relativePath = relativePath,
+                sha256 = sha256,
+                width = width,
+                height = height,
+                renderVersion = renderVersion,
+            )
+        } catch (malformed: IllegalArgumentException) {
+            throw IllegalStateException("$where carries a source image provenance that is not well formed", malformed)
+        }
     }
 
     private fun ResultSet.toRevisionChunk(): RevisionChunk = RevisionChunk(

@@ -196,9 +196,12 @@ data class PdfPageCandidate(val page: Int, val text: String) {
  * fingerprint, because a page image has to be a file this process can point at rather than one shared by
  * two attempts with different settings. Where *inside* that directory it goes is the mode's decision, and it
  * is a decision about evidence: a page image read for review is kept, since a reviewer has to be able to
- * open the image the reading was made from, while a render that only filled in missing text is working
- * material for one attempt and is deleted — every page image when its reading is committed, the directory
- * itself when the attempt ends, including when it is cancelled or fails.
+ * open the image the reading was made from, and so is a fill-missing render that a staged candidate will
+ * name ([ExtractionInput.retainsPageImages]). A render that only filled in missing text for a page record
+ * that names no image is working material for one attempt and is deleted — every page image when its
+ * reading is committed, the directory itself when the attempt ends, including when it is cancelled or
+ * fails — and that page records no image rather than a dead one. The retention rule is stated where the
+ * render is written, in [emitPages].
  *
  * The resolution is the job's own ([ExtractionSettings.renderDpi]) when it carries one, and the page is
  * brought within the renderer's pixel bound when it does not fit; the reading records the resolution it was
@@ -301,6 +304,7 @@ class PdfExtractor(
         document: PDDocument,
     ): PageRun {
         val readsEveryPage = input.settings.ocrMode == OcrImportMode.CHECK_AND_IMPROVE
+        val keepsRenders = readsEveryPage || input.retainsPageImages
         val engine = input.settings.readingEngine()
         // The engines this attempt reads with: the build's own, plus the one this attempt builds for its
         // dispatch authority, because an external reading counts against this attempt's page allowance.
@@ -344,8 +348,27 @@ class PdfExtractor(
                         return@unit
                     }
 
-                    val directory = if (readsEveryPage) {
-                        // The pages a reviewer will look at: they outlive this attempt.
+                    // The artifact-lifetime rule, decided once and here, where the render is written:
+                    //
+                    //   A render that a durable page record will name is retained for as long as that record
+                    //   exists. A page record exists as long as its revision row does — a candidate, a
+                    //   withdrawn candidate (its rows are kept so a stager may resume), a published or a
+                    //   superseded revision — and revision rows are removed only with their document, whose
+                    //   whole artifacts directory is removed with it. So a retained render is never swept
+                    //   while a page still names it, and nothing outside document or collection deletion
+                    //   removes it. A render is always the attempt's own (fingerprint-named) file, so a
+                    //   candidate that reuses one reads the same bytes rather than a second copy.
+                    //
+                    //   A render nobody will name is working material, deleted as soon as its page is
+                    //   committed, and the page then records NO image at all — never a path to a file that
+                    //   is already gone.
+                    //
+                    // Check-and-improve always keeps its renders (a reviewer compares against them). A
+                    // fill-missing attempt keeps them only when the caller says the page record that names
+                    // them is a staged candidate (`ExtractionInput.retainsPageImages`); a fresh import
+                    // publishes content units that carry no image, so keeping a raster for every scanned
+                    // page of every import would only fill the disk.
+                    val directory = if (keepsRenders) {
                         attemptRoot.resolve(PageImageRenderer.PAGES_DIRECTORY)
                     } else {
                         workDirectory ?: Files.createDirectories(attemptRoot.resolve(WORKING_DIRECTORY))
@@ -431,16 +454,15 @@ class PdfExtractor(
                         artifactSha256 = verified.artifactSha256,
                         meanConfidence = verified.meanConfidence,
                         // The page image the engine was handed, named against the document's artifact root
-                        // so a later reader can open the pixels this page's text was read from. In
-                        // fill-missing mode this render is deleted with the attempt, and the reading still
-                        // says which image it came from: the record survives, the working copy does not.
-                        sourceImage = image.artifactProvenance(input.artifactRoot),
+                        // so a later reader can open the pixels this page's text was read from. Only a
+                        // render that is kept is named: a working render is deleted below, and a record of
+                        // it would be a reference to a file nobody can reopen.
+                        sourceImage = image.artifactProvenance(input.artifactRoot).takeIf { keepsRenders },
                     )
-                    if (!readsEveryPage) {
+                    if (!keepsRenders) {
                         // The collector has committed the unit by the time `emit` returns, so a working image
                         // has done its job and is removed inside the same permit that produced it. A page
-                        // image read for review is kept instead: it is the image the reading above has to be
-                        // reviewable against.
+                        // image that is kept is the one the reading above has to be reviewable against.
                         discardRenderedImage(run, image.imagePath)
                     }
                 }
@@ -613,7 +635,8 @@ private const val IMAGE_NAME_FORMAT: String = "page-%06d.png"
  * The directory a page image rendered to fill missing text is written into, under the attempt's own
  * artifacts.
  *
- * A render that only fills in missing text is working material for one attempt, so it is deleted when the
- * attempt ends; the durable evidence of such a page is the tool's own word boxes, not the raster.
+ * A render that only fills in missing text, for a page record that names no image, is working material for
+ * one attempt, so it is deleted when the attempt ends; the durable evidence of such a page is the tool's own
+ * word boxes, not the raster. A render a staged candidate names is written under `pages` instead.
  */
 private const val WORKING_DIRECTORY: String = "working"

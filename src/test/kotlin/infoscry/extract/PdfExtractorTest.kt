@@ -510,22 +510,52 @@ class PdfExtractorTest {
             parsed.unit.sourceImage,
             "a page whose own text layer was read named an image nobody rendered for it",
         )
-        // The page the tool read names the image it was read from, at the place a later reader resolves
-        // artifacts from: this attempt's own directory under the document's artifact root, with the name a
-        // page's image has. A fill-missing render is working material, so it is the attempt's `working`
-        // directory rather than the `pages` a reviewed rescan keeps — the reading says which image it came
-        // from either way, which is the point. A page whose text came out of the container names nothing.
+        // A fill-missing render that nothing asked to keep is working material, deleted with the attempt, so
+        // the page it was read from records no image at all rather than a dead one. A page whose text came
+        // out of the container names nothing either.
+        assertNull(
+            ocred.unit.sourceImage,
+            "a page read from a render that was deleted with the attempt names an image nobody can reopen",
+        )
+    }
+
+    @Test
+    fun `a fill-missing render a candidate will reference is kept and named where a reader resolves it`() {
+        val spy = OcrSpy()
+        val settings = ExtractionSettings(ocrLanguages = "eng")
+        val input = inputFor(fixture(MIXED_NAME), probe(), settings = settings, retainsPageImages = true)
+
+        val units = units(collect(pdfExtractor(spy), input, probe()))
+        val ocred = units.single { pageOf(it.key) == 3 }
+        val parsed = units.single { pageOf(it.key) == 1 }
+
+        assertNull(parsed.unit.sourceImage, "a page whose own text layer was read named an image nobody rendered")
         val rendered = assertNotNull(ocred.unit.sourceImage)
         assertEquals(SourceImageRoot.ARTIFACTS, rendered.root)
         assertEquals(
-            "${fingerprint(settings).value}/working/page-000003.png",
+            "${fingerprint(settings).value}/pages/page-000003.png",
             rendered.relativePath,
-            "the reading does not name the page image it was rendered from where a reader can find it",
+            "the reading does not name the retained page image where a reader can find it",
         )
+        // The reference has to resolve, after the attempt, to the very bytes the page was read from.
+        val file = input.artifactRoot.resolve(rendered.relativePath)
+        assertTrue(Files.isRegularFile(file), "the page names a render that did not outlive the attempt")
+        assertEquals(sha256Of(file), rendered.sha256)
         val pageThree = spy.pages.single { image -> image.ordinal == 2 }
         assertEquals(pageThree.width, rendered.width)
         assertEquals(pageThree.height, rendered.height)
         assertEquals(PageImage.RENDER_VERSION, rendered.renderVersion)
+        // Every page that names a render names one that exists: the invariant, for every page the attempt read.
+        units.mapNotNull { it.unit.sourceImage }.forEach { source ->
+            assertTrue(
+                Files.isRegularFile(input.artifactRoot.resolve(source.relativePath)),
+                "${source.relativePath} is named by a page and is not there",
+            )
+        }
+        assertFalse(
+            Files.exists(input.artifactRoot.resolve(fingerprint(settings).value).resolve("working")),
+            "a retained render was left in the attempt's working directory",
+        )
     }
 
     // ---- What the document says about itself before it is read ----------------------------------------
@@ -1056,6 +1086,9 @@ class PdfExtractorTest {
     )
 
     /** The fingerprint one attempt's checkpoints are keyed by, which is where its artifacts live. */
+    private fun sha256Of(path: Path): String = java.util.HexFormat.of()
+        .formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)))
+
     private fun fingerprint(settings: ExtractionSettings): ExtractionFingerprint =
         ExtractionFingerprint.of("b".repeat(64), settings)
 
@@ -1091,6 +1124,7 @@ class PdfExtractorTest {
         boundary: UnitBoundary,
         committed: Set<String> = emptySet(),
         settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
+        retainsPageImages: Boolean = false,
     ): ExtractionInput = ExtractionInput(
         documentId = DocumentId("doc-1"),
         managedPath = source,
@@ -1099,6 +1133,7 @@ class PdfExtractorTest {
         fingerprint = ExtractionFingerprint.of("b".repeat(64), settings),
         committedUnitKeys = committed,
         boundary = boundary,
+        retainsPageImages = retainsPageImages,
     )
 
     /** Copies a committed fixture into the managed area a real extraction would read from. */
