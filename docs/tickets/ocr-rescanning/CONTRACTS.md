@@ -289,6 +289,34 @@ the final-tree `./gradlew check` — counts in STATUS.md.
 - `ToolEvidence.revisionId: String? = null` — search evidence carries `hit.revisionId`, read evidence the document's active revision at read time via the new `fun interface InvestigationRevisions`; `InvestigationTools(collectionId, search, content, documents, revisions, maxResultBytes)`.
 - Reopened-conversation read serves each entry from its own row (`excerpt`, `revision_id`) and places the document via `COALESCE(live unit, recorded revision, the revision that once held the unit)` with an INNER JOIN on `documents` (deletion) and `d.collection_id` scoping. History `EvidenceWire` now returns `excerpt` + `revisionId`; the `done` wire returns `revisionId`.
 - Web: `openInvestigationSource` routes like saved Ask citations — recorded revision opens that reading, unknown provenance shows the saved excerpt under the revision-unknown label without any request.
+### 02e: Publication seal failure and recovery
+
+**Migrations:** None — no schema, DTO or counter change; SchemaMigrator SUPPORTED_VERSION stays 027.
+
+**Interfaces:**
+- `RevisionSnapshotGate.requireUnsealed()` (`src/main/kotlin/infoscry/search/RevisionSnapshotGate.kt`):
+  throws the existing `RevisionSnapshotUnavailableException` while the seal is raised, for reads that do
+  not take a lease. `acquire()` already refuses search (and any lease-taking reader) under the seal;
+  this is the same refusal for a reader of live SQLite text.
+- The live source read in `SourceRoutes` (`GET /api/collections/{id}/sources/{sourceId}` with no
+  `revision` query parameter) calls `requireUnsealed()` before answering, so it maps to the existing
+  503 `REVISION_SNAPSHOT_UNAVAILABLE` ("the archive is finishing a publication; retry once it has
+  completed") through `ApplicationCall.handle`. A source read that names a revision is unchanged: its
+  text is that revision's immutable text, which the spec lets finish against its own revision, and it
+  is served even while the seal is raised.
+- No change to `RevisionPublicationService.publish(..., observe: (PublicationStep) -> Unit)`: the
+  ticket's deterministic counter hook is the existing `observe` seam counted per step — the first
+  `STAGED_COMMITTED` is the publication's, the second belongs to the inline roll-forward that runs
+  because the authority moved.
+
+**Test coverage:** RevisionPublicationRecoveryTest pins the three scenarios with that counter hook
+(authority-commit failure plus roll-forward staged-commit failure observed exactly once each, leaving a
+PREPARED intent with durable authority; lease and search refusal while SQLite already serves the
+target's text under a scope that still hides it; a restart completing the publication before serving
+and search/source resuming on the authoritative revision). SearchRoutesTest pins the wire boundary:
+503 `REVISION_SNAPSHOT_UNAVAILABLE` for both search and the live source while the publication cannot
+switch, the named-revision read still answering, and both reopening after `recoverUnfinished()`. Red
+evidence and gate counts are in the 02e record in STATUS.md.
 
 ### Known publication wording conflict
 

@@ -1,6 +1,7 @@
 package infoscry.server
 
 import infoscry.AppContext
+import infoscry.document.PublicationStep
 import infoscry.domain.Chunk
 import infoscry.domain.ChunkId
 import infoscry.domain.CollectionId
@@ -229,6 +230,108 @@ class SearchRoutesTest {
             harness.context.revisionSnapshots.unseal()
         }
     }
+
+    // ---- The publication seal over the whole read boundary ----
+
+    /**
+     * Ticket 02e, scenarios 1–3 on the wire: a publication failed at its authority commit and again at
+     * the roll-forward's staged commit refuses both halves of a read — search *and* the live source —
+     * instead of letting the old index answer beside the new text, and completing the recovery reopens
+     * both on the authoritative revision.
+     *
+     * The failure is injected through the service's own step hook with a deterministic counter: the first
+     * STAGED_COMMITTED belongs to the publication, the second to the completion that runs because its
+     * authority already moved. While that completion cannot finish, SQLite serves the replacement and the
+     * index still holds the replaced reading, so any 200 here would be the mixture the seal exists for.
+     */
+    @Test
+    fun `while a publication cannot switch, search and the live source refuse instead of mixing readings`() =
+        runBlocking {
+            val (documentId, unitId) = seedUnit(document = "sealed-source.txt", text = "the original wording")
+            val context = harness.context
+            val base = assertNotNull(context.revisions.recordPublishedContent(documentId, "TEST_SEED"))
+            val candidate = context.revisions.openCandidate(documentId, base, "TEST_REPLACEMENT")
+            context.revisions.appendPage(
+                candidate,
+                RevisionPageDraft(
+                    ordinal = 0,
+                    unitId = unitId,
+                    locator = SourceLocation.TextLines(1, 1),
+                    extractedText = "the replacement wording",
+                    searchText = "the replacement wording",
+                    extractionMethod = ExtractionMethod.OCR,
+                    approval = PageApproval.APPROVED,
+                    chunks = listOf(
+                        RevisionChunkDraft(
+                            ordinal = 0,
+                            text = "the replacement wording",
+                            startOffset = 0,
+                            endOffset = "the replacement wording".length,
+                            tokenCount = 5,
+                            tokenStart = 0,
+                            tokenEnd = 4,
+                            embedding = vectorFor("the replacement wording"),
+                        ),
+                    ),
+                ),
+            )
+
+            val observations = mutableListOf<PublicationStep>()
+            val operation = context.revisionPublication.publish(documentId, base, candidate) { step ->
+                observations += step
+                val count = observations.count { it == step }
+                if (step == PublicationStep.AUTHORITATIVE && count == 1) {
+                    throw IllegalStateException("injected failure at the authority commit")
+                }
+                if (step == PublicationStep.STAGED_COMMITTED && count == 2) {
+                    throw IllegalStateException("injected failure at the roll-forward's staged commit")
+                }
+            }
+            assertEquals(1, observations.count { it == PublicationStep.AUTHORITATIVE }, observations.toString())
+            assertEquals(2, observations.count { it == PublicationStep.STAGED_COMMITTED }, observations.toString())
+
+            val collectionId = harness.collectionIdOf("Default")
+
+            // Search refuses rather than answering from the index rows of the replaced reading…
+            val search = harness.get("/api/search?collection=Default&q=replacement&mode=keyword")
+            assertEquals(HttpStatusCode.ServiceUnavailable, search.status, search.bodyAsText())
+            assertContains(search.bodyAsText(), "REVISION_SNAPSHOT_UNAVAILABLE")
+
+            // …and the live source read refuses rather than answering from SQLite text the database has
+            // already moved — the pair "old index with new text" the ticket exists to forbid.
+            val live = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
+            assertEquals(HttpStatusCode.ServiceUnavailable, live.status, live.bodyAsText())
+            assertContains(live.bodyAsText(), "REVISION_SNAPSHOT_UNAVAILABLE")
+            assertFalse(
+                live.bodyAsText().contains("the replacement wording"),
+                "the source route served the text the switch has not published: ${live.bodyAsText()}",
+            )
+
+            // A request that already names a revision finishes against that revision's immutable text —
+            // the spec's rule for saved evidence, which is coherent whatever the index is doing.
+            val pinned = harness.get("/api/collections/$collectionId/sources/${unitId.value}?revision=$base")
+            assertEquals(HttpStatusCode.OK, pinned.status, pinned.bodyAsText())
+            assertContains(pinned.bodyAsText(), "the original wording")
+
+            // Scenario 3: completing the recovery reopens reads on the authoritative revision.
+            val recovery = context.revisionPublication.recoverUnfinished()
+            assertEquals(listOf(operation), recovery.completed)
+
+            val served = harness.get("/api/search?collection=Default&q=replacement&mode=keyword")
+            assertEquals(HttpStatusCode.OK, served.status, served.bodyAsText())
+            assertContains(served.bodyAsText(), "the replacement wording")
+            assertContains(served.bodyAsText(), "\"revisionId\":\"$candidate\"")
+            val original = harness.get("/api/search?collection=Default&q=original&mode=keyword")
+            assertEquals(HttpStatusCode.OK, original.status, original.bodyAsText())
+            assertEquals("""{"hits":[],"staleFiltered":0}""", original.bodyAsText())
+
+            val liveAfter = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
+            assertEquals(HttpStatusCode.OK, liveAfter.status, liveAfter.bodyAsText())
+            assertContains(liveAfter.bodyAsText(), "the replacement wording")
+            val pinnedAfter = harness.get("/api/collections/$collectionId/sources/${unitId.value}?revision=$base")
+            assertEquals(HttpStatusCode.OK, pinnedAfter.status, pinnedAfter.bodyAsText())
+            assertContains(pinnedAfter.bodyAsText(), "the original wording")
+        }
 
     // ---- Content units, and why a deleted collection's unit is not served ----
 
