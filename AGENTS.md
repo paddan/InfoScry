@@ -26,6 +26,10 @@ a real provider or GPU.
 - For code changes, run the task's meaningful failing tests first, then focused
   passing tests and the applicable accumulated phase gate. Documentation-only
   changes need link, consistency, and diff checks rather than application tests.
+- Run only the side you changed while iterating: backend
+  `./gradlew test -PskipFrontend --tests <class>`, frontend
+  `cd web && npm test -- --run && npm run check`; see `docs/development.md`.
+  Run `./gradlew check` before reporting done.
 - Report what was actually verified and what remains unverified. Never mark a
   task or hardware gate complete from mock results alone.
 - Keep README status and commands current as implementation lands. Keep this
