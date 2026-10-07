@@ -4,6 +4,7 @@
   import HistoryColumn from '../lib/HistoryColumn.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
+  import OcrProfilesPanel from '../lib/OcrProfilesPanel.svelte';
   import CollectionsPanel from '../lib/CollectionsPanel.svelte';
   import {
     DEFAULT_INVESTIGATION_LIMITS,
@@ -54,7 +55,7 @@
   let query = '';
   let mode: SearchMode = 'HYBRID';
   let activeMode: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN' = 'SEARCH';
-  let adminTab: 'COLLECTIONS' | 'LLM' = 'COLLECTIONS';
+  let adminTab: 'COLLECTIONS' | 'LLM' | 'OCR' = 'COLLECTIONS';
   let mediaType = '';
   let pathContains = '';
   let textContains = '';
@@ -522,7 +523,7 @@
   }
 
   function handleAdminTabKeydown(event: KeyboardEvent): void {
-    const tabs: ('COLLECTIONS' | 'LLM')[] = ['COLLECTIONS', 'LLM'];
+    const tabs: ('COLLECTIONS' | 'LLM' | 'OCR')[] = ['COLLECTIONS', 'LLM', 'OCR'];
     const current = tabs.indexOf(adminTab);
     let next = current;
     if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
@@ -795,8 +796,10 @@
           <span class="eyebrow">ADMINISTRATION</span>
           {#if adminTab === 'COLLECTIONS'}
             <p>Create or select a collection and add local files or folders to it. Choosing paths opens a native dialog on this machine.</p>
-          {:else}
+          {:else if adminTab === 'LLM'}
             <p>Configure the LLM profiles Ask and Investigate can use. API keys stay in environment variables.</p>
+          {:else}
+            <p>Configure the image-reading profiles OCR can use. They are separate from Ask and Investigate. API keys stay in environment variables.</p>
           {/if}
         </div>
       {:else}
@@ -912,6 +915,14 @@
             tabindex={adminTab === 'LLM' ? 0 : -1}
             onclick={() => (adminTab = 'LLM')}
           >LLM profiles</button>
+          <button
+            id="admin-tab-ocr"
+            role="tab"
+            aria-selected={adminTab === 'OCR'}
+            aria-controls="admin-panel-ocr"
+            tabindex={adminTab === 'OCR' ? 0 : -1}
+            onclick={() => (adminTab = 'OCR')}
+          >OCR profiles</button>
         </div>
         <div class="admin-panels">
           <div id="admin-panel-collections" role="tabpanel" aria-labelledby="admin-tab-collections" hidden={adminTab !== 'COLLECTIONS'}>
@@ -937,6 +948,9 @@
             {/if}
           </div>
           <div id="admin-panel-llm" role="tabpanel" aria-labelledby="admin-tab-llm" hidden={adminTab !== 'LLM'}><LlmAdminPanel /></div>
+          <div id="admin-panel-ocr" role="tabpanel" aria-labelledby="admin-tab-ocr" hidden={adminTab !== 'OCR'}>
+            {#if activeMode === 'ADMIN' && adminTab === 'OCR'}<OcrProfilesPanel />{/if}
+          </div>
         </div>
       </div>
 

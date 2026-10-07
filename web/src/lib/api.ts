@@ -192,6 +192,58 @@ export type LlmProfile = {
 /** The fields a profile mutation accepts; the server owns id and capability measurements. */
 export type LlmProfileInput = Omit<LlmProfile, 'id' | 'keyAvailable' | 'toolCallingMeasured' | 'capabilityCheckedAt'>;
 
+/** Whether dispatching to an OCR profile sends page images off this machine. */
+export type OcrEndpointScope = 'LOCAL' | 'EXTERNAL';
+
+/**
+ * One OCR profile as the server shows it: the profile and the revision it currently reads through.
+ * Profiles are not tied to a role; a collection selects one for transcription and another for review.
+ * `keyAvailable` is presence of the named environment variable only; no key value is ever returned.
+ */
+export type OcrProfile = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  revisionId: string;
+  sequence: number;
+  provider: LlmProvider;
+  endpoint: string;
+  scope: OcrEndpointScope;
+  model: string;
+  contextWindow: number;
+  maxOutputTokens: number;
+  inputPricePerMillion: number;
+  outputPricePerMillion: number;
+  apiKeyEnvironmentVariable: string | null;
+  keyAvailable: boolean;
+  /** null: never measured; the measurement is a synthetic-image check, not a declaration. */
+  imageCapabilityMeasured: boolean | null;
+  imageCapabilityCheckedAt: string | null;
+};
+
+/** The complete next state of a profile; an edit is a new revision, so there is no sparse update. */
+export type OcrProfileInput = Pick<
+  OcrProfile,
+  | 'name'
+  | 'provider'
+  | 'endpoint'
+  | 'model'
+  | 'contextWindow'
+  | 'maxOutputTokens'
+  | 'inputPricePerMillion'
+  | 'outputPricePerMillion'
+  | 'enabled'
+  | 'apiKeyEnvironmentVariable'
+>;
+
+/** What one capability check measured, with the profile as it now stands. */
+export type OcrProfileProbe = {
+  profile: OcrProfile;
+  supported: boolean;
+  modelVersion: string | null;
+  errorCode: string | null;
+};
+
 export type LlmDefaults = { ASK: string | null; INVESTIGATE: string | null };
 
 export type LlmProfiles = { profiles: LlmProfile[]; defaults: LlmDefaults };
@@ -236,11 +288,14 @@ export const SOURCE_PAGE_CHARS = 16_384;
 /** A failure the server named. `code` is stable; `message` is written for the person reading it. */
 export class ApiError extends Error {
   readonly code: string;
+  /** The HTTP status the failure arrived with; null for a failure that never reached the server. */
+  readonly status: number | null;
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, status: number | null = null) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
+    this.status = status;
   }
 }
 
@@ -455,6 +510,31 @@ export async function updateLlmProfile(id: string, profile: LlmProfileInput): Pr
 
 export async function deleteLlmProfile(id: string): Promise<void> {
   await mutate(`/api/llm/profiles/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+export async function listOcrProfiles(): Promise<OcrProfile[]> {
+  const body = (await readJson(await fetch('/api/ocr/profiles'))) as { profiles: OcrProfile[] };
+  return body.profiles;
+}
+
+export async function createOcrProfile(profile: OcrProfileInput): Promise<OcrProfile> {
+  const body = (await mutate('/api/ocr/profiles', 'POST', profile)) as { profile: OcrProfile };
+  return body.profile;
+}
+
+export async function updateOcrProfile(id: string, profile: OcrProfileInput): Promise<OcrProfile> {
+  const body = (await mutate(`/api/ocr/profiles/${encodeURIComponent(id)}`, 'PATCH', profile)) as { profile: OcrProfile };
+  return body.profile;
+}
+
+/** Retire a profile from new selection; its revisions stay for jobs and history that reference them. */
+export async function disableOcrProfile(id: string): Promise<void> {
+  await mutate(`/api/ocr/profiles/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+/** Check image transport with the server's synthetic image; the route takes no body by design. */
+export async function probeOcrProfile(id: string): Promise<OcrProfileProbe> {
+  return (await mutate(`/api/ocr/profiles/${encodeURIComponent(id)}/probe`, 'POST')) as OcrProfileProbe;
 }
 
 /** Delete one stored conversation (a kept Ask answer or an Investigate conversation) from its collection. */
@@ -965,7 +1045,7 @@ async function readJson(response: Response): Promise<unknown> {
   }
   if (!response.ok) {
     const error = (body as { error?: { code?: string; message?: string } } | null)?.error;
-    throw new ApiError(error?.code ?? `HTTP_${response.status}`, error?.message ?? response.statusText);
+    throw new ApiError(error?.code ?? `HTTP_${response.status}`, error?.message ?? response.statusText, response.status);
   }
   return body;
 }
