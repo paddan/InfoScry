@@ -108,6 +108,9 @@ tasks.test {
         if (skipFrontend) excludeTags(FRONTEND_TAG)
     }
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // A test result depends on the machine (locale, user, installed tools), which the build cache key does
+    // not include, so a pass restored from the cache could belong to another environment.
+    outputs.cacheIf { false }
     // Test classes use temporary directories and ephemeral ports, so they can run in separate JVMs.
     maxParallelForks = (Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
 }
