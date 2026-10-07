@@ -1,5 +1,6 @@
 package infoscry.server
 
+import infoscry.EXTERNAL_TAG
 import infoscry.jobs.Harness
 import infoscry.jobs.PictureUnits
 import infoscry.jobs.RescanHarness
@@ -19,6 +20,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Tag
 
 /**
  * The rescan API over a real socket: what each request does, what it refuses, and what it never says.
@@ -295,7 +297,10 @@ class OcrRoutesTest {
         harness.context.ocrOperations.operation(operationId)!!.snapshot,
     )
 
+    // The selected engine is Surya, and the rescan service refuses an engine this machine lacks, so this
+    // needs the Surya runtime installed (see `SuryaOcr.configured`), like the other `external` tests.
     @Test
+    @Tag(EXTERNAL_TAG)
     fun `the collection's review profile is selectable through the settings route and reaches the operation`() =
         runBlocking {
             val updated = harness.request(
