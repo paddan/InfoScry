@@ -101,6 +101,8 @@ tasks.test {
     // accelerator, so the hardware gate is `gpuIntegrationTest`, which fails rather than skips.
     useJUnitPlatform { excludeTags(EXTERNAL_TAG, MODEL_TAG, GPU_TAG) }
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // Test classes use temporary directories and ephemeral ports, so they can run in separate JVMs.
+    maxParallelForks = (Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
 }
 
 val externalTest = tasks.register<Test>("externalTest") {
