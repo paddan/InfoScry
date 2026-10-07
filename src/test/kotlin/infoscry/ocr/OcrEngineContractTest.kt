@@ -862,6 +862,142 @@ class OcrEngineContractTest {
         }
     }
 
+    // ---- Artifact lifetime: what cancellation, restart and a competing attempt may not erase (03c) ----
+
+    @Test
+    fun `a cancelled attempt leaves the images its staged pages name on disk`() {
+        // Ticket 03c, scenario 2, first half: the pages staged before a cancellation keep the images their
+        // durable rows name — the cancellation deletes only the fill-missing working directory, which a
+        // staging attempt never creates — so every staged reference still opens and still hashes to the
+        // bytes the row recorded.
+        val archive = Archive(directory)
+        try {
+            val document = archive.document()
+            val sink = CandidateRevisionSink(archive.revisions, document.id, "RESCAN")
+            val cancelled = PdfPageRenderer { renderer, page, dpi, where ->
+                if (page == 4) throw CancellationException("the attempt was cancelled while rendering")
+                PngPageRenderer.render(renderer, page, dpi, where)
+            }
+            val input = inputFor(
+                fixture("mixed.pdf"),
+                attemptSettings(mode = OcrImportMode.CHECK_AND_IMPROVE),
+                documentId = document.id,
+                artifactRoot = archive.artifacts,
+                boundary = PermitProbeBoundary(),
+            )
+
+            assertFailsWith<CancellationException> {
+                extractInto(
+                    PdfExtractor(PageOcrEngines(listOf(RecordingEngine())), pageRenderer = cancelled),
+                    input,
+                    sink,
+                )
+            }
+
+            val staged = archive.revisions.pages(assertNotNull(sink.candidateRevisionId))
+            assertEquals(
+                listOf(0, 1, 2),
+                staged.map { page -> page.ordinal },
+                "the cancelled render staged a page, or the pages before it were not staged",
+            )
+            staged.forEach { page ->
+                val source = assertNotNull(page.sourceImage, "a staged page names no image it was read from")
+                val file = archive.artifacts.resolve(source.relativePath)
+                assertTrue(
+                    Files.isRegularFile(file),
+                    "cancellation removed the image a staged page names: ${source.relativePath}",
+                )
+                assertEquals(source.sha256, sha256Of(file), "the image a staged page names is no longer its bytes")
+            }
+        } finally {
+            archive.close()
+        }
+    }
+
+    @Test
+    fun `a restart and a competing fill-missing attempt do not erase the images a staged candidate names`() {
+        // Ticket 03c, scenario 2, second half: a restart adopts the candidate and skips the pages it
+        // already staged (they are not rendered again, so their files are not rewritten), and a competing
+        // fill-missing attempt — the retry shape, a different fingerprint that renders the scanned pages
+        // again and deletes its own working renders — writes only under its own attempt directory. What
+        // the candidate names must hash-match after both.
+        val archive = Archive(directory)
+        try {
+            val document = archive.document()
+            val settings = attemptSettings(mode = OcrImportMode.CHECK_AND_IMPROVE)
+            val cancelled = PdfPageRenderer { renderer, page, dpi, where ->
+                if (page == 4) throw CancellationException("the attempt was cancelled while rendering")
+                PngPageRenderer.render(renderer, page, dpi, where)
+            }
+            val attemptInput = inputFor(
+                fixture("mixed.pdf"),
+                settings,
+                documentId = document.id,
+                artifactRoot = archive.artifacts,
+                boundary = PermitProbeBoundary(),
+            )
+            val first = CandidateRevisionSink(archive.revisions, document.id, "RESCAN")
+            assertFailsWith<CancellationException> {
+                extractInto(
+                    PdfExtractor(PageOcrEngines(listOf(RecordingEngine())), pageRenderer = cancelled),
+                    attemptInput,
+                    first,
+                )
+            }
+            val candidate = assertNotNull(first.candidateRevisionId, "the cancelled attempt staged nothing")
+            val staged = archive.revisions.pages(candidate)
+            assertEquals(listOf(0, 1, 2), staged.map { page -> page.ordinal })
+            val named = staged.map { page ->
+                val source = assertNotNull(page.sourceImage, "a staged page names no image it was read from")
+                source.relativePath to source.sha256
+            }
+
+            // Restart: a fresh sink adopts the same candidate and answers with the staged keys, so those
+            // pages are skipped before anything is rendered for them.
+            val restarted = CandidateRevisionSink(archive.revisions, document.id, "RESCAN")
+            val skip = runBlocking { restarted.committedKeys(document.id, attemptInput.fingerprint) }
+            assertEquals(setOf("page:1", "page:2", "page:3"), skip, "the restart does not adopt the staged pages")
+            extractInto(
+                PdfExtractor(PageOcrEngines(listOf(RecordingEngine()))),
+                inputFor(
+                    fixture("mixed.pdf"),
+                    settings,
+                    documentId = document.id,
+                    artifactRoot = archive.artifacts,
+                    boundary = PermitProbeBoundary(),
+                    committed = skip,
+                ),
+                restarted,
+            )
+
+            // A competing fill-missing attempt over the same document and artifact root: it reads the
+            // scanned pages again under its own fingerprint and deletes its working renders when each
+            // reading commits.
+            extractInto(
+                PdfExtractor(PageOcrEngines(listOf(RecordingEngine()))),
+                inputFor(
+                    fixture("mixed.pdf"),
+                    attemptSettings(mode = OcrImportMode.FILL_MISSING),
+                    documentId = document.id,
+                    artifactRoot = archive.artifacts,
+                    boundary = PermitProbeBoundary(),
+                ),
+                ExtractionSink.NONE,
+            )
+
+            named.forEach { (relative, sha256) ->
+                val file = archive.artifacts.resolve(relative)
+                assertTrue(
+                    Files.isRegularFile(file),
+                    "a restart or a competing attempt erased the image a staged candidate names: $relative",
+                )
+                assertEquals(sha256, sha256Of(file), "the staged image is no longer the bytes it was recorded as")
+            }
+        } finally {
+            archive.close()
+        }
+    }
+
     // ---- Helpers ------------------------------------------------------------------------------------
 
     /** What the fixture pages are read as, so a test can tell one page's reading from another's. */
@@ -891,13 +1027,14 @@ class OcrEngineContractTest {
         artifactRoot: Path = directory.resolve("artifacts"),
         boundary: PermitProbeBoundary = PermitProbeBoundary(),
         retainsPageImages: Boolean = false,
+        committed: Set<String> = emptySet(),
     ): ExtractionInput = ExtractionInput(
         documentId = documentId,
         managedPath = source,
         artifactRoot = artifactRoot,
         settings = settings,
         fingerprint = ExtractionFingerprint.of("b".repeat(64), settings),
-        committedUnitKeys = emptySet(),
+        committedUnitKeys = committed,
         boundary = boundary,
         retainsPageImages = retainsPageImages,
     )

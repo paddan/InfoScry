@@ -32,6 +32,7 @@ import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -187,6 +188,58 @@ class ImageExtractorTest {
                 "the managed copy is named by its own name inside its directory, was ${asIsSource.relativePath}",
             )
         }
+
+    @Test
+    fun `a managed original and a bounded derived image resolve under their own document roots`() = runBlocking {
+        // Ticket 03c, scenario 3: two different images a durable page may name — the managed original that
+        // *is* the document, and the bounded copy this pipeline derived from an oversized one — each
+        // resolving under the root that actually holds it, with the recorded hash the file's own bytes,
+        // and neither reference resolving under the other's root: the pair of roots is what makes a stored
+        // reference unambiguous without the schema ever holding an absolute path.
+        val managed = managedImage(OcrFixtureGenerator.IMAGE_NAME)
+        val managedProbe = probe()
+        val managedUnit = units(
+            collect(ImageExtractor(PageOcrEngines(listOf(OcrSpy()))), inputFor(managed, managedProbe), managedProbe),
+        ).single().unit
+
+        val managedSource = assertNotNull(managedUnit.sourceImage, "a picture read as itself named no image")
+        assertEquals(SourceImageRoot.MANAGED_COPY, managedSource.root)
+        val managedFile = managed.parent.resolve(managedSource.relativePath)
+        assertTrue(
+            Files.isRegularFile(managedFile),
+            "the managed original does not resolve under its own document directory: ${managedSource.relativePath}",
+        )
+        assertEquals(managedSource.sha256, sha256Of(managedFile))
+        assertFalse(
+            Files.exists(artifactRoot.resolve(managedSource.relativePath)),
+            "the managed reference also resolves under the artifact root, so the two roots are not distinct",
+        )
+
+        val oversized = oversizedPaper("oversized.png")
+        val derivedProbe = probe()
+        val derivedUnit = units(
+            collect(ImageExtractor(PageOcrEngines(listOf(OcrSpy()))), inputFor(oversized, derivedProbe), derivedProbe),
+        ).single().unit
+
+        val derivedSource = assertNotNull(derivedUnit.sourceImage, "a reduced picture named no image")
+        assertEquals(SourceImageRoot.ARTIFACTS, derivedSource.root)
+        val derivedFile = artifactRoot.resolve(derivedSource.relativePath)
+        assertTrue(
+            Files.isRegularFile(derivedFile),
+            "the bounded derived copy does not resolve under the document's artifact root: " +
+                derivedSource.relativePath,
+        )
+        assertEquals(derivedSource.sha256, sha256Of(derivedFile))
+        assertNotEquals(
+            sha256Of(managed),
+            derivedSource.sha256,
+            "the derived reading was attributed to the managed original's bytes",
+        )
+        assertFalse(
+            Files.exists(oversized.parent.resolve(derivedSource.relativePath)),
+            "the derived reference also resolves under the managed copy directory, so the two roots are not distinct",
+        )
+    }
 
     @Test
     fun `the picture's text is what the tool read, and the unit is its only one`() = runBlocking {

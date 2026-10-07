@@ -217,6 +217,204 @@ class ImageLlmClientTest {
         }
     }
 
+    // ---- the injected recording transport of ticket 07f ----
+
+    @Test
+    fun `an injected recording transport receives a permitted external dispatch at the classified endpoint`() =
+        runBlocking {
+            val page = page(text = "Faktura 4711\nAnna Andersson")
+            val external = revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE)
+            // Production's own classification is what admits this dispatch: the endpoint leaves the
+            // machine, so the permit is required before the transport may see a byte.
+            assertEquals(OcrEndpointScope.EXTERNAL, endpointScope(EXTERNAL_ENDPOINT))
+
+            val recorder = RecordingImageLlmEngine(
+                script = listOf(RecordedImageResponse(body = openAiAnswer(transcription(page)))),
+            )
+            val asked = mutableListOf<ExternalDispatchPermitRequest>()
+            val client = ImageLlmClient(
+                external,
+                lookup = { KEY_VALUE },
+                permits = ExternalDispatchPermitValidator { request -> asked.add(request); true },
+                engine = recorder,
+            )
+            try {
+                val reading = client.transcribe(page)
+
+                assertEquals(DEFAULT_TRANSCRIPTION, reading.text)
+                val request = recorder.requests.single()
+                assertEquals("POST", request.method)
+                assertEquals(
+                    "$EXTERNAL_ENDPOINT/chat/completions",
+                    request.url,
+                    "the dispatch went to the endpoint production classified as EXTERNAL",
+                )
+                assertEquals("Bearer $KEY_VALUE", request.headers["authorization"])
+                assertTrue(
+                    request.body.contains("data:image/png;base64,"),
+                    "the recorded body carries the page's own image bytes",
+                )
+                // The body is the protocol's own JSON, so the prompt is read back from it rather than
+                // compared as raw text: JSON escapes what the prompt's newlines became on the wire.
+                val sentContent = Json.parseToJsonElement(request.body).jsonObject
+                    .getValue("messages").jsonArray.single().jsonObject
+                    .getValue("content").jsonArray
+                assertEquals(2, sentContent.size, "the recorded body carries instructions and the image")
+                assertEquals(
+                    expectedPrompt(page.unitId, page.ordinal),
+                    sentContent[0].jsonObject.getValue("text").jsonPrimitive.content,
+                    "the recorded body carries the shipped prompt",
+                )
+                assertEquals(
+                    listOf(
+                        ExternalDispatchPermitRequest(
+                            profileRevisionId = external.revisionId,
+                            page = PageDispatchIdentity(unitId = "page:1", ordinal = 0, documentId = "doc-1"),
+                        ),
+                    ),
+                    asked,
+                    "the permit was asked about this revision and this page before the bytes went out",
+                )
+            } finally {
+                client.close()
+                recorder.close()
+            }
+
+            // The same dispatch with a refused permit: the classification still says EXTERNAL, the permit
+            // is still asked, and the recorder proves the transport never saw the page.
+            val refusedRecorder = RecordingImageLlmEngine()
+            val refusedClient = ImageLlmClient(
+                external,
+                lookup = { KEY_VALUE },
+                permits = ExternalDispatchPermitValidator { false },
+                engine = refusedRecorder,
+            )
+            try {
+                val refused = assertFailsWith<ImageLlmException> { refusedClient.transcribe(page) }
+
+                assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, refused.code)
+                assertFalse(refused.dispatched, "nothing was dispatched")
+                assertEquals(0, refusedRecorder.requestCount, "a refused page never reaches the transport")
+            } finally {
+                refusedClient.close()
+                refusedRecorder.close()
+            }
+        }
+
+    @Test
+    fun `bounded retries reach the transport once per attempt while one permit covers the page`() = runBlocking {
+        val page = page(text = "Faktura 4711\nAnna Andersson")
+        val external = revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE)
+        val recorder = RecordingImageLlmEngine(
+            script = listOf(
+                RecordedImageResponse(statusCode = 429),
+                RecordedImageResponse(body = openAiAnswer(transcription(page))),
+            ),
+        )
+        val asked = mutableListOf<ExternalDispatchPermitRequest>()
+        val counted = mutableListOf<ExternalDispatchPermitRequest>()
+        val client = ImageLlmClient(
+            external,
+            lookup = { KEY_VALUE },
+            permits = ExternalDispatchPermitValidator { request -> asked.add(request); true },
+            calls = { request -> counted.add(request) },
+            engine = recorder,
+            retryPolicy = RetryPolicy(maxRetries = 1, retryDelay = { }),
+        )
+        try {
+            val reading = client.transcribe(page)
+
+            assertEquals(DEFAULT_TRANSCRIPTION, reading.text)
+            assertEquals(
+                2,
+                recorder.requestCount,
+                "the throttled attempt and its bounded retry are two recorded calls",
+            )
+            assertEquals(
+                List(2) { "$EXTERNAL_ENDPOINT/chat/completions" },
+                recorder.requests.map { it.url },
+            )
+            assertTrue(recorder.requests.all { it.body.contains("data:image/png;base64,") })
+            assertEquals(1, asked.size, "the permit is asked about the page, not about each attempt")
+            assertEquals(2, counted.size, "every network attempt is counted where it happens")
+            assertEquals(
+                listOf(asked.single(), asked.single()),
+                counted,
+                "both attempts are about the page identity the permit covered",
+            )
+        } finally {
+            client.close()
+            recorder.close()
+        }
+    }
+
+    @Test
+    fun `a refused or failed dispatch leaves no payload in the recorder or the error`() = runBlocking {
+        val page = page(text = "Faktura 4711\nAnna Andersson")
+        val external = revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE)
+
+        // A refused permit: nothing may reach the transport at all.
+        val refusedRecorder = RecordingImageLlmEngine()
+        val refusedClient = ImageLlmClient(
+            external,
+            lookup = { KEY_VALUE },
+            permits = ExternalDispatchPermitValidator { false },
+            engine = refusedRecorder,
+        )
+        val refused = try {
+            assertFailsWith<ImageLlmException> { refusedClient.transcribe(page) }
+        } finally {
+            refusedClient.close()
+            refusedRecorder.close()
+        }
+        assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, refused.code)
+        assertEquals(0, refusedRecorder.requestCount, "the recorder saw nothing for the refused page")
+
+        // A permitted dispatch whose provider keeps failing: the bounded retries are recorded calls, and
+        // the failure a caller sees is a code and a fixed sentence.
+        val failedRecorder = RecordingImageLlmEngine(script = listOf(RecordedImageResponse(statusCode = 500)))
+        val failedClient = ImageLlmClient(
+            external,
+            lookup = { KEY_VALUE },
+            permits = ExternalDispatchPermitValidator { true },
+            engine = failedRecorder,
+            retryPolicy = RetryPolicy(maxRetries = 1, retryDelay = { }),
+        )
+        val failed = try {
+            assertFailsWith<ImageLlmException> { failedClient.transcribe(page) }
+        } finally {
+            failedClient.close()
+            failedRecorder.close()
+        }
+        assertEquals(ImageLlmException.PROVIDER_UNAVAILABLE, failed.code)
+        assertEquals(2, failedRecorder.requestCount, "the first failure and its retry are both recorded")
+
+        // And a missing credential, which the client refuses before any transport exists to send with.
+        val noKeyRecorder = RecordingImageLlmEngine()
+        val noKeyClient = ImageLlmClient(
+            external,
+            lookup = { null },
+            permits = ExternalDispatchPermitValidator { true },
+            engine = noKeyRecorder,
+        )
+        val noKey = try {
+            assertFailsWith<ImageLlmException> { noKeyClient.transcribe(page) }
+        } finally {
+            noKeyClient.close()
+            noKeyRecorder.close()
+        }
+        assertEquals(ImageLlmException.MISSING_CREDENTIAL, noKey.code)
+        assertEquals(0, noKeyRecorder.requestCount)
+
+        for (failure in listOf(refused, failed, noKey)) {
+            val text = failure.message.orEmpty()
+            assertFalse(text.contains(EXTERNAL_ENDPOINT), "the endpoint is never echoed: '$text'")
+            assertFalse(text.contains(KEY_VALUE), "the key value is never echoed: '$text'")
+            assertFalse(text.contains("Faktura 4711"), "page text is never echoed: '$text'")
+            assertFalse(text.contains("Anna Andersson"), "page text is never echoed: '$text'")
+        }
+    }
+
     // ---- redirects ----
 
     @Test

@@ -30,6 +30,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
+import java.util.HexFormat
 import javax.imageio.ImageIO
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -481,8 +483,9 @@ class PdfExtractorTest {
         )
 
         val settings = ExtractionSettings(ocrLanguages = "eng")
+        val input = inputFor(fixture(MIXED_NAME), probe(), settings = settings)
         val units = units(
-            collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe(), settings = settings), probe()),
+            collect(pdfExtractor(spy), input, probe()),
         )
         val ocred = units.single { pageOf(it.key) == 3 }
         val parsed = units.single { pageOf(it.key) == 1 }
@@ -1086,9 +1089,6 @@ class PdfExtractorTest {
     )
 
     /** The fingerprint one attempt's checkpoints are keyed by, which is where its artifacts live. */
-    private fun sha256Of(path: Path): String = java.util.HexFormat.of()
-        .formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)))
-
     private fun fingerprint(settings: ExtractionSettings): ExtractionFingerprint =
         ExtractionFingerprint.of("b".repeat(64), settings)
 
@@ -1146,6 +1146,13 @@ class PdfExtractorTest {
         stream.use { Files.copy(it, target, REPLACE_EXISTING) }
         return target
     }
+
+    /** The SHA-256 of [bytes], in the only form a digest has in this pipeline. */
+    private fun sha256(bytes: ByteArray): String =
+        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))
+
+    /** The SHA-256 of a file's bytes: how a recorded reference is checked against what it names. */
+    private fun sha256Of(path: Path): String = sha256(Files.readAllBytes(path))
 
     private fun fixtureDirectory(): Path = Path.of("src/test/resources/fixtures")
 

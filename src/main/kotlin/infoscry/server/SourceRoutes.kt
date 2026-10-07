@@ -72,6 +72,14 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                             "no source with id $sourceId exists in revision $id",
                         )
                 }
+                // While a publication whose authority is durable cannot switch its snapshot, the live
+                // reading SQLite holds and the rows the index still serves disagree, so the live source
+                // read is refused with the same 503 a search gets (the seal the publication service
+                // raises for that state). A request that named a revision is already answered above from
+                // that revision's own immutable text, which is coherent whatever the index is doing.
+                if (revisionPage == null) {
+                    context.revisionSnapshots.requireUnsealed()
+                }
                 val unit = context.content.readUnit(unitId)
                 val documentId = revisionPage?.let { context.revisions.revision(it.revisionId)?.documentId }
                     ?: unit?.documentId

@@ -76,17 +76,23 @@ class CandidateRevisionSink(
     /**
      * The keys staged for *this* reading of *this* document.
      *
-     * A page is staged the moment it is delivered, so a second delivery of the same key in one attempt is
-     * not paid for twice. A key staged for another fingerprint, or for another document, is not this
-     * reading's and is not answered as committed — reuse is a statement about a reading rather than about a
-     * sink instance. A candidate staged by an *earlier process* is deliberately not answered here either:
-     * the candidate holds page texts keyed by ordinal, and only the caller that owns the durable operation
-     * knows how its extractor's keys map onto those ordinals.
+     * A key staged for another fingerprint, or for another document, is not this reading's and is not
+     * answered as committed. A candidate staged by an *earlier process* under the same fingerprint is: the
+     * page names the extractor key and the reading it was staged under, so the sink adopts that candidate
+     * instead of opening a second one, and its staged pages are not read — or paid for — again.
      */
     override suspend fun committedKeys(
         documentId: DocumentId,
         fingerprint: ExtractionFingerprint,
-    ): Set<String> = staged[documentId to fingerprint]?.toSet().orEmpty()
+    ): Set<String> {
+        if (candidate == null) {
+            revisions.resumableCandidate(documentId, fingerprint.value)?.let { revisionId ->
+                candidate = revisionId
+                staged.getOrPut(documentId to fingerprint) { mutableSetOf() } += revisions.stagedKeys(revisionId)
+            }
+        }
+        return staged[documentId to fingerprint]?.toSet().orEmpty()
+    }
 
     /**
      * The pages this attempt staged that nobody has decided about.
@@ -104,16 +110,23 @@ class CandidateRevisionSink(
         documentId: DocumentId,
         fingerprint: ExtractionFingerprint,
         event: ExtractionEvent,
+    ) = deliver(documentId, fingerprint, event, approval = null)
+
+    override suspend fun deliver(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+        event: ExtractionEvent,
+        approval: PageApproval?,
     ) {
         require(documentId == this.documentId) {
             "this sink stages the pages of ${this.documentId.value}, not of ${documentId.value}"
         }
         if (event !is ExtractionEvent.UnitReady) return
         val revision = candidate
-            ?: revisions.openCandidate(documentId, baselineRevisionId, provenance).also { opened ->
+            ?: revisions.openCandidate(documentId, baselineRevisionId, provenance, fingerprint.value).also { opened ->
                 candidate = opened
             }
-        revisions.appendPage(revision, pageFor(event))
+        revisions.appendPage(revision, pageFor(event, approval ?: PageApproval.PENDING))
         staged.getOrPut(documentId to fingerprint) { mutableSetOf() } += event.key
     }
 
@@ -129,7 +142,7 @@ class CandidateRevisionSink(
     }
 
     /** One delivered page as a revision page, in the published form the store takes it in. */
-    private fun pageFor(event: ExtractionEvent.UnitReady): RevisionPageDraft {
+    private fun pageFor(event: ExtractionEvent.UnitReady, approval: PageApproval): RevisionPageDraft {
         val draft = event.unit
         val baseline = baselinePages[event.ordinal]?.takeIf { (_, locator) -> locator == draft.locator }
         return RevisionPageDraft(
@@ -146,7 +159,8 @@ class CandidateRevisionSink(
             // a comparison that has to show the image a candidate was read from — can tell a reading of a
             // reduced copy from a reading of the whole one instead of attributing the first to the second.
             sourceImage = draft.sourceImage,
-            approval = PageApproval.PENDING,
+            approval = approval,
+            unitKey = event.key,
         )
     }
 }

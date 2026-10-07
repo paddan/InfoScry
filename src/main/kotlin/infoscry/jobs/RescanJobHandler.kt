@@ -671,6 +671,8 @@ internal fun rescanEngineFactory(
         listOfNotNull(infoscry.extract.TesseractOcr(), infoscry.ocr.SuryaOcr.configured()),
     ),
     lookup: (String) -> String? = System::getenv,
+    /** The transport engine the image-model engine's clients are built on, or null for their own CIO. */
+    clientEngine: io.ktor.client.engine.HttpClientEngine? = null,
 ): (infoscry.ocr.OcrEngine, OcrSettingsSnapshot, OcrDispatchAuthority?) -> PageOcrEngine? =
     { kind, _, dispatch ->
         if (kind == infoscry.ocr.OcrEngine.LLM) {
@@ -679,6 +681,7 @@ internal fun rescanEngineFactory(
                 lookup = lookup,
                 permits = dispatch,
                 calls = dispatch?.let { authority -> authority::attemptAboutToBeSent },
+                clientEngine = clientEngine,
             )
         } else {
             localEngines.engineFor(kind)

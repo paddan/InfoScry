@@ -4,6 +4,7 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.llm.RetryPolicy
 import infoscry.storage.DocumentRevisionStore
+import io.ktor.client.engine.HttpClientEngine
 import infoscry.storage.OcrReviewStore
 import java.security.MessageDigest
 import java.util.HexFormat
@@ -277,6 +278,13 @@ class OcrComparisonService(
     private val timeout: Duration = ImageLlmClient.DEFAULT_TIMEOUT,
     private val maxResponseBytes: Int = ImageLlmClient.MAX_RESPONSE_BYTES,
     private val retryPolicy: RetryPolicy = RetryPolicy(),
+    /**
+     * The transport engine every review client this comparison builds is constructed on, or null for each
+     * client's own CIO engine — the seam a test injects a recording transport through so an external review
+     * dispatch can be observed without leaving the machine. The client's own rules (redirects off, permits,
+     * key handling) still apply to whatever transport it is built on.
+     */
+    private val clientEngine: HttpClientEngine? = null,
 ) {
 
     /**
@@ -449,6 +457,7 @@ class OcrComparisonService(
             timeout = timeout,
             maxResponseBytes = maxResponseBytes,
             retryPolicy = retryPolicy,
+            engine = clientEngine,
         )
         return try {
             // One client per comparison: the endpoint, model and limits are the revision's, and nothing

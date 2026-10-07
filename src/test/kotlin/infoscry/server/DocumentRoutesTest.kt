@@ -1,10 +1,14 @@
 package infoscry.server
 
+import infoscry.document.RetryPrerequisites
+import infoscry.domain.Collection
 import infoscry.domain.CollectionId
+import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.ExtractionMethod
+import infoscry.domain.JobType
 import infoscry.domain.SourceLocation
 import infoscry.domain.UnitKind
 import infoscry.embedding.GpuRuntime
@@ -46,7 +50,9 @@ class DocumentRoutesTest {
     @BeforeTest
     fun startServer() {
         dataDir = Files.createTempDirectory("infoscry-documents-routes")
-        harness = ApiTestServer(dataDir)
+        // Retry admission is exercised by the summary's transition test; the prerequisites are injected
+        // so it asserts on the archive's behaviour rather than on what this machine happens to have.
+        harness = ApiTestServer(dataDir, retryPrerequisites = availablePrerequisites())
     }
 
     @AfterTest
@@ -535,6 +541,213 @@ class DocumentRoutesTest {
         return harness.collectionIdOf("Docs")
     }
 
+    @Test
+    fun `the summary counts attention statuses that sit beyond the first page`() = runBlocking {
+        val id = CollectionId(newCollection())
+        // 75 documents; the only two that failed are the two oldest, so they fall on the second 50-row
+        // page of the newest-first listing. The acceptance vector: 75 documents, 2 failed on the second
+        // page, summary failed = 2.
+        repeat(75) { index ->
+            val status = if (index in 0..1) DocumentStatus.FAILED else DocumentStatus.COMPLETE
+            harness.context.documents.insert(document(index, id).copy(status = status))
+        }
+
+        val firstPage = page(id, "")
+        assertEquals(50, firstPage.documents.size)
+        assertEquals(75, firstPage.total)
+        assertFalse(
+            firstPage.documents.any { it.status == DocumentStatus.FAILED },
+            "the attention statuses must be on the second page for this test to mean anything",
+        )
+        val secondPage = page(id, "?limit=50&offset=50")
+        assertEquals(25, secondPage.documents.size)
+        assertEquals(2, secondPage.documents.count { it.status == DocumentStatus.FAILED })
+
+        val summary = summary(id.value)
+
+        assertEquals(75, summary.total, "the summary counts the collection, not the 50 rows a page holds")
+        assertEquals(2, summary.byStatus[DocumentStatus.FAILED], "failed beyond the first page still count")
+        assertEquals(73, summary.byStatus[DocumentStatus.COMPLETE])
+        assertEquals(
+            DocumentStatus.entries.toSet(),
+            summary.byStatus.keys,
+            "every current status is present, including the ones no document has",
+        )
+        assertEquals(summary.total, summary.byStatus.values.sum(), "the total is the same snapshot")
+    }
+
+    @Test
+    fun `the summary is the collection's own snapshot, never a filter or another collection's`() = runBlocking {
+        val id = CollectionId(newCollection())
+        harness.createCollection("Other", Credential.BEARER)
+        val other = CollectionId(harness.collectionIdOf("Other"))
+        repeat(9) { index ->
+            harness.context.documents.insert(
+                documentAt(
+                    id = "mine-%03d".format(index),
+                    collectionId = id,
+                    filename = "invoice-%03d.pdf".format(index),
+                    status = if (index in 0..2) DocumentStatus.FAILED else DocumentStatus.COMPLETE,
+                ),
+            )
+        }
+        repeat(6) { index ->
+            harness.context.documents.insert(
+                documentAt("theirs-%03d".format(index), other, "plans-$index.pdf", status = DocumentStatus.FAILED),
+            )
+        }
+        // A file an import queued but has not published as a document yet: file-only, so it is not a
+        // document and the summary must not count it.
+        val job = harness.context.jobs.enqueue(type = JobType.IMPORT, collectionId = id, total = 1)
+        harness.context.importItems.queue(job.id, "pending-1", "/private/evidence/not-published-yet.txt")
+
+        val plain = summary(id.value)
+        // Listing filters belong to the listing: neither the summary's own query string nor a filtered
+        // listing call may change what the aggregate reports.
+        val filteredListing = page(id, "?q=invoice&status=FAILED")
+        assertEquals(3, filteredListing.total, "the listing filters its own rows")
+        val withQuery = summary(id.value, "?q=invoice&status=FAILED&limit=1&sort=name-asc")
+
+        assertEquals(plain, withQuery, "query parameters must not change the collection-wide summary")
+        assertEquals(9, plain.total, "another collection's documents and file-only import items do not count")
+        assertEquals(3, plain.byStatus[DocumentStatus.FAILED])
+        assertEquals(6, plain.byStatus[DocumentStatus.COMPLETE])
+
+        val theirs = summary(other.value)
+        assertEquals(6, theirs.total, "each collection is summarized as its own")
+        assertEquals(6, theirs.byStatus[DocumentStatus.FAILED])
+        assertEquals(0, theirs.byStatus[DocumentStatus.COMPLETE])
+    }
+
+    @Test
+    fun `an empty collection's summary is zero and unknown or deleting collections are not found`() = runBlocking {
+        val id = newCollection()
+
+        val empty = summary(id)
+        assertEquals(0, empty.total)
+        assertEquals(
+            DocumentStatus.entries.associateWith { 0 },
+            empty.byStatus,
+            "an empty collection has a zero for every status, not a missing one",
+        )
+
+        val unknown = harness.get("/api/collections/does-not-exist/documents/summary")
+        assertEquals(HttpStatusCode.NotFound, unknown.status, unknown.bodyAsText())
+        assertContains(unknown.bodyAsText(), "NOT_FOUND")
+
+        markDeleting(CollectionId(id))
+        val deleting = harness.get("/api/collections/$id/documents/summary")
+        assertEquals(HttpStatusCode.NotFound, deleting.status, deleting.bodyAsText())
+        assertContains(deleting.bodyAsText(), "NOT_FOUND")
+    }
+
+    @Test
+    fun `the summary path answers the summary rather than a document id`() = runBlocking {
+        val id = CollectionId(newCollection())
+        harness.context.documents.insert(documentAt("doc-real", id, "real.pdf"))
+
+        // `/summary` is a static route beside `{documentId}`; it must resolve as the aggregate and never
+        // as a document that happens to be called "summary" (which would be a 404 here).
+        val response = harness.get("/api/collections/${id.value}/documents/summary")
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        val summary = ApiJson.decodeFromString<DocumentSummaryResponse>(response.bodyAsText())
+        assertEquals(1, summary.total)
+        assertEquals(1, summary.byStatus[DocumentStatus.COMPLETE])
+
+        // The document-id route still answers its own documents beside the new static route.
+        val detail = harness.get("/api/collections/${id.value}/documents/doc-real")
+        assertEquals(HttpStatusCode.OK, detail.status, detail.bodyAsText())
+    }
+
+    @Test
+    fun `the next summary after an import, a retry and a deletion reflects the state and carries no text`() =
+        runBlocking {
+            val id = CollectionId(newCollection())
+            val sources = Files.createDirectories(dataDir.resolve("sources"))
+
+            // Import: a managed document enters the pipeline in COPYING, then one attempt finishes it.
+            val failedSource = sources.resolve("quarterly-figures.pdf")
+            Files.writeString(failedSource, "the quarterly figures")
+            val failed = harness.context.library.importFile(id, failedSource).document
+            harness.context.documents.updateStatus(
+                failed.id,
+                DocumentStatus.FAILED,
+                "PDF_PARSE_FAILED",
+                "could not parse page 2 of the secret quarterly figures",
+            )
+            val doneSource = sources.resolve("minutes.pdf")
+            Files.writeString(doneSource, "meeting minutes")
+            val done = harness.context.library.importFile(id, doneSource).document
+            harness.context.documents.updateStatus(done.id, DocumentStatus.COMPLETE)
+            assertEquals(2, summary(id.value).total)
+            assertEquals(1, summary(id.value).byStatus[DocumentStatus.FAILED])
+
+            val importing = sources.resolve("half-copied.pdf")
+            Files.writeString(importing, "still importing")
+            val importingDocument = harness.context.library.importFile(id, importing).document
+            val afterImport = summary(id.value)
+            assertEquals(3, afterImport.total, "the import's new document is in the next summary")
+            assertEquals(1, afterImport.byStatus[DocumentStatus.COPYING])
+
+            // Retry: admission moves the failed document into the attempt's own queued state.
+            val retry = harness.request(
+                HttpMethod.Post,
+                "/api/collections/${id.value}/documents/retry",
+                body = """{"documentIds":["${failed.id.value}"]}""",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.Accepted, retry.status, retry.bodyAsText())
+            val afterRetry = summary(id.value)
+            assertEquals(0, afterRetry.byStatus[DocumentStatus.FAILED], "the retry left FAILED behind")
+            assertEquals(1, afterRetry.byStatus[DocumentStatus.QUEUED])
+            assertEquals(3, afterRetry.total, "a status transition adds and removes nothing")
+
+            // Deletion: once the operation reaches its terminal phase, the row is gone for good.
+            val deletion = harness.request(
+                HttpMethod.Post,
+                "/api/collections/${id.value}/documents/delete",
+                body = """{"documentIds":["${importingDocument.id.value}"],"confirmed":true}""",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.Accepted, deletion.status, deletion.bodyAsText())
+            val admitted = ApiJson.decodeFromString<DeleteDocumentsResponse>(deletion.bodyAsText())
+            assertEquals("DONE", harness.awaitDeletion(admitted.operationId).phase)
+
+            val body = harness.get("/api/collections/${id.value}/documents/summary").bodyAsText()
+            val afterDeletion = ApiJson.decodeFromString<DocumentSummaryResponse>(body)
+            assertEquals(2, afterDeletion.total, "the deleted document is out of the next summary")
+            assertEquals(1, afterDeletion.byStatus[DocumentStatus.QUEUED])
+            assertEquals(1, afterDeletion.byStatus[DocumentStatus.COMPLETE])
+            assertEquals(0, afterDeletion.byStatus[DocumentStatus.COPYING])
+
+            // The summary is counts and nothing else: no paths, no filenames, no stored text.
+            assertFalse(body.contains("original_path"), "the wire name of sourcePath must never appear")
+            assertFalse(body.contains("sourcePath"), "the domain field sourcePath must never be serialized")
+            assertFalse(body.contains("sha256"), "the content hash must never be serialized")
+            assertFalse(body.contains("errorMessage"), "a stored error message can carry document text")
+            assertFalse(body.contains("secret quarterly figures"), "the stored error text must not reach the response")
+            assertFalse(body.contains("quarterly-figures.pdf"), "a filename must not reach the summary")
+            assertFalse(body.contains("sources"), "no source path may reach the summary")
+        }
+
+    /** One collection's summary as the route answers it, optionally with query parameters. */
+    private suspend fun summary(reference: String, query: String = ""): DocumentSummaryResponse {
+        val response = harness.get("/api/collections/$reference/documents/summary$query")
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        return ApiJson.decodeFromString(response.bodyAsText())
+    }
+
+    /** A collection whose lifecycle says deletion, for the guard every collection read shares. */
+    private fun markDeleting(collectionId: CollectionId) {
+        harness.context.database.transaction { connection ->
+            connection.prepareStatement("UPDATE collections SET lifecycle = ? WHERE id = ?").use { statement ->
+                statement.setString(1, CollectionLifecycle.DELETING.name)
+                statement.setString(2, collectionId.value)
+                statement.executeUpdate()
+            }
+        }
+    }
+
     private suspend fun page(id: CollectionId, query: String): DocumentsResponse =
         ApiJson.decodeFromString<DocumentsResponse>(
             harness.get("/api/collections/${id.value}/documents$query").bodyAsText(),
@@ -621,5 +834,15 @@ class DocumentRoutesTest {
         const val TIED_DATE = "2026-03-01T09:00:00.000Z"
 
         const val DOCUMENTS_ROUTES_SCHEMA = "documents-routes-test"
+
+        /** A machine that has everything a retry could need, so admission is the archive's own answer. */
+        fun availablePrerequisites(): suspend (Collection) -> RetryPrerequisites = { collection ->
+            RetryPrerequisites(
+                settings = ExtractionSettings(ocrLanguages = collection.ocrLanguages),
+                ocrToolAvailable = true,
+                ebookToolAvailable = true,
+                embeddingModelAvailable = true,
+            )
+        }
     }
 }

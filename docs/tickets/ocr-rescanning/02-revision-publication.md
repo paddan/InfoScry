@@ -73,3 +73,7 @@ Consume snapshots; produce immutable page/document revision storage and publish(
 ```
 
 New test classes above are planned paths, not existing tests. A successful fake-provider run does not satisfy a real-tool or hardware gate.
+
+## Continuation ownership (2026-10-02)
+
+Saved-evidence and seal follow-ups are now decomposed under [02b](02b-revision-aware-evidence.md) into 02c, 02d and 02e; the core publication record does not close them.

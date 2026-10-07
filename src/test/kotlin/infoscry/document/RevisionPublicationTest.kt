@@ -8,6 +8,8 @@ import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.ExtractionMethod
+import infoscry.domain.SourceImageProvenance
+import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.embedding.TestDocumentEmbedder
 import infoscry.extract.ContentUnitDraft
@@ -139,6 +141,116 @@ class RevisionPublicationTest {
                 searchTexts(context),
                 "once the reader is out, exactly one coherent reading is served",
             )
+        }
+    }
+
+    // ---- Ticket 03b: provenance persistence boundary ----
+
+    /**
+     * A reference that would leave the root its provenance names is refused where the provenance is
+     * built — before any draft, page row or revision could carry it. An absolute reference, one that
+     * climbs out with `..`, one that cancels its way out (`attempt/../../elsewhere.png`) and one that
+     * names the root itself are all the same refusal: the pair of root and reference is what confines an
+     * image, and a reference that widens it names pixels outside the archive's own area.
+     */
+    @Test
+    fun aProvenanceReferenceThatEscapesItsNamedRootIsRejectedBeforePersistence() {
+        AppContext.open(dataDir).use { context ->
+            val fixture = published(context, BASELINE_TEXT)
+            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
+
+            listOf("/etc/passwd", "../elsewhere.png", "attempt/../../elsewhere.png", ".", "a/..").forEach { reference ->
+                assertFailsWith<IllegalArgumentException>("'$reference' was accepted as a source image reference") {
+                    SourceImageProvenance(
+                        root = SourceImageRoot.ARTIFACTS,
+                        relativePath = reference,
+                        sha256 = "b".repeat(64),
+                        width = 1200,
+                        height = 1600,
+                        renderVersion = 1,
+                    )
+                }
+            }
+
+            // And nothing of a refused reference reached persistence: the candidate still holds exactly the
+            // page the fixture staged, and no page of it names an image.
+            assertEquals(
+                listOf(CANDIDATE_TEXT),
+                context.revisions.pages(candidate).map { it.extractedText },
+                "a provenance refused at construction still reached the store",
+            )
+            assertTrue(context.revisions.pages(candidate).all { page -> page.sourceImage == null })
+        }
+    }
+
+    /**
+     * The two roots stay distinct through a round trip: a page read from a bounded copy this pipeline
+     * wrote names the document's artifacts, and a picture that *is* the document names the directory
+     * holding the managed copy — each with its own reference, hash and (where a reader measured one)
+     * dimensions, read back exactly as staged. A measurement is a pair: an unmeasured artifact measures
+     * nothing in either axis.
+     */
+    @Test
+    fun aStagedPagesProvenanceReadsBackAsItWasWrittenUnderItsOwnRoot() {
+        AppContext.open(dataDir).use { context ->
+            val fixture = published(context, BASELINE_TEXT)
+            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
+
+            context.revisions.appendPage(
+                candidate,
+                infoscry.storage.RevisionPageDraft(
+                    ordinal = 1,
+                    unitId = ContentUnitId.new(),
+                    locator = SourceLocation.PdfPage(2),
+                    extractedText = "read from a bounded copy",
+                    searchText = "read from a bounded copy",
+                    extractionMethod = ExtractionMethod.OCR,
+                    approval = PageApproval.APPROVED,
+                    sourceImage = SourceImageProvenance(
+                        root = SourceImageRoot.ARTIFACTS,
+                        relativePath = "attempt/pages/page-000002.png",
+                        sha256 = "c".repeat(64),
+                        width = 1200,
+                        height = 1600,
+                        renderVersion = 2,
+                    ),
+                ),
+            )
+            val derived = assertNotNull(context.revisions.page(candidate, 1)).sourceImage
+            assertEquals(SourceImageRoot.ARTIFACTS, assertNotNull(derived).root)
+            assertEquals("attempt/pages/page-000002.png", derived.relativePath)
+            assertEquals("c".repeat(64), derived.sha256)
+            assertEquals(1200, derived.width)
+            assertEquals(1600, derived.height)
+            assertEquals(2, derived.renderVersion)
+
+            context.revisions.appendPage(
+                candidate,
+                infoscry.storage.RevisionPageDraft(
+                    ordinal = 2,
+                    unitId = ContentUnitId.new(),
+                    locator = SourceLocation.PdfPage(3),
+                    extractedText = "read from the managed copy",
+                    searchText = "read from the managed copy",
+                    extractionMethod = ExtractionMethod.OCR,
+                    approval = PageApproval.APPROVED,
+                    sourceImage = SourceImageProvenance(
+                        root = SourceImageRoot.MANAGED_COPY,
+                        relativePath = "scan.png",
+                        sha256 = "d".repeat(64),
+                        width = null,
+                        height = null,
+                        renderVersion = 1,
+                    ),
+                ),
+            )
+            val asIs = assertNotNull(context.revisions.page(candidate, 2)).sourceImage
+            assertEquals(SourceImageRoot.MANAGED_COPY, assertNotNull(asIs).root)
+            assertEquals("scan.png", asIs.relativePath)
+            assertEquals("d".repeat(64), asIs.sha256)
+            assertNull(asIs.width, "an artifact nobody measured has no width")
+            assertNull(asIs.height, "an artifact nobody measured has no height")
+            assertEquals(1, asIs.renderVersion)
         }
     }
 

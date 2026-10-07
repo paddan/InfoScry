@@ -1,6 +1,7 @@
 package infoscry.ocr
 
 import infoscry.llm.RetryPolicy
+import io.ktor.client.engine.HttpClientEngine
 import kotlin.time.Duration
 
 /**
@@ -61,6 +62,13 @@ class LlmOcr(
     private val maxImageBytes: Int = ImageLlmClient.MAX_IMAGE_BYTES,
     private val maxResponseBytes: Int = ImageLlmClient.MAX_RESPONSE_BYTES,
     private val retryPolicy: RetryPolicy = RetryPolicy(),
+    /**
+     * The transport's engine for every client this engine builds, or null for each client's own CIO
+     * engine — the seam a test injects a recording transport through. It is passed through unchanged:
+     * what the client does with redirects, credentials and permits is the client's, not the engine's.
+     * Named `clientEngine` rather than `engine` because [engine] is this attempt's reading engine.
+     */
+    private val clientEngine: HttpClientEngine? = null,
 ) : PageOcrEngine {
 
     override val engine: OcrEngine = OcrEngine.LLM
@@ -76,6 +84,7 @@ class LlmOcr(
             maxImageBytes = maxImageBytes,
             maxResponseBytes = maxResponseBytes,
             retryPolicy = retryPolicy,
+            engine = clientEngine,
         )
         // One client per page: the endpoint, model and limits are the revision's, the transport is this
         // call's own, and nothing outlives the reading it was built for.

@@ -1,8 +1,8 @@
 # Selectable OCR, comparison and document rescanning
 
 Status: design interview completed and documentation authorized on 2026-09-30.
-**Planned, not implemented.** [Implementation tickets](../tickets/ocr-rescanning/STATUS.md)
-record dependencies and verification. No current runtime capability is implied.
+**Partially implemented; manual workflow and correctness gates remain open.** [Implementation tickets](../tickets/ocr-rescanning/STATUS.md)
+record current dependencies and verification; design requirements below are not completion evidence.
 
 ## Purpose and scope
 

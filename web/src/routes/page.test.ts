@@ -1990,7 +1990,12 @@ function investigationSummary(id: string, title: string, question = title) {
   return { id, createdAt: '2026-09-26T10:00:00Z', question, title };
 }
 
-/** One stored Ask answer, the object the list route returns and the panel replays. */
+/**
+ * One stored Ask answer, the object the list route returns and the panel replays.
+ *
+ * The server's stored citation always carries the excerpt it saved; tests ask for one explicitly so a
+ * live citation (which has none) stays expressible, and a revision only when one was recorded.
+ */
 function askHistoryEntry(
   id: string,
   title: string,

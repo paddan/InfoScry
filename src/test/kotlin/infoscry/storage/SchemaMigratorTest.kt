@@ -355,6 +355,7 @@ class SchemaMigratorTest {
         }
     }
 
+    /** Migration 028 is the evidence revision provenance column; the schema version moves with it. */
     @Test
     fun `sql splitting keeps quoted semicolons and drops comments`() {
         val script = """

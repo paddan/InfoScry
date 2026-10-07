@@ -69,3 +69,7 @@ Produce OcrEngine.transcribe(PageImage, OcrSettingsSnapshot): OcrPageResult; ren
 ```
 
 New test classes above are planned paths, not existing tests. A successful fake-provider run does not satisfy a real-tool or hardware gate.
+
+## Continuation ownership (2026-10-02)
+
+Open provenance persistence is [03b](03b-image-provenance.md); artifact lifetime is separately [03c](03c-image-artifact-lifetime.md). The OCR seam does not close those gates.

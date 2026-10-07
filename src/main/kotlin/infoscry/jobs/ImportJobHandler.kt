@@ -2,8 +2,6 @@ package infoscry.jobs
 
 import infoscry.AppContext
 import infoscry.chunk.Chunker
-import infoscry.config.AppPaths
-import infoscry.document.PageReviewer
 import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.E5Embedder
 import infoscry.embedding.GpuRuntime
@@ -19,7 +17,6 @@ import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.JobType
 import infoscry.domain.Job
-import infoscry.domain.JobId
 import infoscry.extract.CalibreConverter
 import infoscry.extract.DOCUMENT_TOO_LARGE_CODE
 import infoscry.extract.DOCUMENT_UNREADABLE_CODE
@@ -29,13 +26,7 @@ import infoscry.extract.ExtractionSettings
 import infoscry.extract.TesseractOcr
 import infoscry.library.ManagedImportOutcome
 import infoscry.library.ManagedLibrary
-import infoscry.ocr.OcrDispatchAuthority
 import infoscry.ocr.OcrDispatchStage
-import infoscry.ocr.OcrEndpointScope
-import infoscry.ocr.OcrExternalOwner
-import infoscry.ocr.OcrProfileRevision
-import infoscry.ocr.OcrSettingsSnapshot
-import infoscry.ocr.StagedPageReview
 import infoscry.ocr.SuryaOcr
 import infoscry.ocr.ocrReviewerFactory
 import infoscry.storage.CollectionNotActiveException
@@ -47,7 +38,7 @@ import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import infoscry.storage.ImportItemStore
 import infoscry.storage.JobStore
-import infoscry.storage.OcrOperationStore
+import io.ktor.client.engine.HttpClientEngine
 import java.io.IOException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
@@ -81,26 +72,14 @@ class ImportJobHandler internal constructor(
     private val library: ManagedLibrary,
     private val items: ImportItemStore,
     /**
-     * The archive's rescan operations, asked about what one import job has already sent off this machine.
+     * The attempt-level wiring this handler and the retry share: how one job-owned external page scope
+     * becomes the dispatch authority a page is sent through, and how a snapshotted reviewer profile becomes
+     * the review a staged page is judged by — the same allowance for every file of the job and the same
+     * reviewer rules a rescan uses, so there is no second wiring of either in this class.
      */
-    private val operations: OcrOperationStore,
+    private val attemptDispatch: AttemptDispatch,
     /** The job's own row, which is where a wait for an external page approval is written durably. */
     private val jobs: JobStore,
-    /**
-     * How a snapshotted profile revision id is resolved, so the attempt can read its dispatch scope.
-     */
-    private val profileRevisionOf: (String) -> OcrProfileRevision?,
-    /**
-     * The data directory layout, for the two roots a staged page's image is rebuilt from: the document's
-     * artifacts, where a page this attempt rendered sits, and the document's own directory, where a managed
-     * copy that *is* a picture sits.
-     */
-    private val paths: AppPaths,
-    /**
-     * How the attempt gets the reviewer its snapshot selects, wired to the review stage's dispatch
-     * authority — the same factory a rescan uses, because both judge a page by the same rules.
-     */
-    private val reviewerFor: (OcrSettingsSnapshot, OcrDispatchAuthority?) -> PageReviewer,
     /**
      * Where an attached managed copy is read into searchable content. Shared with the retry attempt, so
      * "read this document's bytes again" cannot mean two different things depending on how the document was
@@ -177,7 +156,7 @@ class ImportJobHandler internal constructor(
                 // outcome: its item is durably marked CANCELLED so no later attempt copies the deleted
                 // document again, and the remaining files of the import keep running.
                 stage.run(STAGE_RECORD) { items.cancelTargeting(job.id, deleted.documentId) }
-            } catch (waiting: ImportAwaitingApproval) {
+            } catch (waiting: AttemptAwaitingApproval) {
                 // A page would have exceeded this job's external scope, and it was not sent. The waiting
                 // state is durable and the attempt ends here rather than reading the next file: no page of
                 // any file may be dispatched until a person approves the scope. The files this attempt
@@ -247,7 +226,7 @@ class ImportJobHandler internal constructor(
             onFailure = { code, message -> recordFailure(job, source, stage, document, code, message) },
             // The page allowance this file's pages leave under: the *job's*, because twenty files share one
             // scope, and this attempt's, because nothing may be dispatched before the scope was approved.
-            dispatch = dispatchAuthorityFor(
+            dispatch = attemptDispatch.authorityFor(
                 job = job,
                 document = document,
                 snapshot = payload.ocr,
@@ -256,7 +235,12 @@ class ImportJobHandler internal constructor(
             // How this file's staged pages are judged, or null when the attempt has no reviewer: the page's
             // own text is compared with the engine's reading while the draft is in hand, and the review is
             // recorded for a person.
-            review = stagedPageReviewOf(job, document, collection, payload.ocr),
+            review = attemptDispatch.stagedPageReviewOf(
+                job = job,
+                document = document,
+                collection = collection,
+                snapshot = payload.ocr,
+            ),
         )
         // A document deletion can land here: the file's document is written and its item is not. Nothing
         // below may fail the attempt because of that — the item writes obey the deletion's disposition
@@ -419,86 +403,6 @@ class ImportJobHandler internal constructor(
             return null
         }
         return Attached(imported.document, imported.managedPath, duplicate, updated)
-    }
-
-    /**
-     * The authority this attempt dispatches one stage of one document through, or null when it sends none.
-     *
-     * An import's allowance belongs to the *job*: twenty files share one scope, and a page that left this
-     * machine is counted once whoever read it and whichever stage sent it. The authority is built per document
-     * and per stage because a dispatch names the document it is about and the profile revision it goes through
-     * — that pairing is what stops one job's approval from paying for another job's pages, or for another
-     * document's, and what keeps a review call from being permitted by the scope a reading was approved under.
-     *
-     * A local destination gets no authority at all: nothing left the machine, so nothing is counted against
-     * the allowance. An external one is turned away *before* the page is sent, and the refusal is what ends the
-     * attempt in the durable waiting state.
-     */
-    private fun dispatchAuthorityFor(
-        job: Job,
-        document: Document,
-        snapshot: OcrSettingsSnapshot?,
-        dispatchStage: OcrDispatchStage,
-    ): OcrDispatchAuthority? {
-        val scope = snapshot ?: return null
-        val revisionId = when (dispatchStage) {
-            OcrDispatchStage.TRANSCRIPTION -> scope.transcriptionProfileRevisionId
-            OcrDispatchStage.REVIEW -> scope.reviewProfileRevisionId
-        } ?: return null
-        val revision = profileRevisionOf(revisionId) ?: return null
-        if (revision.scope != OcrEndpointScope.EXTERNAL) return null
-        return OcrDispatchAuthority(
-            operations = operations,
-            owner = OcrExternalOwner.job(job.id.value),
-            documentId = document.id,
-            stage = dispatchStage,
-            profileRevisionId = revisionId,
-            configuredAllowance = scope.externalPageLimit,
-            snapshotHash = OcrOperationStore.snapshotHashOf(scope),
-            onExhausted = { account ->
-                // The page was not sent. The attempt ends in the caller's wait, which writes the durable
-                // waiting state *after* this refusal and before the attempt ends: nothing beyond the
-                // approved scope was ever dispatched, and an approval puts the same job back in the queue.
-                LOGGER.atInfo()
-                    .addKeyValue(JOB_ID_FIELD, job.id.value)
-                    .addKeyValue(DOCUMENT_FIELD, document.id.value)
-                    .addKeyValue(DISTINCT_PAGES_FIELD, account.distinctPages)
-                    .addKeyValue(ALLOWANCE_FIELD, account.allowance)
-                    .log("an import's external page scope is spent, so this page was not sent")
-                throw ImportAwaitingApproval(job.id)
-            },
-        )
-    }
-
-    /**
-     * How this attempt judges a page it stages for a decision, or null when its settings name no reviewer.
-     *
-     * The reviewer is built per file because the authority it dispatches through names one document, and the
-     * two roots a page's image is rebuilt from are the file's own: the artifacts this attempt renders into and
-     * the directory holding its managed copy. An attempt that stages nothing never calls it, and a reviewer
-     * that is configured but never needed is a value, not a request — nothing is sent until a page is compared.
-     */
-    private fun stagedPageReviewOf(
-        job: Job,
-        document: Document,
-        collection: Collection,
-        snapshot: OcrSettingsSnapshot?,
-    ): StagedPageReview? {
-        val reviewerRevisionId = snapshot?.reviewProfileRevisionId ?: return null
-        val reviewDispatch = dispatchAuthorityFor(
-            job = job,
-            document = document,
-            snapshot = snapshot,
-            dispatchStage = OcrDispatchStage.REVIEW,
-        )
-        return StagedPageReview(
-            reviewer = reviewerFor(snapshot, reviewDispatch),
-            reviewProfileRevisionId = reviewerRevisionId,
-            reviewPromptVersion = snapshot.reviewPromptVersion,
-            policyVersion = snapshot.policyVersion,
-            documentArtifactRoot = paths.artifactsDir(collection.id, document.id),
-            managedCopyRoot = paths.documentDir(collection.id, document.id),
-        )
     }
 
     /**
@@ -784,8 +688,11 @@ class ImportJobHandler internal constructor(
          * bytes again is therefore a duplicate rather than a reason to read a document that is already
          * waiting — and the reading a second pass would produce is exactly what a person has still to decide
          * about, so it could not answer the question either.
+         *
+         * The retry handler reuses this same set for the same reason: a document an earlier run of its job
+         * already finished must not be read again when the job resumes.
          */
-        private val FINISHED_STATUSES = setOf(
+        internal val FINISHED_STATUSES = setOf(
             DocumentStatus.COMPLETE,
             DocumentStatus.COMPLETE_WITH_WARNINGS,
             DocumentStatus.NEEDS_REVIEW,
@@ -830,6 +737,12 @@ class ImportJobHandler internal constructor(
             // The instant between a file's copy committing and its attach, for the test that lands a
             // deletion exactly there. Nothing in production passes it.
             afterCopy: suspend () -> Unit = {},
+            // The transport engine the attempt's image-model clients are built on, or null for each
+            // client's own CIO engine. Production passes nothing (its default); a test injects a
+            // recording engine here so an external transcription or review dispatch can be observed
+            // without leaving the machine. The client still applies its own redirect and key rules to
+            // whatever transport it is built on.
+            clientEngine: HttpClientEngine? = null,
         ): JobRunner {
             // A restore re-embeds with the session this worker embeds with, so one process never holds two
             // accelerator sessions for the same pinned model.
@@ -853,23 +766,27 @@ class ImportJobHandler internal constructor(
                 // answer to what an unapproved page costs.
                 publication = context.revisionPublication,
             )
+            val attemptDispatch = AttemptDispatch(
+                operations = context.ocrOperations,
+                profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
+                paths = context.paths,
+                // The same reviewer factory a rescan runs with: an import's staged page, a retry's and a
+                // rescan's are judged by one set of rules, and a second wiring here would be a second answer
+                // to what a reviewer may do.
+                reviewerFor = ocrReviewerFactory(
+                    revisions = context.revisions,
+                    reviews = context.ocrReviews,
+                    profiles = context.ocrProfiles,
+                    clientEngine = clientEngine,
+                ),
+            )
             val handler = ImportJobHandler(
                 collections = context.collections,
                 documents = context.documents,
                 library = context.library,
                 items = context.importItems,
-                operations = context.ocrOperations,
+                attemptDispatch = attemptDispatch,
                 jobs = context.jobs,
-                profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
-                paths = context.paths,
-                // The same reviewer factory a rescan runs with: an import's staged page and a rescan's are
-                // judged by one set of rules, and a second wiring here would be a second answer to what a
-                // reviewer may do.
-                reviewerFor = ocrReviewerFactory(
-                    revisions = context.revisions,
-                    reviews = context.ocrReviews,
-                    profiles = context.ocrProfiles,
-                ),
                 ingest = ingest,
                 afterIngestion = afterIngestion,
                 beforeCopy = beforeCopy,
@@ -885,6 +802,7 @@ class ImportJobHandler internal constructor(
                 jobs = context.jobs,
                 library = context.library,
                 mutations = context.mutations,
+                attemptDispatch = attemptDispatch,
                 ingest = ingest,
             )
             // A rescan is its own kind of work, so it has its own handler. It is wired here because this is
@@ -904,11 +822,12 @@ class ImportJobHandler internal constructor(
                 publication = context.revisionPublication,
                 chunker = chunker,
                 documentEmbedder = documentEmbedder,
-                engineFor = rescanEngineFactory(context.ocrProfiles),
+                engineFor = rescanEngineFactory(context.ocrProfiles, clientEngine = clientEngine),
                 reviewerFor = ocrReviewerFactory(
                     revisions = context.revisions,
                     reviews = context.ocrReviews,
                     profiles = context.ocrProfiles,
+                    clientEngine = clientEngine,
                 ),
                 profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
             )
@@ -1010,16 +929,3 @@ class ImportJobHandler internal constructor(
 }
 
 private val LOGGER = LoggerFactory.getLogger("infoscry.import")
-
-/**
- * The attempt stopped because a page would have exceeded this import's external scope without an approval.
- *
- * It is control flow rather than a failure: the page was never sent, the attempt's waiting state is durable,
- * and an approval queues another attempt of the same job — which resumes at the files this one did not
- * finish rather than at the first file. It travels out through the reader and the ingest unchanged, which is
- * why it is neither an I/O failure nor an unavailable-engine refusal: marking the file as failed would tell a
- * person their document could not be read when the truth is that nobody has approved the scope yet.
- */
-internal class ImportAwaitingApproval(val jobId: JobId) : IllegalStateException(
-    "import job ${jobId.value} waits for an external page scope to be approved before another page is sent",
-)

@@ -136,7 +136,11 @@ endpoint, which may be external. See the
 
 In **Ask**, select a collection and LLM profile and enter a question. Ask answers
 from one retrieval pass and streams an answer with citations. Open a citation
-to inspect the source passage.
+to inspect the source passage. A citation saved with a recorded revision opens
+that exact reading, so a later rescan cannot change what an old answer shows.
+When the saved citation names no revision, the viewer shows the excerpt saved
+with the answer under a “Revision unknown” label rather than the document's
+current text.
 
 Reopen stored answers from that collection's conversation history. A default
 profile only preselects a choice; a configured profile must be selected.
@@ -149,7 +153,10 @@ Read the cited passages to assess whether they support the answer's claims.
 In **Investigate**, select a collection and profile and start a conversation.
 The model can search and read sources over several tool steps. Follow-ups can
 reuse retained evidence, and saved conversations can be reopened after reload.
-Each completed turn displays one adopted final answer.
+Each completed turn displays one adopted final answer. Opening saved evidence
+follows the same rule as Ask: evidence recorded with its revision opens that
+exact reading, and evidence naming no revision shows its saved excerpt under a
+“Revision unknown” label.
 
 The sidebar sets the limits for the next question or follow-up:
 

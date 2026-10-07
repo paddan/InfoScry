@@ -21,6 +21,16 @@ data class RetryJobPayload(
     val collectionId: String,
     val documentIds: List<String>,
     val settings: ExtractionSettings,
+    /**
+     * The OCR selection this retry was admitted with, or null for a payload that recorded none.
+     *
+     * It mirrors the import payload for the same two reasons: the external page allowance of the whole job
+     * and the profile revisions an approval binds to travel here, so a retry dispatches its pages through
+     * the same snapshotted engines, comparisons and allowance rules its admission chose. Null means "a
+     * legacy payload", which is the same behavior the collection had before these settings existed:
+     * Tesseract, fill-missing, no external pages.
+     */
+    val ocr: infoscry.ocr.OcrSettingsSnapshot? = null,
 ) {
 
     init {

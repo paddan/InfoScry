@@ -61,7 +61,8 @@ data class RenderedPage(
  * the page carried — relative to that root, the same way [ContentUnitDraft] names its artifact — so the
  * unit and its artifact commit together and a reader can later verify they still belong to each other.
  * An implementation that writes no artifact leaves both absent rather than naming a file that is not
- * there.
+ * there. The same rule holds for [ContentUnitDraft.sourceImage]: it names an image only when the file is
+ * kept for the life of the record, never a working render this attempt deletes.
  */
 data class OcrResult(
     val text: String,

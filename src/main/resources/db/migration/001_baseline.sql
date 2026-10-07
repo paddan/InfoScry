@@ -611,8 +611,17 @@ CREATE TABLE document_revisions (
     -- Why this revision exists and what produced it, so a reader is never told a provenance nobody
     -- recorded. Free-form on purpose: the values are read by the services that write them.
     provenance         TEXT    NOT NULL CHECK (length(provenance) > 0),
-    created_at         TEXT    NOT NULL
+    created_at         TEXT    NOT NULL,
+    -- The extraction fingerprint of the reading that opened a staged candidate, so an interrupted import
+    -- continues into the same candidate instead of opening a second one. Null for published and rescan
+    -- revisions, which are never resumed by key.
+    attempt_fingerprint TEXT
 );
+
+-- At most one resumable candidate per document and attempt: two racing resumes adopt the same row.
+CREATE UNIQUE INDEX document_revisions_resume_uniqueness
+    ON document_revisions (document_id, attempt_fingerprint)
+    WHERE state = 'CANDIDATE' AND attempt_fingerprint IS NOT NULL;
 
 CREATE INDEX document_revisions_document ON document_revisions (document_id, created_at);
 
@@ -674,6 +683,9 @@ CREATE TABLE page_text_revisions (
     source_image_width          INTEGER CHECK (source_image_width IS NULL OR source_image_width > 0),
     source_image_height         INTEGER CHECK (source_image_height IS NULL OR source_image_height > 0),
     source_image_render_version INTEGER CHECK (source_image_render_version IS NULL OR source_image_render_version > 0),
+    -- The extractor key this page was read for, so a resumed attempt skips a page it already staged.
+    -- Null for pages that no resumable attempt staged.
+    unit_key                    TEXT,
     PRIMARY KEY (revision_id, ordinal),
     CHECK ((artifact_relative_path IS NULL) = (artifact_sha256 IS NULL)),
     CHECK (

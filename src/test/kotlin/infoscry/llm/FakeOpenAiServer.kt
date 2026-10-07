@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -43,6 +44,8 @@ internal class FakeOpenAiServer(
 
     private val server: HttpServer = HttpServer.create(InetSocketAddress(LOOPBACK_HOST, 0), 0)
     private val handled: AtomicInteger = AtomicInteger(0)
+    /** Counted down by [close], so a held connection ends with the server instead of outliving the test. */
+    private val closed: CountDownLatch = CountDownLatch(1)
     private val lastAuthorization: AtomicReference<String?> = AtomicReference(null)
     private val lastApiKey: AtomicReference<String?> = AtomicReference(null)
     private val lastRequestBody: AtomicReference<String?> = AtomicReference(null)
@@ -128,8 +131,10 @@ internal class FakeOpenAiServer(
             // the client cancelled the exchange
         }
         if (response.holdMillis > 0) {
+            // The handler runs on the server's dispatcher thread, and `stop` joins that thread, so a plain sleep
+            // here would make closing the server wait out the whole hold.
             try {
-                Thread.sleep(response.holdMillis)
+                closed.await(response.holdMillis, TimeUnit.MILLISECONDS)
             } catch (ignored: InterruptedException) {
                 Thread.currentThread().interrupt()
             }
@@ -143,6 +148,7 @@ internal class FakeOpenAiServer(
     }
 
     override fun close() {
+        closed.countDown()
         server.stop(0)
     }
 

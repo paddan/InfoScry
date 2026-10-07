@@ -122,6 +122,9 @@ val externalTest = tasks.register<Test>("externalTest") {
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // These tests depend on tools installed on this machine (Tesseract, Chromium) that are not task inputs,
+    // so a cached pass could be replayed where the tool is absent. They must run, never be restored.
+    outputs.cacheIf { false }
     // The browser acceptance tests drive these scripts, so a change to one is an input.
     inputs.file(layout.projectDirectory.file("web/e2e/investigate-browser-acceptance.mjs"))
     inputs.file(layout.projectDirectory.file("web/e2e/collections-browser-acceptance.mjs"))
@@ -239,6 +242,8 @@ val gpuIntegrationTest = tasks.register<Test>("gpuIntegrationTest") {
     classpath = sourceSets["test"].runtimeClasspath
     systemProperty("infoscry.dataDir", dataDir)
     outputs.upToDateWhen { false }
+    // The gate proves the hardware, so a result restored from the build cache would prove nothing.
+    outputs.cacheIf { false }
     jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
 
