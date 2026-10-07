@@ -4,7 +4,7 @@
 
 | Ticket | Blocked by | State |
 |---|---|---|
-| [01 — Measure tool calling from Admin and explain an unmeasured profile in Investigate](01-measure-tool-calling-in-admin.md) | None | Not started |
+| [01 — Measure tool calling from Admin and explain an unmeasured profile in Investigate](01-measure-tool-calling-in-admin.md) | None | Implemented; browser scenario not done |
 | [02 — Import history shows the final stage of a finished import](02-import-history-final-stage.md) | None | Not started |
 | [03 — Revision history names the OCR method an import used](03-import-reading-in-history.md) | None | Not started |
 | [04 — OCR profiles offer the LLM providers and only image-capable models](04-ocr-profile-providers-and-catalog.md) | None | Not started |
@@ -13,4 +13,4 @@
 | [07 — Per-collection ignore patterns for files that are never imported](07-ignore-patterns.md) | 05 | Not started |
 | [08 — Read a document again with a chosen OCR method, including after a failed import](08-retry-with-chosen-ocr.md) | 04 | Not started |
 
-Until 01 lands, a profile can be measured with `infoscry llm test <profile name>`.
+A profile can be measured in Admin → LLM profiles ("Check tool calling") or with `infoscry llm test <profile name>`.

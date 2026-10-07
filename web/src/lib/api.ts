@@ -180,6 +180,9 @@ export type LlmProfilePrice = {
   name: string;
   inputPricePerMillion: number;
   outputPricePerMillion: number;
+  /** The recorded measurement; absent or null means the profile was never measured for tool calling. */
+  toolCallingMeasured?: boolean | null;
+  capabilityCheckedAt?: string | null;
 };
 
 export type LlmProvider = 'OPENAI_COMPATIBLE' | 'ANTHROPIC';
@@ -549,6 +552,18 @@ export async function updateLlmProfile(id: string, profile: LlmProfileInput): Pr
 
 export async function deleteLlmProfile(id: string): Promise<void> {
   await mutate(`/api/llm/profiles/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+/** What one tool-calling check measured, with the saved profile as it now stands. */
+export type LlmProfileProbe = {
+  profile: LlmProfile;
+  textRequestSupported: boolean;
+  toolCallingSupported: boolean;
+};
+
+/** Measures tool calling for a saved profile: the same two requests as `infoscry llm test`. */
+export async function probeLlmProfile(id: string): Promise<LlmProfileProbe> {
+  return (await mutate(`/api/llm/profiles/${encodeURIComponent(id)}/probe`, 'POST')) as LlmProfileProbe;
 }
 
 /**

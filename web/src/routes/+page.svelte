@@ -16,12 +16,14 @@
     type InvestigationLimitKey,
     type InvestigationLimitsInput,
   } from '../lib/investigationLimits';
+  import { profileOptionLabel, toolCallingRemedy, toolCallingState } from '../lib/toolCalling';
   import {
     ApiError,
     deleteConversation,
     listAsks,
     listCollections,
     listInvestigations,
+    listLlmProfilePrices,
     readSource,
     retryDocuments,
     searchCollection,
@@ -529,8 +531,21 @@
 
   function selectMode(modeName: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN'): void {
     if (activeMode !== modeName) closeSourceSheetWithoutFocus();
+    // Admin may have measured a profile's tool calling; the Investigate select must show that, not the start-up read.
+    if (modeName === 'INVESTIGATE' && activeMode === 'ADMIN') void refreshInvestigateProfiles();
     activeMode = modeName;
   }
+
+  async function refreshInvestigateProfiles(): Promise<void> {
+    try {
+      investigateProfiles = await listLlmProfilePrices();
+    } catch {
+      // The list already on screen stays; a refused read must not clear the select.
+    }
+  }
+
+  $: selectedInvestigateProfile = investigateProfiles.find((profile) => profile.name === investigateProfile) ?? null;
+  $: investigateRemedy = selectedInvestigateProfile === null ? null : toolCallingRemedy(toolCallingState(selectedInvestigateProfile));
 
   function handleTabKeydown(event: KeyboardEvent): void {
     const tabs: ('SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN')[] = ['SEARCH', 'ASK', 'INVESTIGATE', 'ADMIN'];
@@ -846,9 +861,10 @@
           {:else}
             <select id="llm-profile" bind:value={investigateProfile} disabled={investigateProfiles.length === 0}>
               {#if investigateProfiles.length === 0}<option value="">{investigateProfileStatus}</option>{/if}
-              {#each investigateProfiles as profile (profile.name)}<option value={profile.name}>{profile.name}</option>{/each}
+              {#each investigateProfiles as profile (profile.name)}<option value={profile.name}>{profileOptionLabel(profile.name, toolCallingState(profile))}</option>{/each}
             </select>
             {#if investigateProfiles.length === 0}<p>{investigateProfileStatus}</p>{/if}
+            {#if investigateRemedy !== null}<p class="profile-remedy" role="note">{investigateRemedy}</p>{/if}
             <p>Investigate can search the selected collection as needed. Search filters apply to Search only.</p>
             <fieldset class="limit-settings">
               <legend>Question limits</legend>

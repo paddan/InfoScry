@@ -12,29 +12,18 @@ import com.github.ajalt.clikt.parameters.types.double
 import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.path
 import infoscry.config.AppPaths
-import infoscry.llm.AnthropicClient
-import infoscry.llm.LlmCapabilityProbe
-import infoscry.llm.LlmError
-import infoscry.llm.LlmEvent
-import infoscry.llm.LlmMessage
+import infoscry.llm.LlmCapabilityProbeService
+import infoscry.llm.LlmProbeRefusedException
+import infoscry.llm.LlmProbeUnavailableException
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmPromptRole.ASK
 import infoscry.llm.LlmPromptRole.INVESTIGATE
 import infoscry.llm.LlmProvider
-import infoscry.llm.LlmRequest
-import infoscry.llm.LlmStreamingClient
-import infoscry.llm.OpenAiCompatibleClient
-import infoscry.llm.RetryPolicy
-import infoscry.llm.ToolDefinition
 import infoscry.server.ApiJson
-import infoscry.storage.Instants
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
 import java.nio.file.Path
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.flow.toList
 import kotlinx.serialization.Serializable
 
 /**
@@ -223,49 +212,21 @@ class TestLlmProfileCommand : CliktCommand(name = "test") {
         infoscry.AppContext.open(AppPaths.of(options.dataDir)).use { context ->
             val profile = context.llm.findByName(profileArg)
                 ?: throw CliFailure("no LLM profile named '" + profileArg + "' exists")
-            val lookup: (String) -> String? = { variable -> System.getenv(variable) }
-            val client = HttpClient(CIO)
-            try {
-                val adapter = when (profile.provider) {
-                    LlmProvider.OPENAI_COMPATIBLE ->
-                        OpenAiCompatibleClient(profile, lookup, client, RetryPolicy())
-                    LlmProvider.ANTHROPIC ->
-                        AnthropicClient(profile, lookup, client, RetryPolicy())
-                }
-                val textOk = probesText(adapter)
-                val toolsOk = probesToolCalling(adapter)
-                context.llm.recordCapability(
-                    profile.name,
-                    LlmCapabilityProbe(toolCallingSupported = toolsOk, checkedAt = Instants.now()),
-                )
-                echo(ApiJson.encodeToString(LlmTestJson(profile.name, textOk, toolsOk)))
-            } finally {
-                client.close()
+            // The same service the Admin route uses, so the CLI and the UI measure and record identically.
+            val service = LlmCapabilityProbeService(context.llm)
+            val measurement = try {
+                runBlocking { service.probe(profile) }
+            } catch (refused: LlmProbeRefusedException) {
+                throw CliFailure(refused.message.orEmpty())
+            } catch (unavailable: LlmProbeUnavailableException) {
+                throw CliFailure(unavailable.message.orEmpty())
             }
-        }
-    }
-
-    /** One tiny request: does the endpoint answer and stream to completion? */
-    private fun probesText(adapter: LlmStreamingClient): Boolean = try {
-        runBlocking {
-            adapter.stream(LlmRequest(messages = listOf(LlmMessage("user", "Say ok.")))).toList()
-        }.any { event -> event is LlmEvent.TextDelta || event == LlmEvent.Completed }
-    } catch (failure: LlmError) {
-        false
-    }
-
-    /** One harmless tool request: does the endpoint ever request a call? */
-    private fun probesToolCalling(adapter: LlmStreamingClient): Boolean = try {
-        runBlocking {
-            adapter.stream(
-                LlmRequest(
-                    messages = listOf(LlmMessage("user", "Call the ping tool.")),
-                    tools = listOf(ToolDefinition(name = "ping", description = "Nothing but a reply.")),
-                    requiredToolName = "ping",
+            service.record(profile.name, measurement)
+            echo(
+                ApiJson.encodeToString(
+                    LlmTestJson(profile.name, measurement.textRequestSupported, measurement.toolCallingSupported),
                 ),
-            ).toList()
-        }.any { event -> event is LlmEvent.ToolCallReady }
-    } catch (failure: LlmError) {
-        false
+            )
+        }
     }
 }

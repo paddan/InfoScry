@@ -1,5 +1,7 @@
 package infoscry.server
 
+import infoscry.llm.FakeOpenAiResponse
+import infoscry.llm.FakeOpenAiServer
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -132,5 +134,90 @@ class LlmProfileRoutesTest {
             release.complete(Unit)
             withTimeout(5_000) { maintenance.await() }
         }
+    }
+
+    // ---- Tool-calling measurement from Admin (ticket 01) ----
+
+    private val textOnly =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n" +
+            "data: [DONE]\n\n"
+
+    private val toolCalling =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"1\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+            "data: [DONE]\n\n"
+
+    private fun profileAt(endpoint: String, enabled: Boolean = true) =
+        """{"name":"Probed profile","provider":"OPENAI_COMPATIBLE","endpoint":"$endpoint","model":"test-model","contextWindow":8192,"maxOutputTokens":1024,"inputPricePerMillion":0.0,"outputPricePerMillion":0.0,"cacheReadPricePerMillion":0.0,"enabled":$enabled,"apiKeyEnvironmentVariable":null}"""
+
+    private fun idOf(body: String): String = Regex(""""id":"([^"]+)"""").find(body)!!.groupValues[1]
+
+    @Test fun `the probe route measures tool calling through the provider and persists it`() = runBlocking {
+        val provider = FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = textOnly),
+                FakeOpenAiResponse(stream = true, body = toolCalling),
+            ),
+        )
+        try {
+            val id = idOf(create(profileAt(provider.url)).bodyAsText())
+
+            val probed = harness.request(HttpMethod.Post, "/api/llm/profiles/$id/probe", credential = Credential.CSRF)
+
+            assertEquals(HttpStatusCode.OK, probed.status, probed.bodyAsText())
+            val answer = probed.bodyAsText()
+            assertContains(answer, "\"textRequestSupported\":true")
+            assertContains(answer, "\"toolCallingSupported\":true")
+            assertContains(answer, "\"toolCallingMeasured\":true")
+            assertEquals(2, provider.requestBodies.size, "the probe is the two-request check, once")
+            assertContains(provider.requestBodies[1], "\"ping\"")
+            assertEquals(true, harness.context.llm.findById(id)?.toolCallingMeasured)
+            assertContains(harness.get("/api/llm/profiles").bodyAsText(), "\"toolCallingMeasured\":true")
+        } finally {
+            provider.close()
+        }
+    }
+
+    @Test fun `a provider that rejects the tool request is measured unsupported and its body is never echoed`() = runBlocking {
+        val leaked = "provider-echoed-secret-value"
+        val provider = FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(statusCode = 401, body = """{"error":{"message":"$leaked"}}"""),
+                FakeOpenAiResponse(statusCode = 401, body = """{"error":{"message":"$leaked"}}"""),
+            ),
+        )
+        try {
+            val id = idOf(create(profileAt(provider.url)).bodyAsText())
+
+            val probed = harness.request(HttpMethod.Post, "/api/llm/profiles/$id/probe", credential = Credential.CSRF)
+
+            assertEquals(HttpStatusCode.OK, probed.status, probed.bodyAsText())
+            assertContains(probed.bodyAsText(), "\"toolCallingSupported\":false")
+            assertFalse(probed.bodyAsText().contains(leaked), "the provider body is not echoed")
+            assertEquals(false, harness.context.llm.findById(id)?.toolCallingMeasured)
+        } finally {
+            provider.close()
+        }
+    }
+
+    @Test fun `a switched-off profile is refused before any provider call and nothing is persisted`() = runBlocking {
+        val provider = FakeOpenAiServer(emptyList())
+        try {
+            val id = idOf(create(profileAt(provider.url, enabled = false)).bodyAsText())
+
+            val refused = harness.request(HttpMethod.Post, "/api/llm/profiles/$id/probe", credential = Credential.CSRF)
+
+            assertEquals(HttpStatusCode.Conflict, refused.status, refused.bodyAsText())
+            assertContains(refused.bodyAsText(), "LLM_PROFILE_DISABLED")
+            assertTrue(provider.requestBodies.isEmpty(), "no request reached the provider")
+            assertEquals(null, harness.context.llm.findById(id)?.toolCallingMeasured)
+        } finally {
+            provider.close()
+        }
+    }
+
+    @Test fun `probing an unknown profile is not found`() = runBlocking {
+        val missing = harness.request(HttpMethod.Post, "/api/llm/profiles/missing/probe", credential = Credential.CSRF)
+
+        assertEquals(HttpStatusCode.NotFound, missing.status, missing.bodyAsText())
     }
 }
