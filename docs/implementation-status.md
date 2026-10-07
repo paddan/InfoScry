@@ -35,8 +35,8 @@ stays in pilot mode: no replacement happens without a manual decision, and
 The owner's first local test of the OCR work (2026-10-07) produced an
 [eight-ticket plan](plans/2026-10-07-local-testing-feedback.md): measuring tool
 calling from Admin, two history display gaps, OCR profiles with the LLM
-providers and image-capable models, skipping files that cannot be imported,
-include/exclude extensions and a global ignore list for imports, and retrying a
+providers and image-capable models (own OCR profiles or existing LLM profiles), skipping files that cannot be imported,
+include/exclude extensions and per-collection ignore patterns for imports, and retrying a
 document with a chosen OCR method. None of it is implemented yet; see the
 [ticket status](tickets/local-testing-feedback/STATUS.md).
 

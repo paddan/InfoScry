@@ -13,7 +13,7 @@ extensions to exclude (everything else is imported), in Admin â†’ Collections â†
 
 - Include and exclude are mutually exclusive in one request; both together is a 400 before any side effect.
 - Extensions are matched case-insensitively, with or without the leading dot; an empty list means no filter.
-- A file removed by the filter is skipped exactly like ticket 05 (not shown, not counted). The global ignore list
+- A file removed by the filter is skipped exactly like ticket 05 (not shown, not counted). The collection's ignore list
   (07) applies before this filter.
 
 ## Files and interfaces

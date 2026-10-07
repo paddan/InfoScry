@@ -18,28 +18,29 @@ OCR review model or the v1 scope in [AGENTS.md](../../AGENTS.md).
 | OCR profiles do not offer the providers LLM profiles do; Transcription and Review profile list only `None` | Feature: OCR profiles are separate from LLM profiles and have no presets or catalog, so a fresh archive has none to choose | [04](../tickets/local-testing-feedback/04-ocr-profile-providers-and-catalog.md) |
 | Files that cannot be imported become `Failed` documents | Change: they are skipped and not shown anywhere | [05](../tickets/local-testing-feedback/05-skip-unsupported-files.md) |
 | No way to include or exclude file extensions when importing a folder | Feature | [06](../tickets/local-testing-feedback/06-include-exclude-extensions.md) |
-| No global ignore list for system files | Feature | [07](../tickets/local-testing-feedback/07-global-ignore-patterns.md) |
+| No ignore list for system files | Feature | [07](../tickets/local-testing-feedback/07-ignore-patterns.md) |
 | A file cannot be read again with another OCR method, in particular after a failed import | Feature: Scan again needs a published text, and Retry uses the collection's settings | [08](../tickets/local-testing-feedback/08-retry-with-chosen-ocr.md) |
 
 ## Product decisions taken by the owner
 
 - OCR profiles offer the same providers and look like LLM profiles, but list only models that support image input
-  (ticket 04). They remain their own profiles; an LLM profile is not reused as an OCR profile.
+  (ticket 04). A collection can use either its own OCR profiles or an existing LLM profile whose model supports
+  image input, for transcription and for review.
 - A file that cannot be imported is skipped and not shown at all: no document, no failed item, no per-file result,
   and it is not counted among the import's files (ticket 05).
 - Folder imports can either include only chosen extensions or exclude chosen extensions; including means only those
   are imported, excluding means everything else is imported (ticket 06).
-- File types can be excluded globally, like `.gitignore`, so system files are never attempted (ticket 07). The list
-  is global for the archive, not per collection.
+- File types can be excluded with ignore patterns, like `.gitignore`, so system files are never attempted
+  (ticket 07). The list belongs to each collection, not to the whole archive.
 
 ## Engineering defaults (proposals, not product decisions)
 
-- Order of filtering for one candidate file: global ignore (07) → the import's include or exclude list (06) →
+- Order of filtering for one candidate file: the collection's ignore list (07) → the import's include or exclude list (06) →
   "can this be read at all" (05). A file removed by any step is skipped silently, as in 05.
 - Include and exclude are mutually exclusive in one request; a request carrying both is refused with 400 before
   any side effect. Extensions are compared case-insensitively without the leading dot.
 - Ignore patterns use `.gitignore` glob syntax for names and relative paths (`*`, `?`, `**`, a trailing `/` for
-  directories, `!` to re-include), stored in the baseline schema and seeded with a default list
+  directories, `!` to re-include), stored in the baseline schema per collection, each new collection seeded with a default list
   (`.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`, `~$*`, `*.tmp`, `.git/`, `node_modules/`).
 - Schema changes edit `src/main/resources/db/migration/001_baseline.sql`; there is no migration path.
 

@@ -10,7 +10,7 @@
 | [04 — OCR profiles offer the LLM providers and only image-capable models](04-ocr-profile-providers-and-catalog.md) | None | Not started |
 | [05 — Files that cannot be imported are skipped and not shown](05-skip-unsupported-files.md) | None | Not started |
 | [06 — Include or exclude file extensions when importing a folder](06-include-exclude-extensions.md) | 05 | Not started |
-| [07 — A global ignore list for files that are never imported](07-global-ignore-patterns.md) | 05 | Not started |
+| [07 — Per-collection ignore patterns for files that are never imported](07-ignore-patterns.md) | 05 | Not started |
 | [08 — Read a document again with a chosen OCR method, including after a failed import](08-retry-with-chosen-ocr.md) | 04 | Not started |
 
 Until 01 lands, a profile can be measured with `infoscry llm test <profile name>`.
