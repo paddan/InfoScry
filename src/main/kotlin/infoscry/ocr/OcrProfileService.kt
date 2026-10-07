@@ -1,5 +1,9 @@
 package infoscry.ocr
 
+import infoscry.llm.LlmProfile
+import infoscry.llm.ProviderCatalog
+import infoscry.llm.ProviderCatalogData
+import infoscry.llm.imageInputOf
 import infoscry.storage.OcrProfileStore
 import infoscry.storage.Instants
 
@@ -16,6 +20,17 @@ data class OcrCapabilityMeasurement(
     val modelVersion: String? = null,
     val errorCode: String? = null,
 )
+
+/** An LLM profile whose model the catalog states cannot read an image, so no OCR profile is made from it. */
+class TextOnlyLlmProfileException : IllegalStateException(
+    "the model of that LLM profile does not accept image input, so it cannot read page images",
+)
+
+/** What choosing an LLM profile for OCR produced: the OCR profile, and whether this call created it. */
+data class LlmProfileCopy(val profile: OcrProfile, val created: Boolean)
+
+/** The suffix that marks an OCR profile as the copy of an LLM profile, so the two never share a name. */
+const val LLM_COPY_NAME_SUFFIX = " (from LLM profile)"
 
 /**
  * The rules that sit between an OCR profile's stored rows and what may select one.
@@ -48,6 +63,8 @@ class OcrProfileService(
      * and therefore never compares equal to one.
      */
     private val engineFor: ((OcrEngine, OcrSettingsSnapshot, OcrDispatchAuthority?) -> PageOcrEngine?)? = null,
+    /** What the curated catalog states about a model's image input, for an LLM profile offered as OCR. */
+    private val providerCatalog: ProviderCatalogData = ProviderCatalog.load(),
 ) {
 
     fun list(): List<OcrProfile> = profiles.list()
@@ -76,6 +93,54 @@ class OcrProfileService(
     ): OcrProfile =
         profiles.update(id, name, draft, enabled, expectedRevisionId)
             ?: throw NoSuchElementException("no OCR profile with id $id")
+
+    /**
+     * Whether the catalog states that [llm]'s model accepts image input: true or false when it says so, null
+     * when it does not. Unknown is never turned into either answer here.
+     */
+    fun imageInputOf(llm: LlmProfile): Boolean? = providerCatalog.imageInputOf(llm.provider, llm.model)
+
+    /**
+     * The OCR profile that carries [llm]'s settings, created or brought up to date.
+     *
+     * An LLM profile is offered for transcription and review by being *copied* into an ordinary OCR profile,
+     * the one this build already knows how to pin: an attempt snapshots that profile's immutable revision, so
+     * a later edit of the LLM profile changes nothing that was admitted. Choosing the LLM profile again after
+     * an edit adds a new revision to the same copy rather than a second profile. The copy carries no
+     * measurement of its own: the image capability check runs on it, as on any OCR profile.
+     *
+     * A model the catalog states is text-only is refused; a model it does not mention is accepted as
+     * "unknown" and left to the capability check.
+     */
+    fun copyOfLlmProfile(llm: LlmProfile): LlmProfileCopy {
+        require(llm.enabled) { "that LLM profile is disabled and cannot be offered for OCR" }
+        if (imageInputOf(llm) == false) throw TextOnlyLlmProfileException()
+        val name = llm.name + LLM_COPY_NAME_SUFFIX
+        val draft = OcrProfileRevisionDraft(
+            provider = llm.provider,
+            model = llm.model,
+            contextWindow = llm.contextWindow,
+            maxOutputTokens = llm.maxOutputTokens,
+            endpoint = llm.endpoint,
+            inputPricePerMillion = llm.inputPricePerMillion,
+            outputPricePerMillion = llm.outputPricePerMillion,
+            apiKeyEnvironmentVariable = llm.apiKeyEnvironmentVariable,
+        )
+        val existing = profiles.list().firstOrNull { it.name.equals(name, ignoreCase = true) }
+            ?: return LlmProfileCopy(profiles.create(name, draft, enabled = true), created = true)
+        val current = existing.revision
+        val unchanged = existing.enabled &&
+            current.provider == draft.provider && current.model == draft.model &&
+            current.contextWindow == draft.contextWindow && current.maxOutputTokens == draft.maxOutputTokens &&
+            current.endpoint == draft.endpoint &&
+            current.apiKeyEnvironmentVariable == draft.apiKeyEnvironmentVariable &&
+            current.inputPricePerMillion == draft.inputPricePerMillion &&
+            current.outputPricePerMillion == draft.outputPricePerMillion
+        if (unchanged) return LlmProfileCopy(existing, created = false)
+        val updated = profiles.update(existing.id, name, draft, enabled = true, expectedRevisionId = current.revisionId)
+            ?: throw NoSuchElementException("no OCR profile with id ${existing.id}")
+        return LlmProfileCopy(updated, created = false)
+    }
 
     /** Disables new use of a profile, keeping its revisions. False when no such profile exists. */
     fun disable(id: String): Boolean = profiles.disable(id)

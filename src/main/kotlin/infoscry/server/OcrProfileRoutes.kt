@@ -6,6 +6,8 @@ import infoscry.ocr.ImageLlmException
 import infoscry.ocr.OcrEndpointScope
 import infoscry.ocr.OcrProfile
 import infoscry.ocr.OcrProfileRevisionDraft
+import infoscry.ocr.TextOnlyLlmProfileException
+import infoscry.ocr.endpointScope
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.request.receiveChannel
@@ -93,6 +95,32 @@ data class OcrProfilesResponse(val profiles: List<OcrProfileApiView>)
 @Serializable
 data class OcrProfileResponse(val profile: OcrProfileApiView)
 
+/** The body that offers one LLM profile for transcription or review. */
+@Serializable
+data class OcrFromLlmProfileRequest(val llmProfileId: String)
+
+/**
+ * One LLM profile as the collection's OCR selects see it: enough to label it, never a key value.
+ *
+ * [imageInput] is what the catalog states about the model: true, false, or absent when it does not say, which
+ * the reader is shown as "image support unknown". [keyAvailable] is the presence of the named variable only.
+ */
+@Serializable
+data class OcrLlmCandidateApiView(
+    val id: String,
+    val name: String,
+    val provider: LlmProvider,
+    val endpoint: String,
+    val scope: OcrEndpointScope,
+    val model: String,
+    val apiKeyEnvironmentVariable: String?,
+    val keyAvailable: Boolean,
+    val imageInput: Boolean?,
+)
+
+@Serializable
+data class OcrLlmCandidatesResponse(val profiles: List<OcrLlmCandidateApiView>)
+
 /**
  * What one capability check measured, and the profile as it now stands.
  *
@@ -137,6 +165,36 @@ fun Routing.configureOcrProfileRoutes(context: AppContext) {
                     context.ocr.create(request.name, request.toDraft(), request.enabled)
                 }
                 call.respondJson(HttpStatusCode.Created, OcrProfileResponse(created.toApiView(context)))
+            }
+        }
+        /**
+         * Offers an existing LLM profile for transcription or review by copying it into an OCR profile.
+         *
+         * The copy is what a collection selects and an attempt pins, so editing the LLM profile later cannot
+         * change an admitted attempt. Choosing the same LLM profile again reuses its copy (200) and adds a
+         * revision only when the LLM profile changed; a model the catalog states is text-only is a 409.
+         */
+        post("/from-llm") {
+            call.handle {
+                val request = call.receiveJsonRejectingUnknownFields<OcrFromLlmProfileRequest>()
+                val llm = context.llm.findById(request.llmProfileId)
+                    ?: throw NoSuchElementException("no LLM profile with that id")
+                val copy = try {
+                    context.mutations.withMutation {
+                        context.collectionService.requireMutationsAllowed()
+                        context.ocr.copyOfLlmProfile(llm)
+                    }
+                } catch (textOnly: TextOnlyLlmProfileException) {
+                    call.respondJson(
+                        HttpStatusCode.Conflict,
+                        ApiErrorResponse(ApiError(code = "LLM_PROFILE_TEXT_ONLY", message = textOnly.message.orEmpty())),
+                    )
+                    return@handle
+                }
+                call.respondJson(
+                    if (copy.created) HttpStatusCode.Created else HttpStatusCode.OK,
+                    OcrProfileResponse(copy.profile.toApiView(context)),
+                )
             }
         }
         patch("/{profileId}") {
@@ -230,6 +288,32 @@ fun Routing.configureOcrProfileRoutes(context: AppContext) {
                     ),
                 )
             }
+        }
+    }
+}
+
+/** The LLM profiles a collection may be offered for OCR, each with what the catalog states about image input. */
+fun Routing.configureOcrLlmCandidateRoutes(context: AppContext) {
+    get("/api/ocr/llm-profiles") {
+        call.handle {
+            call.respondJson(
+                HttpStatusCode.OK,
+                OcrLlmCandidatesResponse(
+                    context.llm.list().filter { it.enabled }.map { llm ->
+                        OcrLlmCandidateApiView(
+                            id = llm.id,
+                            name = llm.name,
+                            provider = llm.provider,
+                            endpoint = llm.endpoint,
+                            scope = endpointScope(llm.endpoint),
+                            model = llm.model,
+                            apiKeyEnvironmentVariable = llm.apiKeyEnvironmentVariable,
+                            keyAvailable = llm.keyAvailable(System::getenv),
+                            imageInput = context.ocr.imageInputOf(llm),
+                        )
+                    },
+                ),
+            )
         }
     }
 }

@@ -974,6 +974,7 @@
                 onDocumentDeleted={handleManagedDocumentDeleted}
                 onRetryDocument={retryManagedDocument}
                 onRetryAllDocuments={retryAllManagedDocuments}
+                onOpenOcrProfiles={() => (adminTab = 'OCR')}
               />
             {/if}
           </div>

@@ -4,13 +4,16 @@
     ApiError,
     createOcrProfile,
     disableOcrProfile,
+    listLlmPresets,
     listOcrProfiles,
     probeOcrProfile,
     updateOcrProfile,
+    type LlmPreset,
     type OcrProfile,
     type OcrProfileInput,
     type OcrProfileProbe,
   } from './api';
+  import ProviderModelFields from './ProviderModelFields.svelte';
 
   /**
    * OCR profile management. Self-contained: it owns its list, form and probe state and talks only
@@ -20,6 +23,8 @@
   export let onProfilesChanged: ((profiles: OcrProfile[]) => void) | undefined = undefined;
 
   let profiles: OcrProfile[] = [];
+  let presets: LlmPreset[] = [];
+  let presetError: string | null = null;
   let selectedId = '';
   let draft: OcrProfileInput = emptyDraft();
   let creating = false;
@@ -96,6 +101,14 @@
   async function load(): Promise<void> {
     loading = true;
     loadError = null;
+    // Presets are a convenience: a failure to list them is a hint beside the form and must not stop the
+    // profile listing, which is the part the operator actually needs.
+    presetError = null;
+    try {
+      presets = await listLlmPresets();
+    } catch (failure) {
+      presetError = describe(failure);
+    }
     try {
       setProfiles(await listOcrProfiles());
     } catch (failure) {
@@ -393,45 +406,17 @@
           <label for="ocr-name">Name</label>
           <input id="ocr-name" bind:value={draft.name} placeholder="e.g. Vision reader" aria-required="true" />
         </div>
-        <div class="field">
-          <label for="ocr-provider">Provider</label>
-          <select id="ocr-provider" bind:value={draft.provider}>
-            <option value="OPENAI_COMPATIBLE">OpenAI-compatible</option>
-            <option value="ANTHROPIC">Anthropic</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="ocr-model">Model</label>
-          <input id="ocr-model" bind:value={draft.model} placeholder="e.g. a vision-capable model" aria-required="true" />
-        </div>
-        <div class="field">
-          <label for="ocr-endpoint">Endpoint (base URL)</label>
-          <input id="ocr-endpoint" bind:value={draft.endpoint} placeholder="https://… (leave empty for Anthropic)" />
-        </div>
-        <div class="field">
-          <label for="ocr-key">API key environment variable</label>
-          <input id="ocr-key" bind:value={draft.apiKeyEnvironmentVariable} placeholder="e.g. OCR_API_KEY" />
-          <p class="hint">Only the variable name is stored. A key value is never shown. A loopback endpoint can omit it.</p>
-          {#if !creating && selected !== null}
-            <p class="hint key-state">{keyState(selected)}</p>
-          {/if}
-        </div>
-        <div class="field">
-          <label for="ocr-context">Context window (tokens)</label>
-          <input id="ocr-context" type="number" min="1" step="1" bind:value={draft.contextWindow} />
-        </div>
-        <div class="field">
-          <label for="ocr-maxtokens">Max output tokens</label>
-          <input id="ocr-maxtokens" type="number" min="1" step="1" bind:value={draft.maxOutputTokens} />
-        </div>
-        <div class="field">
-          <label for="ocr-inprice">Input price (USD / 1M tokens)</label>
-          <input id="ocr-inprice" type="number" min="0" step="0.0001" bind:value={draft.inputPricePerMillion} />
-        </div>
-        <div class="field">
-          <label for="ocr-outprice">Output price (USD / 1M tokens)</label>
-          <input id="ocr-outprice" type="number" min="0" step="0.0001" bind:value={draft.outputPricePerMillion} />
-        </div>
+        <ProviderModelFields
+          bind:draft
+          idPrefix="ocr"
+          {presets}
+          {presetError}
+          imageOnly
+          modelPlaceholder="e.g. a vision-capable model"
+          keyPlaceholder="e.g. OCR_API_KEY"
+          keyHint="Only the variable name is stored. A key value is never shown. A loopback endpoint can omit it."
+          keyState={!creating && selected !== null ? keyState(selected) : null}
+        />
         <div class="field check">
           <label><input type="checkbox" bind:checked={draft.enabled} /> Enabled</label>
         </div>
@@ -493,7 +478,6 @@
   .field.check label { display: flex; align-items: center; gap: 0.5rem; }
   .field.check input { accent-color: #c4a77d; }
   label { color: #b8bcbb; font-size: 0.82rem; }
-  select,
   input:not([type='checkbox']) {
     width: 100%;
     min-width: 0;
@@ -503,10 +487,8 @@
     padding: 0.62rem 0.72rem;
     color: #e8e9e7;
   }
-  select:hover,
   input:hover { border-color: #515757; }
   .hint { margin: 0; color: #929997; font-size: 0.78rem; }
-  .key-state { color: #a9c7a6; }
   .actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0.55rem; margin-top: 0.2rem; }
   .capability { margin-top: 1.5rem; padding-top: 1.1rem; border-top: 1px solid #2d3131; display: grid; gap: 0.6rem; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }

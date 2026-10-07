@@ -40,6 +40,8 @@ data class CatalogModel(
     val outputPricePerMillion: Double? = null,
     val cacheReadPricePerMillion: Double? = null,
     val priceKnown: Boolean = false,
+    /** Whether the model accepts image input: null when neither the provider nor the curated table says. */
+    val imageInput: Boolean? = null,
 )
 
 /** The result of one provider fetch: [live] says the endpoint answered; [models] is always usable. */
@@ -147,6 +149,7 @@ class LlmModelCatalog(
                 outputPricePerMillion = 0.0.takeIf { loopback } ?: known?.outputPricePerMillion,
                 cacheReadPricePerMillion = 0.0.takeIf { loopback } ?: known?.cacheReadPricePerMillion,
                 priceKnown = loopback || (known?.inputPricePerMillion != null && known?.outputPricePerMillion != null),
+                imageInput = known?.imageInput,
             )
         }
     }
@@ -169,7 +172,23 @@ class LlmModelCatalog(
             outputPricePerMillion = outputPrice,
             cacheReadPricePerMillion = cacheReadPrice,
             priceKnown = inputPrice != null && outputPrice != null,
+            // What the provider's own listing states wins; the curated table only fills its silence, and a
+            // model neither mentions stays unknown instead of being assumed either way.
+            imageInput = liveImageInput(entry) ?: known?.imageInput,
         )
+    }
+
+    /**
+     * Image input as an OpenRouter-style listing states it: `architecture.input_modalities` (a list) or the
+     * older `architecture.modality` (`text+image->text`). Null when the entry says neither.
+     */
+    private fun liveImageInput(entry: JsonObject): Boolean? {
+        val architecture = entry["architecture"] as? JsonObject ?: return null
+        val modalities = (architecture["input_modalities"] as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content?.lowercase() }
+        if (!modalities.isNullOrEmpty()) return "image" in modalities
+        val legacy = (architecture["modality"] as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+        return legacy?.substringBefore("->")?.lowercase()?.split('+')?.map(String::trim)?.contains("image")
     }
 
     private fun knownModel(id: String, provider: LlmProvider): KnownModel? =

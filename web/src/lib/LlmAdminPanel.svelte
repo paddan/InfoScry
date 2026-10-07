@@ -4,17 +4,16 @@
     ApiError,
     createLlmProfile,
     deleteLlmProfile,
-    fetchLlmCatalog,
     listLlmPresets,
     listLlmProfiles,
     setLlmDefault,
     updateLlmProfile,
-    type LlmCatalogModel,
     type LlmDefaults,
     type LlmPreset,
     type LlmProfile,
     type LlmProfileInput,
   } from './api';
+  import ProviderModelFields from './ProviderModelFields.svelte';
 
   let profiles: LlmProfile[] = [];
   let defaults: LlmDefaults = { ASK: null, INVESTIGATE: null };
@@ -27,34 +26,8 @@
   let flash: string | null = null;
   let presets: LlmPreset[] = [];
   let presetError: string | null = null;
-  let presetId = '';
-  let fetchingModels = false;
-  let catalog: LlmCatalogModel[] = [];
-  let catalogId = '';
-  let catalogLive = true;
-  let catalogTried = false;
-  let catalogPriceUnknown = false;
-  // The connection (provider + endpoint + key) the catalog was fetched for, and a
-  // counter that bumps whenever that connection changes so stale fetches are droppable.
-  let connectionKey = '';
-  let appliedConnectionKey: string | null = null;
-  let connectionGeneration = 0;
 
   $: selectedProfile = profiles.find((profile) => profile.id === selectedId) ?? null;
-  $: connectionKey = `${draft.provider}\u0000${draft.endpoint}\u0000${draft.apiKeyEnvironmentVariable ?? ''}`;
-  $: if (connectionKey !== appliedConnectionKey) {
-    // The connection changed (a preset, another profile, or a direct edit): the fetched
-    // catalog no longer belongs to the draft, and any fetch still in flight is stale.
-    appliedConnectionKey = connectionKey;
-    connectionGeneration += 1;
-    fetchingModels = false;
-    catalog = [];
-    catalogId = '';
-    catalogLive = true;
-    catalogTried = false;
-    catalogPriceUnknown = false;
-  }
-
   function emptyDraft(): LlmProfileInput {
     return {
       name: '',
@@ -127,50 +100,6 @@
     draft = toInput(profile);
     error = null;
     flash = null;
-  }
-
-  function applyPreset(id: string): void {
-    const preset = presets.find((candidate) => candidate.id === id);
-    if (!preset) return;
-    draft.provider = preset.provider;
-    draft.endpoint = preset.endpoint;
-    draft.apiKeyEnvironmentVariable = preset.apiKeyEnvironmentVariable;
-  }
-
-  async function fetchModels(): Promise<void> {
-    if (fetchingModels) return;
-    fetchingModels = true;
-    const generation = connectionGeneration;
-    const key = connectionKey;
-    catalog = [];
-    catalogId = '';
-    catalogLive = true;
-    catalogTried = true;
-    catalogPriceUnknown = false;
-    try {
-      const data = await fetchLlmCatalog(draft.provider, draft.endpoint, draft.apiKeyEnvironmentVariable);
-      if (generation !== connectionGeneration || key !== connectionKey) return;
-      catalog = data.models;
-      catalogLive = data.live;
-    } catch {
-      if (generation !== connectionGeneration || key !== connectionKey) return;
-      catalogLive = false;
-    } finally {
-      if (generation === connectionGeneration) fetchingModels = false;
-    }
-  }
-
-  function applyCatalogModel(id: string): void {
-    const model = catalog.find((candidate) => candidate.id === id);
-    if (!model) return;
-    catalogId = id;
-    draft.model = model.id;
-    if (model.contextWindow !== null) draft.contextWindow = model.contextWindow;
-    if (model.maxOutputTokens !== null) draft.maxOutputTokens = model.maxOutputTokens;
-    if (model.inputPricePerMillion !== null) draft.inputPricePerMillion = model.inputPricePerMillion;
-    if (model.outputPricePerMillion !== null) draft.outputPricePerMillion = model.outputPricePerMillion;
-    if (model.cacheReadPricePerMillion !== null) draft.cacheReadPricePerMillion = model.cacheReadPricePerMillion;
-    catalogPriceUnknown = !model.priceKnown;
   }
 
   function startNew(): void {
@@ -310,91 +239,21 @@
         <label for="pf-name">Name</label>
         <input id="pf-name" bind:value={draft.name} placeholder="e.g. DeepSeek fast" required />
       </div>
-      <div class="field">
-        <label for="pf-preset">Provider preset</label>
-        <select id="pf-preset" bind:value={presetId} onchange={() => applyPreset(presetId)}>
-          <option value="" disabled>Pick a preset…</option>
-          {#each presets as preset (preset.id)}
-            <option value={preset.id}>{preset.label}</option>
-          {/each}
-        </select>
-        {#if presetError}<p class="hint" role="status">{presetError}</p>{/if}
-      </div>
-      <div class="field">
-        <label for="pf-provider">Provider</label>
-        <select id="pf-provider" bind:value={draft.provider}>
-          <option value="OPENAI_COMPATIBLE">OpenAI-compatible</option>
-          <option value="ANTHROPIC">Anthropic</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="pf-model">Model</label>
-        <div class="inline">
-          <input id="pf-model" bind:value={draft.model} placeholder="e.g. deepseek-chat" required />
-          <button type="button" onclick={fetchModels} disabled={fetchingModels}>
-            {fetchingModels ? 'Fetching…' : 'Fetch models'}
-          </button>
-        </div>
-        {#if catalog.length > 0}
-          <label for="pf-catalog">Model catalog</label>
-          <select id="pf-catalog" bind:value={catalogId} onchange={() => applyCatalogModel(catalogId)}>
-            <option value="" disabled>Choose a model…</option>
-            {#each catalog as model (model.id)}
-              <option value={model.id}>{model.id}</option>
-            {/each}
-          </select>
-        {/if}
-        {#if catalogTried && (catalog.length === 0 || !catalogLive)}
-          <p class="hint">Could not fetch models — enter one manually.</p>
-        {/if}
-        {#if catalogPriceUnknown}
-          <p class="hint">price unknown — enter manually</p>
-        {/if}
-      </div>
-      <div class="field">
-        <label for="pf-endpoint">Endpoint (base URL)</label>
-        <input
-          id="pf-endpoint"
-          bind:value={draft.endpoint}
-          placeholder="https://… (leave empty for Anthropic)"
-        />
-      </div>
-      <div class="field">
-        <label for="pf-key">API key environment variable</label>
-        <input
-          id="pf-key"
-          bind:value={draft.apiKeyEnvironmentVariable}
-          placeholder="e.g. OPENAI_API_KEY"
-        />
-        <p class="hint">Only the variable name is stored — never the key value.</p>
-        {#if !creating && selectedProfile !== null}
-          <p class="hint key-state">
-            {selectedProfile.keyAvailable
-              ? '✓ the key is present in the server environment'
-              : '⚠ the key is missing from the server environment'}
-          </p>
-        {/if}
-      </div>
-      <div class="field">
-        <label for="pf-context">Context window (tokens)</label>
-        <input id="pf-context" type="number" min="1" step="1" bind:value={draft.contextWindow} />
-      </div>
-      <div class="field">
-        <label for="pf-maxtokens">Max output tokens</label>
-        <input id="pf-maxtokens" type="number" min="1" step="1" bind:value={draft.maxOutputTokens} />
-      </div>
-      <div class="field">
-        <label for="pf-inprice">Input price (USD / 1M tokens)</label>
-        <input id="pf-inprice" type="number" min="0" step="0.0001" bind:value={draft.inputPricePerMillion} />
-      </div>
-      <div class="field">
-        <label for="pf-outprice">Output price (USD / 1M tokens)</label>
-        <input id="pf-outprice" type="number" min="0" step="0.0001" bind:value={draft.outputPricePerMillion} />
-      </div>
-      <div class="field">
-        <label for="pf-cacheprice">Cache-read price (USD / 1M tokens)</label>
-        <input id="pf-cacheprice" type="number" min="0" step="0.0001" bind:value={draft.cacheReadPricePerMillion} />
-      </div>
+      <ProviderModelFields
+        bind:draft
+        idPrefix="pf"
+        {presets}
+        {presetError}
+        showCachePrice
+        nativeRequired
+        modelPlaceholder="e.g. deepseek-chat"
+        keyPlaceholder="e.g. OPENAI_API_KEY"
+        keyState={!creating && selectedProfile !== null
+          ? (selectedProfile.keyAvailable
+            ? '✓ the key is present in the server environment'
+            : '⚠ the key is missing from the server environment')
+          : null}
+      />
       <div class="field check">
         <label><input type="checkbox" bind:checked={draft.enabled} /> Enabled</label>
       </div>
@@ -451,8 +310,6 @@
   .field.check { align-content: end; }
   .field.check label { display: flex; align-items: center; gap: 0.5rem; }
   .field.check input { accent-color: #c4a77d; }
-  .inline { display: flex; align-items: center; gap: 0.55rem; }
-  .inline button { white-space: nowrap; }
   label { color: #b8bcbb; font-size: 0.82rem; }
   select,
   input:not([type='checkbox']) {
@@ -469,7 +326,6 @@
     border-color: #515757;
   }
   .hint { margin: 0; color: #929997; font-size: 0.78rem; }
-  .key-state { color: #a9c7a6; }
   .actions { grid-column: 1 / -1; display: flex; gap: 0.55rem; margin-top: 0.2rem; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
   button.primary:hover:not(:disabled) { background: #d4ba94; }

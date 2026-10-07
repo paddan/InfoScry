@@ -9,6 +9,8 @@ const api = vi.hoisted(() => ({
   updateOcrProfile: vi.fn(),
   disableOcrProfile: vi.fn(),
   probeOcrProfile: vi.fn(),
+  listLlmPresets: vi.fn(),
+  fetchLlmCatalog: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -26,6 +28,8 @@ vi.mock('./api', () => ({
   updateOcrProfile: api.updateOcrProfile,
   disableOcrProfile: api.disableOcrProfile,
   probeOcrProfile: api.probeOcrProfile,
+  listLlmPresets: api.listLlmPresets,
+  fetchLlmCatalog: api.fetchLlmCatalog,
 }));
 
 async function apiError(code: string, message: string, status: number | null): Promise<Error> {
@@ -63,6 +67,7 @@ function profileItem(name: string): HTMLElement {
 describe('OCR profiles panel', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    api.listLlmPresets.mockResolvedValue([]);
   });
 
   afterEach(cleanup);
@@ -450,5 +455,93 @@ describe('OCR profiles panel', () => {
     await screen.findByRole('listitem', { name: 'Reader' });
 
     expect(onProfilesChanged).toHaveBeenLastCalledWith([expect.objectContaining({ id: 'p1' })]);
+  });
+
+  describe('provider presets and the image-capable model catalog', () => {
+    const PRESETS = [
+      { id: 'OPENAI', label: 'OpenAI', provider: 'OPENAI_COMPATIBLE', endpoint: 'https://api.openai.com/v1', apiKeyEnvironmentVariable: 'OPENAI_API_KEY' },
+      { id: 'ANTHROPIC', label: 'Anthropic', provider: 'ANTHROPIC', endpoint: 'https://api.anthropic.com', apiKeyEnvironmentVariable: 'ANTHROPIC_API_KEY' },
+    ];
+
+    function catalogModel(id: string, over: Record<string, unknown> = {}) {
+      return {
+        id,
+        contextWindow: null,
+        maxOutputTokens: null,
+        inputPricePerMillion: null,
+        outputPricePerMillion: null,
+        cacheReadPricePerMillion: null,
+        priceKnown: true,
+        imageInput: null,
+        ...over,
+      };
+    }
+
+    async function openNewForm() {
+      api.listOcrProfiles.mockResolvedValue([]);
+      api.listLlmPresets.mockResolvedValue(PRESETS);
+      render(OcrProfilesPanel);
+      await screen.findByText('No OCR profiles yet.');
+      await fireEvent.click(screen.getByRole('button', { name: 'New profile' }));
+    }
+
+    it('offers the same provider presets as the LLM profile form and applies one', async () => {
+      await openNewForm();
+
+      const options = Array.from((screen.getByLabelText('Provider preset') as HTMLSelectElement).options)
+        .map((option) => option.textContent);
+      expect(options).toEqual(expect.arrayContaining(['OpenAI', 'Anthropic']));
+
+      await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'ANTHROPIC' } });
+
+      expect((screen.getByLabelText('Provider') as HTMLSelectElement).value).toBe('ANTHROPIC');
+      expect((screen.getByLabelText('Endpoint (base URL)') as HTMLInputElement).value).toBe('https://api.anthropic.com');
+      expect((screen.getByLabelText('API key environment variable') as HTMLInputElement).value).toBe('ANTHROPIC_API_KEY');
+    });
+
+    it('asks the catalog for image-capable models only and leaves out a model stated to be text-only', async () => {
+      await openNewForm();
+      api.fetchLlmCatalog.mockResolvedValue({
+        live: true,
+        models: [
+          catalogModel('vision-model', { imageInput: true }),
+          catalogModel('text-model', { imageInput: false }),
+        ],
+      });
+
+      await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'OPENAI' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+      await screen.findByLabelText('Model catalog');
+
+      expect(api.fetchLlmCatalog).toHaveBeenCalledWith('OPENAI_COMPATIBLE', 'https://api.openai.com/v1', 'OPENAI_API_KEY', true);
+      expect(screen.getByRole('option', { name: 'vision-model' })).toBeDefined();
+      expect(screen.queryByRole('option', { name: /text-model/ })).toBeNull();
+    });
+
+    it('labels a model whose image support the catalog does not state instead of hiding or assuming it', async () => {
+      await openNewForm();
+      api.fetchLlmCatalog.mockResolvedValue({
+        live: true,
+        models: [catalogModel('vision-model', { imageInput: true }), catalogModel('mystery-model')],
+      });
+
+      await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'OPENAI' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+      await screen.findByLabelText('Model catalog');
+
+      expect(screen.getByRole('option', { name: 'mystery-model — image support unknown' })).toBeDefined();
+      expect(screen.getByRole('option', { name: 'vision-model' })).toBeDefined();
+
+      await fireEvent.change(screen.getByLabelText('Model catalog'), { target: { value: 'mystery-model' } });
+
+      expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('mystery-model');
+      expect(screen.getByText(/Image support unknown for this model/)).toBeDefined();
+    });
+
+    it('does not ask for a cache-read price, which an OCR profile has none of', async () => {
+      await openNewForm();
+
+      expect(screen.queryByLabelText('Cache-read price (USD / 1M tokens)')).toBeNull();
+    });
   });
 });

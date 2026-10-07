@@ -119,7 +119,16 @@ fun Routing.configureLlmCatalogRoutes(
                     raw.takeIf(String::isNotBlank)
                 }
                 // The response view is CatalogResponse: live metadata plus the always-usable fallback.
-                call.respondJson(HttpStatusCode.OK, catalog.fetch(provider, endpoint, apiKeyEnvironmentVariable))
+                val fetched = catalog.fetch(provider, endpoint, apiKeyEnvironmentVariable)
+                // `imageInput=true` serves a form that needs a model able to read an image: a model the
+                // catalog states is text-only is dropped, while one it does not state stays, marked unknown,
+                // because hiding it would be a guess and the image capability check is what settles it.
+                val models = if (parameters["imageInput"] == "true") {
+                    fetched.models.filter { it.imageInput != false }
+                } else {
+                    fetched.models
+                }
+                call.respondJson(HttpStatusCode.OK, fetched.copy(models = models))
             }
         }
     }

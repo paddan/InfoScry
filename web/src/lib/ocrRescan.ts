@@ -1,4 +1,4 @@
-import type { OcrEngine, OcrImportMode, OcrOperation, OcrOperationStage, OcrProfile } from './api';
+import type { OcrEngine, OcrImportMode, OcrLlmCandidate, OcrOperation, OcrOperationStage, OcrProfile } from './api';
 
 /** The words a reader sees for each engine; the value sent to the server stays the enum. */
 export const ENGINE_LABELS: Record<OcrEngine, string> = {
@@ -61,6 +61,27 @@ export function ocrProfileLabel(profile: OcrProfile): string {
     ? 'image check passed'
     : profile.imageCapabilityMeasured === false ? 'image check failed' : 'image check not run';
   return `${profile.name} (${where}, ${key}, ${image})`;
+}
+
+/**
+ * The name the server gives the OCR profile it copies an LLM profile into. It is how a stored selection that
+ * is such a copy is recognised as the LLM profile it came from, so it must match the server's suffix.
+ */
+export function llmCopyName(llmProfileName: string): string {
+  return `${llmProfileName} (from LLM profile)`;
+}
+
+/**
+ * One selectable LLM profile in a reader's words: where it sends pages, its key, and what the catalog states
+ * about image input. An unstated model is called unknown, never image capable.
+ */
+export function llmCandidateLabel(candidate: OcrLlmCandidate): string {
+  const where = candidate.scope === 'EXTERNAL' ? 'external' : 'local';
+  const key = candidate.apiKeyEnvironmentVariable === null
+    ? 'no key needed'
+    : candidate.keyAvailable ? 'key present' : 'key missing';
+  const image = candidate.imageInput === true ? 'image input listed' : 'image support unknown';
+  return `${candidate.name} (${where}, ${key}, ${image})`;
 }
 
 /** A dollar amount with enough digits that a small estimate is not rounded into zero. */
