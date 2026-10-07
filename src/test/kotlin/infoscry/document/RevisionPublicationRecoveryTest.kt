@@ -8,9 +8,11 @@ import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceLocation
 import infoscry.embedding.TestDocumentEmbedder
 import infoscry.jobs.seedCollectionWithId
+import infoscry.search.RevisionSnapshotUnavailableException
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
 import infoscry.storage.PageApproval
+import infoscry.storage.PublicationPhase
 import infoscry.storage.RevisionChunkDraft
 import infoscry.storage.RevisionPageDraft
 import infoscry.storage.RevisionState
@@ -22,6 +24,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -104,6 +107,168 @@ class RevisionPublicationRecoveryTest {
     @Test
     fun aKillAfterTheCleanupLeavesTheReplacedReadingGone() {
         assertRecoveryOf(PublicationStep.CLEANED, authorityMoved = true)
+    }
+
+    /**
+     * Ticket 02e, scenario 1: a deterministic counter hook fails the publication at AUTHORITATIVE and
+     * again at the *second* STAGED_COMMITTED — the roll-forward's own attempt to finish it.
+     *
+     * Unlike the kill tests above, nothing here stops a process: the failures are exceptions the service's
+     * own step hook raises, and the counter is what makes "the second staged commit" deterministic — the
+     * first belongs to the publication, the second to the completion that runs because its authority moved.
+     */
+    @Test
+    fun theCounterHookFailsTheAuthorityCommitAndTheRollForwardsStagedCommit() {
+        AppContext.open(dataDir).use { context ->
+            val observations = mutableListOf<PublicationStep>()
+            val hook = failingHook(observations)
+            val operation = runBlocking {
+                context.revisionPublication.publish(
+                    DocumentId(documentId),
+                    baselineRevisionId,
+                    replacementRevisionId,
+                ) { step -> hook(step) }
+            }
+
+            assertEquals(
+                mapOf(
+                    PublicationStep.INTENT_PERSISTED to 1,
+                    PublicationStep.ROWS_STAGED to 2,
+                    PublicationStep.STAGED_COMMITTED to 2,
+                    PublicationStep.AUTHORITATIVE to 1,
+                ),
+                observations.groupingBy { it }.eachCount(),
+                "the hook must fail exactly the authority commit and the roll-forward's own staged commit; " +
+                    "it observed $observations",
+            )
+            val intent = assertNotNull(context.revisions.intent(operation))
+            assertNotNull(intent.authoritativeAt, "the authority moved, so this is not reported as a failure")
+            assertEquals(
+                PublicationPhase.PREPARED,
+                intent.phase,
+                "neither the publication nor its roll-forward recorded completion",
+            )
+            assertEquals(
+                listOf(operation),
+                context.revisions.unfinishedIntents().map { it.id },
+                "the attempt stays unfinished for the recovery that has to finish it",
+            )
+        }
+    }
+
+    /**
+     * Ticket 02e, scenario 2: while recovery cannot switch, reads are refused explicitly rather than
+     * served the old index beside the new text.
+     *
+     * The authority commit has already moved the live text to the replacement in SQLite, and the index
+     * still holds the baseline's rows under a scope that hides the target — so any answer would be the
+     * mixture the deliverable forbids. The lease and every search must refuse instead.
+     */
+    @Test
+    fun whileRecoveryCannotSwitchSearchAndSourceReadsAreRefusedInsteadOfMixed() {
+        AppContext.open(dataDir).use { context ->
+            val document = DocumentId(documentId)
+            val operation = publishWithFailures(context)
+
+            assertFailsWith<RevisionSnapshotUnavailableException> {
+                context.revisionPublication.acquire()
+            }
+            assertFailsWith<RevisionSnapshotUnavailableException> {
+                searchTexts(context, "replacement")
+            }
+            assertFailsWith<RevisionSnapshotUnavailableException> {
+                searchTexts(context, "baseline")
+            }
+
+            // The refusal is not paranoia: the database already serves the replacement while the index
+            // still holds the baseline's rows, which is exactly the reading pair no source read may answer.
+            assertEquals(replacementRevisionId, context.revisions.activeRevisionId(document))
+            val unitId = assertNotNull(context.revisions.page(replacementRevisionId, 0)).unitId
+            assertEquals(
+                REPLACEMENT_TEXT,
+                assertNotNull(context.content.readUnit(unitId)).extractedText,
+                "the authority commit moved the live text; the source route must refuse this beside the old index",
+            )
+            assertTrue(
+                replacementRevisionId in context.revisionPublication.revisionScope().hiddenRevisionIds,
+                "the scope still hides the target, so an unsealed source read would pair it with the old index",
+            )
+            assertEquals(listOf(operation), context.revisions.unfinishedIntents().map { it.id })
+        }
+    }
+
+    /**
+     * Ticket 02e, scenario 3: a restart completes the authoritative publication before anyone is served,
+     * and reads resume coherently on the revision the database made authoritative.
+     */
+    @Test
+    fun restartingAfterBothInjectedFailuresCompletesThePublicationAndReadsResume() {
+        val observations = mutableListOf<PublicationStep>()
+        val hook = failingHook(observations)
+        val operation = AppContext.open(dataDir).use { context ->
+            runBlocking {
+                context.revisionPublication.publish(
+                    DocumentId(documentId),
+                    baselineRevisionId,
+                    replacementRevisionId,
+                ) { step -> hook(step) }
+            }
+        }
+        assertEquals(2, observations.count { it == PublicationStep.STAGED_COMMITTED }, observations.toString())
+
+        AppContext.open(dataDir).use { context ->
+            assertEquals(
+                listOf(operation),
+                context.publicationRecovery.completed,
+                "the restart finishes the authoritative publication before the archive is served",
+            )
+            assertTrue(context.revisions.unfinishedIntents().isEmpty(), "nothing stays unfinished after the restart")
+            val intent = assertNotNull(context.revisions.intent(operation))
+            assertEquals(PublicationPhase.PUBLISHED, intent.phase)
+            assertNotNull(intent.cleanedAt, "recovery owes the replaced reading's rows removal too")
+
+            val document = DocumentId(documentId)
+            assertEquals(replacementRevisionId, context.revisions.activeRevisionId(document))
+            context.revisionPublication.acquire().close()
+            assertEquals(listOf(REPLACEMENT_TEXT), searchTexts(context, "replacement"))
+            assertEquals(emptyList(), searchTexts(context, "baseline"))
+
+            // Search and source say the same thing again, and the reading the replacement made superseded
+            // is still readable under its own revision — that is what a saved excerpt opens against.
+            val unitId = assertNotNull(context.revisions.page(replacementRevisionId, 0)).unitId
+            assertEquals(REPLACEMENT_TEXT, assertNotNull(context.content.readUnit(unitId)).extractedText)
+            assertEquals(
+                BASELINE_TEXT,
+                assertNotNull(context.revisions.pageForUnit(baselineRevisionId, unitId)).extractedText,
+            )
+        }
+    }
+
+    /**
+     * The ticket's deterministic counter hook: fails [PublicationStep.AUTHORITATIVE] on its first
+     * observation and [PublicationStep.STAGED_COMMITTED] on its second — the roll-forward's own commit.
+     */
+    private fun failingHook(observations: MutableList<PublicationStep>): (PublicationStep) -> Unit = { step ->
+        observations += step
+        val count = observations.count { it == step }
+        if (step == PublicationStep.AUTHORITATIVE && count == 1) {
+            throw IllegalStateException("injected failure at the authority commit")
+        }
+        if (step == PublicationStep.STAGED_COMMITTED && count == 2) {
+            throw IllegalStateException("injected failure at the roll-forward's staged commit")
+        }
+    }
+
+    /** Runs the publication that fails at the authority commit and again at the roll-forward's commit. */
+    private fun publishWithFailures(context: AppContext): String {
+        val hook = failingHook(mutableListOf())
+        return runBlocking {
+            context.revisionPublication.publish(
+                DocumentId(documentId),
+                baselineRevisionId,
+                replacementRevisionId,
+            ) { step -> hook(step) }
+        }
     }
 
     /**

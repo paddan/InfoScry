@@ -43,7 +43,7 @@ Use one leaf ticket as the implementation/review unit. Umbrellas 02b, 08, 09, 10
 | [03b — Provenance persistence](03b-image-provenance.md) | 03 | Implemented |
 | [02c — Saved Ask excerpt fallback](02c-ask-evidence-viewer.md) | 02 | Implemented |
 | [02d — Investigate evidence survives replacement](02d-investigate-evidence-provenance.md) | 02, 02c | Not started |
-| [02e — Publication seal failure and recovery](02e-publication-seal-acceptance.md) | 02 | Not started |
+| [02e — Publication seal failure and recovery](02e-publication-seal-acceptance.md) | 02 | Implemented |
 | [03c — Retained image references remain usable](03c-image-artifact-lifetime.md) | 03b | Implemented |
 | [07c — Resume the same staged import candidate](07c-durable-import-candidates.md) | 07b implementation | Implemented |
 | [07d — Retry uses admitted OCR and review authority](07d-retry-ocr-execution.md) | 07c | Implemented |
@@ -721,3 +721,104 @@ link still points at the managed original in the fallback view and 404s if the d
 pre-existing, advisory-only, untouched files; `svelte-check` itself is clean. No browser acceptance
 (10a) and no real OCR/CoreML/external-provider gate applies to this frontend-only slice and none is
 claimed. Nothing was committed or staged.
+
+## Ticket 02e verification record
+
+The seal now covers the whole read boundary this ticket names, proven by a deterministic in-process
+injection at both handoffs instead of the child-JVM kills the pre-existing recovery tests use. No
+migration (SchemaMigrator SUPPORTED_VERSION stays 027), no DTO, counter or user-facing copy change, and
+the `publish(..., observe: (PublicationStep) -> Unit)` seam is unchanged: the ticket's "deterministic
+counter hook" is that callback counted per step — the first `STAGED_COMMITTED` belongs to the
+publication, the second to the inline roll-forward that runs only because the authority already moved.
+The production diff is two files: `RevisionSnapshotGate.requireUnsealed()` raises the same
+`RevisionSnapshotUnavailableException` `acquire()` raises, for reads that do not take a lease, and
+`SourceRoutes`' live-read path calls it, which maps through the existing `ApplicationCall.handle` clause
+to the existing 503 `REVISION_SNAPSHOT_UNAVAILABLE`. A source read that names a revision is unchanged:
+its text is that revision's immutable text, which the spec lets finish against its own revision.
+
+Red first, 2026-10-07 — the ticket's exact focused command with only the new tests in place, against
+compiling code and the unmodified production path
+(`export JAVA_HOME="$(asdf where java)" && ./gradlew test --tests
+'infoscry.document.RevisionPublicationRecoveryTest' --tests 'infoscry.server.SearchRoutesTest'`
+= BUILD FAILED in 1m 21s; 35 tests completed, 1 failed):
+
+- `while a publication cannot switch, search and the live source refuse instead of mixing readings`
+  (SearchRoutesTest.kt:249): `{"id":"…","documentId":"…","ordinal":0,…,"text":"the replacement
+  wording",…} ==> expected: <503 Service Unavailable> but was: <200 OK>` — with the publication failed
+  at AUTHORITATIVE and again at the roll-forward's STAGED_COMMITTED, the live source route answered
+  from SQLite the text the authority commit had already moved while search refused, which is exactly
+  the "old index with new text" pairing the deliverable forbids.
+- Green in that same red run, recorded as regression pins per the 03c/07e precedent for guards that
+  already held: RevisionPublicationRecoveryTest's three additions (10/10) and SearchRoutesTest's other
+  24 tests — the seal on the search side and the roll-forward's refusal to report failure both exist
+  from ticket 02; the source half was the gap.
+- Baseline before any edit, same command: BUILD SUCCESSFUL (Recovery 7, SearchRoutes 24, 0 failures).
+
+Green gates, 2026-10-07:
+
+- Focused (the ticket's exact command), re-run on the final tree after every edit:
+  `export JAVA_HOME="$(asdf where java)" && ./gradlew test --tests
+  'infoscry.document.RevisionPublicationRecoveryTest' --tests 'infoscry.server.SearchRoutesTest'`
+  = BUILD SUCCESSFUL in 1m 22s; RevisionPublicationRecoveryTest 10, SearchRoutesTest 25 —
+  35 tests, 0 failures, 0 skipped.
+- Accumulated: `export JAVA_HOME="$(asdf where java)" && timeout 3000 ./gradlew check`
+  = BUILD FAILED in 17m 22s; backend 107 suites / 1413 tests / 2 failures / 0 errors / 0 skipped,
+  frontend `vitest --run` 10 files / 219 tests passed and the static build wrote its site. The only
+  two failures are **pre-existing baseline failures outside this slice**, both in `SchemaMigratorTest`
+  and both asserting ticket 02d's migration 028:
+  `migration 028 preserves conversations and evidence and collection deletion still cascades`
+  (`migration 028 must have been applied ==> expected: <28> but was: <27>`) and
+  `the evidence ledger gains a revision column while its stored excerpts survive byte for byte`
+  (`… expected: <[…, revision_id]> but was: <[…]>`).
+- Attribution, proven rather than asserted: baseline commit `8dc876d` itself contains those ticket-02d
+  tests (`git show HEAD:src/test/kotlin/infoscry/storage/SchemaMigratorTest.kt` names "Scenario 4 of
+  ticket 02d" and "migration 028 must have been applied") while the same commit has no `028_*.sql`
+  migration and `SchemaMigrator.SUPPORTED_VERSION = 27`; neither the test nor the migrator is touched
+  by this slice (`git status` shows both unmodified). Reproduced on the pristine baseline: with every
+  change of this slice stashed (`git stash push -m 02e-wip`), `./gradlew test --tests
+  'infoscry.storage.SchemaMigratorTest'` = BUILD FAILED, 16 tests / the same 2 failures with identical
+  messages (result XML written 08:41), then the stash was popped and the tree diff is byte-identical
+  to before (7 files, 327 insertions, 8 deletions). Per the stop rule the full gate was not retried:
+  the only failures are out of slice — 02d's migration lands in the main checkout — and an unchanged
+  re-run would fail identically. Everything else in that accumulated run was green, including both
+  02e suites (Recovery 10, SearchRoutes 25) and the frontend.
+- `git diff --check` clean.
+
+Coverage against the acceptance scenarios:
+
+- **Scenario 1** — `theCounterHookFailsTheAuthorityCommitAndTheRollForwardsStagedCommit`: one publish
+  through the counter hook observes exactly INTENT_PERSISTED ×1, ROWS_STAGED ×2, STAGED_COMMITTED ×2,
+  AUTHORITATIVE ×1, and the attempt comes back as a success carrying its operation id, with a PREPARED
+  intent whose `authoritative_at` is durable and which `unfinishedIntents()` still lists — a failure
+  after the authority commit is never reported as a failure.
+- **Scenario 2** — service side, `whileRecoveryCannotSwitchSearchAndSourceReadsAreRefusedInsteadOfMixed`:
+  the lease and both searches throw `RevisionSnapshotUnavailableException` while the database already
+  serves the replacement and the scope still hides the target (asserted), i.e. the mixture exists and
+  is refused rather than served. Wire side, the SearchRoutesTest test: search and the live source both
+  answer 503 `REVISION_SNAPSHOT_UNAVAILABLE`, the live response carries no replacement text, and the
+  source read that names the base revision still answers 200 with the superseded text.
+- **Scenario 3** — restart, `restartingAfterBothInjectedFailuresCompletesThePublicationAndReadsResume`:
+  reopening the data directory reports `publicationRecovery.completed == [operation]`, leaves nothing
+  unfinished, marks the intent PUBLISHED with its cleanup, and reads resume coherently on the
+  authoritative revision (search serves only the replacement, the live unit says the same thing, the
+  baseline stays readable at its own revision). In-process completion, the SearchRoutesTest half:
+  `recoverUnfinished()` completes the same operation and both routes serve the replacement, with the
+  replaced reading's search hits gone.
+
+Infrastructure incidents, separate from behavioral evidence: the child worker session was killed by the
+workflow's 30-minute timeout while the accumulated check was running; the check's client stdout died
+with it, but the daemon completed that build at 08:35 and its results were recovered from the
+test-result XMLs and the daemon log (both quoted above), and the run is counted as the one accumulated
+gate. No compile-daemon OOM, no `gradle.properties` or dependency change, no `./gradlew --stop` or
+daemon kill was needed, and no test failure recorded here was an infrastructure failure — the two
+backend failures are behavioral and pre-date this slice.
+
+Residuals: the seal is archive-wide and blunt while it is raised — every search and every live source
+read refuses, including for documents unrelated to the failing publication — matching the search-side
+behavior ticket 02 established and cleared by the next startup's recovery; Ask/Investigate live-unit
+readers are not sealed here (revision-pinned citations are coherent by construction, and Investigate's
+live-unit dependence is ticket 02d's slice); the baseline `SchemaMigratorTest` red blocks a green
+accumulated gate on this branch until 02d's migration 028 lands, which is recorded above rather than
+hidden; no user-facing copy changed (the 503 body is the pre-existing message), so no user
+documentation needed updating. No browser acceptance (10a) and no real OCR/CoreML/external-provider
+gate applies to this backend slice and none is claimed.

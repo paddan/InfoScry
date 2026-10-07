@@ -1,6 +1,6 @@
 # 02e: Publication seal failure and recovery
 
-**Status:** Not started — planned on 2026-10-02; unchecked criteria are requirements, not evidence.
+**Status:** Implemented 2026-10-07; acceptance evidence is recorded in [STATUS.md](STATUS.md). Unchecked criteria would be requirements, not evidence.
 **Blocked by:** 02. Dependency IDs resolve in [STATUS.md](STATUS.md).
 **Spec:** [Selectable OCR and rescanning](../../specs/2026-09-30-ocr-rescanning.md).
 **Shared contracts:** [CONTRACTS.md](CONTRACTS.md).
@@ -21,23 +21,28 @@ Consume existing contracts and DTOs first. This slice owns the behavior describe
 
 ## Observable acceptance scenarios
 
-- [ ] Inject failure at AUTHORITATIVE and again at the second STAGED_COMMITTED using a deterministic counter hook.
-- [ ] Read while recovery cannot switch: search/source refusal is explicit rather than old index with new text.
-- [ ] Restart or complete recovery, then prove reads resume coherently on the authoritative revision.
+- [x] Inject failure at AUTHORITATIVE and again at the second STAGED_COMMITTED using a deterministic counter hook.
+- [x] Read while recovery cannot switch: search/source refusal is explicit rather than old index with new text.
+- [x] Restart or complete recovery, then prove reads resume coherently on the authoritative revision.
 
 ## Execution and verification
 
-- [ ] Read this ticket, its dependencies, the spec and actual callers; record existing behavior and the bounded intended change.
-- [ ] Add the smallest regression/acceptance test for the first scenario, run it and record the expected behavioral failure. Repeat for independent failure modes; do not mistake infrastructure failure for red evidence.
-- [ ] Implement only this slice and run its focused suite:
+- [x] Read this ticket, its dependencies, the spec and actual callers; record existing behavior and the bounded intended change.
+- [x] Add the smallest regression/acceptance test for the first scenario, run it and record the expected behavioral failure. Repeat for independent failure modes; do not mistake infrastructure failure for red evidence.
+- [x] Implement only this slice and run its focused suite:
 
 ```sh
 export JAVA_HOME="$(asdf where java)"
 ./gradlew test --tests 'infoscry.document.RevisionPublicationRecoveryTest' --tests 'infoscry.server.SearchRoutesTest'
 ```
 
-- [ ] Run the applicable accumulated gate in CONTRACTS.md; each code slice still requires `./gradlew check`. UI slices require frontend tests, check and build; runtime gates remain separately labelled.
-- [ ] Review the final diff and caller contracts, run `git diff --check`, update the evidence row in STATUS.md and applicable user documentation. Commit/push only under separate Git authorization.
+- [x] Run the applicable accumulated gate in CONTRACTS.md; each code slice still requires `./gradlew check`. UI slices require frontend tests, check and build; runtime gates remain separately labelled.
+- [x] Review the final diff and caller contracts, run `git diff --check`, update the evidence row in STATUS.md and applicable user documentation. Commit/push only under separate Git authorization.
+
+> Verification note (2026-10-07): the accumulated `./gradlew check` was run and its only two failures
+> are pre-existing baseline failures of ticket 02d's migration-028 tests, proven on the pristine
+> baseline; see the exact commands, counts and attribution in the
+> [02e verification record](STATUS.md#ticket-02e-verification-record).
 
 ## Stop conditions and handoff
 
