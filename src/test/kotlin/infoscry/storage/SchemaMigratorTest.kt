@@ -73,8 +73,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(24, database.userVersion())
-            assertEquals(24, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(25, database.userVersion())
+            assertEquals(25, SchemaMigrator.SUPPORTED_VERSION)
         }
     }
 
@@ -120,7 +120,7 @@ class SchemaMigratorTest {
                 "missing tables, found $tables",
             )
 
-            assertEquals(24, count(database, "schema_version"))
+            assertEquals(25, count(database, "schema_version"))
             assertEquals(0, count(database, "collections"), "a new archive must expose no collection")
         }
     }

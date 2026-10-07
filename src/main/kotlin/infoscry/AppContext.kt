@@ -12,11 +12,14 @@ import infoscry.document.RetryPrerequisites
 import infoscry.document.RetryService
 import infoscry.document.PublicationRecoveryReport
 import infoscry.document.RescanService
+import infoscry.document.RevisionHistoryService
+import infoscry.document.RevisionRestoreService
 import infoscry.document.RevisionPublicationService
 import infoscry.jobs.rescanEngineFactory
 import infoscry.domain.Collection
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.E5Embedder
 import infoscry.embedding.ModelManager
 import infoscry.embedding.ModelManifest
@@ -122,6 +125,15 @@ class AppContext private constructor(
      * than depend on what happens to be installed where the suite runs. Nothing in production passes it.
      */
     private val injectedRescanEmbedder: (() -> Boolean)? = null,
+    /**
+     * The embedder a restore re-embeds a historical reading's passages with, or null for the process's own.
+     *
+     * The same kind of seam as [injectedQueryEmbedder]: a test that has no GPU and no pinned model has to be
+     * able to say what the embedder is — or that there is none. Nothing in production passes it; production
+     * uses the embedder the job worker was attached with ([attachDocumentEmbedder]) and otherwise the pinned
+     * model's own, so a restore and an import never hold two accelerator sessions.
+     */
+    private val injectedRestoreEmbedder: (() -> DocumentEmbedder?)? = null,
 ) : AutoCloseable {
 
     /**
@@ -215,6 +227,56 @@ class AppContext private constructor(
         // be published, not whether the accelerator is reachable this second.
         embedderAvailable = injectedRescanEmbedder
             ?: { ModelManager.production().isInstalled(paths.modelsDir) },
+    )
+
+    /**
+     * The document embedder this process's job worker was attached with, so a restore re-embeds with the same
+     * session an import does. Null until a composition root attaches one.
+     */
+    @Volatile
+    private var attachedDocumentEmbedder: (() -> DocumentEmbedder?)? = null
+
+    /** The pinned model's embedder, built on first use and only when nothing else was injected or attached. */
+    private val productionDocumentEmbedder: () -> DocumentEmbedder? by lazy {
+        E5Embedder.productionDocumentEmbedder(paths.modelsDir, paths.embeddingProfileDir)
+    }
+
+    /**
+     * Records the embedder this process's worker embeds with, so [revisionRestore] shares it.
+     *
+     * An embedder a test injected at [open] keeps winning: the seam exists to say what the answer is.
+     */
+    fun attachDocumentEmbedder(embedder: () -> DocumentEmbedder?) {
+        attachedDocumentEmbedder = embedder
+    }
+
+    /**
+     * Explicit restoration of a historical revision as a new publication.
+     *
+     * It shares the mutation gate, the deletion blockers, the operation store and the publication service with
+     * every other writer: a restore is refused while a rescan owns the document or a deletion targets it, and
+     * it becomes the document's text only through the same recoverable protocol a rescan publishes through.
+     */
+    val revisionRestore: RevisionRestoreService = RevisionRestoreService(
+        revisions = revisions,
+        documents = documents,
+        collections = collections,
+        mutations = mutations,
+        blockers = blockers,
+        operations = ocrOperations,
+        publication = revisionPublication,
+        embedder = {
+            (injectedRestoreEmbedder ?: attachedDocumentEmbedder ?: productionDocumentEmbedder).invoke()
+        },
+    )
+
+    /** The published text history of a document, as the history view and its restore action read it. */
+    val revisionHistory: RevisionHistoryService = RevisionHistoryService(
+        revisions = revisions,
+        documents = documents,
+        operations = ocrOperations,
+        reviews = ocrReviews,
+        profileRevisionOf = { revisionId -> ocrProfiles.findRevision(revisionId) },
     )
 
     val collectionService: CollectionService = CollectionService(
@@ -401,6 +463,7 @@ class AppContext private constructor(
             documentIndex: DocumentIndexRemover = DocumentIndexRemover.NONE,
             retryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
             rescanEmbedder: (() -> Boolean)? = null,
+            restoreEmbedder: (() -> DocumentEmbedder?)? = null,
         ): AppContext = open(
             AppPaths.from(dataDir),
             index,
@@ -408,6 +471,7 @@ class AppContext private constructor(
             documentIndex,
             retryPrerequisites,
             rescanEmbedder,
+            restoreEmbedder,
         )
 
         fun open(
@@ -417,6 +481,7 @@ class AppContext private constructor(
             documentIndex: DocumentIndexRemover = DocumentIndexRemover.NONE,
             retryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
             rescanEmbedder: (() -> Boolean)? = null,
+            restoreEmbedder: (() -> DocumentEmbedder?)? = null,
         ): AppContext {
             // The whole layout first, before anything can write into it. Opening a data directory creates its
             // database, so this is not a read-only operation and must not pretend to be one: the import path
@@ -470,6 +535,7 @@ class AppContext private constructor(
                             injectedQueryEmbedder = queryEmbedder,
                             injectedRetryPrerequisites = retryPrerequisites,
                             injectedRescanEmbedder = rescanEmbedder,
+                            injectedRestoreEmbedder = restoreEmbedder,
                         )
                         // A publication that a previous process did not finish is resolved before the
                         // marker is resolved and before anything may read: an intent that moved authority
@@ -478,6 +544,9 @@ class AppContext private constructor(
                         context.publicationRecovery = runBlocking {
                             context.revisionPublication.recoverUnfinished()
                         }
+                        // A restore request a previous process left in flight is resolved from what that
+                        // recovery just decided about its publication, still before anything may read.
+                        runBlocking { context.revisionRestore.recoverInterrupted() }
                         context.deletionRecovery = runBlocking {
                             // Both kinds are finished before the marker is resolved and before any job is
                             // admitted, so no worker can see a document whose rows are half removed.

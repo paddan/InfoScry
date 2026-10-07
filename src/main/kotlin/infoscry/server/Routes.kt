@@ -15,6 +15,8 @@ import infoscry.jobs.ImportJobPayload
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
 import infoscry.document.RescanRefusalException
+import infoscry.document.RestoreRefusalException
+import infoscry.document.RestoreRequestConflictException
 import infoscry.document.StaleActiveRevisionException
 import infoscry.document.StaleCandidateDecisionException
 import infoscry.jobs.DocumentIngest
@@ -817,6 +819,19 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = refused.code, message = refused.message.orEmpty())),
         )
+    } catch (refused: RestoreRefusalException) {
+        // A restore that cannot be done as asked. 409 says the request was understood and the archive's state
+        // says no; 503 says this machine cannot embed right now and the request is worth repeating later. The
+        // current revision is still the document's text in both cases, and the words are curated.
+        respondJson(
+            if (refused.unavailable) HttpStatusCode.ServiceUnavailable else HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = refused.code, message = refused.message.orEmpty())),
+        )
+    } catch (conflict: RestoreRequestConflictException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "RESTORE_REQUEST_CONFLICT", message = conflict.message.orEmpty())),
+        )
     } catch (stale: StaleRescanPreviewException) {
         respondJson(
             HttpStatusCode.Conflict,
@@ -859,7 +874,7 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             ApiErrorResponse(
                 ApiError(
                     code = "DOCUMENT_BEING_DELETED",
-                    message = "this document is being deleted, so no rescan may be admitted for it",
+                    message = "this document is being deleted, so no rescan, review decision or restore may be admitted for it",
                 ),
             ),
         )

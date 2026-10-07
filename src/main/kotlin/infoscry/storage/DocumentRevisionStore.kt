@@ -41,6 +41,42 @@ enum class PageApproval { APPROVED, PENDING, REJECTED }
 /** Where one publication attempt got to. */
 enum class PublicationPhase { PREPARED, PUBLISHED, ABANDONED, REFUSED }
 
+/** Where one restore request got to. */
+enum class RestorePhase { STAGED, PUBLISHED, FAILED }
+
+/**
+ * One request to restore a historical revision, exactly as it is persisted.
+ *
+ * [newRevisionId] is the revision the restore created: a candidate while the request is [RestorePhase.STAGED],
+ * the document's published text once it is [RestorePhase.PUBLISHED], and a withdrawn one when it
+ * [RestorePhase.FAILED]. [restoredFromRevisionId] is the historical revision whose page texts it copied.
+ */
+data class RevisionRestoreRecord(
+    val restoreId: String,
+    val collectionId: CollectionId,
+    val documentId: DocumentId,
+    val requestId: String,
+    val requestHash: String,
+    val expectedRevisionId: String,
+    val restoredFromRevisionId: String,
+    val newRevisionId: String,
+    val phase: RestorePhase,
+    val errorCode: String?,
+    val errorMessage: String?,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+/** What a page's text is, without the text: enough to say whether two readings of it differ. */
+data class PageDigest(
+    val ordinal: Int,
+    val unitId: ContentUnitId,
+    /** The hash of the page's extracted text, computed when the revision predates recorded hashes. */
+    val textSha256: String,
+    val extractionMethod: ExtractionMethod?,
+    val approval: PageApproval,
+)
+
 /** One immutable reading of a document's text. */
 data class DocumentRevision(
     val id: String,
@@ -204,7 +240,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
     /** One document's revisions, oldest first, so a reader can walk the history of its text. */
     fun revisions(documentId: DocumentId): List<DocumentRevision> = database.read { connection ->
-        connection.prepareStatement("$SELECT_REVISIONS WHERE document_id = ? ORDER BY created_at, id").use { statement ->
+        connection.prepareStatement("$SELECT_REVISIONS WHERE document_id = ? ORDER BY created_at, rowid").use { statement ->
             statement.setString(1, documentId.value)
             statement.executeQuery().use { rows ->
                 buildList { while (rows.next()) add(rows.toRevision()) }
@@ -476,6 +512,183 @@ class DocumentRevisionStore(private val database: Database, private val content:
         }
     }
 
+    // ---- Restoring a historical revision ----
+
+    /**
+     * Stages a restore of [sourceRevisionId] as a new candidate revision, in one transaction.
+     *
+     * The candidate is a *copy of the historical revision's immutable page texts*: the same stable unit ids,
+     * locators, texts, extraction provenance, artifact references and source-image references, so no page is
+     * read again and no page image is copied — the new revision names the images the old one named. Only the
+     * pages that revision published (its approved ones) are copied, because those are the reading that was
+     * ever searchable; a page nobody approved was never part of it. The passages are copied without vectors:
+     * a restore embeds with the embedder the process has now rather than trusting a vector some earlier model
+     * produced, and the publication refuses a passage that has none.
+     *
+     * Nothing published changes. The candidate descends from [expectedRevisionId], the reading it will
+     * replace, and the request record is written in the same transaction, so a crash leaves either nothing or
+     * a candidate that a record accounts for.
+     */
+    fun stageRestore(
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        requestId: String,
+        requestHash: String,
+        expectedRevisionId: String,
+        sourceRevisionId: String,
+    ): RevisionRestoreRecord {
+        val restoreId = "restore-" + UUID.randomUUID()
+        val newRevisionId = "revision-" + UUID.randomUUID()
+        database.transaction { connection ->
+            val now = Instants.now()
+            connection.insertRevision(
+                newRevisionId, documentId, expectedRevisionId, RevisionState.CANDIDATE, PROVENANCE_RESTORE, now,
+            )
+            val copied = connection.copyApprovedPages(newRevisionId, sourceRevisionId, now)
+            check(copied > 0) { "revision $sourceRevisionId published no page, so there is nothing to restore" }
+            connection.copyApprovedChunks(newRevisionId, sourceRevisionId, now)
+            connection.prepareStatement(
+                "INSERT INTO revision_restores (restore_id, collection_id, document_id, request_id, request_hash, " +
+                    "expected_revision_id, restored_from_revision_id, new_revision_id, phase, created_at, " +
+                    "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ).use { statement ->
+                statement.setString(1, restoreId)
+                statement.setString(2, collectionId.value)
+                statement.setString(3, documentId.value)
+                statement.setString(4, requestId)
+                statement.setString(5, requestHash)
+                statement.setString(6, expectedRevisionId)
+                statement.setString(7, sourceRevisionId)
+                statement.setString(8, newRevisionId)
+                statement.setString(9, RestorePhase.STAGED.name)
+                statement.setString(10, now)
+                statement.setString(11, now)
+                statement.executeUpdate()
+            }
+        }
+        return checkNotNull(restore(restoreId))
+    }
+
+    /**
+     * Ends a restore request that is still in flight, as published or failed.
+     *
+     * Only a STAGED request can be finished, and only once: the first outcome recorded is the outcome, so a
+     * recovery that races a late completion cannot turn a published restore back into a failed one.
+     *
+     * @return whether this call recorded the outcome.
+     */
+    fun finishRestore(restoreId: String, phase: RestorePhase, errorCode: String? = null, errorMessage: String? = null): Boolean {
+        require(phase != RestorePhase.STAGED) { "a restore is finished as published or failed, not $phase" }
+        return database.transaction { connection ->
+            connection.prepareStatement(
+                "UPDATE revision_restores SET phase = ?, error_code = ?, error_message = ?, updated_at = ? " +
+                    "WHERE restore_id = ? AND phase = ?",
+            ).use { statement ->
+                statement.setString(1, phase.name)
+                statement.setString(2, errorCode)
+                statement.setString(3, errorMessage)
+                statement.setString(4, Instants.now())
+                statement.setString(5, restoreId)
+                statement.setString(6, RestorePhase.STAGED.name)
+                statement.executeUpdate() > 0
+            }
+        }
+    }
+
+    /** One restore request, or `null` when no request has that identifier. */
+    fun restore(restoreId: String): RevisionRestoreRecord? = database.read { connection ->
+        connection.selectRestore("$SELECT_RESTORES WHERE restore_id = ?", restoreId)
+    }
+
+    /** The restore request a caller's own request id names for one document, or `null`. */
+    fun restoreForRequest(collectionId: CollectionId, documentId: DocumentId, requestId: String): RevisionRestoreRecord? =
+        database.read { connection ->
+            connection.prepareStatement(
+                "$SELECT_RESTORES WHERE collection_id = ? AND document_id = ? AND request_id = ?",
+            ).use { statement ->
+                statement.setString(1, collectionId.value)
+                statement.setString(2, documentId.value)
+                statement.setString(3, requestId)
+                statement.executeQuery().use { rows -> if (rows.next()) rows.toRestore() else null }
+            }
+        }
+
+    /** The restore that created [newRevisionId], or `null` when that revision is not a restore. */
+    fun restoreCreating(newRevisionId: String): RevisionRestoreRecord? = database.read { connection ->
+        connection.selectRestore("$SELECT_RESTORES WHERE new_revision_id = ?", newRevisionId)
+    }
+
+    /** Every restore request of one document, oldest first. */
+    fun restores(documentId: DocumentId): List<RevisionRestoreRecord> = database.read { connection ->
+        connection.prepareStatement("$SELECT_RESTORES WHERE document_id = ? ORDER BY created_at, rowid").use { statement ->
+            statement.setString(1, documentId.value)
+            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRestore()) } }
+        }
+    }
+
+    /** The restore of [documentId] that has not finished, or `null`. */
+    fun inFlightRestore(documentId: DocumentId): RevisionRestoreRecord? = database.read { connection ->
+        connection.prepareStatement("$SELECT_RESTORES WHERE document_id = ? AND phase = ?").use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setString(2, RestorePhase.STAGED.name)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.toRestore() else null }
+        }
+    }
+
+    /** Every restore request that has not finished, oldest first: what a startup has to resolve. */
+    fun unfinishedRestores(): List<RevisionRestoreRecord> = database.read { connection ->
+        connection.prepareStatement("$SELECT_RESTORES WHERE phase = ? ORDER BY created_at, rowid").use { statement ->
+            statement.setString(1, RestorePhase.STAGED.name)
+            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRestore()) } }
+        }
+    }
+
+    // ---- Reading history ----
+
+    /**
+     * When each revision of [documentId] became its published text, by revision id.
+     *
+     * The instant is the one the SQLite authority moved, which is the only moment a revision *became* the
+     * document's text. A revision that never went through a publication — an import's, or the backfill's —
+     * has no entry, and is not given one.
+     */
+    fun publishedAt(documentId: DocumentId): Map<String, String> = database.read { connection ->
+        connection.prepareStatement(
+            "SELECT target_revision_id, authoritative_at FROM revision_publications " +
+                "WHERE document_id = ? AND authoritative_at IS NOT NULL ORDER BY authoritative_at",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.executeQuery().use { rows ->
+                buildMap { while (rows.next()) put(rows.getString(1), rows.getString(2)) }
+            }
+        }
+    }
+
+    /** One revision's pages without their text, so a history can compare readings without loading them. */
+    fun pageDigests(revisionId: String): List<PageDigest> = database.read { connection ->
+        connection.prepareStatement(
+            "SELECT ordinal, unit_id, text_sha256, CASE WHEN text_sha256 IS NULL THEN extracted_text END AS text, " +
+                "extraction_method, approval FROM page_text_revisions WHERE revision_id = ? ORDER BY ordinal",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        add(
+                            PageDigest(
+                                ordinal = rows.getInt("ordinal"),
+                                unitId = ContentUnitId(rows.getString("unit_id")),
+                                textSha256 = rows.getString("text_sha256") ?: sha256Of(rows.getString("text")),
+                                extractionMethod = rows.getString("extraction_method")?.let(ExtractionMethod::valueOf),
+                                approval = PageApproval.valueOf(rows.getString("approval")),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     // ---- Publication intents ----
 
     /**
@@ -732,6 +945,73 @@ class DocumentRevisionStore(private val database: Database, private val content:
         }
     }
 
+    /**
+     * Copies the approved pages of one revision into another, keeping every recorded fact about them.
+     *
+     * The source-image columns are copied too: a restored page names the image its text was read from, and
+     * that image is the same immutable artifact, not a second copy of it.
+     */
+    private fun Connection.copyApprovedPages(revisionId: String, sourceRevisionId: String, now: String): Int =
+        prepareStatement(
+            "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, extracted_text, " +
+                "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
+                "artifact_sha256, source_image_root, source_image_relative_path, source_image_sha256, " +
+                "source_image_width, source_image_height, source_image_render_version, approval, created_at) " +
+                "SELECT ?, ordinal, unit_id, locator, extracted_text, search_text, text_sha256, " +
+                "extraction_method, mean_confidence, artifact_relative_path, artifact_sha256, " +
+                "source_image_root, source_image_relative_path, source_image_sha256, source_image_width, " +
+                "source_image_height, source_image_render_version, ?, ? FROM page_text_revisions " +
+                "WHERE revision_id = ? AND approval = ?",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            statement.setString(2, PageApproval.APPROVED.name)
+            statement.setString(3, now)
+            statement.setString(4, sourceRevisionId)
+            statement.setString(5, PageApproval.APPROVED.name)
+            statement.executeUpdate()
+        }
+
+    /** Copies the passages of the approved pages of one revision, without their vectors. */
+    private fun Connection.copyApprovedChunks(revisionId: String, sourceRevisionId: String, now: String) {
+        prepareStatement(
+            "INSERT INTO revision_chunks (revision_id, unit_ordinal, ordinal, text, start_offset, end_offset, " +
+                "token_count, token_start, token_end, embedding, embedding_dimension, created_at) " +
+                "SELECT ?, c.unit_ordinal, c.ordinal, c.text, c.start_offset, c.end_offset, c.token_count, " +
+                "c.token_start, c.token_end, NULL, NULL, ? FROM revision_chunks c WHERE c.revision_id = ? " +
+                "AND c.unit_ordinal IN (SELECT ordinal FROM page_text_revisions WHERE revision_id = ? " +
+                "AND approval = ?)",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            statement.setString(2, now)
+            statement.setString(3, sourceRevisionId)
+            statement.setString(4, sourceRevisionId)
+            statement.setString(5, PageApproval.APPROVED.name)
+            statement.executeUpdate()
+        }
+    }
+
+    private fun Connection.selectRestore(sql: String, key: String): RevisionRestoreRecord? =
+        prepareStatement(sql).use { statement ->
+            statement.setString(1, key)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.toRestore() else null }
+        }
+
+    private fun ResultSet.toRestore(): RevisionRestoreRecord = RevisionRestoreRecord(
+        restoreId = getString("restore_id"),
+        collectionId = CollectionId(getString("collection_id")),
+        documentId = DocumentId(getString("document_id")),
+        requestId = getString("request_id"),
+        requestHash = getString("request_hash"),
+        expectedRevisionId = getString("expected_revision_id"),
+        restoredFromRevisionId = getString("restored_from_revision_id"),
+        newRevisionId = getString("new_revision_id"),
+        phase = RestorePhase.valueOf(getString("phase")),
+        errorCode = getString("error_code"),
+        errorMessage = getString("error_message"),
+        createdAt = getString("created_at"),
+        updatedAt = getString("updated_at"),
+    )
+
     private fun Connection.selectPageText(revisionId: String, ordinal: Int): RevisionPageText? =
         prepareStatement("$SELECT_PAGE_TEXTS WHERE revision_id = ? AND ordinal = ?").use { statement ->
             statement.setString(1, revisionId)
@@ -943,6 +1223,14 @@ class DocumentRevisionStore(private val database: Database, private val content:
         const val SELECT_CHUNKS =
             "SELECT unit_ordinal, ordinal, text, start_offset, end_offset, token_count, token_start, " +
                 "token_end, embedding FROM revision_chunks"
+
+        const val SELECT_RESTORES =
+            "SELECT restore_id, collection_id, document_id, request_id, request_hash, expected_revision_id, " +
+                "restored_from_revision_id, new_revision_id, phase, error_code, error_message, created_at, " +
+                "updated_at FROM revision_restores"
+
+        /** What a revision that is a restore of an earlier one records as its provenance. */
+        const val PROVENANCE_RESTORE = "RESTORE"
 
         const val SELECT_INTENTS =
             "SELECT id, document_id, collection_id, base_revision_id, target_revision_id, phase, " +

@@ -66,10 +66,19 @@ internal class ApiTestServer(
     retryPrerequisites: (suspend (Collection) -> RetryPrerequisites)? = null,
     /** Whether a rescan could embed here, for the tests that drive rescan admission without the pinned model. */
     rescanEmbedder: (() -> Boolean)? = null,
+    /** The embedder a restore re-embeds with, for the tests that restore a revision without the pinned model. */
+    restoreEmbedder: (() -> infoscry.embedding.DocumentEmbedder?)? = null,
 ) : AutoCloseable {
 
-    val context: AppContext =
-        AppContext.open(dataDir, index, queryEmbedder, documentIndex, retryPrerequisites, rescanEmbedder)
+    val context: AppContext = AppContext.open(
+        dataDir,
+        index,
+        queryEmbedder,
+        documentIndex,
+        retryPrerequisites,
+        rescanEmbedder,
+        restoreEmbedder,
+    )
 
     // Port 0 lets the operating system choose, so a test never collides with another server — including
     // a second server started inside the same test to observe how maintenance excludes it.
