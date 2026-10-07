@@ -491,7 +491,7 @@ class LlmStore(private val database: Database) {
         // A row written before the endpoint rules existed can still carry a credential in its URL, and the
         // profile type refuses such a value. Reading it through anyway would fail the whole listing — and any
         // screen or CLI command that lists profiles — while the credential stayed in the file, so the value
-        // is read back the way migration 020 leaves one: credential removed, profile disabled until a person
+        // is read back with the credential removed, and the profile disabled until a person
         // reviews the address. No endpoint is ever returned with its userinfo component still on it.
         val credentialRemoved = endpointCarriesUserInfo(storedEndpoint)
         val enabled = results.getInt("enabled") != 0 && !credentialRemoved
@@ -633,7 +633,7 @@ class LlmStore(private val database: Database) {
         excerpt: String,
         /** The seq of the assistant tool-call exchange that introduced this evidence; null for legacy rows. */
         messageSeq: Int? = null,
-        /** The revision the excerpt was read from; null when nobody recorded one. */
+        /** The revision the excerpt was read from; null when that cannot be proven ("revision unknown"). */
         revisionId: String? = null,
     ) {
         database.transaction { connection ->
@@ -642,7 +642,8 @@ class LlmStore(private val database: Database) {
             ).use { s ->
                 s.setString(1, conversationId); s.setString(2, evidenceId)
                 s.setString(3, sourceUnitId); s.setString(4, locatorJson)
-                s.setString(5, excerpt); setIntOrNull(s, 6, messageSeq); s.setString(7, revisionId); s.executeUpdate()
+                s.setString(5, excerpt); setIntOrNull(s, 6, messageSeq)
+                s.setString(7, revisionId); s.executeUpdate()
             }
         }
     }
@@ -714,11 +715,8 @@ class LlmStore(private val database: Database) {
      * switched-off profile, because the address this conversation locked is not one anything may
      * dispatch to until somebody reviews it — whoever fixed the profile row in the meantime.
      *
-     * "Had to be repaired" is read from two places, because the repair removes the first one's
-     * evidence: `profile_endpoint_repaired`, the marker migration 020 sets on every row whose
-     * credential it stripped, and the stored address itself, for a row that still carries `userinfo`
-     * — a hand edit, or a row the migration never saw. A snapshot the migration cleaned holds no
-     * credential any more, so without the marker it would look untouched and could dispatch again.
+     * "Had to be repaired" means the stored address carries `userinfo`, which no write path stores, so it
+     * is a row that something wrote around the application.
      */
     fun loadInvestigateHistory(conversationId: String): InvestigateHistory? = database.read { connection ->
         data class ConversationRow(
@@ -726,7 +724,6 @@ class LlmStore(private val database: Database) {
             val mode: String,
             val profileProvider: String,
             val profileEndpoint: String?,
-            val profileEndpointRepaired: Boolean,
             val profileModel: String,
             val profileName: String,
             val promptVersion: Int,
@@ -734,7 +731,7 @@ class LlmStore(private val database: Database) {
         )
 
         val conversation = connection.prepareStatement(
-            "SELECT collection_id, mode, profile_provider, profile_endpoint, profile_endpoint_repaired, profile_model, profile_name, prompt_version, retrieval_snapshot FROM conversations WHERE id = ?",
+            "SELECT collection_id, mode, profile_provider, profile_endpoint, profile_model, profile_name, prompt_version, retrieval_snapshot FROM conversations WHERE id = ?",
         ).use { statement ->
             statement.setString(1, conversationId)
             statement.executeQuery().use { results ->
@@ -744,7 +741,6 @@ class LlmStore(private val database: Database) {
                     mode = results.getString("mode"),
                     profileProvider = results.getString("profile_provider"),
                     profileEndpoint = results.getString("profile_endpoint"),
-                    profileEndpointRepaired = results.getInt("profile_endpoint_repaired") != 0,
                     profileModel = results.getString("profile_model"),
                     profileName = results.getString("profile_name"),
                     promptVersion = results.getInt("prompt_version"),
@@ -806,9 +802,9 @@ class LlmStore(private val database: Database) {
         }
         val messages = visibleMessages.map { it.message }
         val messageSeqs = visibleMessages.map { it.seq }
-        // Legacy rows written before migration 009 carry no introducing seq. Recover it from the
-        // visible tool result that names the evidence id, so a reopened pre-migration conversation
-        // keeps the same citation eligibility as one created after the migration. An entry whose
+        // Rows written without an introducing seq (`message_seq` NULL) carry none. Recover it from the
+        // visible tool result that names the evidence id, so a reopened conversation without it
+        // keeps the same citation eligibility as one that recorded it. An entry whose
         // tool exchange was dropped from provider history stays unassociated and ineligible.
         val legacyEvidenceSeqs = visibleMessages
             .filter { it.message.role == "tool" && it.message.toolCallId != null }
@@ -855,12 +851,8 @@ class LlmStore(private val database: Database) {
         // case that matters: a person may have fixed the profile after the conversation was created, which
         // leaves the row clean and enabled while the address this conversation locked is still the repaired
         // one. Nothing dispatches to a repaired address until somebody reviews it, so the gate has to see this
-        // whatever the current row says. Both the migration's marker and a stored address that still carries
-        // `userinfo` count, because the repair itself strips the credential the second test looks for: without
-        // the marker a row migration 020 cleaned reads as untouched, and without the address test a hand-edited
-        // row the migration never reached would.
-        val repairedSnapshot = conversation.profileEndpointRepaired ||
-            endpointCarriesUserInfo(conversation.profileEndpoint ?: "")
+        // whatever the current row says.
+        val repairedSnapshot = endpointCarriesUserInfo(conversation.profileEndpoint ?: "")
 
         InvestigateHistory(
             collectionId = CollectionId(conversation.collectionId),

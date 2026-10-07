@@ -216,6 +216,8 @@ internal class DocumentIngest(
             boundary = StageBoundary(stage),
             originalFilename = document.originalFilename,
             dispatch = dispatch,
+            // A candidate's pages name the images they were read from, so those renders outlive the attempt.
+            retainsPageImages = sink.stagesForReview,
         )
 
         var finished = false

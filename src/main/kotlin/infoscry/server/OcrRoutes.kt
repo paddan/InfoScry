@@ -1,6 +1,7 @@
 package infoscry.server
 
 import infoscry.AppContext
+import infoscry.document.PendingReview
 import infoscry.document.ReviewChoice
 import infoscry.document.ReviewDecision
 import infoscry.domain.DocumentId
@@ -11,13 +12,16 @@ import infoscry.ocr.OcrOperation
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PageReview
 import infoscry.ocr.ReviewReason
-import infoscry.storage.DocumentRevisionStore
+import infoscry.document.RevisionHistoryEntry
+import infoscry.storage.RevisionRestoreRecord
 import infoscry.storage.StaleRescanPreviewException
-import infoscry.storage.RevisionState
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
 import io.ktor.server.request.receiveText
+import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -96,6 +100,28 @@ data class PendingReviewView(
     val reviewPromptVersion: Int,
     val policyVersion: Int,
     val searchable: Boolean,
+    /**
+     * Whether `GET .../reviews/{unitId}/image` can be asked for this page. It is a listing-time answer from the
+     * page's record (the image exists inside its document and is the one the review was made against); the
+     * route verifies the bytes and is the authority, so a client still handles a refusal.
+     */
+    val imageAvailable: Boolean = false,
+)
+
+/** One pending page's candidate text, bounded, as the review surface shows it next to the page image. */
+@Serializable
+data class PendingCandidateResponse(
+    val operationId: String,
+    val unitId: String,
+    val ordinal: Int,
+    /** The hash of the whole candidate text, which a decision on this page must quote. */
+    val candidateHash: String,
+    /** The revision a decision's `expectedRevisionId` names while this proposal is pending. */
+    val baselineRevisionId: String? = null,
+    val text: String,
+    /** The candidate's full length in characters; larger than `text` when [truncated]. */
+    val totalChars: Int,
+    val truncated: Boolean,
 )
 
 /** One bounded reason behind a review, as the comparison recorded it. */
@@ -117,6 +143,8 @@ data class ReviewsResponse(
     val total: Int,
     val pendingPages: Int,
     val pendingReviewCount: Int,
+    /** Pages already decided whose decisions are not published yet; Publish is offered while this is above zero. */
+    val decidedUnpublishedCount: Int = 0,
     /** How the two external counters differ, in the words the UI shows beside them. */
     val externalAccounting: String,
 )
@@ -141,7 +169,42 @@ data class PublicationDecisionResponse(
     val errorCode: String? = null,
 )
 
-/** One published revision of a document, with the provenance of how it came to be. */
+/** What the rescan that produced a revision was configured with, when an operation recorded it. */
+@Serializable
+data class RevisionReadingView(
+    val engine: String,
+    val mode: String,
+    val language: String,
+    val toolVersion: String? = null,
+    val modelVersion: String? = null,
+    val transcriptionModel: String? = null,
+    val reviewModel: String? = null,
+)
+
+/**
+ * How the pages of one revision differ from its parent's, each page counted once.
+ *
+ * `automatic` and `manual` are decisions the archive recorded (a reviewer policy approval and a person's
+ * approval or edit); `unknown` is a change with no recorded decision; `restored` pages differ because the
+ * revision is an explicit restore; `notPublished` pages never became text.
+ */
+@Serializable
+data class PageChangesView(
+    val unchanged: Int,
+    val added: Int,
+    val automatic: Int,
+    val manual: Int,
+    val unknown: Int,
+    val restored: Int,
+    val notPublished: Int,
+)
+
+/**
+ * One published revision of a document, with the provenance of how it came to be.
+ *
+ * Only what the archive recorded: a field that was not recorded is absent rather than guessed, and nothing
+ * here names a file, an artifact or an endpoint.
+ */
 @Serializable
 data class RevisionView(
     val revisionId: String,
@@ -151,6 +214,14 @@ data class RevisionView(
     val createdAt: String,
     val active: Boolean,
     val pageCount: Int,
+    /** When the revision became the document's text; absent for a reading that never went through a publication. */
+    val publishedAt: String? = null,
+    /** The historical revision this one is an explicit restore of. */
+    val restoredFromRevisionId: String? = null,
+    /** The engine and settings of the rescan that produced it; absent for an import or a restore. */
+    val reading: RevisionReadingView? = null,
+    val extractionMethods: List<String> = emptyList(),
+    val pageChanges: PageChangesView,
 )
 
 /** A page of a document's published history, with the revision that is active now. */
@@ -159,6 +230,33 @@ data class RevisionsResponse(
     val revisions: List<RevisionView>,
     val total: Int,
     val activeRevisionId: String? = null,
+)
+
+/** Restoring a historical revision. The request id is what makes a repeated POST one operation. */
+@Serializable
+data class RestoreRevisionRequest(
+    val requestId: String,
+    /** The revision the caller was looking at; a document that publishes another one refuses the restore. */
+    val expectedRevisionId: String,
+    /** The historical revision whose page texts are to become the document's text again. */
+    val restoreRevisionId: String,
+)
+
+/** One restore request, as it stands. */
+@Serializable
+data class RestoreOperationView(
+    val restoreId: String,
+    val documentId: String,
+    val requestId: String,
+    val expectedRevisionId: String,
+    val restoredFromRevisionId: String,
+    /** The revision the restore created: the document's text once the restore is `PUBLISHED`. */
+    val newRevisionId: String,
+    val phase: String,
+    val errorCode: String? = null,
+    val errorMessage: String? = null,
+    val createdAt: String,
+    val updatedAt: String,
 )
 
 /**
@@ -284,13 +382,59 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                 call.respondJson(
                     HttpStatusCode.OK,
                     ReviewsResponse(
-                        reviews = pending.drop(offset).take(limit).map(PageReview::toApiView),
+                        reviews = pending.drop(offset).take(limit).map(PendingReview::toApiView),
                         total = pending.size,
                         pendingPages = operation.pendingReviewCount,
                         pendingReviewCount = operation.pendingReviewCount,
+                        decidedUnpublishedCount = operation.decidedUnpublishedCount,
                         externalAccounting = externalAccountingOf(operation),
                     ),
                 )
+            }
+        }
+
+        // The text a person is deciding about. JSON only, bounded, and only for a page that is still pending.
+        get("/reviews/{unitId}/candidate") {
+            call.handle {
+                val operationId = call.reviewOperationId()
+                val reading = context.rescanService.pendingCandidate(
+                    collectionId = call.collectionId(),
+                    documentId = call.documentId(),
+                    operationId = operationId,
+                    unitId = call.reviewUnitId(),
+                )
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.response.headers.append("X-Content-Type-Options", "nosniff")
+                call.respondJson(
+                    HttpStatusCode.OK,
+                    PendingCandidateResponse(
+                        operationId = operationId,
+                        unitId = reading.unitId,
+                        ordinal = reading.ordinal,
+                        candidateHash = reading.candidateHash,
+                        baselineRevisionId = reading.baselineRevisionId,
+                        text = reading.text,
+                        totalChars = reading.totalChars,
+                        truncated = reading.truncated,
+                    ),
+                )
+            }
+        }
+
+        // The image that reading was made from: the managed artifact, resolved server-side from the page's own
+        // record. The type is one of a fixed list, never a stored value, and nothing here names a file.
+        get("/reviews/{unitId}/image") {
+            call.handle {
+                val image = context.rescanService.pendingImage(
+                    collectionId = call.collectionId(),
+                    documentId = call.documentId(),
+                    operationId = call.reviewOperationId(),
+                    unitId = call.reviewUnitId(),
+                )
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.response.headers.append("X-Content-Type-Options", "nosniff")
+                call.response.headers.append("Content-Security-Policy", "default-src 'none'; sandbox")
+                call.respondBytes(image.bytes, ContentType.parse(image.mediaType), HttpStatusCode.OK)
             }
         }
 
@@ -368,31 +512,50 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
 
         get("/revisions") {
             call.handle {
-                val collectionId = call.collectionId()
-                val documentId = call.documentId()
                 val limit = call.boundedLimit(DEFAULT_REVISIONS)
                 val offset = call.boundedOffset()
-                val active = context.revisions.activeRevisionId(documentId)
-                val all = context.revisions.revisions(documentId)
-                    .filter { revision -> revision.state != RevisionState.CANDIDATE }
+                // Scoped like every other id in this tree: a document of another collection is answered exactly
+                // like one that does not exist, so the history confirms nothing the caller did not scope.
+                val history = context.revisionHistory.history(call.collectionId(), call.documentId())
                 call.respondJson(
                     HttpStatusCode.OK,
                     RevisionsResponse(
-                        revisions = all.drop(offset).take(limit).map { revision ->
-                            RevisionView(
-                                revisionId = revision.id,
-                                parentRevisionId = revision.parentRevisionId,
-                                state = revision.state.name,
-                                provenance = revision.provenance,
-                                createdAt = revision.createdAt,
-                                active = revision.id == active,
-                                pageCount = context.revisions.pages(revision.id).size,
-                            )
-                        },
-                        total = all.size,
-                        activeRevisionId = active,
+                        revisions = history.drop(offset).take(limit).map(RevisionHistoryEntry::toApiView),
+                        total = history.size,
+                        activeRevisionId = history.firstOrNull { it.active }?.revision?.id,
                     ),
                 )
+            }
+        }
+
+        // Explicit restoration: a NEW revision that copies a historical one's page texts and publishes through
+        // the same recoverable protocol as a rescan. It never reads a page again. The restore is durable before
+        // this answers and idempotent under its request id, like a rescan admission.
+        post("/restore") {
+            call.handle {
+                val request = call.receiveJson<RestoreRevisionRequest>()
+                if (request.requestId.isBlank() || request.expectedRevisionId.isBlank() || request.restoreRevisionId.isBlank()) {
+                    throw BadRequestException(
+                        "a restore needs a request id, the revision it was taken against and the revision to restore",
+                    )
+                }
+                val restore = context.revisionRestore.restore(
+                    collectionId = call.collectionId(),
+                    documentId = call.documentId(),
+                    requestId = request.requestId,
+                    expectedRevisionId = request.expectedRevisionId,
+                    restoreRevisionId = request.restoreRevisionId,
+                )
+                call.respondJson(HttpStatusCode.Accepted, restore.toApiView())
+            }
+        }
+
+        get("/restores/{restoreId}") {
+            call.handle {
+                val restoreId = call.parameters["restoreId"]?.takeIf { it.isNotBlank() }
+                    ?: throw BadRequestException("a restore id is required in the path")
+                val restore = context.revisionRestore.restoreOf(call.collectionId(), call.documentId(), restoreId)
+                call.respondJson(HttpStatusCode.OK, restore.toApiView())
             }
         }
     }
@@ -482,7 +645,56 @@ internal fun externalAccountingOf(operation: OcrOperation): String {
         "and then reviewed is one page and two calls"
 }
 
-private fun PageReview.toApiView(): PendingReviewView = PendingReviewView(
+private fun RevisionHistoryEntry.toApiView(): RevisionView = RevisionView(
+    revisionId = revision.id,
+    parentRevisionId = revision.parentRevisionId,
+    state = revision.state.name,
+    provenance = revision.provenance,
+    createdAt = revision.createdAt,
+    active = active,
+    pageCount = pageCount,
+    publishedAt = publishedAt,
+    restoredFromRevisionId = restoredFromRevisionId,
+    reading = reading?.let { reading ->
+        RevisionReadingView(
+            engine = reading.engine,
+            mode = reading.mode,
+            language = reading.language,
+            toolVersion = reading.toolVersion,
+            modelVersion = reading.modelVersion,
+            transcriptionModel = reading.transcriptionModel,
+            reviewModel = reading.reviewModel,
+        )
+    },
+    extractionMethods = extractionMethods,
+    pageChanges = PageChangesView(
+        unchanged = pageChanges.unchanged,
+        added = pageChanges.added,
+        automatic = pageChanges.automatic,
+        manual = pageChanges.manual,
+        unknown = pageChanges.unknown,
+        restored = pageChanges.restored,
+        notPublished = pageChanges.notPublished,
+    ),
+)
+
+private fun RevisionRestoreRecord.toApiView(): RestoreOperationView = RestoreOperationView(
+    restoreId = restoreId,
+    documentId = documentId.value,
+    requestId = requestId,
+    expectedRevisionId = expectedRevisionId,
+    restoredFromRevisionId = restoredFromRevisionId,
+    newRevisionId = newRevisionId,
+    phase = phase.name,
+    errorCode = errorCode,
+    errorMessage = errorMessage,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+)
+
+private fun PendingReview.toApiView(): PendingReviewView = review.toApiView(imageAvailable)
+
+private fun PageReview.toApiView(imageAvailable: Boolean): PendingReviewView = PendingReviewView(
     unitId = unitId,
     ordinal = ordinal,
     recommendation = recommendation.name,
@@ -497,6 +709,7 @@ private fun PageReview.toApiView(): PendingReviewView = PendingReviewView(
     reviewPromptVersion = reviewPromptVersion,
     policyVersion = policyVersion,
     searchable = searchable,
+    imageAvailable = imageAvailable,
 )
 
 private fun ReviewReason.toApiView(): ReviewReasonView = ReviewReasonView(
@@ -515,6 +728,14 @@ private fun ApplicationCall.documentId(): DocumentId {
         ?: throw BadRequestException("a document id is required in the path")
     return DocumentId(raw)
 }
+
+private fun ApplicationCall.reviewOperationId(): String =
+    request.queryParameters["operationId"]?.takeIf { it.isNotBlank() }
+        ?: throw BadRequestException("the review routes need the operation they are about")
+
+private fun ApplicationCall.reviewUnitId(): String =
+    parameters["unitId"]?.takeIf { it.isNotBlank() }
+        ?: throw BadRequestException("a page id is required in the path")
 
 private fun ApplicationCall.operationId(): String =
     parameters["operationId"]?.takeIf { it.isNotBlank() }

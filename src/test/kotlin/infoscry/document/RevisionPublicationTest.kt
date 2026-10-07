@@ -7,7 +7,6 @@ import infoscry.domain.ChunkId
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
-import infoscry.domain.DocumentStatus
 import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceImageRoot
@@ -21,20 +20,12 @@ import infoscry.search.DocumentRow
 import infoscry.search.RevisionSnapshotUnavailableException
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
-import infoscry.storage.ContentStore
-import infoscry.storage.Database
 import infoscry.storage.DocumentRevisionStore
-import infoscry.storage.DocumentStore
-import infoscry.storage.Instants
 import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.PageApproval
 import infoscry.storage.PublicationPhase
 import infoscry.storage.RevisionChunkDraft
 import infoscry.storage.RevisionState
-import infoscry.storage.SchemaMigrator
-import infoscry.storage.CollectionStore
-import infoscry.domain.Collection
-import infoscry.domain.Document
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
@@ -66,90 +57,19 @@ import kotlinx.coroutines.runBlocking
 class RevisionPublicationTest {
 
     private lateinit var dataDir: Path
-    private lateinit var legacyDir: Path
 
     @BeforeTest
     fun createTemporaryDataDirectory() {
         dataDir = Files.createTempDirectory("infoscry-revision-publication")
         AppContext.open(dataDir).use { context -> context.seedCollectionWithId("default", "Default") }
-        // A second directory that is never opened as an archive until a version-17 schema has been built
-        // in it: the backfill can only be observed from an archive the new migration has not touched yet.
-        legacyDir = Files.createTempDirectory("infoscry-revision-backfill")
     }
 
     @AfterTest
     fun removeTemporaryDataDirectory() {
         dataDir.toFile().deleteRecursively()
-        legacyDir.toFile().deleteRecursively()
     }
 
-    // ---- M1: the backfill and the isolated candidate sink ----
-
-    @Test
-    fun existingPublishedContentBecomesAnInitialPublishedRevision() {
-        // An archive as version 17 left it: text and chunks committed, and no revision anywhere.
-        val database = Database(legacyDir.resolve("infoscry.db"))
-        SchemaMigrator(database).migrate(upToVersion = 17)
-        val collections = CollectionStore(database)
-        val documents = DocumentStore(database)
-        val content = ContentStore(database)
-        val collection = collections.create("Legacy")
-        val document = documents.insert(
-            Document(
-                id = DocumentId("legacy-document"),
-                collectionId = collection.id,
-                sha256 = "b".repeat(64),
-                mediaType = "text/plain",
-                originalFilename = "legacy.txt",
-                sourcePath = "/tmp/legacy.txt",
-                sizeBytes = 12,
-                status = DocumentStatus.COMPLETE,
-                createdAt = Instants.now(),
-                updatedAt = Instants.now(),
-            ),
-        )
-        val unit = content.commitExtractedUnit(
-            documentId = document.id,
-            fingerprint = ExtractionFingerprint.of(document.sha256, ExtractionSettings(ocrLanguages = "eng")),
-            key = "page-1",
-            ordinal = 0,
-            draft = ContentUnitDraft(
-                locator = SourceLocation.TextLines(1, 1),
-                extractedText = "the legacy reading",
-                searchText = "the legacy reading",
-                method = ExtractionMethod.DIRECT_TEXT,
-            ),
-            artifactRoot = legacyDir.resolve("artifacts"),
-        ).unit
-        content.replaceUnitChunks(
-            unitId = unit.id,
-            drafts = listOf(chunkDraft(0, "the legacy reading")),
-            chunkerVersion = "test",
-            tokenizerId = "test",
-            maxSequenceTokens = 512,
-            overlapTokens = 0,
-        )
-        database.close()
-
-        AppContext.open(legacyDir).use { context ->
-            val active = assertNotNull(context.revisions.activeRevisionId(document.id))
-            assertEquals("revision-backfill-${document.id.value}", active)
-            val revision = assertNotNull(context.revisions.revision(active))
-            assertEquals(RevisionState.PUBLISHED, revision.state)
-            assertEquals("MIGRATION_BACKFILL", revision.provenance)
-
-            val page = assertNotNull(context.revisions.page(active, 0))
-            assertEquals(unit.id, page.unitId, "a backfilled page keeps the published unit identity")
-            assertEquals("the legacy reading", page.extractedText)
-            assertEquals(PageApproval.APPROVED, page.approval)
-            assertNull(page.textSha256, "a legacy page has no hash, which is not the same as a zero hash")
-            assertNull(
-                page.sourceImage,
-                "a page backfilled from a version 17 archive was given a source image it was never read from",
-            )
-            assertEquals(1, context.revisions.chunkCount(active))
-        }
-    }
+    // ---- M1: the isolated candidate sink ----
 
     @Test
     fun stagingACandidateCannotTouchPublishedContent() {
@@ -457,8 +377,11 @@ class RevisionPublicationTest {
             val fixture = published(context, BASELINE_TEXT)
             val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
 
-            // The deletion runs on its own thread and the publication waits for it at the instant its rows
-            // are staged and its authority has not moved — the exact interleaving the boundary exists for.
+            // The deletion runs on its own thread, but it is only started from the INTENT_PERSISTED hook, so
+            // it cannot land before the publication has passed every earlier check: the order is fixed by
+            // the hook rather than by thread scheduling. The hook runs before the boundary takes its
+            // mutation permit, so the exclusive deletion can complete there, and the publication waits for
+            // it — its authority has not moved, which is the exact interleaving the boundary exists for.
             val staged = java.util.concurrent.CountDownLatch(1)
             val deleted = java.util.concurrent.CountDownLatch(1)
             val deleter = Thread {
@@ -466,7 +389,7 @@ class RevisionPublicationTest {
                     context.documentService.deleteConfirmed(fixture.collectionId, listOf(fixture.documentId))
                 }
                 deleted.countDown()
-            }.apply { isDaemon = true; start() }
+            }.apply { isDaemon = true }
 
             val failure = assertFailsWith<Throwable> {
                 runBlocking {
@@ -479,6 +402,7 @@ class RevisionPublicationTest {
                         // — which is exactly the ordering the recheck exists to catch.
                         if (step == PublicationStep.INTENT_PERSISTED) {
                             staged.countDown()
+                            deleter.start()
                             assertTrue(deleted.await(20, java.util.concurrent.TimeUnit.SECONDS), "the deletion finished")
                         }
                     }
@@ -992,6 +916,57 @@ class RevisionPublicationTest {
             context.revisionPublication.acquire().close()
             assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context))
             assertEquals(emptyList(), searchFor(context, "baseline").map { it.text })
+        }
+    }
+
+    /**
+     * T9: a completion failure whose switch never happened seals reads end to end, and recovery unseals.
+     *
+     * The hook is counter-based rather than tied to a timing: it fails the first AUTHORITATIVE observation
+     * (the authority is durable, the snapshot switch has not run) and then the *second* STAGED_COMMITTED
+     * observation, which is the roll-forward's own staged commit, so the publication cannot be finished in
+     * this process either. The scope still hides the target revision, so the archive's two readings
+     * disagree and every read must refuse rather than mix them. Recovery, with no hook, finishes the
+     * publication and lets readers in on the reading the database publishes.
+     */
+    @Test
+    fun aCompletionFailureWhoseSwitchNeverHappenedRefusesReadsUntilRecoveryUnseals() {
+        AppContext.open(dataDir).use { context ->
+            val fixture = published(context, BASELINE_TEXT)
+            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
+
+            var authoritative = 0
+            var stagedCommitted = 0
+            val operation = runBlocking {
+                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
+                    when (step) {
+                        PublicationStep.AUTHORITATIVE ->
+                            if (++authoritative == 1) throw IllegalStateException("died after the authority moved, before the switch")
+                        PublicationStep.STAGED_COMMITTED ->
+                            if (++stagedCommitted == 2) throw IllegalStateException("the roll-forward could not commit its staged rows")
+                        else -> Unit
+                    }
+                }
+            }
+
+            assertEquals(1, authoritative, "the failure hit the live publication's authority step once")
+            assertEquals(2, stagedCommitted, "the roll-forward reached its own staged commit, where it failed")
+            val intent = assertNotNull(context.revisions.intent(operation))
+            assertNotNull(intent.authoritativeAt, "the database already publishes the candidate")
+            assertEquals(PublicationPhase.PREPARED, intent.phase, "the publication was never finished")
+            assertEquals(candidate, context.revisions.activeRevisionId(fixture.documentId))
+
+            // The archive's two readings disagree, so a read refuses instead of serving either alone or both.
+            assertFailsWith<RevisionSnapshotUnavailableException> { context.revisionPublication.acquire() }
+            assertFailsWith<RevisionSnapshotUnavailableException> { searchTexts(context) }
+
+            val recovery = runBlocking { context.revisionPublication.recoverUnfinished() }
+            assertEquals(listOf(operation), recovery.completed)
+            assertEquals(PublicationPhase.PUBLISHED, assertNotNull(context.revisions.intent(operation)).phase)
+            context.revisionPublication.acquire().close()
+            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context), "recovery unseals onto the reading the database publishes")
+            assertEquals(emptyList(), searchFor(context, "baseline").map { it.text })
+            assertEquals(1, context.index().rowCount(fixture.documentId))
         }
     }
 

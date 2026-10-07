@@ -140,10 +140,18 @@ class JobRunnerTest {
     fun `a cancelled attempt stops at its next stage and keeps what it committed`() = runBlocking {
         val firstStageCommitted = CompletableDeferred<JobId>()
         val observedCancellation = AtomicReference<Throwable?>()
+        // Completed by the test once cancel has returned. The handler waits for it before its next stage, so
+        // the cancellation is requested strictly before that stage rather than racing the test thread.
+        val cancelRequested = CompletableDeferred<Unit>()
         runner(
             testHandler { job, stage ->
                 stage.reportProgress(1, 3)
                 firstStageCommitted.complete(job.id)
+                // The cancel interrupts this coroutine as well, so the wait is not itself cancellable: what is
+                // under test is the next stage noticing the cancellation, not this wait being interrupted.
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    withTimeout(TIMEOUT_MILLIS) { cancelRequested.await() }
+                }
                 try {
                     // The next stage is where the cancellation has to be observed: the runner cancels the
                     // attempt, and the durable flag is what the stage checks before doing more work.
@@ -160,6 +168,7 @@ class JobRunnerTest {
             firstStageCommitted.await()
 
             val requested = runner.cancel(job.id)
+            cancelRequested.complete(Unit)
             assertEquals(JobState.RUNNING, requested.state)
             assertTrue(requested.cancelRequested)
 

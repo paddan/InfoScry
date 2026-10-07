@@ -152,17 +152,14 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             }
             val evidence = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT e.evidence_id, e.source_unit_id, e.locator_json, e.excerpt, e.revision_id, d.id AS document_id " +
+                    "SELECT e.evidence_id, e.source_unit_id, e.locator_json, e.excerpt, r.id AS placed_revision_id, d.id AS document_id " +
                         "FROM evidence_ledger e " +
-                        // Saved evidence is read back from its own ledger row, because the unit it names may be
-                        // gone: a replacement can remove the page a saved excerpt came from. The excerpt and its
-                        // revision therefore come from the row itself.
+                        // The excerpt and revision come from the ledger entry itself, so the unit is only needed to
+                        // find the document, and an entry whose unit a replacement removed must not drop out. A
+                        // revision that still names the entry's document, or the one that once held the unit, places
+                        // it in that case; nothing here ever reads the unit's text.
                         "LEFT JOIN content_units u ON u.id = e.source_unit_id " +
                         "LEFT JOIN document_revisions r ON r.id = e.revision_id " +
-                        // Only the *document* may be resolved from the revision history: an entry that recorded no
-                        // revision is placed by the revision that once held its unit — so it stays in the reopened
-                        // conversation — but it keeps naming no revision, because which reading its excerpt came
-                        // from was never recorded.
                         "JOIN documents d ON d.id = COALESCE(u.document_id, r.document_id, (" +
                         "SELECT h.document_id FROM page_text_revisions p " +
                         "JOIN document_revisions h ON h.id = p.revision_id " +
@@ -182,7 +179,8 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                                         unitId = rows.getString("source_unit_id"),
                                         locator = locator,
                                         locatorLabel = locator.describe(),
-                                        revisionId = rows.getString("revision_id"),
+                                        // Absent when nobody recorded one: revision unknown, never a guess.
+                                        revisionId = rows.getString("placed_revision_id"),
                                         excerpt = rows.getString("excerpt"),
                                     ),
                                 )
@@ -237,7 +235,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             // A switched-off profile is refused before the capability gate, the conversation or the SSE
-            // stream: retired by a person, or repaired by migration 020 and left off until a review.
+            // stream: retired by a person, or because its address carried a credential.
             profile.requireDispatchable()
             if (!profile.toolCallingSupported) {
                 // The gate fires before the service is built, so no provider call and no conversation
@@ -380,7 +378,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
             snapshot.evidenceEntries.forEach { entry ->
                 context.llm.persistEvidenceLedgerEntry(
                     conversationId, entry.evidenceId, entry.sourceUnitId, entry.locatorJson, entry.excerpt, entry.messageSeq,
-                    revisionId = entry.revisionId,
+                    entry.revisionId,
                 )
             }
             snapshot.limitEvents.forEach { event ->
@@ -401,7 +399,10 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
         override fun loadHistory(conversationId: String) = context.llm.loadInvestigateHistory(conversationId)
     }
     return InvestigationService(
-        tools = InvestigationTools(collectionId, context.search, context.content, context.documents, context.revisions),
+        tools = InvestigationTools(
+            collectionId, context.search, context.content, context.documents,
+            activeRevisionId = context.revisions::activeRevisionId,
+        ),
         prompt = PromptService(context.llm),
         promptVersion = context.llm.effectivePromptVersion(LlmPromptRole.INVESTIGATE),
         streamingClient = { selected ->
@@ -459,8 +460,8 @@ private suspend fun ApplicationCall.streamInvestigation(
 /**
  * A citation a `done` event can resolve: the stable evidence id, the unit that holds the source, and
  * the location inside it. A live citation carries no excerpt — the viewer fetches content by unit id —
- * while stored evidence carries the excerpt its own citation saved, which is the only copy of that text
- * left once a replacement has removed the unit the excerpt names.
+ * while stored evidence (an Ask citation or an Investigate ledger entry) carries the excerpt it saved,
+ * which is the only copy of that text left once a replacement has removed the unit the excerpt names.
  */
 @Serializable
 data class EvidenceWire(

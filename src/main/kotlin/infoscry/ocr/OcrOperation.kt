@@ -147,6 +147,15 @@ data class OcrOperation(
     val external: OcrExternalAccount,
     /** How many pages of this document are waiting for a person's decision. */
     val pendingReviewCount: Int = 0,
+    /**
+     * How many pages a person has already decided that are not published yet.
+     *
+     * Derived from persisted state on every read — the candidate revision's approved pages that came from a
+     * proposal, while that revision is still unpublished — so it is the same after a reload or a restart and
+     * is zero once the decisions are published. It is what lets a review surface offer Publish when
+     * [pendingReviewCount] is already zero.
+     */
+    val decidedUnpublishedCount: Int = 0,
     val errorCode: String? = null,
     val errorMessage: String? = null,
     val requestId: String,

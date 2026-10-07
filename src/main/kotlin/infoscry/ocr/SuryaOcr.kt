@@ -703,11 +703,22 @@ class SuryaOcr(
             return !errorDrain.isAlive
         }
 
-        /** What the worker's own exit status was, for the one message that has to say why it is gone. */
-        private fun exitDescription(): String = try {
-            "exit code ${process.exitValue()}"
-        } catch (running: IllegalThreadStateException) {
-            "then still running"
+        /**
+         * What the worker's own exit status was, for the one message that has to say why it is gone.
+         *
+         * The answer line ends when the worker's stdout does, which can be a moment before the process is
+         * reaped, so the status is waited for, briefly, rather than read at once: reading it at once names a
+         * worker that has just exited "still running".
+         */
+        private fun exitDescription(): String {
+            try {
+                if (process.waitFor(EXIT_STATUS_GRACE.toMillis(), TimeUnit.MILLISECONDS)) {
+                    return "exit code ${process.exitValue()}"
+                }
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            return "then still running"
         }
     }
 
@@ -901,6 +912,9 @@ class SuryaOcr(
 
         /** How long a stopped worker has to end before it is killed. */
         private val KILL_GRACE: Duration = Duration.ofSeconds(5)
+
+        /** How long a worker whose output has ended is given to be reaped before it is called still running. */
+        private val EXIT_STATUS_GRACE: Duration = Duration.ofSeconds(1)
 
         /** How much of the child's error stream is read at a time, and dropped. */
         private const val ERROR_DRAIN_BYTES: Int = 64 * 1024

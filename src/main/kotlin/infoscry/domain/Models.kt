@@ -110,6 +110,13 @@ data class SourceImageProvenance(
 
     init {
         require(relativePath.isNotBlank()) { "a source image reference must not be blank" }
+        // The reference is what a reviewer-facing route serves an image from, so it is confined where it is
+        // *written*: an absolute path, a `..` or `.` segment, or an empty one is refused here rather than
+        // only where an image is later resolved. The schema enforces the same rule.
+        require(isRootConfined(relativePath)) {
+            "a source image reference is relative to its root and stays inside it, " +
+                "was '${relativePath.take(MAX_REPORTED_REFERENCE_CHARACTERS)}'"
+        }
         requireStaysInsideNamedRoot(relativePath)
         require(sha256.length == SHA256_HEX_LENGTH && sha256.all { character -> character.isHexCharacter() }) {
             "a source image names its artifact's SHA-256, was '${sha256.take(MAX_REPORTED_HASH_CHARACTERS)}'"
@@ -125,6 +132,23 @@ data class SourceImageProvenance(
     private companion object {
         const val SHA256_HEX_LENGTH: Int = 64
         const val MAX_REPORTED_HASH_CHARACTERS: Int = 16
+        const val MAX_REPORTED_REFERENCE_CHARACTERS: Int = 80
+
+        /**
+         * Whether [reference] names something strictly inside whatever root it is resolved against.
+         *
+         * Either separator is treated as one, so a reference that is only a path on another platform is
+         * refused too: a record that moves between machines must mean the same file everywhere.
+         */
+        fun isRootConfined(reference: String): Boolean {
+            if ('\u0000' in reference) return false
+            val first = reference.first()
+            if (first == '/' || first == '\\') return false
+            if (reference.length >= 2 && reference[1] == ':' && (first in 'a'..'z' || first in 'A'..'Z')) return false
+            return reference.split('/', '\\').none { segment ->
+                segment.isEmpty() || segment == "." || segment == ".."
+            }
+        }
 
         /** Hex as `HexFormat` writes it — the only form a digest in this pipeline has. */
         fun Char.isHexCharacter(): Boolean = this in '0'..'9' || this in 'a'..'f'

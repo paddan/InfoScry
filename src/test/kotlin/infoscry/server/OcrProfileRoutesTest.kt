@@ -152,6 +152,138 @@ class OcrProfileRoutesTest {
         assertContains(listed, secondRevision, message = "disabling keeps the revisions history references")
     }
 
+    private suspend fun patch(id: String, body: String) =
+        harness.request(HttpMethod.Patch, "/api/ocr/profiles/$id", body, Credential.CSRF)
+
+    private fun withExpected(body: String, revisionId: String): String =
+        body.trimEnd().removeSuffix("}") + ""","expectedRevisionId":"$revisionId"}"""
+
+    @Test
+    fun `an edit that names the current revision is applied and the profile reports its revision id`() = runBlocking {
+        val created = create()
+        val id = profileIdOf(created)
+        val first = revisionIdOf(created)
+
+        val edited = patch(id, withExpected(profileBody.replace("vision-model", "vision-model-2"), first))
+
+        assertEquals(HttpStatusCode.OK, edited.status, edited.bodyAsText())
+        assertNotEquals(first, revisionIdOf(edited), "the answer names the revision the edit created")
+        assertContains(edited.bodyAsText(), "\"sequence\":2")
+    }
+
+    @Test
+    fun `an edit taken against an older revision is a distinct conflict and changes nothing`() = runBlocking {
+        val created = create()
+        val id = profileIdOf(created)
+        val first = revisionIdOf(created)
+        val second = revisionIdOf(patch(id, profileBody.replace("vision-model", "vision-model-2")))
+
+        val stale = patch(id, withExpected(profileBody.replace("vision-model", "vision-model-3"), first))
+
+        assertEquals(HttpStatusCode.Conflict, stale.status, stale.bodyAsText())
+        assertContains(stale.bodyAsText(), "STALE_OCR_PROFILE_REVISION")
+        assertFalse(stale.bodyAsText().contains("vision-model-3"), "a refused edit's fields are not echoed")
+        val after = harness.context.ocr.require(id)
+        assertEquals(second, after.revision.revisionId, "the profile still reads through the newer revision")
+        assertEquals("vision-model-2", after.revision.model)
+        assertEquals(2, after.revision.sequence, "a refused edit added no revision")
+    }
+
+    @Test
+    fun `an edit that names no expected revision keeps the last-writer behaviour`() = runBlocking {
+        val created = create()
+        val id = profileIdOf(created)
+
+        val first = patch(id, profileBody.replace("vision-model", "vision-model-2"))
+        val second = patch(id, profileBody.replace("vision-model", "vision-model-3"))
+
+        assertEquals(HttpStatusCode.OK, first.status, first.bodyAsText())
+        assertEquals(HttpStatusCode.OK, second.status, second.bodyAsText())
+        assertContains(second.bodyAsText(), "\"sequence\":3")
+    }
+
+    @Test
+    fun `a blank expected revision is a bad request rather than an unguarded edit`() = runBlocking {
+        val id = profileIdOf(create())
+
+        val blank = patch(id, withExpected(profileBody, ""))
+
+        assertEquals(HttpStatusCode.BadRequest, blank.status, blank.bodyAsText())
+    }
+
+    @Test
+    fun `an unknown profile with an expected revision is still not found`() = runBlocking {
+        create()
+
+        val missing = patch("missing", withExpected(profileBody, "whatever"))
+
+        assertEquals(HttpStatusCode.NotFound, missing.status, missing.bodyAsText())
+    }
+
+    @Test
+    fun `two edits from the same base revision are not both applied`() = runBlocking {
+        val created = create()
+        val id = profileIdOf(created)
+        val base = revisionIdOf(created)
+
+        val statuses = withTimeout(TIMEOUT_MILLIS) {
+            listOf("vision-model-a", "vision-model-b").map { model ->
+                async(Dispatchers.IO) {
+                    patch(id, withExpected(profileBody.replace("vision-model", model), base)).status
+                }
+            }.map { it.await() }
+        }
+
+        assertEquals(1, statuses.count { it == HttpStatusCode.OK }, "exactly one edit wins: $statuses")
+        assertEquals(1, statuses.count { it == HttpStatusCode.Conflict }, "the other is refused: $statuses")
+        assertEquals(2, harness.context.ocr.require(id).revision.sequence, "exactly one revision was added")
+    }
+
+    @Test
+    fun `the store applies one of two simultaneous edits from the same base revision`() {
+        val created = harness.context.ocr.create(
+            "Race",
+            infoscry.ocr.OcrProfileRevisionDraft(
+                provider = infoscry.llm.LlmProvider.OPENAI_COMPATIBLE,
+                model = "m",
+                contextWindow = 32_000,
+                maxOutputTokens = 1_024,
+                endpoint = "http://127.0.0.1:11434/v1",
+            ),
+            enabled = true,
+        )
+        val base = created.revision.revisionId
+        val gate = java.util.concurrent.CyclicBarrier(2)
+        val outcomes = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val threads = listOf("m-a", "m-b").map { model ->
+            Thread {
+                gate.await()
+                try {
+                    harness.context.ocr.update(
+                        created.id,
+                        "Race",
+                        infoscry.ocr.OcrProfileRevisionDraft(
+                            provider = infoscry.llm.LlmProvider.OPENAI_COMPATIBLE,
+                            model = model,
+                            contextWindow = 32_000,
+                            maxOutputTokens = 1_024,
+                            endpoint = "http://127.0.0.1:11434/v1",
+                        ),
+                        enabled = true,
+                        expectedRevisionId = base,
+                    )
+                    outcomes += "applied"
+                } catch (stale: infoscry.storage.StaleOcrProfileRevisionException) {
+                    outcomes += "stale"
+                }
+            }.also(Thread::start)
+        }
+        threads.forEach(Thread::join)
+
+        assertEquals(listOf("applied", "stale"), outcomes.sorted())
+        assertEquals(2, harness.context.ocr.require(created.id).revision.sequence)
+    }
+
     @Test
     fun `an unknown profile is not found and a duplicate name is a conflict`() = runBlocking {
         create()

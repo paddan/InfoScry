@@ -3,7 +3,11 @@ import { chromium } from 'playwright';
 
 const base = process.env.BASE_URL;
 assert(base, 'BASE_URL is required');
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: true,
+  // Opt-in: a machine whose installed Chromium is not the revision this Playwright pins can name it here.
+  executablePath: process.env.INFOSCRY_CHROMIUM || undefined,
+});
 try {
   const page = await browser.newPage();
   await page.setViewportSize({ width: 1600, height: 900 });

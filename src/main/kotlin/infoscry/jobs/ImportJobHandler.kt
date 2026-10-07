@@ -744,6 +744,9 @@ class ImportJobHandler internal constructor(
             // whatever transport it is built on.
             clientEngine: HttpClientEngine? = null,
         ): JobRunner {
+            // A restore re-embeds with the session this worker embeds with, so one process never holds two
+            // accelerator sessions for the same pinned model.
+            context.attachDocumentEmbedder(documentEmbedder)
             // One reader of managed copies, shared by both attempts: an import reaches its document by
             // copying a source file, a retry through an identifier it already had, and from there on the
             // reading is the same work.

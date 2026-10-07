@@ -27,7 +27,7 @@ migration, and import guidance no longer assumes it exists.
       reopening and user-created Default. UI tests cover both legacy choices and
       first import; accumulated checks pass.
 
-**Status:** Done. Migration 013 (`src/main/resources/db/migration/013_retire_automatic_default.sql`)
+**Status:** Done. Migration 013 (`013_retire_automatic_default.sql`, since folded into `src/main/resources/db/migration/001_baseline.sql`)
 removes the seeded row only when `id = 'default'`, `name = 'Default'`, `lifecycle = 'ACTIVE'`, and no
 document, job, conversation or unfinished collection/document deletion references it; `SUPPORTED_VERSION`
 and the migration list are 13. `CollectionsPanel.svelte` explains a preserved legacy Default and points at

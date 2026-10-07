@@ -1499,44 +1499,13 @@ describe('app shell', () => {
     ).toBe(true);
   });
 
-  it('keeps the citation’s revision while paging through the source it opens', async () => {
-    let sourceRequests = 0;
+  it('shows a stored Ask excerpt with a revision-unknown label instead of fetching the live unit', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
       asks: () => jsonResponse({
-        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', 'revision-8')],
+        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', undefined, 'Saved excerpt as it was')],
       }),
-      source: () => {
-        sourceRequests += 1;
-        return sourceRequests === 1
-          ? jsonResponse(sourcePage('First part ', 0, 30, true))
-          : jsonResponse(sourcePage('second part', 11, 30, false));
-      },
-    });
-    render(Page);
-    await screen.findByText('Default');
-    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
-    expect(await screen.findByRole('button', { name: 'Load more' })).toBeTruthy();
-
-    await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
-
-    expect(await screen.findByText('First part second part')).toBeTruthy();
-    // The follow-up page belongs to the same reading as the first: pagination must not fall back to
-    // the live unit and show current text under the citation's revision.
-    expect(
-      calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=11&limit=16384&revision=revision-8'),
-    ).toBe(true);
-  });
-
-  it('shows the saved excerpt for a citation that names no revision and reads no live unit', async () => {
-    const { calls } = stubFetch({
-      list: () => jsonResponse({ collections: [collection('Default')] }),
-      asks: () => jsonResponse({
-        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', undefined, 'Signed by Mira in 1998.')],
-      }),
-      source: () => jsonResponse(sourcePage('The unit’s current text', 0, 23)),
+      source: () => jsonResponse(sourcePage("Today's text, which is not the old evidence", 0, 42)),
     });
     render(Page);
     await screen.findByText('Default');
@@ -1544,22 +1513,23 @@ describe('app shell', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
 
-    expect(await screen.findByText('Signed by Mira in 1998.')).toBeTruthy();
+    expect(await screen.findByText('Saved excerpt as it was')).toBeTruthy();
     expect(screen.getByText(/Revision unknown/)).toBeTruthy();
-    // Nobody recorded which reading the excerpt came from, so the viewer asks for nothing at all:
-    // today's unit text must never stand in for yesterday's answer.
+    // The unit is live, but nobody recorded which reading the excerpt came from, so showing the live text
+    // here would attribute today's wording to yesterday's answer.
     expect(calls.some((call) => call.url.includes('/sources/'))).toBe(false);
-    expect(screen.queryByText('The unit’s current text')).toBeNull();
+    expect(screen.queryByText("Today's text, which is not the old evidence")).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Open original' })).toBeTruthy();
   });
 
-  it('shows the saved excerpt when the unit the citation names no longer exists', async () => {
-    // No `source` override: the stub answers every source read with 404, which is what a removed unit
-    // looks like to a live read. The fallback must not depend on the unit still being there.
+  it('opens the named revision for stored Ask evidence even when an excerpt was saved', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
       asks: () => jsonResponse({
-        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', undefined, 'Signed by Mira in 1998.')],
+        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', 'revision-8', 'Saved excerpt')],
       }),
+      source: () => jsonResponse(sourcePage('Body of revision eight', 0, 22)),
     });
     render(Page);
     await screen.findByText('Default');
@@ -1567,110 +1537,68 @@ describe('app shell', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
 
-    expect(await screen.findByText('Signed by Mira in 1998.')).toBeTruthy();
-    expect(screen.getByText(/Revision unknown/)).toBeTruthy();
-    expect(screen.queryByRole('alert')).toBeNull();
-    expect(calls.some((call) => call.url.includes('/sources/'))).toBe(false);
+    expect(await screen.findByText('Body of revision eight')).toBeTruthy();
+    expect(calls.some((call) => call.url.endsWith('&revision=revision-8'))).toBe(true);
+    expect(screen.queryByText(/Revision unknown/)).toBeNull();
   });
 
-  it('shows the saved excerpt for investigate evidence that names no revision', async () => {
+  it('reopens an Ask citation that has neither a revision nor a saved excerpt from the live unit', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
-      investigateStart: () => eventResponse([
-        { type: 'citation', id: 'S1', valid: true },
-        {
-          type: 'done',
-          text: 'Mira signed [S1].',
-          evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4', excerpt: 'Signed by Mira in 1998.' }],
-        },
-      ]),
+      asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] }),
+      source: () => jsonResponse(sourcePage('Live unit text', 0, 14)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+
+    // A citation that was just streamed carries no excerpt: nothing was saved, and the live unit is what it read.
+    expect(await screen.findByText('Live unit text')).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=0&limit=16384')).toBe(true);
+    expect(screen.queryByText(/Revision unknown/)).toBeNull();
+  });
+
+  it('shows saved Investigate evidence with its excerpt and a revision-unknown label when no revision was recorded', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({
+        investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it [S2]', { excerpt: 'Saved ledger excerpt' }),
+      }),
+      source: () => jsonResponse(sourcePage("Today's text, which is not the old evidence", 0, 42)),
     });
     render(Page);
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
-    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'Who signed?' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
-    await fireEvent.click(await screen.findByRole('button', { name: /Open source S1/ }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /\[S2\] Page 8/ }));
 
-    expect(await screen.findByText('Signed by Mira in 1998.')).toBeTruthy();
+    expect(await screen.findByText('Saved ledger excerpt')).toBeTruthy();
     expect(screen.getByText(/Revision unknown/)).toBeTruthy();
-    // Nobody recorded which reading the excerpt came from, so the viewer asks for nothing at all.
     expect(calls.some((call) => call.url.includes('/sources/'))).toBe(false);
+    expect(screen.queryByText("Today's text, which is not the old evidence")).toBeNull();
   });
 
-  it('renders a saved excerpt literally rather than interpreting its markup', async () => {
-    stubFetch({
-      list: () => jsonResponse({ collections: [collection('Default')] }),
-      asks: () => jsonResponse({
-        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', undefined, '<script>unsafe()</script>')],
-      }),
-      source: () => jsonResponse(sourcePage('The unit’s current text', 0, 23)),
-    });
-    render(Page);
-    await screen.findByText('Default');
-    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
-
-    expect(await screen.findByText('<script>unsafe()</script>')).toBeTruthy();
-    expect(document.querySelector('script')).toBeNull();
-    expect(screen.getByText(/Revision unknown/)).toBeTruthy();
-  });
-
-  it('moves focus into the source sheet when a saved excerpt opens it', async () => {
-    stubFetch({
-      list: () => jsonResponse({ collections: [collection('Default')] }),
-      asks: () => jsonResponse({
-        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', undefined, 'Signed by Mira in 1998.')],
-      }),
-    });
-    render(Page);
-    await screen.findByText('Default');
-    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    const citation = await screen.findByRole('button', { name: 'Open source S1, Page 4' });
-    citation.focus();
-    await fireEvent.click(citation);
-
-    // The fallback opens the same modal sheet as a source read, so keyboard focus must enter it
-    // instead of staying on the citation behind the backdrop.
-    const dialog = await screen.findByRole('dialog', { name: 'Source' });
-    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
-  });
-
-  it('ignores a pending source response after the reader opens another citation', async () => {
-    let finishFirstRead!: (response: Response) => void;
+  it('opens saved Investigate evidence at the revision the ledger recorded', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
-      asks: () => jsonResponse({
-        asks: [{
-          ...askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1] and Jo [S2].'),
-          evidence: [
-            { id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4', revisionId: 'revision-8' },
-            { id: 'S2', documentId: 'doc-1', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 9', excerpt: 'Jo countersigned the deed.' },
-          ],
-        }],
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({
+        investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it [S2]', { revisionId: 'revision-3', excerpt: 'Saved ledger excerpt' }),
       }),
-      source: () => new Promise<Response>((resolve) => { finishFirstRead = resolve; }),
+      source: () => jsonResponse(sourcePage('Body of revision three', 0, 22)),
     });
     render(Page);
     await screen.findByText('Default');
-    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
-    expect(await screen.findByText('Loading source…')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /\[S2\] Page 8/ }));
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S2, Page 9' }));
-    expect(await screen.findByText('Jo countersigned the deed.')).toBeTruthy();
-
-    finishFirstRead(jsonResponse(sourcePage('The first citation’s late page', 0, 32)));
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-    // The reader moved to another source, so the first citation's late answer is dropped rather than
-    // replacing the excerpt that is now on screen.
-    expect(screen.queryByText('The first citation’s late page')).toBeNull();
-    expect(screen.getByText('Jo countersigned the deed.')).toBeTruthy();
-    expect(calls.filter((call) => call.url.includes('/sources/'))).toHaveLength(1);
+    expect(await screen.findByText('Body of revision three')).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-2?offset=0&limit=16384&revision=revision-3')).toBe(true);
+    expect(screen.queryByText(/Revision unknown/)).toBeNull();
   });
 
   it('clears the Ask panel to its compose state with the New conversation button', async () => {
@@ -2020,6 +1948,9 @@ function collection(name: string, documentCount = 0): Collection {
     id: name.toLowerCase(),
     name,
     ocrLanguages: 'eng',
+    ocrEngine: 'TESSERACT',
+    ocrImportMode: 'FILL_MISSING',
+    ocrExternalPageLimit: 0,
     createdAt: '2026-09-21T07:00:00Z',
     updatedAt: '2026-09-21T07:00:00Z',
     lifecycle: 'ACTIVE',
@@ -2094,14 +2025,19 @@ function askHistoryEntry(
   };
 }
 
-function investigationHistory(id: string, question: string, answer: string) {
+function investigationHistory(
+  id: string,
+  question: string,
+  answer: string,
+  evidenceExtras: { revisionId?: string; excerpt?: string } = {},
+) {
   return {
     id,
     messages: [
       { role: 'user', text: question },
       { role: 'assistant', text: answer },
     ],
-    evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8' }],
+    evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8', ...evidenceExtras }],
     inputTokens: 20,
     outputTokens: 9,
     costUsd: 0.0001,

@@ -36,7 +36,7 @@ class AskCommand : CliktCommand(name = "ask") {
         context.use { open ->
             val selected = open.llm.findByName(profile) ?: throw CliFailure("no such LLM profile")
             // `ask` is a call, so it obeys the same rule the routes do: a profile retired by a person, or
-            // repaired by migration 020 and left switched off until somebody reviews the address, is refused
+            // switched off because its address carried a credential, is refused
             // instead of dispatched to.
             try {
                 selected.requireDispatchable()

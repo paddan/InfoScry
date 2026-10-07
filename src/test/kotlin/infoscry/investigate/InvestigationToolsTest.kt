@@ -368,10 +368,65 @@ class InvestigationToolsTest {
         assertEquals("COMPLETE", payload["status"]!!.jsonPrimitive.content)
     }
 
-    private fun tools(collection: CollectionId, search: InvestigationSearch, maxResultBytes: Int = 2_048): InvestigationTools =
-        // Provenance attribution is pinned end to end in InvestigationRoutesTest; these scenarios pin
-        // tool payloads and bounds, so nothing here reads at a published revision.
-        InvestigationTools(collection, search, content, documents, InvestigationRevisions { null }, maxResultBytes)
+    private fun tools(
+        collection: CollectionId,
+        search: InvestigationSearch,
+        maxResultBytes: Int = 2_048,
+        activeRevisionId: (DocumentId) -> String? = { null },
+    ): InvestigationTools =
+        InvestigationTools(collection, search, content, documents, maxResultBytes, activeRevisionId)
+
+    @Test
+    fun `evidence carries the revision its text was read from without sending it to the model`() {
+        val docA = document(collectionA)
+        val unit = addUnit(docA, 0, "reading text")
+        val search = FakeSearch()
+        search.hits = listOf(hit(collectionA, docA, unit, 0).copy(revisionId = "revision-from-hit"))
+        val tools = tools(collectionA, search, activeRevisionId = { "revision-active-now" })
+
+        val searched = assertIs<ToolResult.Success>(tools.execute("search_collection", """{"query":"q"}"""))
+        assertEquals(listOf("revision-from-hit"), searched.evidence.map { it.revisionId }, "a hit names its own revision")
+        assertFalse(searched.payloadJson.contains("revision"), "provenance is for the ledger, not for the model: ${searched.payloadJson}")
+
+        val read = assertIs<ToolResult.Success>(
+            tools.execute("read_content_unit", """{"contentUnitId":"${unit.value}"}"""),
+        )
+        assertEquals(
+            listOf("revision-active-now"),
+            read.evidence.map { it.revisionId },
+            "a unit read from the live reading is the document's active revision",
+        )
+        assertFalse(read.payloadJson.contains("revision"), read.payloadJson)
+
+        val adjacent = assertIs<ToolResult.Success>(
+            tools.execute("read_adjacent_units", """{"contentUnitId":"${unit.value}","after":1}"""),
+        )
+        assertTrue(adjacent.evidence.all { it.revisionId == "revision-active-now" })
+    }
+
+    @Test
+    fun `a unit whose revision moved while it was read names no revision`() {
+        val docA = document(collectionA)
+        val unit = addUnit(docA, 0, "reading text")
+        val answers = ArrayDeque(listOf("revision-before", "revision-after"))
+        val tools = tools(collectionA, FakeSearch(), activeRevisionId = { answers.removeFirstOrNull() })
+
+        val read = assertIs<ToolResult.Success>(
+            tools.execute("read_content_unit", """{"contentUnitId":"${unit.value}"}"""),
+        )
+
+        assertEquals(listOf<String?>(null), read.evidence.map { it.revisionId }, "text that may belong to either reading has no provable revision")
+    }
+
+    @Test
+    fun `a unit of a document with no active revision names none`() {
+        val docA = document(collectionA)
+        val unit = addUnit(docA, 0, "reading text")
+        val read = assertIs<ToolResult.Success>(
+            tools(collectionA, FakeSearch()).execute("read_content_unit", """{"contentUnitId":"${unit.value}"}"""),
+        )
+        assertEquals(listOf<String?>(null), read.evidence.map { it.revisionId })
+    }
 
     private fun document(collection: CollectionId, title: String? = null): DocumentId {
         val document = Document(

@@ -67,8 +67,14 @@ class OcrProfileService(
      * The new revision is what future attempts read; the revision the profile pointed at before is kept, so
      * an attempt that snapshotted it still describes what it ran with.
      */
-    fun update(id: String, name: String, draft: OcrProfileRevisionDraft, enabled: Boolean): OcrProfile =
-        profiles.update(id, name, draft, enabled)
+    fun update(
+        id: String,
+        name: String,
+        draft: OcrProfileRevisionDraft,
+        enabled: Boolean,
+        expectedRevisionId: String? = null,
+    ): OcrProfile =
+        profiles.update(id, name, draft, enabled, expectedRevisionId)
             ?: throw NoSuchElementException("no OCR profile with id $id")
 
     /** Disables new use of a profile, keeping its revisions. False when no such profile exists. */

@@ -40,6 +40,14 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 | `logs/` | Structured application logs |
 | `tmp/` | Temporary work and GPU profiling artifacts |
 
+The SQLite schema is one baseline,
+[001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql), applied
+to an empty database by [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
+and recorded as `PRAGMA user_version = 1`. It is edited in place when the schema
+changes: there are no incremental migrations and no upgrade path, because no
+deployed archive has to be preserved. A database whose version is newer than the
+build is refused rather than written to.
+
 Import deduplicates by collection and SHA-256. External originals are never
 modified or deleted. Content-unit IDs remain stable; extraction results and
 checkpoints are committed per unit with durable artifact references. Restarting
@@ -241,6 +249,23 @@ pruned from a request cannot justify a new citation, though old displayed
 citations still resolve. One final answer is adopted per completed turn;
 superseded drafts remain audit data rather than displayed conversation answers.
 Citation validity alone does not prove that a claim is supported by its source.
+
+### Saved evidence provenance
+
+Saved evidence carries its own provenance and is read back from itself, never
+from the live unit. An Ask citation (`citations`) and an Investigate ledger
+entry (`evidence_ledger`) each store the `excerpt` that was supplied and a
+nullable `revision_id`, the revision that excerpt was read from. A search hit
+names its revision; a unit read directly names the document's active revision
+only when the revision and the unit's text are unchanged across the read, and
+otherwise none. A null revision means "revision unknown", not "current".
+Neither history read joins to live unit text, so evidence whose unit a
+replacement removed stays in history (placed in its document through the
+revision that once held the unit, using the `page_text_revisions (unit_id)`
+index) and current text is never shown as old evidence. The viewer opens the
+named revision when there is one; otherwise it shows the saved excerpt labelled
+"revision unknown". `revision_id` is not a foreign key and is never sent to the
+model.
 
 ## Investigate limits
 

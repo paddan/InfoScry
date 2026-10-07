@@ -720,6 +720,13 @@ class SuryaOcrTest {
     }
 
     /** One fake worker whose runtime answers this page with a code rather than with a reading. */
+    /**
+     * A worker that answers every page with the refusal [name] stands for.
+     *
+     * It reads its request before it answers, as the real worker does. One that answered and exited without
+     * reading would race the engine's write: when the write came second the pipe was already closed, the engine
+     * saw a worker that had ended rather than the answer it had sent, and the code under test was lost.
+     */
     private fun refusingEngine(name: String): SuryaOcr {
         val code = when (name) {
             "refuses-llama" -> NEEDS_LLAMA_CPP
@@ -729,7 +736,7 @@ class SuryaOcrTest {
         val script = writeFakeExecutable(
             directory,
             name,
-            identityBranch(IDENTITY_A) +
+            identityBranch(IDENTITY_A) + "read -r request\n" +
                 "printf '{\"protocol\":$PROTOCOL,\"type\":\"page\",\"status\":\"error\"," +
                 "\"code\":\"$code\",\"message\":\"a stand-in runtime\"}\\n'\n",
         )

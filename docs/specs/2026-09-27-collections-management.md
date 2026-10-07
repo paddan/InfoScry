@@ -59,8 +59,8 @@ The implementation was inspected on 2026-09-27:
 - [ContentStore.kt](../../src/main/kotlin/infoscry/storage/ContentStore.kt)
   stores checkpoints and finished extraction summaries. A known page total
   during extraction needs an explicit durable progress contract.
-- [001_core.sql](../../src/main/resources/db/migration/001_core.sql) seeds
-  `default` once. This is not a recurring startup action.
+- [001_baseline.sql](../../src/main/resources/db/migration/001_baseline.sql) seeds
+  no collection; a new archive is empty.
 - The same bytes in two collections are separate managed documents. Deduplication
   is scoped to `(collection_id, sha256)`.
 
@@ -216,13 +216,11 @@ and collection/document management excludes deleting targets. A failure displays
 a safe actionable state and is not reported as success. External originals and
 copies in other collections are never modified. There is no undo or recycle bin.
 
-### Default compatibility
+### Default collection
 
-Do not edit the meaning of an already-applied migration. Add a forward migration
-that removes the legacy `default` row only if it is named `Default`, active, and
-has no documents, jobs, conversations, unfinished deletion, or other owned user
-state. A fresh database may run the original seed and this cleanup within
-initialization, but exposes no Default when startup finishes.
+The baseline schema seeds no `default` collection, so a new archive exposes no
+Default. No archive is migrated: the application is not deployed, so there is no
+legacy `default` row to retire or preserve.
 
 Preserve populated, renamed, or otherwise used legacy collections. For the
 populated legacy Default, Admin explains the change and offers rename or explicit
@@ -270,9 +268,8 @@ Proposed responsibilities:
 
 ## Implementation slices and acceptance
 
-1. **Empty archive and Default compatibility.** Forward migration, explicit
-   collection selection, updated CLI examples. Test new, empty legacy, populated,
-   renamed, pending-job and conversation-bearing Default archives and reopen.
+1. **Empty archive.** Baseline schema without a seeded Default, explicit
+   collection selection, updated CLI examples. Test a new archive and reopen.
 2. **Durable documents and processing reads.** Filtered paging/details, job
    history, extractor progress facts and safe errors. Test matching totals,
    literal wildcard characters, stable paging ties, unknown totals, mixed OCR,

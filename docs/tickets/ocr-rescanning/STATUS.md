@@ -13,6 +13,14 @@
 
 Product scope was authorized on 2026-09-30. This plan was decomposed on 2026-10-02 after a targeted assessment through `97d7ce8`. Tickets 01–06 and the 07/07b backend provide an implemented baseline with historical passing tests. The manual product is unfinished, and 07b's repair gate is open. No unchecked criterion or old full-suite count establishes current end-to-end readiness. No implementation, installation, model download, private-data experiment, commit or push is authorized by this planning document.
 
+**Merge of `claude/happy-rubin-8sxq4l` (2026-10-07).** That branch implemented the ticket-08 and ticket-09 scope
+(covering 08a–08f and 09a–09c below) and its own 02b and 03b; it was merged with this branch as the base for
+overlapping work. Where both lines implemented the same thing (source-image provenance, evidence revision
+provenance), the branch's implementation was kept and the other removed, except that both source-image reference
+checks are kept. The schema is now one baseline (`001_baseline.sql`) that includes this line's candidate-resume
+columns and index; the migration numbers named in older records refer to the history it replaced. See the
+"Ticket 08 and 09" and "Tickets 03b and 02b" verification records below for what was and was not run.
+
 ## Global constraints
 
 - Kotlin/JVM 25; one application process and one Gradle backend module; TypeScript/SvelteKit static frontend.
@@ -40,24 +48,37 @@ Use one leaf ticket as the implementation/review unit. Umbrellas 02b, 08, 09, 10
 
 | Execution ticket | Blocked by | State |
 |---|---|---|
-| [03b — Provenance persistence](03b-image-provenance.md) | 03 | Implemented |
+| [01 — OCR profiles and immutable attempt settings](01-profiles-and-settings.md) | None | Done — migration 017; focused suite green (67 tests: `OcrSettingsTest` 19, `OcrProfileRoutesTest` 10, `CollectionRoutesTest` 29, `SchemaMigratorTest` 9) and `./gradlew check` green (13m45s); legacy archives and legacy fingerprints unchanged |
+| [02 — Isolated revisions and recoverable publication](02-revision-publication.md) | 01 | Done — migration 018 (document/page revisions, revision chunks, publication intents, `citations.revision_id`) and the PREPARED → staged commit → authority → snapshot → PUBLISHED protocol with roll-forward/roll-back recovery; `./gradlew check` green (97 suites, 1133 tests, 0 failures, 14m) plus the focused suites; three independent review rounds drove the untagged-baseline, reader-acquire race, candidate-leak, unadmitted-cleanup, post-authority-failure, draft-source-route and recovery-window fixes |
+| [02b — Revision-aware saved evidence](02b-revision-aware-evidence.md) | 02 | Done — the Investigate ledger stores each evidence's revision with its excerpt, history no longer joins live units, the viewer opens the named revision or shows the saved excerpt labelled revision unknown, and the pre-switch seal window has a deterministic test. jsdom only for the viewer; see the record below |
+| [03 — Page-image OCR seam and Tesseract compatibility](03-ocr-engine-contract.md) | 01, 02 | Done — `PageOcrEngine`/`PageImage`/`OcrPageResult`, `PageImageRenderer`, Tesseract behind the seam and the FILL_MISSING / CHECK_AND_IMPROVE / rescan branch, with legacy fill-missing behavior and the pinned legacy fingerprints unchanged; `./gradlew check` green (98 suites, 1176 tests, 0 failures, 14m) plus the focused suites; four review rounds drove the bounded-raster, overflow, over-cap-picture, multipage-blank, candidate-key and fingerprint-collision fixes |
+| [03b — Image provenance and artifact lifetime](03b-image-provenance.md) | 03 | Done — root-confined, all-or-none provenance enforced by the record and by schema CHECKs, partial rows fail on read, and a fill-missing render that a candidate names is retained (otherwise no provenance is recorded); see the record below |
+| [04 — Local Surya adapter and Mac runtime proof](04-surya.md) | 03 | Done — `SuryaOcr` + `scripts/ocr/surya_worker.py` (bounded versioned JSON, one inference manager per worker, `--identity` probe, process-tree teardown) with the real runtime measured on this Mac (surya-ocr 0.22.1, llama.cpp 0.5.0 build 11146, weights 1.36 GiB; cold ~5.2 s / warm ~1.8 s per page); `./gradlew check --rerun-tasks` green (99 suites, 1197 tests, 0 failures, 14m43s), `externalTest --tests SuryaRealToolTest` green, `python3 scripts/ocr/test_surya_worker.py` ok; three review rounds drove whole-tree teardown, `OCR_EMPTY` failures instead of committed empty text, the runtime identity probe in the fingerprint, and `NEEDS_TOOL` remedies in the import queue |
+| [05 — Image-based LLM transcription and profile capability](05-image-llm.md) | 03 | Done — `ImageLlmClient` speaks both image protocols from the page's own bytes (hash-checked, format-checked, `max_tokens`-bounded, response-size bounded, per-attempt timeout, bounded retries on 429/5xx only, redirects refused unfollowed, whole request budgeted against the window and reserved output, resolved model version carried back) and refuses a non-local destination without ticket 07's permit validator; `LlmOcr` reads only through the snapshotted revision and the shipped prompt version; `prompts/ocr-transcription.txt` v1 ships with the transcription schema; `POST /api/ocr/profiles/{profileId}/probe` sends only the synthetic image and records `imageCapabilityMeasured`/`imageCapabilityCheckedAt`; focused suites green with both key invariants proven by guard-revert runs, and `./gradlew check` green (102 suites, 1268 tests, 0 failures, 15m55s); a security round closed the credentialed-endpoint hole across the OCR, LLM and catalog validators and remediated stored ones with migration 020 (credential removed, repaired conversation snapshots marked, repaired profiles switched off), and made "a switched-off profile is not a dispatch destination" hold at the routes, the CLI and the services that dispatch; a migration delimiter bug the parent found (`COALESCE` order, which would have rewritten `https://host?email=a@b/c` into `https://b/c`) was fixed and is covered by regression cases. Unverified: no real provider gate (ticket 10), and the engine is deliberately not wired into `ExtractorRegistry` — that is ticket 07's admission path (external-page accounting, previews, approval) |
+| [06 — Image-grounded comparison and pilot decisions](06-comparison.md) | 03, 05 | Done — deterministic diagnostics, the side-neutral A/B review call (prompt v2) with its answer mapped to the application's vocabulary in code, pilot mode enforced server-side so every difference is `PROPOSE`, durable reviews keyed by baseline/candidate/reviewer/prompt/policy, identical-nonblank no-ops, empty pairs pending and unsearchable, and failures that keep the baseline with zero re-transcription; `./gradlew check` green (104 suites, 1313 tests, 0 failures, 15m53s); four review rounds made approval structural (a policy that holds the review store, whose acceptance can only be resolved from a live row) and verified baselines against the stored revision page before every shortcut |
+| [07 — Rescan jobs, import modes and external approval](07-jobs-and-admission.md) | 04, 05, 06 | Partially implemented — the rescan path is verified: `RESCAN` job type and operation record (migration 023), preview/admission with request-id idempotency, per-page checkpoints and bounded cancellation, external-page accounting, `AWAITING_APPROVAL`, comparison and review wiring, decisions and publication, and operation ownership that holds a document while an operation is unfinished or awaiting review (migration 024 adds review-pending imports); `./gradlew check` green after three hand repairs (106 suites, 1340 tests, 0 failures, 16m27s). The import half executes none of what it admits, admission does not revalidate the whole settings snapshot, and resume/approval can start a second attempt — all carried by 07b |
+| [07b — Import execution, admission revalidation and attempt claiming](07b-import-execution-and-admission.md) | 07 | Done — job-owned external approval with `AWAITING_APPROVAL`, the two-file allowance (distinct pages once, calls apart), settings revalidation at admission, attempt claiming through `OcrOperationStore.startAttempt`, the CLI surfacing a waiting-approval requirement, the admitted runtime identity carried into execution, `NEEDS_REVIEW` reachable and a finished status for imports, and a check-and-improve import that compares each page against its own text, records the reviews a person owes, publishes the pages it approved and leaves pending pages with no content unit, chunk or index row (rescans keep all-or-nothing refusal). Focused suites green (26 suites / 542 tests; a forced 2m34s run over jobs/document/ocr/extract). Residuals in the ticket: no decision surface for an import's pending pages yet (ticket 08), a pure scan in check-and-improve publishes nothing by design, the embedder is now required, a check-and-improve retry stages without reviews, and external review dispatch is untested because the tests are loopback |
+| [08 — Admin profiles, collection controls and page review](08-admin-and-review.md) | 07 | Implemented, not accepted — web panels for profiles, collection controls, Scan again and page review, plus the backend routes the review needed (candidate text, page image, decided-unpublished count, profile edit guard). Verified in jsdom and focused backend suites only; no browser, live-backend or `externalTest` run. Gaps and residuals in the verification record below |
+| [09 — Revision history and explicit restoration](09-history-and-restore.md) | 08 | Implemented, not accepted — restore through the unchanged publication boundary (migration 025), extended history view, deletion coverage and the web history panel. Tested with the fake embedder only; no real CoreML run, no browser run. Revision-aware source link not built |
+| [10 — Integrated browser and real-runtime acceptance](10-integrated-acceptance.md) | 09 | Not started |
+| [11 — Measured pilot and guarded automatic replacement](11-pilot-and-auto-activation.md) | 10 | Not started |
 | [02c — Saved Ask excerpt fallback](02c-ask-evidence-viewer.md) | 02 | Implemented |
-| [02d — Investigate evidence survives replacement](02d-investigate-evidence-provenance.md) | 02, 02c | Not started |
+| [02d — Investigate evidence survives replacement](02d-investigate-evidence-provenance.md) | 02, 02c | Covered by 02b (merged branch): the ledger stores each evidence's revision with its excerpt and history no longer joins live units |
 | [02e — Publication seal failure and recovery](02e-publication-seal-acceptance.md) | 02 | Implemented |
 | [03c — Retained image references remain usable](03c-image-artifact-lifetime.md) | 03b | Implemented |
 | [07c — Resume the same staged import candidate](07c-durable-import-candidates.md) | 07b implementation | Implemented |
 | [07d — Retry uses admitted OCR and review authority](07d-retry-ocr-execution.md) | 07c | Implemented |
 | [07e — Keep ordinary extraction for non-image formats](07e-non-image-import-compatibility.md) | 07b implementation | Implemented |
 | [07f — Exercise external review admission locally](07f-external-review-accounting.md) | 07c, 07d | Implemented |
-| [08a — OCR profile administration](08a-ocr-profile-admin.md) | 01, 05 | Not started |
-| [08b — Collection OCR defaults](08b-collection-ocr-controls.md) | 08a, 07e | Not started |
-| [08c — Preview and control one rescan](08c-rescan-controls.md) | 08b, 07c, 07d, 07f | Not started |
-| [08d — Read review material for imports and rescans](08d-review-read-api.md) | 03c, 07c, 07e | Not started |
-| [08e — Persist and publish manual page decisions](08e-review-decision-publication.md) | 08d, 02e | Not started |
-| [08f — Manual page review in Admin](08f-page-review-ui.md) | 08c, 08e, 02c, 02d | Not started |
-| [09a — Revision restoration API](09a-restore-service.md) | 08e, 02d | Not started |
-| [09b — Published history and restore controls](09b-history-ui.md) | 09a, 08f | Not started |
-| [09c — Deletion removes revision-owned work safely](09c-revision-deletion-acceptance.md) | 03c, 07c, 08e, 09a | Not started |
+| [08a — OCR profile administration](08a-ocr-profile-admin.md) | 01, 05 | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [08b — Collection OCR defaults](08b-collection-ocr-controls.md) | 08a, 07e | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [08c — Preview and control one rescan](08c-rescan-controls.md) | 08b, 07c, 07d, 07f | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [08d — Read review material for imports and rescans](08d-review-read-api.md) | 03c, 07c, 07e | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [08e — Persist and publish manual page decisions](08e-review-decision-publication.md) | 08d, 02e | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [08f — Manual page review in Admin](08f-page-review-ui.md) | 08c, 08e, 02c, 02d | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [09a — Revision restoration API](09a-restore-service.md) | 08e, 02d | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [09b — Published history and restore controls](09b-history-ui.md) | 09a, 08f | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [09c — Deletion removes revision-owned work safely](09c-revision-deletion-acceptance.md) | 03c, 07c, 08e, 09a | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
 | [10a — Complete manual OCR browser acceptance](10a-browser-acceptance.md) | 08f, 09b, 09c, 07f, 02d, 02e | Not started |
 | [10b — Separate real OCR and CoreML evidence](10b-real-runtime-gates.md) | 03c, 07d, 08e | Not started |
 | [10c — Reconcile docs and manual completion evidence](10c-manual-release-checkpoint.md) | 10a, 10b | Not started |
@@ -314,6 +335,178 @@ Residual, closed with the slice that followed: a `NEEDS_REVIEW` document is now 
 purposes (`ImportJobHandler.FINISHED_STATUSES`), so a byte-identical re-import records `DUPLICATE` instead of
 re-reading a document that is waiting for a decision. The remaining work — the import's compare/review and
 publication — is measured in the ticket, together with the publication question it is gated on.
+
+## Ticket 08 and 09 verification record
+
+Written from what was run, not from the plan. Everything below ran on a Linux container with JDK 25 (Temurin),
+as a non-root user with a UTF-8 locale unless stated; nothing ran on macOS, in a real browser, against a live
+server, through `externalTest` or `gpuIntegrationTest`, or with the real CoreML embedder.
+
+### Ticket 08 — what exists
+
+- **Web:** `OcrProfilesPanel` (list, create, edit, disable, image-capability check, key *presence* only),
+  `CollectionOcrSettings` and `DocumentRescan` (engine, mode, profiles, allowance, preview, start with a stable
+  request id, approve, cancel, resume, reload recovery), `OcrReviewPanel` (current page image, candidate text,
+  bounded word-level difference, Keep existing / Use new / Edit text, confirmed document-wide choice, batch save
+  then publish) and the `reviewDiff` helper. Server and OCR text is rendered as text nodes only; there is no
+  `{@html}` in these components.
+- **Backend added for the review (gaps the web work found):** `GET …/ocr/reviews/{unitId}/candidate` and
+  `…/image` (collection-scoped, only pages with an undecided proposal, image bytes hash-verified against both the
+  page and the review and limited to six raster types, no path ever returned), `decidedUnpublishedCount` on
+  operations and reviews so Publish stays reachable after a reload, and an optional `expectedRevisionId` on
+  `PATCH /api/ocr/profiles/{id}` (409 `STALE_OCR_PROFILE_REVISION`, checked inside the store transaction;
+  absent keeps last-writer-wins for the CLI).
+- **Behaviour changes to review:** the stored `pendingReviewCount` is now kept in step with decisions and
+  publication (before, a published operation kept holding its document); `GET /reviews` lists only pages still
+  pending; the review panel's Edit text now starts from the candidate text (from the existing text when the
+  candidate is cut or not loaded).
+
+### Ticket 08 — what was run
+
+- Web gate on the final tree: 16 files, 378 Vitest tests, `npm run check` 155 files with 0 errors and 0
+  warnings, `npm run build` succeeded. Each part's tests were written first and observed failing for a
+  behavioural reason before implementation.
+- Backend: `OcrReviewRoutesTest` (16) and `OcrProfileRoutesTest` (24) pass; the document, server, storage,
+  jobs and ocr packages together ran 684 tests as a non-root user. The failures in those runs were two racy tests
+  (`JobRunnerTest`, `RevisionPublicationTest`) fixed afterwards, see below.
+
+### Ticket 08 — not verified, and residuals
+
+- No browser, screen-reader, narrow-layout or contrast check; image loading was never exercised against the real
+  route from the page. The review route tests seed the proposal row by hand because the harness reviewer does not
+  persist one, and an image under the artifacts root (a rendered PDF page) is not covered, only a picture's
+  managed copy. The non-image test also trips the hash check, so the type check is not isolated.
+- The ticket says the review list returns opaque image URLs and a decision batch id; the real API returns
+  `imageAvailable` and a separate image route, and publish takes only `expectedRevisionId`. The code follows the API.
+- `OcrOperation` does not return the snapshot hash, so approving external pages after a reload needs a fresh
+  preview and is refused if the settings changed; "cancellation requested" is not persisted; the import-level
+  `POST /api/jobs/{id}/approve-external` is not wired in the UI; previewing an unmeasured external profile gives
+  409 with no probe shortcut in the Collections panel.
+- `decidedUnpublishedCount` matches a decision by unit, ordinal and baseline, so a page proposed by an earlier
+  operation and auto-approved by a later one could be counted. The candidate and image GETs, like the other
+  review GETs, need a loopback Host but no bearer token. Candidate text is cut at 262,144 characters (the hash
+  still names the whole text).
+- The review decisions' `expectedRevisionId` comes from the document's active revision, not from the candidate
+  response; the two should be equal and are not compared.
+
+### Ticket 09 — what exists
+
+- **Backend:** `RevisionRestoreService` stages a new revision from a historical revision's approved page texts
+  (same unit ids, no OCR), re-embeds with the current embedder and publishes through the unchanged
+  `RevisionPublicationService`; admission is request-id idempotent and refuses a stale expected revision, a
+  document or collection under deletion, an active rescan, another restore in flight and a missing embedder;
+  a failed restore leaves the current revision active; startup recovery resolves a restore interrupted at any
+  step (migration 025 adds `revision_restores`). `GET …/ocr/revisions` now reports provenance, engine/model,
+  publication time and per-page change classes (manual versus automatic is inferred from recorded reviews and
+  `unknown` is reported as such); it is scoped to the collection.
+- **Web:** `OcrHistoryPanel` lists versions, states what is not recorded, and restores after a confirmation.
+
+### Ticket 09 — what was run
+
+- Backend: `RevisionRestoreTest` 19, `RevisionRestoreRecoveryTest` 6 (child JVMs killed at each publication
+  step), `RevisionHistoryDeletionTest` 2, `OcrRestoreRoutesTest` 12; the document, server, storage and jobs
+  packages together ran 507 tests with no failure as a non-root user. A mutation check (changing the restore
+  table's cascade) made both deletion tests fail.
+- Web: `OcrHistoryPanel` 38 tests, included in the 378 above.
+
+### Ticket 09 — not verified, and residuals
+
+- Every embedding in these tests is the deterministic test embedder; a restore with the real CoreML model has
+  not been run. A rescan admitted while a restore is mid-embedding, and a maintenance run starting between
+  embedding and publish, have no restore-specific test (publication's own tests cover the boundary).
+- A restore runs inline in the request and answers 202 with the finished operation, so a large document can make
+  the request slow; restored passages are re-embedded, not re-chunked, and a stored passage over 512 tokens
+  refuses the restore rather than truncating it.
+- The revision-aware source link and the labelling of unknown legacy evidence are not built (the source viewer
+  opens only from a search hit or citation with a unit id; revision-aware evidence is ticket 02b). The web panel
+  shows timestamps as raw ISO strings and has no `CollectionsPanel` test asserting that it is embedded.
+
+### Test infrastructure changed along the way
+
+- `./gradlew test -PskipFrontend` leaves out the compiled frontend and excludes tests tagged `frontend`; test
+  results are not cached; `OcrRoutesTest`'s review-profile test is tagged `external` because it needs an
+  installed Surya runtime. `scripts/maven-central-mirror.init.gradle` is an opt-in mirror for hosts that receive
+  HTTP 429 from Maven Central.
+- Fixed: a race in `SuryaOcr.exitDescription` (an exited worker could be reported as still running), a refusing
+  Surya stand-in that exited without reading its request, and two test races (`JobRunnerTest` cancellation,
+  `RevisionPublicationTest` deletion ordering; 0 failures in 12 runs each under CPU load after the fix).
+- Known environment failures when the suite runs as root in a container without an init process or a UTF-8
+  locale: tests that rely on read-only directories, `ExternalProcessTest` (zombie processes count as running)
+  and `OfficeExtractorsTest` (the POI language tag follows the default locale). The last full backend run
+  (1,362 tests) predates tickets 08 and 09; it had only those three failures. No full `./gradlew check` has
+  been run since.
+
+## Tickets 03b and 02b and the schema baseline — verification record
+
+Same environment and limits as the 08/09 record: Linux container, JDK 25, non-root with a UTF-8 locale unless
+stated; no macOS, real browser, live server, `externalTest`, `gpuIntegrationTest` or real CoreML run.
+
+### 03b
+
+- `SourceImageProvenance` refuses blank, NUL-containing, absolute (leading separator or drive letter) and
+  `.`/`..`/empty-segment references when it is constructed, so at every write. The schema enforces the same
+  shape and all-or-none root, path, hash and render version, with width and height as their own pair (an
+  unmeasured picture stays legal; requiring dimensions would be a product change). A row that something wrote
+  around the store with partial or malformed provenance fails loudly on read instead of reading as "no image".
+- Artifact lifetime: a check-and-improve render is retained as before; a fill-missing render is retained under
+  `pages/` when the attempt stages for review and recorded, otherwise it is deleted and the page records no
+  provenance (before, it recorded a dead `working/` path). A retained render lives as long as any revision row
+  names it, which in practice is until the document or collection is deleted: withdrawn candidates keep their
+  pages so that a stager may resume, so no per-candidate sweep was added. No test asserts that deleting a
+  document removes retained renders; that rests on deletion removing the document's artifact directory.
+- Run: the extract, ocr, document, storage, server and jobs packages, 952 tests, 3 failures, all environmental
+  (`ExternalProcessTest` twice, `OfficeExtractorsTest`).
+
+### Schema baseline
+
+- The 26 migrations were replaced by `src/main/resources/db/migration/001_baseline.sql` (`user_version` 1). Before
+  the old files were removed, a temporary test applied the old chain and the baseline to two fresh databases and
+  compared every schema object, column (order, type, default, nullability, key), foreign key, index and row, plus
+  the normalized CHECK text: no difference apart from the version number. A fresh archive has no collection.
+- There is no upgrade path and no handling of existing databases (an owner decision: the application is not in
+  production); future schema changes edit the baseline. Upgrade-path tests were removed; the behavioural schema
+  tests run against the baseline. `conversations.profile_endpoint_repaired`, which only the removed repair
+  migration wrote, was dropped with its read path; reading still strips a credential from a stored endpoint
+  that something wrote around the profile type.
+- Run: storage, document, jobs, server, ocr, extract, llm, ask, investigate, search and library packages,
+  1,211 tests, 3 failures, all environmental. `CollectionsBrowserAcceptanceTest` was edited (its legacy-Default
+  scenario now builds on the baseline) but only compiled: it needs `externalTest`.
+
+### 02b
+
+- `evidence_ledger.revision_id` (nullable, not a foreign key, like `citations.revision_id`) stores the revision
+  each Investigate evidence was taken from: a search hit's own revision, or the document's active revision for a
+  directly read unit, set to unknown if that revision or the unit's text changed during the read. The ledger
+  already had an `excerpt` column, contrary to the ticket. History reads both from the ledger and resolves the
+  document without joining live units, so a removed unit no longer drops its evidence.
+- The viewer (Ask and Investigate) opens the named revision; with no revision but a saved excerpt it shows the
+  excerpt labelled "Revision unknown" and does not fetch today's text; a citation with neither (a live, just
+  streamed one) still opens the live unit.
+- `RevisionPublicationTest` covers the pre-switch seal window with a counter-based hook: reads and search refuse
+  while sealed, and recovery publishes the candidate and unseals. It passed without a production change and has
+  no mutation proof. An index on `page_text_revisions (unit_id)` serves the unit-to-document fallback lookup.
+- Run: `RevisionPublication*`, storage, investigate, `Ask*`, `Investigation*` and `LlmStoreTest`, 272 tests, no
+  failure; web 16 files, 383 Vitest tests, `npm run check` 0 errors and 0 warnings, build succeeded. The backend
+  tests for the ledger were not seen failing before the change (they did not compile without the new fields).
+
+### Whole backend suite after 03b, the baseline and 02b
+
+`./gradlew test -PskipFrontend` (every backend test except those tagged `external`, `model`, `gpu` and
+`frontend`) as a non-root user: 112 classes, 1,431 tests, 3 failures, all environmental (`ExternalProcessTest`
+twice, `OfficeExtractorsTest`), 10 minutes 42 seconds with two parallel forks. This is the first whole-suite run
+since tickets 08 and 09. `./gradlew check`, `externalTest` and `gpuIntegrationTest` were not run.
+
+### Browser acceptance after 03b, the baseline and 02b
+
+`./gradlew externalTest --tests '*BrowserAcceptanceTest'` with the frontend built, in headless Chromium through
+the pinned Playwright, using `INFOSCRY_CHROMIUM` because the container's Chromium is another revision:
+`CollectionsBrowserAcceptanceTest` 8, `InvestigateBrowserAcceptanceTest` 7 and `SearchBrowserAcceptanceTest` 1,
+16 tests, no failure, 1 minute 53 seconds. These scenarios predate the OCR work: none of them opens the OCR
+profile, Scan again, page review or text history panels, so they show that tickets 08, 09 and 02b did not
+break Collections, Search and Investigate in a browser, not that the new panels work in one. Run as root in a
+Linux container. The other `external` tests (`TesseractRealToolTest`, `SuryaRealToolTest` and the Surya review
+profile test in `OcrRoutesTest`) were not run: neither tool is installed here.
+
 
 ## Ticket 07c verification record
 

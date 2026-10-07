@@ -28,6 +28,9 @@
     type RetryRejection,
     type UnitKindName,
   } from './api';
+  import CollectionOcrSettings from './CollectionOcrSettings.svelte';
+  import DocumentRescan from './DocumentRescan.svelte';
+  import OcrHistoryPanel from './OcrHistoryPanel.svelte';
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageLabel } from './importProgress';
@@ -1344,6 +1347,8 @@
               extraction for the documents it targets.
             </p>
           </form>
+
+          <CollectionOcrSettings collection={selected} onChanged={() => onCollectionsChanged()} />
         </section>
 
         <section class="collection-deletion" aria-label={`Delete ${selected.name}`}>
@@ -1607,6 +1612,20 @@
                 {#if retryMessage !== null}<p role="status">{retryMessage}</p>{/if}
                 {#if retryError !== null}<p role="alert">{retryError}</p>{/if}
               {/if}
+            {/if}
+            {#if detail !== null}
+              {#key `${selected.id}:${detail.document.id}`}
+                <DocumentRescan
+                  collectionId={selected.id}
+                  documentId={detail.document.id}
+                  documentName={detail.document.originalFilename}
+                />
+                <OcrHistoryPanel
+                  collectionId={selected.id}
+                  documentId={detail.document.id}
+                  documentName={detail.document.originalFilename}
+                />
+              {/key}
             {/if}
             <div class="actions">
               <button type="button" onclick={closeDetails}>Close details</button>

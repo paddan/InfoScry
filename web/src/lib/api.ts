@@ -9,10 +9,23 @@
 
 import type { InvestigationLimits } from './investigationLimits';
 
+/** Which reader a collection's OCR uses; `LLM` reads page images through an OCR profile. */
+export type OcrEngine = 'TESSERACT' | 'SURYA' | 'LLM';
+
+/** Whether a reading only fills pages with no text, or also checks and improves text that exists. */
+export type OcrImportMode = 'FILL_MISSING' | 'CHECK_AND_IMPROVE';
+
 export type Collection = {
   id: string;
   name: string;
   ocrLanguages: string;
+  ocrEngine: OcrEngine;
+  ocrImportMode: OcrImportMode;
+  /** Nulls are omitted from the wire: absent means no profile is selected. */
+  ocrTranscriptionProfileId?: string | null;
+  ocrReviewProfileId?: string | null;
+  /** Distinct pages one operation may send to an external provider before it needs an approval. */
+  ocrExternalPageLimit: number;
   createdAt: string;
   updatedAt: string;
   description?: string | null;
@@ -192,6 +205,58 @@ export type LlmProfile = {
 /** The fields a profile mutation accepts; the server owns id and capability measurements. */
 export type LlmProfileInput = Omit<LlmProfile, 'id' | 'keyAvailable' | 'toolCallingMeasured' | 'capabilityCheckedAt'>;
 
+/** Whether dispatching to an OCR profile sends page images off this machine. */
+export type OcrEndpointScope = 'LOCAL' | 'EXTERNAL';
+
+/**
+ * One OCR profile as the server shows it: the profile and the revision it currently reads through.
+ * Profiles are not tied to a role; a collection selects one for transcription and another for review.
+ * `keyAvailable` is presence of the named environment variable only; no key value is ever returned.
+ */
+export type OcrProfile = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  revisionId: string;
+  sequence: number;
+  provider: LlmProvider;
+  endpoint: string;
+  scope: OcrEndpointScope;
+  model: string;
+  contextWindow: number;
+  maxOutputTokens: number;
+  inputPricePerMillion: number;
+  outputPricePerMillion: number;
+  apiKeyEnvironmentVariable: string | null;
+  keyAvailable: boolean;
+  /** null: never measured; the measurement is a synthetic-image check, not a declaration. */
+  imageCapabilityMeasured: boolean | null;
+  imageCapabilityCheckedAt: string | null;
+};
+
+/** The complete next state of a profile; an edit is a new revision, so there is no sparse update. */
+export type OcrProfileInput = Pick<
+  OcrProfile,
+  | 'name'
+  | 'provider'
+  | 'endpoint'
+  | 'model'
+  | 'contextWindow'
+  | 'maxOutputTokens'
+  | 'inputPricePerMillion'
+  | 'outputPricePerMillion'
+  | 'enabled'
+  | 'apiKeyEnvironmentVariable'
+>;
+
+/** What one capability check measured, with the profile as it now stands. */
+export type OcrProfileProbe = {
+  profile: OcrProfile;
+  supported: boolean;
+  modelVersion: string | null;
+  errorCode: string | null;
+};
+
 export type LlmDefaults = { ASK: string | null; INVESTIGATE: string | null };
 
 export type LlmProfiles = { profiles: LlmProfile[]; defaults: LlmDefaults };
@@ -236,11 +301,14 @@ export const SOURCE_PAGE_CHARS = 16_384;
 /** A failure the server named. `code` is stable; `message` is written for the person reading it. */
 export class ApiError extends Error {
   readonly code: string;
+  /** The HTTP status the failure arrived with; null for a failure that never reached the server. */
+  readonly status: number | null;
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, status: number | null = null) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
+    this.status = status;
   }
 }
 
@@ -481,6 +549,44 @@ export async function updateLlmProfile(id: string, profile: LlmProfileInput): Pr
 
 export async function deleteLlmProfile(id: string): Promise<void> {
   await mutate(`/api/llm/profiles/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+export async function listOcrProfiles(): Promise<OcrProfile[]> {
+  const body = (await readJson(await fetch('/api/ocr/profiles'))) as { profiles: OcrProfile[] };
+  return body.profiles;
+}
+
+export async function createOcrProfile(profile: OcrProfileInput): Promise<OcrProfile> {
+  const body = (await mutate('/api/ocr/profiles', 'POST', profile)) as { profile: OcrProfile };
+  return body.profile;
+}
+
+/**
+ * Replaces a profile with its next state. `expectedRevisionId` is the revision the edit was made from: when the
+ * profile has moved on the server answers 409 `STALE_OCR_PROFILE_REVISION` and changes nothing. Creating never
+ * sends it.
+ */
+export async function updateOcrProfile(
+  id: string,
+  profile: OcrProfileInput,
+  expectedRevisionId?: string,
+): Promise<OcrProfile> {
+  const body = (await mutate(
+    `/api/ocr/profiles/${encodeURIComponent(id)}`,
+    'PATCH',
+    expectedRevisionId === undefined ? profile : { ...profile, expectedRevisionId },
+  )) as { profile: OcrProfile };
+  return body.profile;
+}
+
+/** Retire a profile from new selection; its revisions stay for jobs and history that reference them. */
+export async function disableOcrProfile(id: string): Promise<void> {
+  await mutate(`/api/ocr/profiles/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+/** Check image transport with the server's synthetic image; the route takes no body by design. */
+export async function probeOcrProfile(id: string): Promise<OcrProfileProbe> {
+  return (await mutate(`/api/ocr/profiles/${encodeURIComponent(id)}/probe`, 'POST')) as OcrProfileProbe;
 }
 
 /** Delete one stored conversation (a kept Ask answer or an Investigate conversation) from its collection. */
@@ -827,6 +933,32 @@ export async function updateCollectionOcrLanguages(collectionId: string, ocrLang
 }
 
 /**
+ * One collection OCR-settings edit. Every field is optional and absent keeps what the collection has; a
+ * profile id sent as an empty string clears that profile.
+ */
+export type CollectionOcrSettingsPatch = {
+  ocrLanguages?: string;
+  ocrEngine?: OcrEngine;
+  ocrImportMode?: OcrImportMode;
+  ocrTranscriptionProfileId?: string;
+  ocrReviewProfileId?: string;
+  ocrExternalPageLimit?: number;
+};
+
+/** Saves any of a collection's OCR settings. Nothing is reprocessed; the next import or rescan snapshots them. */
+export async function updateCollectionOcrSettings(
+  collectionId: string,
+  patch: CollectionOcrSettingsPatch,
+): Promise<Collection> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/ocr-languages`,
+    'PATCH',
+    patch,
+  )) as { collection: Collection };
+  return body.collection;
+}
+
+/**
  * One deletion operation as the server reports it.
  *
  * It carries no managed or trash path: the ids, the phase, whether the deletion has finished, and — when
@@ -994,7 +1126,444 @@ async function readJson(response: Response): Promise<unknown> {
   }
   if (!response.ok) {
     const error = (body as { error?: { code?: string; message?: string } } | null)?.error;
-    throw new ApiError(error?.code ?? `HTTP_${response.status}`, error?.message ?? response.statusText);
+    throw new ApiError(error?.code ?? `HTTP_${response.status}`, error?.message ?? response.statusText, response.status);
   }
   return body;
+}
+
+// ---- rescanning one document ----
+
+/** The settings one operation is bound to; nulls are omitted from the wire. */
+export type OcrSettingsSnapshot = {
+  engine: OcrEngine;
+  mode: OcrImportMode;
+  language: string;
+  extractorVersion: string;
+  transcriptionPromptVersion: number;
+  reviewPromptVersion: number;
+  policyVersion: number;
+  externalPageLimit: number;
+  transcriptionProfileRevisionId?: string | null;
+  reviewProfileRevisionId?: string | null;
+  toolVersion?: string | null;
+  modelVersion?: string | null;
+  renderDpi?: number | null;
+  autoValidationId?: string | null;
+  runtimeIdentity?: string | null;
+};
+
+/** Where one stage of a rescan would dispatch; `endpoint` is empty for a provider's own default. */
+export type OcrNamedDestination = {
+  role: string;
+  engine: OcrEngine;
+  scope: OcrEndpointScope;
+  endpoint: string;
+  model: string;
+  profileRevisionId?: string | null;
+};
+
+/** What a rescan would do. A missing price is not a zero price: see `costUnavailableReason`. */
+export type RescanPreview = {
+  previewId: string;
+  documentId: string;
+  baseRevisionId?: string | null;
+  managedHash: string;
+  snapshot: OcrSettingsSnapshot;
+  /** What an external approval binds to; the operation read does not return it. */
+  snapshotHash: string;
+  pageTotal?: number | null;
+  externalPageUpperBound?: number | null;
+  destinations: OcrNamedDestination[];
+  costEstimate?: { amountUsd: number; basis: string } | null;
+  costUnavailableReason?: string | null;
+  approvalRequired: boolean;
+  externalAllowance: number;
+  expiresAt: string;
+};
+
+/** What a preview may override; the collection's settings are used for everything absent. */
+export type RescanPreviewOverrides = {
+  engine?: OcrEngine;
+  importMode?: OcrImportMode;
+  transcriptionProfileId?: string;
+  reviewProfileId?: string;
+};
+
+export type OcrOperationStage =
+  | 'PREFLIGHT'
+  | 'AWAITING_APPROVAL'
+  | 'OCR'
+  | 'REVIEW'
+  | 'CHUNKING'
+  | 'EMBEDDING'
+  | 'INDEXING'
+  | 'COMPLETE'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'NEEDS_TOOL';
+
+/** `distinctPages` is the allowance's unit; `calls` is what was paid for (a page read then reviewed is two). */
+export type OcrExternalAccount = {
+  distinctPages: number;
+  calls: number;
+  allowance: number;
+  approvedDistinctPages?: number | null;
+};
+
+/** One durable rescan operation: no page text, no path, no provider message. */
+export type OcrOperation = {
+  operationId: string;
+  collectionId: string;
+  documentId: string;
+  jobId?: string | null;
+  baseRevisionId?: string | null;
+  candidateRevisionId?: string | null;
+  snapshot: OcrSettingsSnapshot;
+  stage: OcrOperationStage;
+  pageTotal?: number | null;
+  pagesCommitted: number;
+  pagesFailed: number;
+  external: OcrExternalAccount;
+  pendingReviewCount: number;
+  /** Pages already decided whose decisions are not published yet; absent from an older server, which means 0. */
+  decidedUnpublishedCount?: number;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  requestId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function ocrPath(collectionId: string, documentId: string): string {
+  return `/api/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/ocr`;
+}
+
+/** What a rescan would do, without reading a page or sending anything anywhere. */
+export async function previewRescan(
+  collectionId: string,
+  documentId: string,
+  overrides: RescanPreviewOverrides = {},
+): Promise<RescanPreview> {
+  return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', overrides)) as RescanPreview;
+}
+
+/** Admits a previewed rescan; the same request id with the same body answers with the same operation. */
+export async function admitRescan(
+  collectionId: string,
+  documentId: string,
+  previewId: string,
+  requestId: string,
+): Promise<OcrOperation> {
+  return (await mutate(`${ocrPath(collectionId, documentId)}/rescan`, 'POST', {
+    previewId,
+    requestId,
+  })) as OcrOperation;
+}
+
+export async function getRescanOperation(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+): Promise<OcrOperation> {
+  return (await readJson(
+    await fetch(`${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}`),
+  )) as OcrOperation;
+}
+
+/** One document's operations, newest first. */
+export async function listRescanOperations(collectionId: string, documentId: string): Promise<OcrOperation[]> {
+  const body = (await readJson(await fetch(`${ocrPath(collectionId, documentId)}/operations`))) as {
+    operations: OcrOperation[];
+  };
+  return body.operations;
+}
+
+/** Approves up to `maxDistinctPages` external pages for the snapshot the hash names, and resumes the operation. */
+export async function approveRescanExternal(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  expectedSnapshotHash: string,
+  maxDistinctPages: number,
+): Promise<OcrOperation> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/approve-external`,
+    'POST',
+    { expectedSnapshotHash, maxDistinctPages },
+  )) as OcrOperation;
+}
+
+/** A durable cancellation request; a running attempt ends the operation between pages. */
+export async function cancelRescan(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+): Promise<OcrOperation> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/cancel`,
+    'POST',
+  )) as OcrOperation;
+}
+
+/** Another attempt of an operation that stopped, with the same snapshot and counters. */
+export async function resumeRescan(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+): Promise<OcrOperation> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/resume`,
+    'POST',
+  )) as OcrOperation;
+}
+
+// ---- reviewing proposed pages ----
+
+/** One bounded reason behind a review, as the comparison recorded it; spans are character offsets. */
+export type ReviewReason = {
+  code: string;
+  origin: string;
+  baselineStart?: number | null;
+  baselineEnd?: number | null;
+  candidateStart?: number | null;
+  candidateEnd?: number | null;
+  explanation?: string | null;
+};
+
+/**
+ * One proposed page. The listing carries hashes and reasons; the candidate text and the page image are read
+ * from their own routes, one page at a time.
+ */
+export type PendingReview = {
+  unitId: string;
+  ordinal: number;
+  recommendation: string;
+  disposition: string;
+  baselineRevisionId?: string | null;
+  baselineTextHash?: string | null;
+  candidateHash: string;
+  outcomeCode?: string | null;
+  confidence?: number | null;
+  reasons: ReviewReason[];
+  reviewerRevisionId: string;
+  reviewPromptVersion: number;
+  policyVersion: number;
+  searchable: boolean;
+  /** A cheap hint that the image route can be asked; the route is the authority, so a failed load is handled. */
+  imageAvailable?: boolean;
+};
+
+/** The pending page's new reading, bounded; `candidateHash` names the WHOLE text even when it is cut. */
+export type PendingCandidate = {
+  operationId: string;
+  unitId: string;
+  ordinal: number;
+  candidateHash: string;
+  baselineRevisionId?: string | null;
+  text: string;
+  totalChars: number;
+  truncated: boolean;
+};
+
+/** Only pages still waiting for a decision are listed; decided ones are counted in `decidedUnpublishedCount`. */
+export type ReviewsResponse = {
+  reviews: PendingReview[];
+  total: number;
+  pendingPages: number;
+  pendingReviewCount: number;
+  /** Decided pages not yet published; absent from an older server, which means 0. */
+  decidedUnpublishedCount?: number;
+  externalAccounting: string;
+};
+
+export type ReviewChoice = 'KEEP' | 'USE_NEW' | 'EDIT';
+
+export type ReviewDecisionInput = {
+  unitId: string;
+  ordinal: number;
+  candidateHash: string;
+  choice: ReviewChoice;
+  /** The person's own text; sent only for EDIT. */
+  text?: string | null;
+};
+
+export type ReviewDecisionsBody = {
+  requestId: string;
+  expectedRevisionId: string;
+  decisions?: ReviewDecisionInput[];
+  /** One choice for the document's whole server-side pending set; KEEP or USE_NEW. */
+  documentWide?: ReviewChoice | null;
+};
+
+export type ReviewDecisionsResponse = {
+  operation: OcrOperation;
+  applied: { ordinal: number; choice: string; unitId: string }[];
+};
+
+export type PublicationDecisionResponse = {
+  operation: OcrOperation;
+  publicationId: string;
+  phase: string;
+  errorCode?: string | null;
+};
+
+/** What the rescan behind a revision was configured with; absent for an import or a restore. */
+export type RevisionReading = {
+  engine: string;
+  mode: string;
+  language: string;
+  toolVersion?: string | null;
+  modelVersion?: string | null;
+  transcriptionModel?: string | null;
+  reviewModel?: string | null;
+};
+
+/** How a revision's pages differ from its parent's; `automatic`/`manual` are inferred from recorded reviews. */
+export type PageChanges = {
+  unchanged: number;
+  added: number;
+  automatic: number;
+  manual: number;
+  unknown: number;
+  restored: number;
+  notPublished: number;
+};
+
+/** One published text version with the provenance the archive recorded; nothing here is guessed. */
+export type RevisionView = {
+  revisionId: string;
+  parentRevisionId?: string | null;
+  state: string;
+  provenance: string;
+  createdAt: string;
+  active: boolean;
+  pageCount: number;
+  publishedAt?: string | null;
+  restoredFromRevisionId?: string | null;
+  reading?: RevisionReading | null;
+  extractionMethods?: string[];
+  pageChanges?: PageChanges;
+};
+
+export type RevisionsResponse = {
+  revisions: RevisionView[];
+  total: number;
+  activeRevisionId?: string | null;
+};
+
+/** One bounded page of the operation's proposals that still wait for a decision. */
+export async function listPendingReviews(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  offset: number,
+  limit: number,
+): Promise<ReviewsResponse> {
+  const query = `operationId=${encodeURIComponent(operationId)}&offset=${offset}&limit=${limit}`;
+  return (await readJson(await fetch(`${ocrPath(collectionId, documentId)}/reviews?${query}`))) as ReviewsResponse;
+}
+
+function reviewPagePath(collectionId: string, documentId: string, unitId: string): string {
+  return `${ocrPath(collectionId, documentId)}/reviews/${encodeURIComponent(unitId)}`;
+}
+
+/** One pending page's new reading, capped by the server; the page must still be pending. */
+export async function readPendingCandidate(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  unitId: string,
+): Promise<PendingCandidate> {
+  const query = `operationId=${encodeURIComponent(operationId)}`;
+  return (await readJson(
+    await fetch(`${reviewPagePath(collectionId, documentId, unitId)}/candidate?${query}`),
+  )) as PendingCandidate;
+}
+
+/** The URL of one pending page's image, for an `<img>`; built from opaque ids only, never from a path. */
+export function pendingImageUrl(collectionId: string, documentId: string, operationId: string, unitId: string): string {
+  return `${reviewPagePath(collectionId, documentId, unitId)}/image?operationId=${encodeURIComponent(operationId)}`;
+}
+
+/** The document's published history; the review reads the active revision id from it, nothing else. */
+export async function listDocumentRevisions(
+  collectionId: string,
+  documentId: string,
+  offset = 0,
+  limit = 1,
+): Promise<RevisionsResponse> {
+  return (await readJson(
+    await fetch(`${ocrPath(collectionId, documentId)}/revisions?offset=${offset}&limit=${limit}`),
+  )) as RevisionsResponse;
+}
+
+/** One restore request as the server stores it; `phase` is STAGED, PUBLISHED or FAILED. */
+export type RestoreOperation = {
+  restoreId: string;
+  documentId: string;
+  requestId: string;
+  expectedRevisionId: string;
+  restoredFromRevisionId: string;
+  newRevisionId: string;
+  phase: string;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * Restores a historical revision as a new one. Nothing is rescanned. The same request id with the same body
+ * answers with the same operation; `expectedRevisionId` is the active revision the person was looking at.
+ */
+export async function restoreRevision(
+  collectionId: string,
+  documentId: string,
+  requestId: string,
+  expectedRevisionId: string,
+  restoreRevisionId: string,
+): Promise<RestoreOperation> {
+  return (await mutate(`${ocrPath(collectionId, documentId)}/restore`, 'POST', {
+    requestId,
+    expectedRevisionId,
+    restoreRevisionId,
+  })) as RestoreOperation;
+}
+
+export async function getRestoreOperation(
+  collectionId: string,
+  documentId: string,
+  restoreId: string,
+): Promise<RestoreOperation> {
+  return (await readJson(
+    await fetch(`${ocrPath(collectionId, documentId)}/restores/${encodeURIComponent(restoreId)}`),
+  )) as RestoreOperation;
+}
+
+/** Saves one decision batch; a 409 means the active revision or a page's candidate is no longer the one decided on. */
+export async function decideReviews(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  body: ReviewDecisionsBody,
+): Promise<ReviewDecisionsResponse> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/review-decisions?operationId=${encodeURIComponent(operationId)}`,
+    'POST',
+    body,
+  )) as ReviewDecisionsResponse;
+}
+
+/** Admits the publication of the decided pages; searchable text changes only when it reports PUBLISHED. */
+export async function publishReviewDecisions(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  expectedRevisionId: string,
+): Promise<PublicationDecisionResponse> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/publish-decisions?operationId=${encodeURIComponent(operationId)}`,
+    'POST',
+    { expectedRevisionId },
+  )) as PublicationDecisionResponse;
 }

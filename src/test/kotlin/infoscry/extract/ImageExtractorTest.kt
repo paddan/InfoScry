@@ -30,6 +30,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
@@ -143,6 +144,50 @@ class ImageExtractorTest {
         assertEquals(declared.height, source.height)
         assertEquals(PageImage.RENDER_VERSION, source.renderVersion)
     }
+
+    @Test
+    fun `a picture's recorded reference resolves inside the root it names and is never an absolute path`() =
+        runBlocking {
+            // An as-is picture names the directory holding the managed copy, a reduced copy names the
+            // document's artifact root; neither may be an absolute path a reviewer could see, and each has to
+            // resolve to a file that exists inside its own root after the attempt.
+            val managed = managedImage(OcrFixtureGenerator.IMAGE_NAME)
+            val probe = PermitProbeBoundary()
+            val asIs = units(collect(ImageExtractor(PageOcrEngines(listOf(OcrSpy()))), inputFor(managed, probe), probe))
+                .single().unit.sourceImage
+            val oversized = oversizedPaper("oversized.png")
+            val reducedProbe = PermitProbeBoundary()
+            val reduced = units(
+                collect(
+                    ImageExtractor(PageOcrEngines(listOf(OcrSpy()))),
+                    inputFor(oversized, reducedProbe),
+                    reducedProbe,
+                ),
+            ).single().unit.sourceImage
+
+            val asIsSource = assertNotNull(asIs)
+            val reducedSource = assertNotNull(reduced)
+            assertEquals(SourceImageRoot.MANAGED_COPY, asIsSource.root)
+            assertEquals(SourceImageRoot.ARTIFACTS, reducedSource.root)
+            listOf(
+                asIsSource to managed.toAbsolutePath().normalize().parent,
+                reducedSource to artifactRoot.toAbsolutePath().normalize(),
+            ).forEach { (source, root) ->
+                assertFalse(Path.of(source.relativePath).isAbsolute, "'${source.relativePath}' is an absolute path")
+                assertFalse(
+                    Path.of(source.relativePath).any { segment -> segment.toString() == ".." },
+                    "'${source.relativePath}' climbs out of its root",
+                )
+                val resolved = root.resolve(source.relativePath).normalize()
+                assertTrue(resolved.startsWith(root) && resolved != root, "$resolved is outside $root")
+                assertTrue(Files.isRegularFile(resolved), "$resolved is named by the reading and is not there")
+                assertEquals(sha256Of(resolved), source.sha256)
+            }
+            assertTrue(
+                !asIsSource.relativePath.contains('/'),
+                "the managed copy is named by its own name inside its directory, was ${asIsSource.relativePath}",
+            )
+        }
 
     @Test
     fun `a managed original and a bounded derived image resolve under their own document roots`() = runBlocking {

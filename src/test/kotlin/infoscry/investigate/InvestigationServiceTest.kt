@@ -73,9 +73,6 @@ class InvestigationServiceTest {
 
     private fun tools(collectionId: CollectionId) = InvestigationTools(
         collectionId, FakeSearch(collectionId), contentStore, documentStore,
-        // These scenarios pin conversation mechanics, not evidence provenance: no test here reads at a
-        // published revision, so nothing records one.
-        InvestigationRevisions { null },
     )
 
     private fun service(
@@ -361,6 +358,32 @@ class InvestigationServiceTest {
         assertEquals(CollectionId("collection"), appended.collectionId, "the locked collection must win over the request")
         assertEquals(locked, appended.profile, "the locked profile must win over the request")
         assertTrue(persistence.created.isEmpty(), "a continue must not create a new conversation")
+    }
+
+    @Test
+    fun `the ledger entry a turn writes carries the excerpt and the revision it was read from`() = runBlocking {
+        val collection = CollectionStore(database).create("Provenance collection").id
+        val documentId = insertDocument(collection)
+        val unit = addUnit(documentId, ordinal = 0, "unit-p", "The meeting began at noon.")
+        val provider = PerRoundProvider(
+            listOf(
+                listOf(LlmEvent.ToolCallReady(infoscry.llm.ToolCall("c1", "read_content_unit", """{"contentUnitId":"${unit.value}"}""")), LlmEvent.Completed),
+                listOf(LlmEvent.TextDelta("It began at noon [S1]."), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed),
+            ),
+        )
+        val persistence = FakePersistence()
+        val withRevision = InvestigationTools(
+            collection, FakeSearch(collection), contentStore, documentStore, activeRevisionId = { "revision-4" },
+        )
+
+        val events = service(withRevision, provider, persistence = persistence)
+            .investigate(InvestigateRequest(collection, "When?", profile())).toList()
+
+        val entry = persistence.appended.single().second.evidenceEntries.single()
+        assertEquals("The meeting began at noon.", entry.excerpt)
+        assertEquals("revision-4", entry.revisionId, "the ledger stores the revision with the evidence at write time")
+        val done = events.filterIsInstance<InvestigateEvent.Done>().single()
+        assertEquals(listOf<String?>("revision-4"), done.evidence.map { it.revisionId })
     }
 
     @Test
@@ -1130,7 +1153,7 @@ class InvestigationServiceTest {
             LlmEvent.Completed,
         )
         val sv = service(
-            tools = InvestigationTools(CollectionId("collection"), SlowSearch(delayMs = 1_000), contentStore, documentStore, InvestigationRevisions { null }),
+            tools = InvestigationTools(CollectionId("collection"), SlowSearch(delayMs = 1_000), contentStore, documentStore),
             provider = provider,
             turnTimeoutMs = 300,
         )

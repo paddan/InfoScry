@@ -494,6 +494,93 @@ class OcrEngineContractTest {
     }
 
     @Test
+    fun `a page staged from a fill-missing render names an image that is still there after the attempt`() {
+        val archive = Archive(directory)
+        try {
+            val document = archive.document()
+            val sink = CandidateRevisionSink(archive.revisions, document.id, "IMPORT")
+            val engine = RecordingEngine()
+            val input = inputFor(
+                fixture("mixed.pdf"),
+                attemptSettings(mode = OcrImportMode.FILL_MISSING),
+                documentId = document.id,
+                artifactRoot = archive.artifacts,
+                boundary = PermitProbeBoundary(),
+                retainsPageImages = true,
+            )
+
+            extractInto(PdfExtractor(PageOcrEngines(listOf(engine))), input, sink)
+
+            val staged = archive.revisions.pages(assertNotNull(sink.candidateRevisionId))
+            val read = staged.filter { page -> page.extractionMethod == ExtractionMethod.OCR }
+            assertTrue(read.isNotEmpty(), "no page was read from a render, so this proves nothing")
+            read.forEach { page ->
+                val source = assertNotNull(page.sourceImage, "a page read from a render names no image")
+                val artifact = archive.artifacts.resolve(source.relativePath)
+                assertTrue(Files.isRegularFile(artifact), "page ${page.ordinal} names a render that is gone")
+                assertEquals(sha256Of(artifact), source.sha256)
+            }
+            assertEquals(
+                0,
+                staged.count { page -> page.extractionMethod != ExtractionMethod.OCR && page.sourceImage != null },
+                "a page whose own text was read named an image",
+            )
+
+            // A withdrawn candidate keeps its rows, so what its rows name stays: nothing is swept out from
+            // under a page that can still be opened, and the document's deletion is what removes both.
+            sink.withdraw()
+            read.forEach { page ->
+                assertTrue(
+                    Files.isRegularFile(archive.artifacts.resolve(assertNotNull(page.sourceImage).relativePath)),
+                    "withdrawing the candidate removed an image its page still names",
+                )
+            }
+        } finally {
+            archive.close()
+        }
+    }
+
+    @Test
+    fun `a page staged from a render nobody asked to keep records no image rather than a dead one`() {
+        val archive = Archive(directory)
+        try {
+            val document = archive.document()
+            val sink = CandidateRevisionSink(archive.revisions, document.id, "IMPORT")
+            val input = inputFor(
+                fixture("mixed.pdf"),
+                attemptSettings(mode = OcrImportMode.FILL_MISSING),
+                documentId = document.id,
+                artifactRoot = archive.artifacts,
+                boundary = PermitProbeBoundary(),
+            )
+
+            extractInto(PdfExtractor(PageOcrEngines(listOf(RecordingEngine()))), input, sink)
+
+            val staged = archive.revisions.pages(assertNotNull(sink.candidateRevisionId))
+            assertTrue(
+                staged.any { page -> page.extractionMethod == ExtractionMethod.OCR },
+                "no page was read from a render, so this proves nothing",
+            )
+            staged.forEach { page ->
+                // The rule under test is the invariant itself: whatever a staged page names exists.
+                page.sourceImage?.let { source ->
+                    assertTrue(
+                        Files.isRegularFile(archive.artifacts.resolve(source.relativePath)),
+                        "page ${page.ordinal} names ${source.relativePath}, which is not there",
+                    )
+                }
+            }
+            assertEquals(
+                0,
+                staged.count { page -> page.sourceImage != null },
+                "a render that was deleted with the attempt was still recorded as a page's image",
+            )
+        } finally {
+            archive.close()
+        }
+    }
+
+    @Test
     fun `a staged revision page names the image the reading was made from`() {
         val archive = Archive(directory)
         try {
@@ -939,6 +1026,7 @@ class OcrEngineContractTest {
         documentId: DocumentId = DocumentId("doc-1"),
         artifactRoot: Path = directory.resolve("artifacts"),
         boundary: PermitProbeBoundary = PermitProbeBoundary(),
+        retainsPageImages: Boolean = false,
         committed: Set<String> = emptySet(),
     ): ExtractionInput = ExtractionInput(
         documentId = documentId,
@@ -948,6 +1036,7 @@ class OcrEngineContractTest {
         fingerprint = ExtractionFingerprint.of("b".repeat(64), settings),
         committedUnitKeys = committed,
         boundary = boundary,
+        retainsPageImages = retainsPageImages,
     )
 
     /** The settings one OCR attempt runs with: the mode, the engine and the resolution live in them. */

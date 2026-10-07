@@ -785,14 +785,14 @@ class OcrSettingsTest {
     )
 
     @Test
-    fun `a legacy archive reopens with its language and the OCR defaults`() {
-        val directory = Files.createTempDirectory("infoscry-ocr-legacy")
+    fun `a collection row written without OCR settings reads back with the defaults`() {
+        val directory = Files.createTempDirectory("infoscry-ocr-defaults")
         try {
             val now = "2026-09-30T07:00:00Z"
             val payload = """{"collectionId":"c1","sources":["/tmp/a.pdf"],"settings":{"ocrLanguages":"deu+eng"}}"""
-            Database(directory.resolve("state.db")).use { legacy ->
-                SchemaMigrator(legacy).migrate(upToVersion = 16)
-                legacy.transaction { connection ->
+            Database(directory.resolve("state.db")).use { database ->
+                SchemaMigrator(database).migrate()
+                database.transaction { connection ->
                     connection.createStatement().use { statement ->
                         statement.execute(
                             "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
@@ -804,12 +804,11 @@ class OcrSettingsTest {
                         )
                     }
                 }
-                SchemaMigrator(legacy).migrate()
             }
 
             Database(directory.resolve("state.db")).use { reopened ->
                 val collection = CollectionStore(reopened).get(CollectionId("c1"))!!
-                assertEquals("deu+eng", collection.ocrLanguages, "an existing row keeps the languages it had")
+                assertEquals("deu+eng", collection.ocrLanguages, "a row keeps the languages it was written with")
                 val settings = collection.ocrSettings()
                 assertEquals(OcrEngine.TESSERACT, settings.engine)
                 assertEquals(OcrImportMode.FILL_MISSING, settings.importMode)
@@ -817,7 +816,7 @@ class OcrSettingsTest {
                 assertNull(settings.reviewProfileId, "review is explicitly unavailable, never an implicit default")
                 assertEquals(0, settings.externalPageLimit)
 
-                // The queue is untouched, and its payload still reads with legacy semantics.
+                // A payload without OCR attempt state still reads with its own language.
                 val queued = JobStore(reopened).get(JobId("j1"))!!.payload!!
                 assertContains(queued, "deu+eng")
                 val decoded = ImportJobPayload.decode(queued)

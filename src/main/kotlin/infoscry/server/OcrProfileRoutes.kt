@@ -50,6 +50,12 @@ data class OcrProfileRequest(
     val enabled: Boolean,
     val endpoint: String = "",
     val apiKeyEnvironmentVariable: String? = null,
+    /**
+     * `PATCH` only: the revision the editor was looking at. When present and no longer the profile's current
+     * revision, the edit is refused with `STALE_OCR_PROFILE_REVISION` and nothing changes; absent keeps the
+     * unguarded behaviour. A `POST` carrying one is refused.
+     */
+    val expectedRevisionId: String? = null,
 )
 
 /**
@@ -123,6 +129,9 @@ fun Routing.configureOcrProfileRoutes(context: AppContext) {
         post {
             call.handle {
                 val request = call.receiveJsonRejectingUnknownFields<OcrProfileRequest>()
+                if (request.expectedRevisionId != null) {
+                    throw BadRequestException("a new profile has no revision to expect")
+                }
                 val created = context.mutations.withMutation {
                     context.collectionService.requireMutationsAllowed()
                     context.ocr.create(request.name, request.toDraft(), request.enabled)
@@ -134,9 +143,20 @@ fun Routing.configureOcrProfileRoutes(context: AppContext) {
             call.handle {
                 val profileId = call.ocrProfileId()
                 val request = call.receiveJsonRejectingUnknownFields<OcrProfileRequest>()
+                // Optional for compatibility (the CLI and older clients send none and keep last-writer-wins),
+                // but a present value must name a revision: a blank one is a malformed guard, not "no guard".
+                if (request.expectedRevisionId != null && request.expectedRevisionId.isBlank()) {
+                    throw BadRequestException("an expected revision id must not be blank")
+                }
                 val updated = context.mutations.withMutation {
                     context.collectionService.requireMutationsAllowed()
-                    context.ocr.update(profileId, request.name, request.toDraft(), request.enabled)
+                    context.ocr.update(
+                        profileId,
+                        request.name,
+                        request.toDraft(),
+                        request.enabled,
+                        request.expectedRevisionId,
+                    )
                 }
                 call.respondJson(HttpStatusCode.OK, OcrProfileResponse(updated.toApiView(context)))
             }

@@ -98,7 +98,7 @@ data class LlmProfile(
  * Refuses a profile no call may dispatch through.
  *
  * The flag is a decision rather than a label: a person switches a profile off when they retire it, and
- * migration 020 switches off every profile whose stored address had to be repaired, because that address was
+ * a profile whose stored address carried a credential is read back switched off, because that address was
  * rewritten and is not the one somebody wrote. Neither may be dispatched to until somebody reviews it, so
  * the rule lives here and a dispatch destination is resolved through it instead of being trusted to check
  * the flag for itself. The name — a label a person chose, never a credential — is what makes the refusal

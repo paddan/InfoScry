@@ -513,110 +513,52 @@ class PdfExtractorTest {
             parsed.unit.sourceImage,
             "a page whose own text layer was read named an image nobody rendered for it",
         )
-        // The page the tool read records no image reference: in fill-missing mode this render is working
-        // material — it is deleted the moment the reading commits and its directory when the attempt ends
-        // — so naming it would leave a durable page pointing at a file this attempt removed. The durable
-        // evidence of such a page is its word boxes above, which are still on disk; the pixels are gone by
-        // design. A page whose text came out of the container names nothing either.
+        // A fill-missing render that nothing asked to keep is working material, deleted with the attempt, so
+        // the page it was read from records no image at all rather than a dead one. A page whose text came
+        // out of the container names nothing either.
         assertNull(
             ocred.unit.sourceImage,
-            "fill-missing named the temporary render it deletes after committing: ${ocred.unit.sourceImage}",
-        )
-        // What the tool was handed is still observable through the seam: the engine saw a real page image
-        // at its own attempt path, and that path is inside the attempt's working directory.
-        val pageThree = spy.pages.single { image -> image.ordinal == 2 }
-        assertTrue(
-            pageThree.imagePath.startsWith(
-                input.artifactRoot.resolve(fingerprint(settings).value).resolve("working"),
-            ),
-            "the fill-missing render was not working material under the attempt's own directory: " +
-                pageThree.imagePath,
+            "a page read from a render that was deleted with the attempt names an image nobody can reopen",
         )
     }
 
-    // ---- Artifact lifetime: what a finished attempt may leave behind (ticket 03c) ---------------------
-
     @Test
-    fun `fill-missing finish leaves every recorded image reference resolvable and hash-matched`() {
-        // Ticket 03c, scenario 1: a finished fill-missing attempt may leave behind only references that
-        // open — the word boxes the engine wrote beside the attempt's artifacts, and any image a unit
-        // names — and the recorded hash has to be the file's own bytes. A reference whose file is gone is
-        // exactly the lifetime bug this pins, so the engine here writes real artifact bytes rather than
-        // naming a file that was never written.
+    fun `a fill-missing render a candidate will reference is kept and named where a reader resolves it`() {
+        val spy = OcrSpy()
         val settings = ExtractionSettings(ocrLanguages = "eng")
-        val attempt = fingerprint(settings).value
-        val spy = OcrSpy(
-            text = { page -> "läst sida $page" },
-            artifact = { page ->
-                val relative = "ocr/page-$page.tsv.gz"
-                val target = directory.resolve("artifacts").resolve(attempt).resolve(relative)
-                Files.createDirectories(target.parent)
-                val bytes = "boxes of page $page".toByteArray()
-                Files.write(target, bytes)
-                relative to sha256(bytes)
-            },
+        val input = inputFor(fixture(MIXED_NAME), probe(), settings = settings, retainsPageImages = true)
+
+        val units = units(collect(pdfExtractor(spy), input, probe()))
+        val ocred = units.single { pageOf(it.key) == 3 }
+        val parsed = units.single { pageOf(it.key) == 1 }
+
+        assertNull(parsed.unit.sourceImage, "a page whose own text layer was read named an image nobody rendered")
+        val rendered = assertNotNull(ocred.unit.sourceImage)
+        assertEquals(SourceImageRoot.ARTIFACTS, rendered.root)
+        assertEquals(
+            "${fingerprint(settings).value}/pages/page-000003.png",
+            rendered.relativePath,
+            "the reading does not name the retained page image where a reader can find it",
         )
-        val input = inputFor(fixture(MIXED_NAME), probe(), settings = settings)
-
-        val events = collect(pdfExtractor(spy), input, probe())
-
-        val recorded = units(events)
-        assertTrue(
-            recorded.any { unit -> unit.unit.artifactRelativePath != null },
-            "no unit recorded a word-box artifact, so this test proves nothing",
-        )
-        recorded.forEach { unit ->
-            unit.unit.artifactRelativePath?.let { relative ->
-                val file = input.artifactRoot.resolve(relative)
-                assertTrue(
-                    Files.isRegularFile(file),
-                    "a unit records a word-box artifact that is not there: $relative",
-                )
-                assertEquals(unit.unit.artifactSha256, sha256Of(file), "artifact hash mismatch for $relative")
-            }
-            unit.unit.sourceImage?.let { source ->
-                val root = when (source.root) {
-                    SourceImageRoot.ARTIFACTS -> input.artifactRoot
-                    SourceImageRoot.MANAGED_COPY -> directory.resolve("managed")
-                }
-                val file = root.resolve(source.relativePath)
-                assertTrue(
-                    Files.isRegularFile(file),
-                    "a unit records an image that is not there: ${source.root}/${source.relativePath}",
-                )
-                assertEquals(
-                    source.sha256,
-                    sha256Of(file),
-                    "the recorded image is no longer the bytes its hash describes: ${source.relativePath}",
-                )
-            }
-        }
-    }
-
-    @Test
-    fun `a fill-missing render is working material and records no durable reference`() {
-        // Ticket 03c, scenario 1 — the deliberate half: a fill-missing render is deleted when its reading
-        // commits (and its directory when the attempt ends), so it is working material by design and the
-        // unit may not name it. The durable evidence of such a page is the engine's word boxes; a durable
-        // page that named the deleted render would be a reference nothing could ever open again.
-        val spy = OcrSpy(text = { page -> "läst sida $page" })
-        val input = inputFor(fixture(MIXED_NAME), probe())
-
-        val events = collect(pdfExtractor(spy), input, probe())
-
-        val ocred = units(events).filter { unit -> unit.unit.method == ExtractionMethod.OCR }
-        assertTrue(ocred.isNotEmpty(), "no page was read by OCR, so this test proves nothing")
-        ocred.forEach { unit ->
-            assertNull(
-                unit.unit.sourceImage,
-                "fill-missing recorded a reference to its temporary render: ${unit.unit.sourceImage}",
+        // The reference has to resolve, after the attempt, to the very bytes the page was read from.
+        val file = input.artifactRoot.resolve(rendered.relativePath)
+        assertTrue(Files.isRegularFile(file), "the page names a render that did not outlive the attempt")
+        assertEquals(sha256Of(file), rendered.sha256)
+        val pageThree = spy.pages.single { image -> image.ordinal == 2 }
+        assertEquals(pageThree.width, rendered.width)
+        assertEquals(pageThree.height, rendered.height)
+        assertEquals(PageImage.RENDER_VERSION, rendered.renderVersion)
+        // Every page that names a render names one that exists: the invariant, for every page the attempt read.
+        units.mapNotNull { it.unit.sourceImage }.forEach { source ->
+            assertTrue(
+                Files.isRegularFile(input.artifactRoot.resolve(source.relativePath)),
+                "${source.relativePath} is named by a page and is not there",
             )
         }
-        val parsed = units(events).filter { unit -> unit.unit.method == ExtractionMethod.DIRECT_TEXT }
-        assertTrue(parsed.isNotEmpty(), "no directly-read page was committed, so this test proves nothing")
-        parsed.forEach { unit ->
-            assertNull(unit.unit.sourceImage, "a page nobody rendered named an image: ${unit.unit.sourceImage}")
-        }
+        assertFalse(
+            Files.exists(input.artifactRoot.resolve(fingerprint(settings).value).resolve("working")),
+            "a retained render was left in the attempt's working directory",
+        )
     }
 
     // ---- What the document says about itself before it is read ----------------------------------------
@@ -1182,6 +1124,7 @@ class PdfExtractorTest {
         boundary: UnitBoundary,
         committed: Set<String> = emptySet(),
         settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
+        retainsPageImages: Boolean = false,
     ): ExtractionInput = ExtractionInput(
         documentId = DocumentId("doc-1"),
         managedPath = source,
@@ -1190,6 +1133,7 @@ class PdfExtractorTest {
         fingerprint = ExtractionFingerprint.of("b".repeat(64), settings),
         committedUnitKeys = committed,
         boundary = boundary,
+        retainsPageImages = retainsPageImages,
     )
 
     /** Copies a committed fixture into the managed area a real extraction would read from. */

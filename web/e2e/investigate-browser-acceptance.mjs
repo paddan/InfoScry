@@ -239,7 +239,11 @@ if (!scenario) {
   process.exit(2);
 }
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: true,
+  // Opt-in: a machine whose installed Chromium is not the revision this Playwright pins can name it here.
+  executablePath: process.env.INFOSCRY_CHROMIUM || undefined,
+});
 try {
   await scenario(browser);
   console.log(`PASS ${SCENARIO}`);

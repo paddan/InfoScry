@@ -15,13 +15,13 @@ import infoscry.search.SearchOutcome
 import infoscry.search.SearchService
 import infoscry.search.SearchUnavailableException
 import infoscry.storage.ContentStore
-import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.ContentUnitSummary
 import infoscry.storage.DocumentStore
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.Transient
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -35,8 +35,11 @@ data class ToolEvidence(
     val locatorLabel: String,
     val text: String,
     val truncated: Boolean,
-    /** The revision this excerpt was read from, or `null` when nobody recorded one. */
-    val revisionId: String? = null,
+    /**
+     * The revision this text was read from, or null when that cannot be proven. Never serialized: the tool
+     * result the model receives is its own payload, and provenance belongs to the evidence ledger.
+     */
+    @Transient val revisionId: String? = null,
 )
 
 /** The outcome of one tool call: either the exact JSON [payloadJson] the model receives, or a typed failure. */
@@ -48,14 +51,6 @@ sealed interface ToolResult {
 /** The retrieval boundary the tools read through; kept separable so the tools are testable without an index. */
 fun interface InvestigationSearch {
     fun search(queryText: String, mode: SearchMode, filters: SearchFilters): SearchOutcome
-}
-
-/**
- * The revision boundary evidence is attributed to: which reading the live content a tool served belongs
- * to. Separable like [InvestigationSearch] so the tools stay testable without a revision store.
- */
-fun interface InvestigationRevisions {
-    fun activeRevisionId(documentId: DocumentId): String?
 }
 
 /**
@@ -73,24 +68,21 @@ class InvestigationTools(
     private val search: InvestigationSearch,
     private val content: ContentStore,
     private val documents: DocumentStore,
-    private val revisions: InvestigationRevisions,
     private val maxResultBytes: Int = DEFAULT_MAX_RESULT_BYTES,
+    /**
+     * The revision a document publishes now. A unit read directly is the live reading, so this is the
+     * revision its text belongs to; null for a document with no published revision.
+     */
+    private val activeRevisionId: (DocumentId) -> String? = { null },
 ) {
     constructor(
         collectionId: CollectionId,
         search: SearchService,
         content: ContentStore,
         documents: DocumentStore,
-        revisions: DocumentRevisionStore,
         maxResultBytes: Int = DEFAULT_MAX_RESULT_BYTES,
-    ) : this(
-        collectionId,
-        InvestigationSearch(search::search),
-        content,
-        documents,
-        InvestigationRevisions(revisions::activeRevisionId),
-        maxResultBytes,
-    )
+        activeRevisionId: (DocumentId) -> String? = { null },
+    ) : this(collectionId, InvestigationSearch(search::search), content, documents, maxResultBytes, activeRevisionId)
 
     init {
         require(maxResultBytes > 0) { "maxResultBytes must be positive, was $maxResultBytes" }
@@ -183,7 +175,8 @@ class InvestigationTools(
     private fun readUnit(argumentsJson: String, nextEvidenceId: () -> String): ToolResult = parse<UnitIdArg>(argumentsJson) { args ->
         val unit = scopedUnit(ContentUnitId(args.contentUnitId))
             ?: return ToolResult.Failure(CODE_NOT_FOUND, "the requested content unit is not readable here")
-        bounded(mutableListOf(itemOf(unit)), { 0 }, nextEvidenceId)
+        val revisionId = provableRevision(unit.documentId, listOf(unit))
+        bounded(mutableListOf(itemOf(unit, revisionId)), { 0 }, nextEvidenceId)
     }
 
     private fun readAdjacent(argumentsJson: String, nextEvidenceId: () -> String): ToolResult = parse<AdjacentArgs>(argumentsJson) { args ->
@@ -196,10 +189,11 @@ class InvestigationTools(
             .filter { it.ordinal < unit.ordinal } // the requested unit itself is not a neighbour
         val afterUnits = if (after == 0) emptyList() else content.listUnits(unit.documentId, afterOrdinal = unit.ordinal, limit = after)
 
+        val revisionId = provableRevision(unit.documentId, beforeUnits + unit + afterUnits)
         val items = ArrayList<EvidenceItem>(before + 1 + after)
-        beforeUnits.forEach { items += itemOf(it) }
-        items += itemOf(unit)
-        afterUnits.forEach { items += itemOf(it) }
+        beforeUnits.forEach { items += itemOf(it, revisionId) }
+        items += itemOf(unit, revisionId)
+        afterUnits.forEach { items += itemOf(it, revisionId) }
         val sides = FarthestNeighbour(beforeRemaining = items.size - 1 - afterUnits.size)
         bounded(items, { size -> sides.dropIndex(size) }, nextEvidenceId)
     }
@@ -213,14 +207,23 @@ class InvestigationTools(
         return if (document.collectionId == collectionId) unit else null
     }
 
-    private fun itemOf(unit: ContentUnit): EvidenceItem =
-        EvidenceItem(
-            unit.id.value,
-            unit.locator,
-            unit.locator.describe(),
-            escape(unit.extractedText),
-            revisionId = revisions.activeRevisionId(unit.documentId),
-        )
+    private fun itemOf(unit: ContentUnit, revisionId: String?): EvidenceItem =
+        EvidenceItem(unit.id.value, unit.locator, unit.locator.describe(), escape(unit.extractedText), revisionId = revisionId)
+
+    /**
+     * The revision [units] were read from, or null when that cannot be proven.
+     *
+     * A unit read directly is the live reading, so its revision is the one the document publishes. A
+     * publication can switch between the read and this lookup, which would label old text with the new
+     * revision; so the lookup runs before and after a re-read of the units, and any disagreement in the
+     * revision or in a unit's text leaves the evidence without one ("revision unknown") instead of with a
+     * revision that might not be its own.
+     */
+    private fun provableRevision(documentId: DocumentId, units: List<ContentUnit>): String? {
+        val before = activeRevisionId(documentId) ?: return null
+        val unchanged = units.all { content.readUnit(it.id)?.extractedText == it.extractedText }
+        return before.takeIf { unchanged && activeRevisionId(documentId) == before }
+    }
 
     private fun filtersOf(arg: SearchFiltersArg?): SearchFilters = SearchFilters(
         collectionId = collectionId,

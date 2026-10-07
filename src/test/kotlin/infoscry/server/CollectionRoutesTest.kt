@@ -1,5 +1,6 @@
 package infoscry.server
 
+import infoscry.FRONTEND_TAG
 import infoscry.collection.CollectionIndexRemover
 import infoscry.domain.CollectionId
 import infoscry.domain.Document
@@ -32,7 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import org.junit.jupiter.api.Assumptions.assumeFalse
+import org.junit.jupiter.api.Tag
 
 /**
  * The collection API over a real socket: what each request does, and which status a failure produces.
@@ -678,10 +679,8 @@ class CollectionRoutesTest {
     }
 
     @Test
+    @Tag(FRONTEND_TAG)
     fun `the compiled web application is served and client-side routes fall back to it`() = runBlocking {
-        // `-PskipFrontend` leaves the shell out of the resources, so there is nothing to serve; the build sets
-        // this property only then, which keeps a missing shell a failure everywhere else.
-        assumeFalse(System.getProperty("infoscry.skipFrontend") == "true", "built with -PskipFrontend")
         val root = harness.get("/")
 
         assertEquals(HttpStatusCode.OK, root.status, "the built frontend has to be packaged and served")

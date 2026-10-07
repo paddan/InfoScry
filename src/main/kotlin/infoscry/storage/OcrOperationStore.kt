@@ -718,6 +718,10 @@ class OcrOperationStore(private val database: Database) {
             pagesCommitted = getInt("pages_committed"),
             pagesFailed = getInt("pages_failed"),
             pendingReviewCount = getInt("pending_review_count"),
+            decidedUnpublishedCount = connection.countDecidedUnpublished(
+                candidateRevisionId = getString("candidate_revision_id"),
+                baseRevisionId = getString("base_revision_id"),
+            ),
             // The allowance and the two counters are read here rather than left at zero: an operation that
             // says how many pages it may still send is the answer every caller needs, and an operation that
             // reported "0 allowed" while an approval existed would refuse work it is allowed to do.
@@ -736,6 +740,30 @@ class OcrOperationStore(private val database: Database) {
             createdAt = getString("created_at"),
             updatedAt = getString("updated_at"),
         )
+    }
+
+    /**
+     * The pages of an unpublished candidate that a decision approved, counted from the rows that hold them.
+     *
+     * A page counts when its approval is `APPROVED` and a proposal (`PROPOSE`) was recorded for that page
+     * against this operation's baseline: pages the comparison approved on its own never had one, and pages
+     * still `PENDING` are the review backlog, not decisions. Once the candidate is `PUBLISHED` (or withdrawn)
+     * nothing is owed, so the count is zero by construction rather than by a counter somebody must reset.
+     */
+    private fun Connection.countDecidedUnpublished(candidateRevisionId: String?, baseRevisionId: String?): Int {
+        if (candidateRevisionId == null) return 0
+        return prepareStatement(
+            "SELECT COUNT(*) FROM page_text_revisions p " +
+                "JOIN document_revisions r ON r.id = p.revision_id " +
+                "WHERE p.revision_id = ? AND r.state = 'CANDIDATE' AND p.approval = 'APPROVED' " +
+                "AND EXISTS (SELECT 1 FROM page_reviews v WHERE v.document_id = r.document_id " +
+                "AND v.unit_id = p.unit_id AND v.ordinal = p.ordinal AND v.disposition = 'PROPOSE' " +
+                "AND v.baseline_revision_id IS ?)",
+        ).use { statement ->
+            statement.setString(1, candidateRevisionId)
+            statement.setString(2, baseRevisionId)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getInt(1) else 0 }
+        }
     }
 
     private fun ResultSet.toStoredPreview(previewId: String): StoredPreview = StoredPreview(

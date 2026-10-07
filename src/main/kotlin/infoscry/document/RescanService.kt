@@ -9,6 +9,7 @@ import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
+import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.domain.UnitKind
 import infoscry.extract.PageImageSupport
@@ -51,6 +52,7 @@ import infoscry.storage.RevisionPageText
 import infoscry.storage.StaleRescanPreviewException
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
@@ -673,12 +675,160 @@ class RescanService(
      * Read through the operation so the answer is scoped: another document's proposals are not this
      * operation's to show.
      */
-    fun pendingReviews(collectionId: CollectionId, documentId: DocumentId, operationId: String) =
-        requireScopedOperation(collectionId, documentId, operationId).let { operation ->
-            reviews.pending(documentId).filter { review ->
-                operation.candidateRevisionId != null && review.baselineRevisionId == operation.baseRevisionId
-            }
+    fun pendingReviews(collectionId: CollectionId, documentId: DocumentId, operationId: String): List<PendingReview> {
+        val operation = requireScopedOperation(collectionId, documentId, operationId)
+        val candidate = operation.candidateRevisionId ?: return emptyList()
+        val staged = revisions.pages(candidate).associateBy { it.ordinal }
+        return reviews.pending(documentId).mapNotNull { review ->
+            val page = staged[review.ordinal]?.takeIf { review.matchesPending(operation, it) } ?: return@mapNotNull null
+            PendingReview(review, imageAvailable = pageImageFile(collectionId, documentId, page, review) != null)
         }
+    }
+
+    /**
+     * One pending page's candidate text, for the person who has to decide about it.
+     *
+     * Only a page that has a proposal *and* has not been decided is readable here, and the text is the staged
+     * candidate's own — never the published reading, and never a page of another operation. A candidate past
+     * [MAX_CANDIDATE_CHARS] is cut and says so: the hash still names the whole text, so a decision is bound to
+     * what was staged rather than to the excerpt shown.
+     *
+     * @throws NoSuchElementException for anything that is not a pending page of this operation, in one answer
+     *   that names neither the page's text nor any stored identifier.
+     * @throws DocumentBeingDeletedException when the document is on its way out.
+     */
+    fun pendingCandidate(
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        operationId: String,
+        unitId: String,
+    ): PendingCandidateReading {
+        val (operation, page, _) = pendingPage(collectionId, documentId, operationId, unitId)
+        val text = page.extractedText
+        val bounded = boundedText(text)
+        return PendingCandidateReading(
+            unitId = page.unitId.value,
+            ordinal = page.ordinal,
+            candidateHash = page.textSha256 ?: readingTextHash(text),
+            baselineRevisionId = operation.baseRevisionId,
+            text = bounded,
+            totalChars = text.length,
+            truncated = bounded.length < text.length,
+        )
+    }
+
+    /**
+     * The image one pending page's reading was made from: the managed artifact the comparison used.
+     *
+     * The bytes are read once, from the artifact the page's own record names inside its own document's
+     * directory, and served only when their SHA-256 is both the one the page recorded and the one the review
+     * was made against and they are a raster this build allow-lists. Nothing here accepts or reveals a path.
+     *
+     * @throws NoSuchElementException for anything that is not a pending page with an intact image.
+     */
+    fun pendingImage(
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        operationId: String,
+        unitId: String,
+    ): PendingPageImage {
+        val (_, page, review) = pendingPage(collectionId, documentId, operationId, unitId)
+        val file = pageImageFile(collectionId, documentId, page, review) ?: throw noPendingPage()
+        val bytes = try {
+            Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(MAX_IMAGE_BYTES + 1) }
+        } catch (_: IOException) {
+            throw noPendingPage()
+        }
+        if (bytes.size > MAX_IMAGE_BYTES || sha256Hex(bytes) != review.imageSha256) throw noPendingPage()
+        val mediaType = rasterMediaTypeOf(bytes) ?: throw noPendingPage()
+        return PendingPageImage(bytes, mediaType)
+    }
+
+    private fun noPendingPage() = NoSuchElementException("no pending review exists for that page of this operation")
+
+    private fun pendingPage(
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        operationId: String,
+        unitId: String,
+    ): Triple<OcrOperation, RevisionPageText, PageReview> {
+        val operation = requireScopedOperation(collectionId, documentId, operationId)
+        requireNotBeingDeleted(documentId)
+        val candidate = operation.candidateRevisionId ?: throw noPendingPage()
+        val page = revisions.pageForUnit(candidate, ContentUnitId(unitId)) ?: throw noPendingPage()
+        val review = reviews.pending(documentId).firstOrNull { it.matchesPending(operation, page) }
+            ?: throw noPendingPage()
+        return Triple(operation, page, review)
+    }
+
+    /** Whether this proposal is the one waiting on this staged page: same page, same baseline, same text, undecided. */
+    private fun PageReview.matchesPending(operation: OcrOperation, page: RevisionPageText): Boolean =
+        page.approval == PageApproval.PENDING &&
+            unitId == page.unitId.value &&
+            ordinal == page.ordinal &&
+            baselineRevisionId == operation.baseRevisionId &&
+            candidateHash == (page.textSha256 ?: readingTextHash(page.extractedText))
+
+    /**
+     * The file a page's reading was made from, or null when it is not there, not a plain file inside its own
+     * document's directory, too large to serve, or not the image the review was made against.
+     *
+     * The hash is *not* computed here: this is the cheap answer a listing gives for every page, and
+     * [pendingImage] is what verifies the bytes it serves.
+     */
+    private fun pageImageFile(
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        page: RevisionPageText,
+        review: PageReview,
+    ): Path? {
+        val provenance = page.sourceImage ?: return null
+        if (provenance.sha256 != review.imageSha256) return null
+        val root = when (provenance.root) {
+            SourceImageRoot.ARTIFACTS -> paths.artifactsDir(collectionId, documentId)
+            SourceImageRoot.MANAGED_COPY -> paths.documentDir(collectionId, documentId)
+        }
+        return try {
+            val relative = Path.of(provenance.relativePath)
+            if (relative.isAbsolute) return null
+            val base = root.toAbsolutePath().normalize()
+            val file = base.resolve(relative).normalize()
+            if (file == base || !file.startsWith(base)) return null
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return null
+            // A directory of the path that is a link could still lead out: the real location has to be inside too.
+            if (!file.toRealPath().startsWith(base.toRealPath())) return null
+            file.takeIf { Files.size(it) <= MAX_IMAGE_BYTES }
+        } catch (_: IOException) {
+            null
+        } catch (_: java.nio.file.InvalidPathException) {
+            null
+        }
+    }
+
+    private fun boundedText(text: String): String {
+        if (text.length <= MAX_CANDIDATE_CHARS) return text
+        val end = if (Character.isHighSurrogate(text[MAX_CANDIDATE_CHARS - 1])) MAX_CANDIDATE_CHARS - 1 else MAX_CANDIDATE_CHARS
+        return text.substring(0, end)
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))
+
+    /** The allow-listed media type the leading bytes of an image name, or null when they are none of them. */
+    private fun rasterMediaTypeOf(bytes: ByteArray): String? {
+        fun startsWith(vararg prefix: Int) =
+            bytes.size >= prefix.size && prefix.indices.all { bytes[it].toInt() and 0xFF == prefix[it] }
+        return when {
+            startsWith(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) -> "image/png"
+            startsWith(0xFF, 0xD8, 0xFF) -> "image/jpeg"
+            startsWith('G'.code, 'I'.code, 'F'.code, '8'.code) -> "image/gif"
+            startsWith('B'.code, 'M'.code) -> "image/bmp"
+            startsWith('R'.code, 'I'.code, 'F'.code, 'F'.code) && bytes.size >= WEBP_HEADER_BYTES &&
+                String(bytes, 8, 4, Charsets.US_ASCII) == "WEBP" -> "image/webp"
+            startsWith('I'.code, 'I'.code, 0x2A, 0x00) || startsWith('M'.code, 'M'.code, 0x00, 0x2A) -> "image/tiff"
+            else -> null
+        }
+    }
 
     /**
      * Applies explicit page decisions to an operation's candidate and answers with the operation.
@@ -748,8 +898,14 @@ class RescanService(
             }
             applied += applyDecision(operation, candidate, page, decision)
         }
+        // The stored backlog is re-derived from the candidate's own pages, so deciding the last proposal
+        // reads as "nothing waits for a person" rather than leaving the count the staging pass wrote.
         return ReviewDecisionResult(
-            operation = operations.recordPageTotal(operation.operationId, operation.pageTotal),
+            operation = operations.recordProgress(
+                operation.operationId,
+                pageTotal = operation.pageTotal,
+                pendingReview = pendingOrdinals(candidate).size,
+            ),
             applied = applied,
         )
     }
@@ -778,6 +934,9 @@ class RescanService(
         )
         val intent = revisions.intent(publicationId)
         val published = intent?.phase == infoscry.storage.PublicationPhase.PUBLISHED
+        // A published candidate has no page left to decide; a refused one still has its backlog. Either way the
+        // stored count is what the candidate holds now, so a finished operation never keeps holding its document.
+        operations.recordProgress(operation.operationId, pendingReview = pendingOrdinals(candidate).size)
         val finished = if (published) {
             operations.finish(operation.operationId, OcrOperationStage.COMPLETE)
         } else {
@@ -1270,6 +1429,15 @@ class RescanService(
 
         const val HASH_BUFFER_BYTES: Int = 64 * 1024
 
+        /** The most characters of one candidate page a review read returns; the rest is reported, not sent. */
+        const val MAX_CANDIDATE_CHARS: Int = 262_144
+
+        /** The largest page image a review read serves. Rendered pages are bounded well below this. */
+        const val MAX_IMAGE_BYTES: Int = 32 * 1024 * 1024
+
+        /** Bytes needed to tell a WebP container (`RIFF`, a size, `WEBP`). */
+        const val WEBP_HEADER_BYTES: Int = 12
+
         const val CANCELLED_CODE: String = "RESCAN_CANCELLED"
 
         const val AWAITING_REVIEW_CODE: String = "AWAITING_REVIEW"
@@ -1308,6 +1476,24 @@ enum class ReviewChoice {
     USE_NEW,
     EDIT,
 }
+
+/** One proposal waiting for a person, and whether an intact-by-record image of its page can be requested. */
+data class PendingReview(val review: PageReview, val imageAvailable: Boolean)
+
+/** One pending page's candidate text as a review read returns it: bounded, with what is needed to spot staleness. */
+data class PendingCandidateReading(
+    val unitId: String,
+    val ordinal: Int,
+    /** The hash of the *whole* candidate text; a decision is guarded by it. */
+    val candidateHash: String,
+    val baselineRevisionId: String?,
+    val text: String,
+    val totalChars: Int,
+    val truncated: Boolean,
+)
+
+/** One page image's verified bytes and the allow-listed media type they were recognised as. */
+class PendingPageImage(val bytes: ByteArray, val mediaType: String)
 
 /** One decision as it was applied, so the caller can show what happened to each page. */
 data class AppliedDecision(val ordinal: Int, val choice: String, val unitId: String)

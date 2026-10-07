@@ -23,7 +23,7 @@ export JAVA_HOME="$(asdf where java)"
 | Path | Purpose |
 |---|---|
 | `src/main/kotlin/infoscry/` | Services, HTTP routes and CLI commands |
-| `src/main/resources/` | Database migrations, prompts and provider metadata |
+| `src/main/resources/` | Database baseline schema, prompts and provider metadata |
 | `src/test/kotlin/infoscry/` | JVM tests and acceptance harnesses |
 | `src/test/resources/fixtures/` | Redistributable test documents |
 | `web/src/` | Svelte reader and frontend tests |
@@ -58,8 +58,8 @@ providers, redistributable fixtures and temporary data directories. It excludes
 tests tagged `external`, `model` or `gpu`. Initial dependency installation can
 require network access; tests do not need a real LLM provider.
 
-For focused backend work, skipping the frontend build (no Node needed; the one test
-that fetches the compiled shell is skipped):
+For focused backend work, skipping the frontend build (no Node needed; tests
+tagged `frontend`, which read the compiled shell, are excluded):
 
 ```bash
 ./gradlew test -PskipFrontend --tests infoscry.server.DocumentRoutesTest
@@ -107,6 +107,8 @@ npx playwright install chromium
 ```
 
 This downloads Chromium for acceptance tests; it is not needed to run the app.
+A machine that already has a Chromium build of another revision can point the
+acceptance scripts at it instead, with `INFOSCRY_CHROMIUM=/path/to/chrome`.
 See [Playwright's browser setup](https://playwright.dev/docs/browsers).
 Return to the repository root before running the Gradle checks.
 
