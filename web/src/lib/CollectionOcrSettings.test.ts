@@ -395,14 +395,19 @@ describe('collection OCR settings', () => {
       expect(screen.getByRole('alert').textContent).toContain('does not accept image input');
     });
 
-    it('shows a stored copy of an LLM profile as that LLM profile instead of listing it twice', async () => {
+    it('shows a profile that is a copy of an LLM profile as that LLM profile, found by id and not by name', async () => {
       api.listOcrLlmCandidates.mockResolvedValue(LLM);
-      api.listOcrProfiles.mockResolvedValue([...PROFILES, profile('copy-1', 'Reader (from LLM profile)')]);
+      api.listOcrProfiles.mockResolvedValue([
+        ...PROFILES,
+        profile('copy-1', 'Renamed long ago', { sourceLlmProfileId: 'l-vision' }),
+        profile('same-name', 'Reader (from LLM profile)'),
+      ]);
       await renderSettings(collection('Nightfall', { ocrEngine: 'LLM', ocrTranscriptionProfileId: 'copy-1' }));
 
       expect(select('Transcription profile').value).toBe('llm:l-vision');
-      expect(optionTexts('Transcription profile', 'OCR profiles').some((text) => text.includes('from LLM profile')))
-        .toBe(false);
+      const ocrGroup = optionTexts('Transcription profile', 'OCR profiles');
+      expect(ocrGroup.some((text) => text.includes('Renamed long ago'))).toBe(false);
+      expect(ocrGroup.some((text) => text.includes('Reader (from LLM profile)'))).toBe(true);
     });
 
     it('explains an empty list and links to Admin OCR profiles instead of showing an unexplained None', async () => {

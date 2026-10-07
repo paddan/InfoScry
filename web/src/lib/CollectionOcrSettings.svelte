@@ -15,7 +15,6 @@
     ENGINE_LABELS,
     IMPORT_MODE_LABELS,
     llmCandidateLabel,
-    llmCopyName,
     ocrProfileLabel,
   } from './ocrRescan';
 
@@ -68,7 +67,7 @@
   $: copyIds = new Map(
     llmOffered.flatMap((candidate) =>
       profiles
-        .filter((profile) => profile.name.toLowerCase() === llmCopyName(candidate.name).toLowerCase())
+        .filter((profile) => profile.sourceLlmProfileId === candidate.id)
         .map((profile) => [profile.id, candidate.id] as const)),
   );
   $: selectable = profiles.filter((profile) => profile.enabled && !copyIds.has(profile.id));

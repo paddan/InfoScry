@@ -232,6 +232,8 @@ export type OcrProfile = {
   /** null: never measured; the measurement is a synthetic-image check, not a declaration. */
   imageCapabilityMeasured: boolean | null;
   imageCapabilityCheckedAt: string | null;
+  /** The LLM profile this profile was copied from; absent or null for an OCR profile made directly. */
+  sourceLlmProfileId?: string | null;
 };
 
 /** The complete next state of a profile; an edit is a new revision, so there is no sparse update. */

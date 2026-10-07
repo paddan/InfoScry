@@ -64,14 +64,6 @@ export function ocrProfileLabel(profile: OcrProfile): string {
 }
 
 /**
- * The name the server gives the OCR profile it copies an LLM profile into. It is how a stored selection that
- * is such a copy is recognised as the LLM profile it came from, so it must match the server's suffix.
- */
-export function llmCopyName(llmProfileName: string): string {
-  return `${llmProfileName} (from LLM profile)`;
-}
-
-/**
  * One selectable LLM profile in a reader's words: where it sends pages, its key, and what the catalog states
  * about image input. An unstated model is called unknown, never image capable.
  */

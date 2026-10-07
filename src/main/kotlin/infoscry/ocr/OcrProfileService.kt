@@ -126,10 +126,12 @@ class OcrProfileService(
             outputPricePerMillion = llm.outputPricePerMillion,
             apiKeyEnvironmentVariable = llm.apiKeyEnvironmentVariable,
         )
-        val existing = profiles.list().firstOrNull { it.name.equals(name, ignoreCase = true) }
-            ?: return LlmProfileCopy(profiles.create(name, draft, enabled = true), created = true)
+        // The copy is found by the LLM profile's id, never by name: a rename keeps the link, and an unrelated OCR
+        // profile that happens to carry the derived name is not adopted (creating the copy then fails on the name).
+        val existing = profiles.findBySourceLlmProfile(llm.id)
+            ?: return LlmProfileCopy(profiles.create(name, draft, enabled = true, sourceLlmProfileId = llm.id), created = true)
         val current = existing.revision
-        val unchanged = existing.enabled &&
+        val unchanged = existing.enabled && existing.name == name &&
             current.provider == draft.provider && current.model == draft.model &&
             current.contextWindow == draft.contextWindow && current.maxOutputTokens == draft.maxOutputTokens &&
             current.endpoint == draft.endpoint &&

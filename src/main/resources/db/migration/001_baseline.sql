@@ -581,11 +581,18 @@ CREATE TABLE ocr_profiles (
     current_revision_id TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
     updated_at          TEXT    NOT NULL,
+    -- The LLM profile this profile was copied from, when it was offered for OCR. Deliberately not a foreign
+    -- key: deleting the LLM profile leaves the copy (and every attempt that pinned it) and a dangling id.
+    source_llm_profile_id TEXT,
     FOREIGN KEY (current_revision_id) REFERENCES ocr_profile_revisions (revision_id)
         DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE INDEX ocr_profile_revisions_profile ON ocr_profile_revisions (profile_id);
+
+-- At most one copy per LLM profile.
+CREATE UNIQUE INDEX ocr_profiles_source_llm ON ocr_profiles (source_llm_profile_id)
+    WHERE source_llm_profile_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------------------------
 -- Document revisions and recoverable publication

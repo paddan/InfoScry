@@ -41,9 +41,13 @@ need LLM profiles to become revisioned (they are edited in place) plus a second 
 snapshot. Choosing the same LLM profile again reuses its copy and adds a revision only when the LLM profile changed
 since; an admitted attempt keeps the revision it pinned either way. The copy starts unmeasured and the existing
 image check runs on it, as for any OCR profile. A model the curated catalog states is text-only is refused with 409
-`LLM_PROFILE_TEXT_ONLY`; a model it does not state is allowed and labelled "image support unknown". The derived name is
-reserved by convention (there is no link column), so an unrelated OCR profile with exactly that name would be treated
-as the copy.
+`LLM_PROFILE_TEXT_ONLY`; a model it does not state is allowed and labelled "image support unknown". The copy is
+linked to its LLM profile by `ocr_profiles.source_llm_profile_id` (a unique partial index allows at most one copy per
+LLM profile), and reuse, refresh and the collection selects' remapping use that id, never the name. Renaming the LLM
+profile keeps the link and renames the copy on the next choice; an unrelated OCR profile that happens to carry the
+derived name is not adopted (creating the copy then fails with a 409 name conflict and the unrelated profile is left
+alone). The column is deliberately not a foreign key: if the LLM profile is deleted, the copy stays selectable, the id
+dangles, and admitted attempts are unaffected because they pin the copy's revision.
 
 Image support is stated by the provider's own listing (`architecture.input_modalities` or `architecture.modality`)
 when it has one, and otherwise by `imageInput` in `src/main/resources/llm/providers.json` (true for the curated OpenAI

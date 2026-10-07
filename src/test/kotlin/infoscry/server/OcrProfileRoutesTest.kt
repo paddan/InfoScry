@@ -702,6 +702,61 @@ class OcrProfileRoutesTest {
     }
 
     @Test
+    fun `renaming the LLM profile keeps its copy linked by id and follows the new name`() = runBlocking {
+        val llm = llmProfile("Reader", "gpt-4o")
+        val copy = fromLlm(llm.id)
+        assertContains(copy.bodyAsText(), "\"sourceLlmProfileId\":\"${llm.id}\"")
+
+        harness.context.llm.update(llm.id, llm.copy(name = "Page reader"))
+        val again = fromLlm(llm.id)
+
+        assertEquals(HttpStatusCode.OK, again.status, again.bodyAsText())
+        assertEquals(profileIdOf(copy), profileIdOf(again), "a rename keeps the link, so no second copy appears")
+        assertContains(again.bodyAsText(), "\"name\":\"Page reader (from LLM profile)\"")
+        assertEquals(1, profileCount())
+    }
+
+    @Test
+    fun `an unrelated OCR profile with the copy's name is never adopted as the copy`() = runBlocking {
+        val unrelated = create(profileBody.replace("Local vision", "Reader (from LLM profile)"))
+        val unrelatedId = profileIdOf(unrelated)
+        val unrelatedRevision = revisionIdOf(unrelated)
+        val llm = llmProfile("Reader", "gpt-4o")
+
+        val response = fromLlm(llm.id)
+
+        assertEquals(HttpStatusCode.Conflict, response.status, response.bodyAsText())
+        val after = harness.context.ocr.require(unrelatedId)
+        assertEquals(unrelatedRevision, after.revision.revisionId, "the unrelated profile gained no revision")
+        assertEquals("vision-model", after.revision.model)
+        assertEquals(null, after.sourceLlmProfileId, "and was not linked to the LLM profile")
+        assertEquals(1, profileCount())
+    }
+
+    @Test
+    fun `deleting the LLM profile leaves its copy and an admitted attempt untouched`() = runBlocking {
+        val llm = llmProfile("Reader", "gpt-4o")
+        val profileId = profileIdOf(fromLlm(llm.id))
+        val settings = infoscry.ocr.CollectionOcrSettings(
+            language = "eng",
+            engine = infoscry.ocr.OcrEngine.LLM,
+            transcriptionProfileId = profileId,
+        )
+        val admitted = harness.context.ocr.snapshotFor(settings, extractorVersion = "test")
+
+        llmProfile("Other", "gpt-4o-mini") // the last LLM profile cannot be deleted
+        harness.context.llm.deleteById(llm.id)
+
+        val kept = harness.context.ocr.require(profileId)
+        assertTrue(kept.enabled, "the copy stays selectable")
+        assertEquals(llm.id, kept.sourceLlmProfileId, "the link is left dangling, not rewritten")
+        assertEquals(
+            admitted.transcriptionProfileRevisionId,
+            harness.context.ocr.snapshotFor(settings, extractorVersion = "test").transcriptionProfileRevisionId,
+        )
+    }
+
+    @Test
     fun `editing the LLM profile after admission leaves the admitted attempt on the revision it pinned`() = runBlocking {
         val llm = llmProfile("Reader", "gpt-4o")
         val copy = fromLlm(llm.id)

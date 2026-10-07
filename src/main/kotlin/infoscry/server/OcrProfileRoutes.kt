@@ -87,6 +87,8 @@ data class OcrProfileApiView(
     val keyAvailable: Boolean,
     val imageCapabilityMeasured: Boolean?,
     val imageCapabilityCheckedAt: String?,
+    /** The LLM profile this profile was copied from; absent for an OCR profile made directly. */
+    val sourceLlmProfileId: String? = null,
 )
 
 @Serializable
@@ -357,4 +359,5 @@ private fun OcrProfile.toApiView(context: AppContext): OcrProfileApiView = OcrPr
     keyAvailable = context.ocr.keyAvailable(revision),
     imageCapabilityMeasured = revision.imageCapabilityMeasured,
     imageCapabilityCheckedAt = revision.imageCapabilityCheckedAt,
+    sourceLlmProfileId = sourceLlmProfileId,
 )

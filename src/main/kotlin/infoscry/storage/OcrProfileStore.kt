@@ -42,6 +42,14 @@ class OcrProfileStore(private val database: Database) {
         }
     }
 
+    /** The copy of one LLM profile, or null when that LLM profile was never offered for OCR. */
+    fun findBySourceLlmProfile(llmProfileId: String): OcrProfile? = database.read { connection ->
+        connection.prepareStatement("$SELECT_PROFILE WHERE p.source_llm_profile_id = ?").use { statement ->
+            statement.setString(1, llmProfileId)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.toProfile() else null }
+        }
+    }
+
     /** One profile by its identifier, or null when no such profile exists. */
     fun findById(id: String): OcrProfile? = database.read { connection ->
         selectProfile(connection, id)
@@ -79,7 +87,12 @@ class OcrProfileStore(private val database: Database) {
      * inserted first with the identifier of the revision this call is about to write, and the deferred
      * foreign key is checked when the transaction commits. Both rows therefore exist or neither does.
      */
-    fun create(name: String, draft: OcrProfileRevisionDraft, enabled: Boolean): OcrProfile {
+    fun create(
+        name: String,
+        draft: OcrProfileRevisionDraft,
+        enabled: Boolean,
+        sourceLlmProfileId: String? = null,
+    ): OcrProfile {
         val trimmedName = requireName(name)
         val profileId = UUID.randomUUID().toString()
         val revisionId = UUID.randomUUID().toString()
@@ -88,7 +101,7 @@ class OcrProfileStore(private val database: Database) {
             try {
                 connection.prepareStatement(
                     "INSERT INTO ocr_profiles (id, name, enabled, current_revision_id, created_at, " +
-                        "updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        "updated_at, source_llm_profile_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 ).use { statement ->
                     statement.setString(1, profileId)
                     statement.setString(2, trimmedName)
@@ -96,6 +109,7 @@ class OcrProfileStore(private val database: Database) {
                     statement.setString(4, revisionId)
                     statement.setString(5, now)
                     statement.setString(6, now)
+                    statement.setString(7, sourceLlmProfileId)
                     statement.executeUpdate()
                 }
             } catch (failure: SQLException) {
@@ -261,6 +275,7 @@ class OcrProfileStore(private val database: Database) {
         // before the endpoint rule existed cannot fail the whole listing on the way out.
         enabled = getInt("enabled") != 0 && !credentialInEndpoint(),
         revision = toRevision(),
+        sourceLlmProfileId = getString("source_llm_profile_id"),
     )
 
     private fun ResultSet.toRevision(): OcrProfileRevision {
@@ -316,7 +331,7 @@ class OcrProfileStore(private val database: Database) {
         const val SELECT_REVISION = "SELECT $REVISION_COLUMNS FROM ocr_profile_revisions"
 
         const val SELECT_PROFILE =
-            "SELECT p.id, p.name, p.enabled, r.revision_id, r.profile_id, r.sequence, r.provider, " +
+            "SELECT p.id, p.name, p.enabled, p.source_llm_profile_id, r.revision_id, r.profile_id, r.sequence, r.provider, " +
                 "r.endpoint, r.model, r.api_key_environment_variable, r.context_window, " +
                 "r.max_output_tokens, r.input_price_per_million, r.output_price_per_million, " +
                 "r.image_capability_measured, r.image_capability_checked_at, r.created_at " +
