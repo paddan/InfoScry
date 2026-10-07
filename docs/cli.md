@@ -138,6 +138,10 @@ infoscry llm set-default --ask my-profile
 infoscry llm set-default --investigate my-profile
 ```
 
+`test <name>` records whether the profile supports tool calling, which Investigate
+requires. The Admin → LLM profiles "Check tool calling" action runs the same check through the
+same service. A switched-off profile is refused before any request is sent.
+
 Subcommands: `list`, `add`, `set-default`, `test <name>`. `add` options:
 `--name`, `--provider` (`openai-compatible` or `anthropic`), `--model`,
 `--endpoint`, `--api-key-env`, `--context-window` (default `128000`),

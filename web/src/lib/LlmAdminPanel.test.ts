@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import LlmAdminPanel from './LlmAdminPanel.svelte';
-import type { LlmCatalog, LlmCatalogModel, LlmPreset, LlmProfile } from './api';
+import type { LlmCatalog, LlmCatalogModel, LlmPreset, LlmProfile, LlmProfileProbe } from './api';
 
 const api = vi.hoisted(() => ({
   listLlmProfiles: vi.fn(),
@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   updateLlmProfile: vi.fn(),
   deleteLlmProfile: vi.fn(),
   setLlmDefault: vi.fn(),
+  probeLlmProfile: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -22,6 +23,7 @@ vi.mock('./api', () => ({
   updateLlmProfile: api.updateLlmProfile,
   deleteLlmProfile: api.deleteLlmProfile,
   setLlmDefault: api.setLlmDefault,
+  probeLlmProfile: api.probeLlmProfile,
 }));
 
 function preset(id: string, label: string, over: Partial<LlmPreset> = {}): LlmPreset {
@@ -410,5 +412,62 @@ describe('LLM admin panel', () => {
     await act(async () => {});
 
     expect((screen.getByRole('button', { name: /Fetch/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('shows the measured tool-calling state of the selected profile', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [
+        profile('p1', 'fast', { toolCallingMeasured: false, capabilityCheckedAt: '2026-10-07T10:00:00Z' }),
+        profile('p2', 'slow'),
+      ],
+      defaults: { ASK: null, INVESTIGATE: null },
+    });
+
+    render(LlmAdminPanel);
+
+    expect(await screen.findByText('Tool calling: unsupported (measured 2026-10-07T10:00:00Z)')).toBeTruthy();
+    await fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'p2' } });
+    expect(screen.getByText('Tool calling: not measured')).toBeTruthy();
+  });
+
+  it('measures tool calling once however often Check tool calling is clicked, and shows the result', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: 'p1' },
+    });
+    const measured = profile('p1', 'fast', { toolCallingMeasured: true, capabilityCheckedAt: '2026-10-07T11:00:00Z' });
+    let finish!: (value: LlmProfileProbe) => void;
+    api.probeLlmProfile.mockImplementation(() => new Promise<LlmProfileProbe>((resolve) => { finish = resolve; }));
+
+    render(LlmAdminPanel);
+    const check = await screen.findByRole('button', { name: 'Check tool calling' });
+    await fireEvent.click(check);
+    await fireEvent.click(check);
+
+    expect(api.probeLlmProfile).toHaveBeenCalledTimes(1);
+    expect(api.probeLlmProfile).toHaveBeenCalledWith('p1');
+    expect((screen.getByRole('button', { name: 'Checking…' }) as HTMLButtonElement).disabled).toBe(true);
+
+    api.listLlmProfiles.mockResolvedValue({ profiles: [measured], defaults: { ASK: 'p1', INVESTIGATE: 'p1' } });
+    await act(async () => {
+      finish({ profile: measured, textRequestSupported: true, toolCallingSupported: true });
+    });
+
+    expect(await screen.findByText('Tool calling supported: this profile can be used for Investigate.')).toBeTruthy();
+    expect(screen.getByText('Tool calling: supported (measured 2026-10-07T11:00:00Z)')).toBeTruthy();
+  });
+
+  it('reports a refused check with the server message and does not claim a measurement', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast', { enabled: false })],
+      defaults: { ASK: null, INVESTIGATE: null },
+    });
+    api.probeLlmProfile.mockRejectedValue(new Error("the LLM profile 'fast' is disabled; enable it before checking tool calling"));
+
+    render(LlmAdminPanel);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Check tool calling' }));
+
+    expect(await screen.findByText("the LLM profile 'fast' is disabled; enable it before checking tool calling")).toBeTruthy();
+    expect(screen.getByText('Tool calling: not measured')).toBeTruthy();
   });
 });

@@ -7,6 +7,7 @@
     fetchLlmCatalog,
     listLlmPresets,
     listLlmProfiles,
+    probeLlmProfile,
     setLlmDefault,
     updateLlmProfile,
     type LlmCatalogModel,
@@ -15,8 +16,11 @@
     type LlmProfile,
     type LlmProfileInput,
   } from './api';
+  import { toolCallingState } from './toolCalling';
 
   let profiles: LlmProfile[] = [];
+  /** A tool-calling check is in flight; a second click while it runs is ignored, so one check is sent. */
+  let probing = false;
   let defaults: LlmDefaults = { ASK: null, INVESTIGATE: null };
   let selectedId = '';
   let draft: LlmProfileInput = emptyDraft();
@@ -233,6 +237,35 @@
     }
   }
 
+  /**
+   * Measures the saved profile (the draft is not sent). The server records the result, so the list is reloaded
+   * and the state line shows what was stored, not what was just quoted.
+   */
+  async function checkToolCalling(): Promise<void> {
+    if (probing || creating || selectedProfile === null) return;
+    probing = true;
+    error = null;
+    flash = null;
+    try {
+      const result = await probeLlmProfile(selectedId);
+      await reload();
+      flash = result.toolCallingSupported
+        ? 'Tool calling supported: this profile can be used for Investigate.'
+        : 'Tool calling unsupported: Investigate cannot use this profile with this model.';
+    } catch (failure) {
+      error = describe(failure);
+    } finally {
+      probing = false;
+    }
+  }
+
+  function toolCallingText(profile: LlmProfile): string {
+    const state = toolCallingState(profile);
+    if (state === 'not-measured') return 'Tool calling: not measured';
+    const label = state === 'supported' ? 'supported' : 'unsupported';
+    return `Tool calling: ${label} (measured ${profile.capabilityCheckedAt ?? 'unknown time'})`;
+  }
+
   async function remove(): Promise<void> {
     if (profiles.length <= 1 || saving) return;
     saving = true;
@@ -398,6 +431,20 @@
       <div class="field check">
         <label><input type="checkbox" bind:checked={draft.enabled} /> Enabled</label>
       </div>
+
+      {#if !creating && selectedProfile !== null}
+        <div class="field tool-calling">
+          <p class="key-state" role="status">{toolCallingText(selectedProfile)}</p>
+          <div class="inline">
+            <button type="button" onclick={checkToolCalling} disabled={probing}>
+              {probing ? 'Checking…' : 'Check tool calling'}
+            </button>
+          </div>
+          <p class="hint">
+            Sends two short requests to the saved profile, not to the values above. Investigate needs a supported profile.
+          </p>
+        </div>
+      {/if}
 
       <div class="actions">
         <button type="submit" class="primary" disabled={saving}>

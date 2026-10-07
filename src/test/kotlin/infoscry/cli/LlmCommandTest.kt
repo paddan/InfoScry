@@ -133,6 +133,27 @@ class LlmCommandTest {
         assertTrue(result.stdout.contains("tool=supported"), result.stdout)
     }
 
+    @Test
+    fun `a switched-off profile is refused before any provider call and nothing is persisted`() {
+        val server = FakeOpenAiServer(emptyList())
+        try {
+            addProfile(server.url)
+            AppContext.open(AppPaths.of(dataDir)).use { context ->
+                val profile = context.llm.findByName("probe")!!
+                context.llm.update(profile.id, profile.copy(enabled = false))
+            }
+
+            val result = CliProcess.run("llm", "test", "probe", "--data-dir", dataDir.toString())
+
+            assertNotEquals(0, result.exitCode, "a switched-off profile was probed")
+            assertTrue(server.requestBodies.isEmpty(), "no request reached the provider")
+            val stored = ApiJson.decodeFromString<LlmProfilesJson>(runList()).profiles.first { it.name == "probe" }
+            assertEquals(null, stored.toolCallingMeasured, "nothing was measured or persisted")
+        } finally {
+            server.close()
+        }
+    }
+
     // ---- helpers ----
 
     private fun addProfile(endpoint: String) {

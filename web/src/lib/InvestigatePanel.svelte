@@ -215,7 +215,7 @@
         error = 'The investigation was interrupted before it finished. You can send another question.';
       }
     } catch (failure) {
-      if (turn === generation && !signalController.signal.aborted) error = describe(failure);
+      if (turn === generation && !signalController.signal.aborted) error = describeTurnFailure(failure);
     } finally {
       activeControllers.delete(signalController);
       if (turn === generation) {
@@ -277,6 +277,17 @@
   function describe(failure: unknown): string {
     if (failure instanceof ApiError) return failure.message;
     return failure instanceof Error ? failure.message : 'Something went wrong.';
+  }
+
+  /**
+   * A refused profile is the one failure the reader can fix on the spot, so the refusal names the place where
+   * tool calling is measured, not only the server's sentence.
+   */
+  function describeTurnFailure(failure: unknown): string {
+    if (failure instanceof ApiError && failure.code === 'TOOL_CALLING_UNSUPPORTED') {
+      return `${failure.message}. Open Admin → LLM profiles, choose Check tool calling for this profile, then ask again.`;
+    }
+    return describe(failure);
   }
 
   onMount(loadPanel);
