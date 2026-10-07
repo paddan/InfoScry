@@ -595,63 +595,6 @@ class InvestigationRoutesTest {
     }
 
     @Test
-    fun `a conversation the migration repaired reopens switched off and its continue does not dispatch`() = runBlocking {
-        FakeOpenAiServer(listOf(FakeOpenAiResponse(stream = true, body = turnSse()))).use { fake ->
-            createProfile(name = "migration-repaired", endpoint = fake.url)
-            val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
-            val profile = harness.context.llm.findByName("migration-repaired")!!
-            val conversationId = harness.context.llm.persistInvestigateConversation(
-                collectionId = collection.id,
-                profile = profile,
-                promptVersion = 1,
-                retrievalSnapshot = RetrievalSnapshot.value(),
-            )
-            // Exactly what a cleaned row looks like for a conversation whose snapshot carried a credential: the
-            // address is cleaned, so it no longer carries `userinfo` for the read path to find, and the row is
-            // marked, which is the only record left that the address was rewritten. The repaired address is the
-            // live profile's own clean one, so a gate that consults the stored address alone sees a conversation
-            // with nothing wrong with it — and would dispatch to the address the migration changed on a person's
-            // behalf. The SchemaMigrator test asserts that this is the state the migration actually produces.
-            harness.context.database.transaction { connection ->
-                connection.prepareStatement(
-                    "UPDATE conversations SET profile_endpoint = ?, profile_endpoint_repaired = 1 WHERE id = ?",
-                ).use { statement ->
-                    statement.setString(1, fake.url)
-                    statement.setString(2, conversationId)
-                    statement.executeUpdate()
-                }
-            }
-            assertTrue(
-                harness.context.llm.findByName("migration-repaired")!!.enabled,
-                "the live profile is clean and enabled, so the repaired snapshot is what has to be refused",
-            )
-
-            val response = harness.request(
-                HttpMethod.Post,
-                "/api/investigations/$conversationId/continue",
-                body = createBody(profile = "migration-repaired", question = "and then?"),
-                credential = Credential.BEARER,
-            )
-
-            // Asserted before the response shape: if the marker is ignored, this is the count that moves, and a
-            // turn that dispatched to the address the migration rewrote would still look like a well-formed SSE
-            // stream to every other assertion here.
-            assertEquals(0, fake.handledRequests, "nothing dispatches through a migration-repaired snapshot")
-            assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
-            assertContains(response.bodyAsText(), "INVALID_REQUEST")
-            assertContains(response.bodyAsText(), "migration-repaired", message = "the refusal names the profile to review")
-            assertContains(response.bodyAsText(), "disabled")
-            assertFalse(response.bodyAsText().contains("data: "), "a refused continue must not stream SSE events")
-            // And the reason the refusal happened: the read path reopened the cleaned snapshot as a switched-off
-            // profile, so the same rule that stops a retired profile stops this one.
-            assertFalse(
-                assertNotNull(harness.context.llm.loadInvestigateHistory(conversationId)).profile.enabled,
-                "a snapshot the migration repaired reopens as a switched-off profile",
-            )
-        }
-    }
-
-    @Test
     fun `invalid per-turn limits are rejected before a conversation is created`() = runBlocking {
         createProfile()
         val response = harness.request(

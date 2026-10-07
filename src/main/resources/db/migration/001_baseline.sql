@@ -364,10 +364,6 @@ CREATE TABLE prompt_overrides (
 -- Conversations are fixed to one collection and one profile snapshot when created. The snapshot is
 -- non-secret and a later profile edit never rewrites history. `title` is a short name written from the
 -- opening question; it is nullable and the list endpoints fall back to the truncated question.
---
--- `profile_endpoint_repaired` records that the snapshot's address once carried a credential that was
--- removed. The read path treats such a snapshot as a switched-off profile, so a conversation cannot
--- resume dispatching to a repaired address until a person has reviewed the live profile.
 CREATE TABLE conversations (
     id                          TEXT    NOT NULL PRIMARY KEY,
     collection_id               TEXT    NOT NULL,
@@ -380,7 +376,6 @@ CREATE TABLE conversations (
     retrieval_snapshot          TEXT    NOT NULL DEFAULT '{}',
     created_at                  TEXT    NOT NULL,
     title                       TEXT,
-    profile_endpoint_repaired   INTEGER NOT NULL DEFAULT 0 CHECK (profile_endpoint_repaired IN (0, 1)),
     FOREIGN KEY (collection_id) REFERENCES collections (id) ON DELETE CASCADE
 );
 

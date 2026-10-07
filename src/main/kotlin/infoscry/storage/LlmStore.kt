@@ -712,11 +712,8 @@ class LlmStore(private val database: Database) {
      * switched-off profile, because the address this conversation locked is not one anything may
      * dispatch to until somebody reviews it — whoever fixed the profile row in the meantime.
      *
-     * "Had to be repaired" is read from two places, because the repair removes the first one's
-     * evidence: `profile_endpoint_repaired`, the marker on every row whose
-     * credential was stripped, and the stored address itself, for a row that still carries `userinfo`
-     * — a hand edit, or a row written before the marker. A snapshot that was cleaned holds no
-     * credential any more, so without the marker it would look untouched and could dispatch again.
+     * "Had to be repaired" means the stored address carries `userinfo`, which no write path stores, so it
+     * is a row that something wrote around the application.
      */
     fun loadInvestigateHistory(conversationId: String): InvestigateHistory? = database.read { connection ->
         data class ConversationRow(
@@ -724,7 +721,6 @@ class LlmStore(private val database: Database) {
             val mode: String,
             val profileProvider: String,
             val profileEndpoint: String?,
-            val profileEndpointRepaired: Boolean,
             val profileModel: String,
             val profileName: String,
             val promptVersion: Int,
@@ -732,7 +728,7 @@ class LlmStore(private val database: Database) {
         )
 
         val conversation = connection.prepareStatement(
-            "SELECT collection_id, mode, profile_provider, profile_endpoint, profile_endpoint_repaired, profile_model, profile_name, prompt_version, retrieval_snapshot FROM conversations WHERE id = ?",
+            "SELECT collection_id, mode, profile_provider, profile_endpoint, profile_model, profile_name, prompt_version, retrieval_snapshot FROM conversations WHERE id = ?",
         ).use { statement ->
             statement.setString(1, conversationId)
             statement.executeQuery().use { results ->
@@ -742,7 +738,6 @@ class LlmStore(private val database: Database) {
                     mode = results.getString("mode"),
                     profileProvider = results.getString("profile_provider"),
                     profileEndpoint = results.getString("profile_endpoint"),
-                    profileEndpointRepaired = results.getInt("profile_endpoint_repaired") != 0,
                     profileModel = results.getString("profile_model"),
                     profileName = results.getString("profile_name"),
                     promptVersion = results.getInt("prompt_version"),
@@ -852,12 +847,8 @@ class LlmStore(private val database: Database) {
         // case that matters: a person may have fixed the profile after the conversation was created, which
         // leaves the row clean and enabled while the address this conversation locked is still the repaired
         // one. Nothing dispatches to a repaired address until somebody reviews it, so the gate has to see this
-        // whatever the current row says. Both the repair marker and a stored address that still carries
-        // `userinfo` count, because the repair itself strips the credential the second test looks for: without
-        // the marker a cleaned row reads as untouched, and without the address test a hand-edited
-        // row would.
-        val repairedSnapshot = conversation.profileEndpointRepaired ||
-            endpointCarriesUserInfo(conversation.profileEndpoint ?: "")
+        // whatever the current row says.
+        val repairedSnapshot = endpointCarriesUserInfo(conversation.profileEndpoint ?: "")
 
         InvestigateHistory(
             collectionId = CollectionId(conversation.collectionId),
