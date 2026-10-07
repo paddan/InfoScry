@@ -28,6 +28,12 @@ sealed interface CliSession : AutoCloseable {
         description: String? = null,
     ): Collection
 
+    /** The ignore patterns of [collection], named or identified. */
+    suspend fun ignorePatterns(collection: String): List<String>
+
+    /** Replaces the ignore patterns of [collection]; an invalid pattern fails and changes nothing. */
+    suspend fun setIgnorePatterns(collection: String, patterns: List<String>): List<String>
+
     suspend fun listJobs(limit: Int): List<Job>
 
     /** Persists the cancellation request and, when this process owns the attempt, interrupts it. */
@@ -42,6 +48,15 @@ sealed interface CliSession : AutoCloseable {
 
         override suspend fun createCollection(name: String, description: String?): Collection =
             context.collectionService.create(name = name, description = description)
+
+        override suspend fun ignorePatterns(collection: String): List<String> =
+            context.collectionService.ignorePatterns(context.collectionService.requireActiveByNameOrId(collection).id).patterns
+
+        override suspend fun setIgnorePatterns(collection: String, patterns: List<String>): List<String> =
+            context.collectionService.updateIgnorePatterns(
+                context.collectionService.requireActiveByNameOrId(collection).id,
+                patterns,
+            ).patterns
 
         override suspend fun listJobs(limit: Int): List<Job> = context.jobs.list(limit = limit)
 
@@ -63,6 +78,11 @@ sealed interface CliSession : AutoCloseable {
 
         override suspend fun createCollection(name: String, description: String?): Collection =
             api.createCollection(name = name, description = description)
+
+        override suspend fun ignorePatterns(collection: String): List<String> = api.ignorePatterns(collection)
+
+        override suspend fun setIgnorePatterns(collection: String, patterns: List<String>): List<String> =
+            api.setIgnorePatterns(collection, patterns)
 
         override suspend fun listJobs(limit: Int): List<Job> = api.listJobs(limit)
 

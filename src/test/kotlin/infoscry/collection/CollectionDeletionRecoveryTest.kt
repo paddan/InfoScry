@@ -523,6 +523,13 @@ class CollectionDeletionRecoveryTest {
                 "recovery after a kill at $stopAfter must not be blocked: ${report.blocked}",
             )
             assertNull(reopened.collections.get(collectionId), "no collection row may survive")
+            val leftoverPatterns = reopened.database.read { connection ->
+                connection.prepareStatement("SELECT COUNT(*) FROM collection_ignore_patterns WHERE collection_id = ?").use {
+                    it.setString(1, collectionId.value)
+                    it.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+                }
+            }
+            assertEquals(0, leftoverPatterns, "the collection's ignore patterns go with it, at every recovery point")
             assertNull(reopened.collectionService.get(collectionId))
             assertTrue(reopened.documents.listByCollection(collectionId, 10).isEmpty())
             assertTrue(reopened.deletions.listUnfinished().isEmpty(), "the operation must reach DONE")

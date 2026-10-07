@@ -40,11 +40,8 @@ import infoscry.storage.ImportItemStore
 import infoscry.storage.JobStore
 import io.ktor.client.engine.HttpClientEngine
 import java.io.IOException
-import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.SimpleFileVisitor
-import java.nio.file.attribute.BasicFileAttributes
 import kotlinx.coroutines.CancellationException
 import org.slf4j.LoggerFactory
 
@@ -153,8 +150,10 @@ class ImportJobHandler internal constructor(
         // any byte is copied, so a skipped file leaves no item, no document and no count. The payload's extension
         // filter is applied here, so a resumed attempt applies the filter the import was queued with. A missing
         // source that passes the filter is still admitted: its item reports that it is gone.
-        val sources = enumerate(payload.sources, payload.recursive)
-            .filter { source -> selection.admits(source.path, source.exists, payload.extensions) }
+        val sources = enumerate(payload.sources, payload.recursive, payload.ignore)
+            .filter { source ->
+                selection.admits(source.path, source.relativePath, source.exists, payload.ignore, payload.extensions)
+            }
         stage.reportProgress(completed = 0, total = sources.size)
 
         var completed = 0
@@ -511,7 +510,11 @@ class ImportJobHandler internal constructor(
         return text.substringAfterLast('/').substringAfterLast('\\').takeIf(String::isNotEmpty) ?: text
     }
 
-    private data class ImportSource(val key: String, val path: Path, val exists: Boolean)
+    /**
+     * One file the request selected. [relativePath] is what an ignore pattern is matched against: the path below the
+     * folder the file was found in, or just the file's name when it was named directly.
+     */
+    private data class ImportSource(val key: String, val path: Path, val exists: Boolean, val relativePath: String)
 
     /**
      * The files a request names, in a stable order and without duplicates.
@@ -525,7 +528,7 @@ class ImportJobHandler internal constructor(
      * A directory is only read down to its own files unless [recursive] says otherwise: importing a
      * directory without `--recursive` takes what is directly inside it, and takes the whole tree with it.
      */
-    private fun enumerate(sources: List<String>, recursive: Boolean): List<ImportSource> {
+    private fun enumerate(sources: List<String>, recursive: Boolean, ignore: IgnorePatterns): List<ImportSource> {
         val byKey = LinkedHashMap<String, ImportSource>()
         sources.forEach { raw ->
             val given = Path.of(raw)
@@ -534,10 +537,10 @@ class ImportJobHandler internal constructor(
                     val resolved = runCatching { given.toRealPath() }
                         .getOrElse { given.toAbsolutePath().normalize() }
                     if (Files.isRegularFile(resolved)) {
-                        byKey.putIfAbsent(resolved.toString(), ImportSource(resolved.toString(), resolved, true))
+                        byKey.putIfAbsent(resolved.toString(), ImportSource(resolved.toString(), resolved, true, nameOf(resolved)))
                     } else {
                         val key = given.toAbsolutePath().normalize().toString()
-                        byKey.putIfAbsent(key, ImportSource(key, given, false))
+                        byKey.putIfAbsent(key, ImportSource(key, given, false, nameOf(given)))
                     }
                 }
 
@@ -547,43 +550,24 @@ class ImportJobHandler internal constructor(
                     // directly and once through its directory, would produce two items on a filesystem
                     // that reaches the same tree by two paths.
                     val root = runCatching { given.toRealPath() }.getOrElse { given.toAbsolutePath().normalize() }
-                    regularFilesUnder(root, recursive).forEach { file ->
-                        byKey.putIfAbsent(file.toString(), ImportSource(file.toString(), file, true))
+                    selection.walk(root, recursive, ignore).forEach { file ->
+                        byKey.putIfAbsent(
+                            file.path.toString(),
+                            ImportSource(file.path.toString(), file.path, true, file.relativePath),
+                        )
                     }
                 }
 
                 else -> {
                     val key = given.toAbsolutePath().normalize().toString()
-                    byKey.putIfAbsent(key, ImportSource(key, given, false))
+                    byKey.putIfAbsent(key, ImportSource(key, given, false, nameOf(given)))
                 }
             }
         }
         return byKey.values.toList()
     }
 
-    /**
-     * The regular files under [directory], sorted by path string for a stable import order.
-     *
-     * One walk serves both modes: with [recursive] the walk descends the whole tree, and without it the
-     * walk's maximum depth is the directory's own level, so only the files directly inside it are found.
-     * The attributes come from the walk either way, which keeps the two modes identical about symbolic
-     * links: a link is read as a link, never followed.
-     */
-    private fun regularFilesUnder(directory: Path, recursive: Boolean): List<Path> {
-        val found = mutableListOf<Path>()
-        Files.walkFileTree(
-            directory,
-            setOf(),
-            if (recursive) Int.MAX_VALUE else 1,
-            object : SimpleFileVisitor<Path>() {
-                override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
-                    if (attributes.isRegularFile) found.add(file)
-                    return FileVisitResult.CONTINUE
-                }
-            },
-        )
-        return found.sortedBy { it.toString() }
-    }
+    private fun nameOf(path: Path): String = path.fileName?.toString().orEmpty()
 
     companion object {
 
