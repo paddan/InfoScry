@@ -336,4 +336,34 @@ class OcrRestoreRoutesTest {
         assertFalse(revisions[0].containsKey("reading"))
         assertFalse(revisions[2].containsKey("reading"))
     }
+
+    @Test
+    fun `a revision an import published names the OCR settings it was read with, and nothing about where it runs`() =
+        runBlocking {
+            val snapshot = infoscry.ocr.OcrSettingsSnapshot(
+                engine = infoscry.ocr.OcrEngine.TESSERACT,
+                mode = infoscry.ocr.OcrImportMode.FILL_MISSING,
+                language = "swe",
+                extractorVersion = "test",
+                toolVersion = "tesseract 5.5",
+            )
+            // The import's own publication: its snapshot is the revision's reading, not any collection setting.
+            val imported = harness.context.revisions.recordPublishedContent(fixture.documentId, "IMPORT", snapshot)
+            assertTrue(imported != null, "the fixture document publishes content, so the import has a revision")
+
+            val body = harness.get("$prefix/revisions").bodyAsText()
+            val revisions = json(body).getValue("revisions").jsonArray.map { it.jsonObject }
+            val entry = revisions.single { it.getValue("revisionId").jsonPrimitive.content == imported }
+            val reading = entry.getValue("reading").jsonObject
+            assertEquals("TESSERACT", reading.getValue("engine").jsonPrimitive.content)
+            assertEquals("FILL_MISSING", reading.getValue("mode").jsonPrimitive.content)
+            assertEquals("swe", reading.getValue("language").jsonPrimitive.content)
+            assertEquals("tesseract 5.5", reading.getValue("toolVersion").jsonPrimitive.content)
+            assertFalse(entry["noOcrNeeded"]?.jsonPrimitive?.content == "true", "a page was read by OCR")
+
+            // No endpoint, key variable or path crosses the API, whatever the reading holds.
+            assertFalse(body.contains("http", ignoreCase = true), "the history names an endpoint")
+            assertFalse(body.contains("API_KEY", ignoreCase = true), "the history names a key variable")
+            assertFalse(body.contains(dataDir.toString()), "the history names a path")
+        }
 }

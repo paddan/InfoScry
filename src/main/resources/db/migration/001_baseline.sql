@@ -615,7 +615,11 @@ CREATE TABLE document_revisions (
     -- The extraction fingerprint of the reading that opened a staged candidate, so an interrupted import
     -- continues into the same candidate instead of opening a second one. Null for published and rescan
     -- revisions, which are never resumed by key.
-    attempt_fingerprint TEXT
+    attempt_fingerprint TEXT,
+    -- The OCR settings an import or a retry was admitted with and read this revision under, as the attempt's
+    -- own frozen snapshot (never today's collection settings), so the history can name the engine, mode,
+    -- language and versions after the fact. Null for every revision no import or retry produced.
+    reading_snapshot   TEXT
 );
 
 -- At most one resumable candidate per document and attempt: two racing resumes adopt the same row.

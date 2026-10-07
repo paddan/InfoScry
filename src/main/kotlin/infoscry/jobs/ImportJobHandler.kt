@@ -241,6 +241,8 @@ class ImportJobHandler internal constructor(
                 collection = collection,
                 snapshot = payload.ocr,
             ),
+            // The selection this import was admitted with, which the revision it publishes records as its reading.
+            reading = payload.ocr,
         )
         // A document deletion can land here: the file's document is written and its item is not. Nothing
         // below may fail the attempt because of that — the item writes obey the deletion's disposition

@@ -8,6 +8,7 @@ import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
+import infoscry.ocr.OcrSettingsSnapshot
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -250,6 +251,29 @@ class DocumentRevisionStore(private val database: Database, private val content:
         }
     }
 
+    /**
+     * The OCR settings each of [documentId]'s revisions was read under, by revision identifier.
+     *
+     * A revision no import or retry produced has no entry. The snapshot is the attempt's own frozen record, so
+     * a reader can say what the reading was configured with after the collection's settings changed.
+     */
+    fun readingSnapshots(documentId: DocumentId): Map<String, OcrSettingsSnapshot> = database.read { connection ->
+        connection.prepareStatement(
+            "SELECT id, reading_snapshot FROM document_revisions " +
+                "WHERE document_id = ? AND reading_snapshot IS NOT NULL",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.executeQuery().use { rows ->
+                buildMap {
+                    while (rows.next()) {
+                        val stored = rows.getString("reading_snapshot")
+                        put(rows.getString("id"), decodeReading(stored))
+                    }
+                }
+            }
+        }
+    }
+
     /** The revision [documentId] currently publishes, or `null` when it has none. */
     fun activeRevisionId(documentId: DocumentId): String? = database.read { connection ->
         connection.selectActiveRevision(documentId)
@@ -344,6 +368,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
         parentRevisionId: String?,
         provenance: String,
         attemptFingerprint: String? = null,
+        readingSnapshot: OcrSettingsSnapshot? = null,
     ): String {
         require(provenance.isNotBlank()) { "a revision records why it exists" }
         val id = "revision-" + UUID.randomUUID()
@@ -351,7 +376,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
             database.transaction { connection ->
                 connection.prepareStatement(
                     "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, provenance, " +
-                        "created_at, attempt_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "created_at, attempt_fingerprint, reading_snapshot) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 ).use { statement ->
                     statement.setString(1, id)
                     statement.setString(2, documentId.value)
@@ -360,6 +385,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
                     statement.setString(5, provenance)
                     statement.setString(6, Instants.now())
                     statement.setString(7, attemptFingerprint)
+                    statement.setString(8, readingSnapshot?.let { encodeReading(it) })
                     statement.executeUpdate()
                 }
             }
@@ -550,16 +576,32 @@ class DocumentRevisionStore(private val database: Database, private val content:
      * replaced stays readable. The chunks are copied without their vectors — they are already in the
      * index, and re-embedding them here would make an import depend on the accelerator twice.
      *
+     * [readingSnapshot] is the OCR selection the import or retry that published this content was admitted with;
+     * it is recorded on the revision itself, so the history can say how the text was read long after the
+     * collection's settings have changed.
+     *
      * @return the new revision's identifier, or `null` when the document publishes no content yet.
      */
-    fun recordPublishedContent(documentId: DocumentId, provenance: String): String? {
+    fun recordPublishedContent(
+        documentId: DocumentId,
+        provenance: String,
+        readingSnapshot: OcrSettingsSnapshot? = null,
+    ): String? {
         require(provenance.isNotBlank()) { "a revision records why it exists" }
         return database.transaction { connection ->
             if (connection.countUnits(documentId) == 0) return@transaction null
             val previous = connection.selectActiveRevision(documentId)
             val id = "revision-" + UUID.randomUUID()
             val now = Instants.now()
-            connection.insertRevision(id, documentId, previous, RevisionState.PUBLISHED, provenance, now)
+            connection.insertRevision(
+                id,
+                documentId,
+                previous,
+                RevisionState.PUBLISHED,
+                provenance,
+                now,
+                readingSnapshot,
+            )
             connection.copyPublishedPages(id, documentId, now)
             connection.copyPublishedChunks(id, documentId, now)
             connection.upsertActiveRevision(documentId, id, now)
@@ -954,10 +996,11 @@ class DocumentRevisionStore(private val database: Database, private val content:
         state: RevisionState,
         provenance: String,
         now: String,
+        readingSnapshot: OcrSettingsSnapshot? = null,
     ) {
         prepareStatement(
             "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, provenance, " +
-                "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "created_at, reading_snapshot) VALUES (?, ?, ?, ?, ?, ?, ?)",
         ).use { statement ->
             statement.setString(1, id)
             statement.setString(2, documentId.value)
@@ -965,6 +1008,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
             statement.setString(4, state.name)
             statement.setString(5, provenance)
             statement.setString(6, now)
+            statement.setString(7, readingSnapshot?.let { encodeReading(it) })
             statement.executeUpdate()
         }
     }
@@ -1314,6 +1358,15 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "FROM revision_publications"
 
         private val LOCATOR_JSON = Json { ignoreUnknownKeys = true }
+
+        private val READING_JSON = Json { ignoreUnknownKeys = true }
+
+        /** The frozen OCR snapshot of one import or retry, in the form the revision row keeps it. */
+        fun encodeReading(snapshot: OcrSettingsSnapshot): String =
+            READING_JSON.encodeToString(OcrSettingsSnapshot.serializer(), snapshot)
+
+        fun decodeReading(stored: String): OcrSettingsSnapshot =
+            READING_JSON.decodeFromString(OcrSettingsSnapshot.serializer(), stored)
 
         /** The revision text's own identity, so a stager can prove which text it staged. */
         internal fun sha256Of(text: String): String {

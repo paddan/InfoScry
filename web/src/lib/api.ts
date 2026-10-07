@@ -1473,6 +1473,7 @@ export type RevisionView = {
   reading?: RevisionReading | null;
   extractionMethods?: string[];
   pageChanges?: PageChanges;
+  noOcrNeeded?: boolean;
 };
 
 export type RevisionsResponse = {

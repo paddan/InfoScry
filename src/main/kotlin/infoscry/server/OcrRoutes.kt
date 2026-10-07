@@ -218,10 +218,15 @@ data class RevisionView(
     val publishedAt: String? = null,
     /** The historical revision this one is an explicit restore of. */
     val restoredFromRevisionId: String? = null,
-    /** The engine and settings of the rescan that produced it; absent for an import or a restore. */
+    /**
+     * The OCR engine, mode, language and versions the revision was read with; absent when no page was read by
+     * OCR or the attempt recorded no settings.
+     */
     val reading: RevisionReadingView? = null,
     val extractionMethods: List<String> = emptyList(),
     val pageChanges: PageChangesView,
+    /** True when every published page was read without OCR, so the history says no page needed OCR. */
+    val noOcrNeeded: Boolean = false,
 )
 
 /** A page of a document's published history, with the revision that is active now. */
@@ -676,6 +681,7 @@ private fun RevisionHistoryEntry.toApiView(): RevisionView = RevisionView(
         restored = pageChanges.restored,
         notPublished = pageChanges.notPublished,
     ),
+    noOcrNeeded = noOcrNeeded,
 )
 
 private fun RevisionRestoreRecord.toApiView(): RestoreOperationView = RestoreOperationView(
