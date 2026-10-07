@@ -74,8 +74,8 @@ Document progress comes from committed content units and extraction checkpoints.
 Import-history counters count files. Retry reads managed copies, snapshots the
 collection's current OCR settings and preserves reusable extraction work.
 
-See the [Collections spec](specs/2026-09-27-collections-management.md) for the
-contracts and [tickets](tickets/collections-management/STATUS.md) for verification.
+The Collections spec and its tickets (removed from `docs/` once complete; see git history before commit `c9edfab`) hold the original contracts and
+verification.
 
 ## Embeddings and GPU requirements
 
@@ -288,5 +288,5 @@ Object-key order and whitespace are ignored; array order, types and values are
 preserved. An equivalent repeated call is refused and research ends with
 synthesis from available evidence.
 
-See the [Investigate spec](specs/investigate-follow-up-and-efficiency.md) and
-[verification report](tickets/investigate-follow-up-and-efficiency/STATUS.md).
+The Investigate spec and its verification report (removed from `docs/` once complete; see git history before commit `c9edfab`) hold the original
+contracts and evidence.

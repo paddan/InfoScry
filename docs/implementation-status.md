@@ -30,6 +30,16 @@ with the published text, a reviewer recommends and a person decides. Everything
 stays in pilot mode: no replacement happens without a manual decision, and
 "Scan again" is driven by the operations API rather than a UI panel. The manual UI and history/restore are unfinished. Retry wiring, non-image import compatibility, saved evidence and image provenance/lifetime still have open correctness gates. The [ticket plan](tickets/ocr-rescanning/STATUS.md) splits these repairs and the remaining UI/acceptance work into independently testable slices.
 
+## Planned fixes from local testing
+
+The owner's first local test of the OCR work (2026-10-07) produced an
+[eight-ticket plan](plans/2026-10-07-local-testing-feedback.md): measuring tool
+calling from Admin, two history display gaps, OCR profiles with the LLM
+providers and image-capable models (own OCR profiles or existing LLM profiles), skipping files that cannot be imported,
+include/exclude extensions and per-collection ignore patterns for imports, and retrying a
+document with a chosen OCR method. None of it is implemented yet; see the
+[ticket status](tickets/local-testing-feedback/STATUS.md).
+
 ## Planned compact document list
 
 The [compact Collections document list](specs/2026-09-30-compact-document-list.md)
@@ -52,11 +62,9 @@ The 2026-09-28 Collections gate recorded:
 - Frontend Vitest, Svelte/TypeScript diagnostics and production build passed.
 
 The later independent review recorded additional repairs and focused reruns,
-including 192 frontend tests and 16 external tests. See the
-[Collections report](tickets/collections-management/STATUS.md) for the final
-review evidence and [acceptance ticket](tickets/collections-management/12-integrated-acceptance.md)
-for the exact gate criteria. Counts above are historical snapshots, not fixed
-expected totals.
+including 192 frontend tests and 16 external tests. The Collections report and
+acceptance ticket held the final review evidence and the exact gate criteria
+(removed from `docs/` once complete; see git history before commit `c9edfab`). Counts above are historical snapshots, not fixed expected totals.
 
 On 2026-09-29 the Search repair and wider source preview passed `./gradlew check`
 with 1,059 JVM tests and 210 frontend Vitest tests, `npm run check` with zero
@@ -76,8 +84,8 @@ pipeline and deterministic fake embedder with redistributable fixtures.
 **Investigate:** seven scenarios exercise the first cited question,
 retained-evidence follow-ups, source opening, reload/reopen, citation correction,
 HTTP rejection, empty evidence, research limits, repeated-call limits and
-cancellation recovery. They use a local fake provider. See the
-[Investigate report](tickets/investigate-follow-up-and-efficiency/STATUS.md).
+cancellation recovery. They use a local fake provider. The Investigate report
+(removed from `docs/` once complete; see git history before commit `c9edfab`) records the details.
 
 **Search:** a Chromium scenario exercises live advanced filters, a delayed
 older response, inclusive date bounds, a single-digit query, mode changes and

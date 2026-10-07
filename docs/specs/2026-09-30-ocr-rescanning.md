@@ -35,7 +35,7 @@ Verified against the repository on 2026-09-30:
   superseded chunks while processing. `jobs/DocumentIngest.kt` subsequently
   publishes an index replacement. This does not isolate a rescan candidate from
   the currently readable text.
-- [Collections management](2026-09-27-collections-management.md) permits Retry
+- Collections management permits Retry
   only for FAILED/CANCELLED/NEEDS_TOOL and excludes reprocessing successful
   documents. This design explicitly adds a separate **Scan again** operation for
   successful managed PDF/image documents. Retry eligibility is not broadened.

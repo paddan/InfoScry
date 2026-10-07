@@ -28,7 +28,7 @@ The existing OCR plan is separate; none of these tickets depends on OCR work.
 
 | Ticket | Blocked by | State |
 |---|---|---|
-| [01 — Collection-wide summary](01-summary.md) | None | Implemented |
+| 01 — Collection-wide summary | None | Implemented |
 | [02 — Collapse, bounded layout and session memory](02-collapse-and-session.md) | 01 | Not started |
 | [03 — Live search and inline details](03-live-search-and-details.md) | 02 | Not started |
 | [04 — Browser acceptance and documentation](04-acceptance.md) | 03 | Not started |

@@ -2,7 +2,7 @@
 
 > Uppföljning: denna diagnos är historisk. Implementationsstatus och
 > verifieringsbevis finns i
-> [docs/tickets/investigate-follow-up-and-efficiency/STATUS.md](tickets/investigate-follow-up-and-efficiency/STATUS.md).
+> docs/tickets/investigate-follow-up-and-efficiency/STATUS.md.
 > Fynden 1–5 är åtgärdade; browseracceptansen körs nu av `./gradlew externalTest`.
 
 Scope: aktuell implementation av Investigate, inklusive befintliga lokala ändringar i service, routes, verktyg, reader och tester. Ingen programkod ändrades. README, historikspecifikationen och planen för forskningsgränser lästes.
