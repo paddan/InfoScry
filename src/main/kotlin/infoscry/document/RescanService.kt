@@ -1,6 +1,8 @@
 package infoscry.document
 
 import infoscry.chunk.Chunker
+import infoscry.domain.ContentUnit
+import infoscry.embedding.DocumentEmbedder
 import infoscry.collection.DeletionBlockers
 import infoscry.config.AppPaths
 import infoscry.domain.CollectionLifecycle
@@ -60,6 +62,8 @@ import java.time.Instant
 import java.util.HexFormat
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.io.IOUtils
 import org.apache.pdfbox.pdmodel.PDDocument
@@ -100,6 +104,12 @@ class RescanRefusalException(val code: String, message: String) : IllegalStateEx
 
         /** The operation cannot be resumed against the snapshot it was admitted with. */
         const val SNAPSHOT_NOT_RESUMABLE: String = "RESCAN_SNAPSHOT_NOT_RESUMABLE"
+
+        /** Deciding pages is done, but this machine cannot chunk and embed their text, so nothing was published. */
+        const val REVIEW_EMBEDDING_UNAVAILABLE: String = "REVIEW_EMBEDDING_UNAVAILABLE"
+
+        /** Chunking or embedding the decided pages failed; the current revision is still the document's text. */
+        const val REVIEW_EMBEDDING_FAILED: String = "REVIEW_EMBEDDING_FAILED"
     }
 }
 
@@ -388,6 +398,15 @@ class RescanService(
     private val keyAvailable: (String?) -> Boolean = { variable -> variable == null || System.getenv(variable) != null },
     private val pages: RescanPageSource = RescanPageSource(),
     private val clock: () -> Instant = Instant::now,
+    /**
+     * The chunker a decided page's text is cut into passages with, or null when this process has none.
+     *
+     * It is the one an import chunks with, so a person's edit is measured by the same exact tokenizer, prefix,
+     * special tokens and repeated header as every other passage and is never truncated.
+     */
+    private val chunker: () -> Chunker? = { null },
+    /** The embedder this process has, or null when there is none; resolved on demand and never cached here. */
+    private val embedder: () -> DocumentEmbedder? = { null },
 ) {
 
     // ---- preview ----
@@ -927,6 +946,10 @@ class RescanService(
         requireDecisionsApplyToActiveReading(documentId, expectedRevisionId)
         val candidate = operation.candidateRevisionId
             ?: throw IllegalArgumentException("this operation has staged no replacement to publish")
+        // A page a person kept or edited carries text the attempt never chunked or embedded. They are made
+        // here, before the publication boundary and outside any permit, so a model that fails leaves the
+        // document's text exactly as it was and the decisions recorded for the next try.
+        completeDecidedPages(documentId, candidate)
         val publicationId = publication.publish(
             documentId = documentId,
             baseRevisionId = operation.baseRevisionId,
@@ -956,6 +979,106 @@ class RescanService(
     }
 
     // ---- internals ----
+
+    /**
+     * Gives every approved page of the candidate the passages and vectors the publication requires.
+     *
+     * Use new publishes a page the attempt already chunked and embedded, so it needs nothing. Keep existing and
+     * Edit text replace the staged page with text that has neither, and both are chunked here the same way:
+     * from the page's own text with the import's exact tokenizer, so a kept page is measured by the current
+     * tokenizer rather than trusting the vectors of an older embedding, and an edit is never cut to fit. Only
+     * what is missing is done, which is what lets a retry after a failed embedding resume without repeating
+     * the pages that already have their vectors.
+     *
+     * Nothing here changes what readers search: the candidate is not published until the whole set exists.
+     *
+     * @throws RescanRefusalException when this process cannot chunk or embed, or the embedder fails; the
+     *   words are curated and never carry the provider's own.
+     */
+    private suspend fun completeDecidedPages(documentId: DocumentId, candidate: String) {
+        val pages = revisions.pages(candidate)
+        // A page still owed a decision refuses the whole publication on its own; nothing is worth computing.
+        if (pages.any { page -> page.approval == PageApproval.PENDING }) return
+        val chunksByPage = revisions.chunks(candidate).groupBy { chunk -> chunk.unitOrdinal }
+        val unchunked = pages.filter { page -> page.approval == PageApproval.APPROVED && page.ordinal !in chunksByPage }
+        val unembedded = chunksByPage.values.any { chunks -> chunks.any { chunk -> !chunk.isStaged } }
+        if (unchunked.isEmpty() && !unembedded) return
+
+        // Resolved outside any permit: the first call can load a model. No embedder is a refusal rather than a
+        // reason to measure or embed some other way.
+        val resolvedEmbedder = try {
+            embedder()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            null
+        }
+        val resolvedChunker = chunker()
+        if (resolvedEmbedder == null || resolvedChunker == null) {
+            throw RescanRefusalException(
+                RescanRefusalException.REVIEW_EMBEDDING_UNAVAILABLE,
+                "this machine has no embedding model available, so the decided pages cannot be indexed and " +
+                    "nothing was published; the document still shows its current text and your decisions are " +
+                    "kept. Keyword search and source viewing are unaffected",
+            )
+        }
+        try {
+            withContext(Dispatchers.IO) {
+                unchunked.forEach { page ->
+                    val plan = resolvedChunker.chunk(
+                        unit = ContentUnit(
+                            id = page.unitId,
+                            documentId = documentId,
+                            ordinal = page.ordinal,
+                            locator = page.locator,
+                            extractedText = page.extractedText,
+                            searchText = page.searchText,
+                            artifactRelativePath = page.artifactRelativePath,
+                            artifactSha256 = page.artifactSha256,
+                            meanConfidence = page.meanConfidence,
+                            extractionMethod = page.extractionMethod,
+                        ),
+                        maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
+                        overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
+                    )
+                    revisions.recordPageChunks(candidate, page.ordinal, plan.drafts)
+                }
+                revisions.chunks(candidate).groupBy { chunk -> chunk.unitOrdinal }.forEach { (ordinal, chunks) ->
+                    val ordered = chunks.sortedBy { chunk -> chunk.ordinal }
+                    val missing = ordered.filter { chunk -> !chunk.isStaged }
+                    if (missing.isEmpty()) return@forEach
+                    val vectors = missing.chunked(EMBED_BATCH).flatMap { batch ->
+                        val embedded = resolvedEmbedder.embedDocuments(batch.map { chunk -> chunk.text })
+                        check(embedded.size == batch.size) {
+                            "the embedder returned ${embedded.size} vectors for ${batch.size} passages"
+                        }
+                        embedded
+                    }
+                    var next = 0
+                    // Every passage of the page is written together, in order: the ones already embedded keep
+                    // the vector they have.
+                    revisions.recordChunkVectors(
+                        candidate,
+                        ordinal,
+                        ordered.map { chunk -> chunk.embedding ?: vectors[next++] },
+                    )
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            // What the model threw may carry a provider's text, so it goes to the log as a type only.
+            org.slf4j.LoggerFactory.getLogger("infoscry.document").atWarn()
+                .addKeyValue("document", documentId.value)
+                .addKeyValue("error", failure::class.simpleName)
+                .log("the passages of decided pages could not be chunked and embedded")
+            throw RescanRefusalException(
+                RescanRefusalException.REVIEW_EMBEDDING_FAILED,
+                "the decided pages could not be chunked and embedded, so nothing was published; the document " +
+                    "still shows its current text and your decisions are kept. Publish again to retry",
+            )
+        }
+    }
 
     private fun applyDecision(
         operation: OcrOperation,
@@ -1437,6 +1560,9 @@ class RescanService(
 
         /** Bytes needed to tell a WebP container (`RIFF`, a size, `WEBP`). */
         const val WEBP_HEADER_BYTES: Int = 12
+
+        /** How many passages one embedding call holds, so a long page stays interruptible. */
+        const val EMBED_BATCH: Int = 64
 
         const val CANCELLED_CODE: String = "RESCAN_CANCELLED"
 
