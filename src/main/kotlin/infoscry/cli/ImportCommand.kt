@@ -6,7 +6,9 @@ import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.multiple
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.required
+import com.github.ajalt.clikt.parameters.options.split
 import com.github.ajalt.clikt.parameters.types.path
 import infoscry.AppContext
 import infoscry.config.AppPaths
@@ -18,6 +20,7 @@ import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.domain.JobType
+import infoscry.jobs.ExtensionFilter
 import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportJobPayload
 import infoscry.jobs.ImportPipeline
@@ -106,6 +109,16 @@ class ImportCommand(
         help = "Recurse into subdirectories when importing a directory",
     ).flag()
 
+    private val includeTypes by option(
+        "--include",
+        help = "Import only files with these extensions, comma-separated, e.g. --include=pdf,docx",
+    ).split(",").default(emptyList())
+
+    private val excludeTypes by option(
+        "--exclude",
+        help = "Import every file except those with these extensions, comma-separated, e.g. --exclude=tmp,log",
+    ).split(",").default(emptyList())
+
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
     private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
@@ -114,15 +127,29 @@ class ImportCommand(
 
     override fun run() {
         val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        // Refused before the data directory is looked at, so a bad extension list has no effect at all.
+        val extensions = extensionFilter()
         val paths = AppPaths.of(options.dataDir)
         val requested = canonicalSources(sources)
 
         val remote = RuntimeInfo.discover(paths.runtimeFile)
         if (remote != null) {
-            importThroughServer(remote, requested, options)
+            importThroughServer(remote, requested, extensions, options)
             return
         }
-        importHere(paths, requested, options)
+        importHere(paths, requested, extensions, options)
+    }
+
+    /** The extension filter the flags name, or a refusal when both lists are given. */
+    private fun extensionFilter(): ExtensionFilter {
+        if (includeTypes.isNotEmpty() && excludeTypes.isNotEmpty()) {
+            throw CliFailure("--include and --exclude cannot be used together; name the types to keep or the types to skip")
+        }
+        return try {
+            ExtensionFilter.of(includeTypes, excludeTypes)
+        } catch (invalid: IllegalArgumentException) {
+            throw CliFailure(invalid.message.orEmpty(), invalid)
+        }
     }
 
     /**
@@ -131,7 +158,7 @@ class ImportCommand(
      * The lock is the reason this cannot be a fire-and-forget: only the process that holds it may write,
      * so the command stays alive until every document is done and then reports each result itself.
      */
-    private fun importHere(paths: AppPaths, requested: List<String>, options: CliOptions) {
+    private fun importHere(paths: AppPaths, requested: List<String>, extensions: ExtensionFilter, options: CliOptions) {
         LoggingBootstrap.useLogsDirectory(paths)
         val context = try {
             AppContext.open(paths)
@@ -144,7 +171,7 @@ class ImportCommand(
                     unavailable.message ?: "another InfoScry process owns ${paths.root}",
                     unavailable,
                 )
-            importThroughServer(appeared, requested, options)
+            importThroughServer(appeared, requested, extensions, options)
             return
         }
 
@@ -177,6 +204,7 @@ class ImportCommand(
                 settings = settings,
                 recursive = recursiveFlag,
                 ocr = snapshot,
+                extensions = extensions,
             )
             val job = try {
                 runBlocking {
@@ -227,10 +255,17 @@ class ImportCommand(
     }
 
     /** Enqueues the import on the server that owns the data directory. */
-    private fun importThroughServer(runtime: RuntimeInfo, requested: List<String>, options: CliOptions) {
+    private fun importThroughServer(
+        runtime: RuntimeInfo,
+        requested: List<String>,
+        extensions: ExtensionFilter,
+        options: CliOptions,
+    ) {
         LoopbackApi(runtime).use { api ->
             val accepted = try {
-                runBlocking { api.enqueueImport(collection, requested, recursiveFlag) }
+                runBlocking {
+                    api.enqueueImport(collection, requested, recursiveFlag, extensions.include, extensions.exclude)
+                }
             } catch (failure: RemoteApiFailure) {
                 throw CliFailure("${failure.code}: ${failure.message}", failure)
             }

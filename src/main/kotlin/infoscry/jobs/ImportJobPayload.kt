@@ -33,6 +33,8 @@ data class ImportJobPayload(
     // A payload written before this flag existed therefore also reads as false, and a directory it named
     // is read top-level-only on resume -- the same deliberate change the flag makes everywhere else.
     val recursive: Boolean = false,
+    /** Which extensions this import keeps. Defaulted so a payload written before the filter reads as no filter. */
+    val extensions: ExtensionFilter = ExtensionFilter.NONE,
 ) {
 
     init {
@@ -60,12 +62,14 @@ data class ImportJobPayload(
             settings: ExtractionSettings,
             recursive: Boolean = false,
             ocr: infoscry.ocr.OcrSettingsSnapshot? = null,
+            extensions: ExtensionFilter = ExtensionFilter.NONE,
         ): ImportJobPayload = ImportJobPayload(
             collectionId = collectionId.value,
             sources = sources.map { java.nio.file.Path.of(it).toAbsolutePath().normalize().toString() },
             settings = settings,
             ocr = ocr,
             recursive = recursive,
+            extensions = extensions,
         )
 
         /**

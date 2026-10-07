@@ -141,6 +141,88 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `an include list imports only the listed types and skips the rest uncounted`() {
+        withHarness { harness ->
+            val notes = harness.writeText("notes.txt", "Alpha\n")
+            val log = harness.writeText("run.log", "Gamma\n")
+            val bare = harness.writeText("README", "Delta\n")
+
+            // The list is written as a person types it: upper case and with the leading dot.
+            val run = harness.importDurably(
+                listOf(notes, log, bare),
+                RecordingUnits(units = 1),
+                extensions = ExtensionFilter.of(include = listOf(".TXT"), exclude = emptyList()),
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(listOf("notes.txt"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+            assertEquals(1, run.job.total, "a file the filter removes is not among the import's files")
+            assertEquals(1, managedDocumentCount(harness))
+        }
+    }
+
+    @Test
+    fun `an exclude list imports everything else, including a file with no extension`() {
+        withHarness { harness ->
+            val notes = harness.writeText("notes.txt", "Alpha\n")
+            val log = harness.writeText("run.LOG", "Gamma\n")
+            val bare = harness.writeText("README", "Delta\n")
+
+            val run = harness.importDurably(
+                listOf(notes, log, bare),
+                RecordingUnits(units = 1),
+                extensions = ExtensionFilter.of(include = emptyList(), exclude = listOf("log")),
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(
+                listOf("README", "notes.txt"),
+                run.items.map { Path.of(it.sourcePath).fileName.toString() }.sorted(),
+            )
+            assertEquals(2, run.job.total)
+        }
+    }
+
+    @Test
+    fun `an extension filter applies to the files of a recursive directory walk`() {
+        withHarness { harness ->
+            harness.writeText("tree/top.txt", "Top\n")
+            harness.writeText("tree/nested/deep.txt", "Deep\n")
+            harness.writeText("tree/nested/deep.log", "Deeper\n")
+
+            val run = harness.import(
+                listOf(harness.sourcesDir.resolve("tree")),
+                harness.pipeline(RecordingUnits(units = 1)),
+                recursive = true,
+                extensions = ExtensionFilter.of(include = listOf("txt"), exclude = emptyList()),
+            )
+
+            assertEquals(
+                listOf("deep.txt", "top.txt"),
+                run.items.map { Path.of(it.sourcePath).fileName.toString() }.sorted(),
+            )
+        }
+    }
+
+    @Test
+    fun `a queued import keeps its extension filter so a resumed attempt applies the same one`() {
+        withHarness { harness ->
+            val notes = harness.writeText("notes.txt", "Alpha\n")
+            val log = harness.writeText("run.log", "Gamma\n")
+            // The job waits in the queue with no worker attached: the process that queued it is gone.
+            val jobId = harness.enqueueQueuedImport(
+                listOf(notes, log),
+                ExtensionFilter.of(include = emptyList(), exclude = listOf("log")),
+            )
+
+            val run = harness.resume(jobId, harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(listOf("notes.txt"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+        }
+    }
+
+    @Test
     fun `a file is skipped by what its content is, not by its name`() {
         withHarness { harness ->
             // Binary bytes under a text name are skipped, and text bytes under a binary-looking name are read.
@@ -2295,8 +2377,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
         recursive: Boolean = false,
         ocr: OcrSettingsSnapshot? = null,
+        extensions: ExtensionFilter = ExtensionFilter.NONE,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId, recursive, ocr)
+        val job = enqueue(context, sources, settings, collectionId, recursive, ocr, extensions)
         attach(context, storedPipeline(context, extractor), embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -2377,8 +2460,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
         embedder: DocumentEmbedder = TestDocumentEmbedder(),
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
         recursive: Boolean = false,
+        extensions: ExtensionFilter = ExtensionFilter.NONE,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId, recursive)
+        val job = enqueue(context, sources, settings, collectionId, recursive, extensions = extensions)
         attach(context, pipeline, embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -2422,6 +2506,15 @@ internal class Harness(val directory: Path) : AutoCloseable {
         runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { extractionParked.await() } }
         job.id
     }
+
+    /**
+     * Queues an import with [extensions] and attaches no worker, so the job waits in the queue the way it does
+     * after a restart. The filter has to survive that wait inside the payload.
+     */
+    fun enqueueQueuedImport(sources: List<Path>, extensions: ExtensionFilter): JobId =
+        AppContext.open(dataDir).use { context ->
+            enqueue(context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"), extensions = extensions).id
+        }
 
     /** Runs an already queued job to its end in a fresh process, as the next start would after a kill. */
     fun resume(
@@ -2679,6 +2772,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
         collectionId: CollectionId,
         recursive: Boolean = false,
         ocr: OcrSettingsSnapshot? = null,
+        extensions: ExtensionFilter = ExtensionFilter.NONE,
     ): Job {
         val payload = ImportJobPayload(
             collectionId = collectionId.value,
@@ -2686,6 +2780,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
             settings = settings,
             ocr = ocr,
             recursive = recursive,
+            extensions = extensions,
         )
         return context.jobs.enqueue(
             type = JobType.IMPORT,

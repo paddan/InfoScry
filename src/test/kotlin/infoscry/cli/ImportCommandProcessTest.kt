@@ -162,6 +162,53 @@ class ImportCommandProcessTest {
     }
 
     @Test
+    fun `--include imports only the listed types and --exclude everything else`() {
+        val notes = writeSource("notes.txt", "Readable.\n")
+        val log = writeSource("run.log", "Logged.\n")
+
+        val included = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json",
+            "--include=.TXT", notes.toString(), log.toString(),
+        )
+        assertEquals(0, included.exitCode, included.stderr)
+        val includedReport = ApiJson.decodeFromString<ImportResult>(included.stdout.lines().last { it.isNotBlank() })
+        assertEquals(
+            listOf("notes.txt"),
+            includedReport.items.map { Path.of(it.sourcePath!!).fileName.toString() },
+        )
+
+        // Fresh files for the exclude run: the include run above already holds notes.txt.
+        val other = writeSource("other.txt", "Other.\n")
+        val trace = writeSource("trace.log", "Traced.\n")
+        val excluded = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json",
+            "--exclude=log", other.toString(), trace.toString(),
+        )
+        assertEquals(0, excluded.exitCode, excluded.stderr)
+        val excludedReport = ApiJson.decodeFromString<ImportResult>(excluded.stdout.lines().last { it.isNotBlank() })
+        assertEquals(
+            listOf("other.txt"),
+            excludedReport.items.map { Path.of(it.sourcePath!!).fileName.toString() },
+        )
+    }
+
+    @Test
+    fun `--include and --exclude together exit nonzero and create no job`() {
+        val notes = writeSource("notes.txt", "Readable.\n")
+
+        val result = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default",
+            "--include=txt", "--exclude=log", notes.toString(),
+        )
+
+        assertNotEquals(0, result.exitCode, "both lists were accepted: ${result.stdout}")
+        assertContains(result.stderr, "--include and --exclude cannot be used together")
+        AppContext.open(dataDir).use { context ->
+            assertEquals(0, context.jobs.list(100, 0).size, "a refused import must not create a job")
+        }
+    }
+
+    @Test
     fun `a server accepts an import and keeps working after the command has returned`() {
         val source = writeSource("report.txt", "En rapport.\n")
         val server = startHarness(gated = true, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")

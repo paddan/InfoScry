@@ -74,8 +74,20 @@ class LoopbackApi(
         ).jobs.map { it.toDomain() }
 
     /** Hands one import to the server that owns the data directory. */
-    suspend fun enqueueImport(collection: String, paths: List<String>, recursive: Boolean): ImportAcceptedResponse {
-        val request = ImportRequest(collection = collection, paths = paths, recursive = recursive)
+    suspend fun enqueueImport(
+        collection: String,
+        paths: List<String>,
+        recursive: Boolean,
+        include: List<String> = emptyList(),
+        exclude: List<String> = emptyList(),
+    ): ImportAcceptedResponse {
+        val request = ImportRequest(
+            collection = collection,
+            paths = paths,
+            recursive = recursive,
+            include = include,
+            exclude = exclude,
+        )
         val response = client.post("$base/api/imports") {
             header()
             contentType(ContentType.Application.Json)

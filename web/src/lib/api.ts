@@ -902,13 +902,30 @@ export async function pickPaths(directory: boolean): Promise<string[]> {
   return body.paths;
 }
 
+/**
+ * The extensions a folder import keeps. `include` keeps only those extensions; `exclude` keeps everything else.
+ * Both empty means every file. The server refuses a request that gives both.
+ */
+export interface ExtensionFilterRequest {
+  include: string[];
+  exclude: string[];
+}
+
 /** Queue an import of the selected paths into a collection; the job runs in the background. */
 export async function enqueueImport(
   collection: string,
   paths: string[],
   recursive: boolean,
+  extensions: ExtensionFilterRequest = { include: [], exclude: [] },
 ): Promise<{ accepted: boolean; job: JobApiView }> {
-  return (await mutate('/api/imports', 'POST', { collection, paths, recursive })) as {
+  const body = {
+    collection,
+    paths,
+    recursive,
+    include: extensions.include,
+    exclude: extensions.exclude,
+  };
+  return (await mutate('/api/imports', 'POST', body)) as {
     accepted: boolean;
     job: JobApiView;
   };
