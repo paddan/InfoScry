@@ -142,6 +142,32 @@ class JobStoreTest {
     }
 
     @Test
+    fun `a finished job carries no stage of the attempt that ended, only a deliberate approval wait`() {
+        val completed = jobs.enqueue(JobType.IMPORT, collectionId)
+        jobs.claim(completed.id)
+        jobs.progress(completed.id, stage = "queue", completed = 1, total = 1)
+        assertNull(jobs.complete(completed.id).stage, "a completed import must not keep the stage it last ran in")
+
+        val failed = jobs.enqueue(JobType.IMPORT, collectionId)
+        jobs.claim(failed.id)
+        jobs.progress(failed.id, stage = "queue")
+        assertNull(jobs.fail(failed.id, code = "IMPORT_FAILED", message = "the file could not be read").stage)
+
+        val cancelled = jobs.enqueue(JobType.IMPORT, collectionId)
+        jobs.claim(cancelled.id)
+        jobs.progress(cancelled.id, stage = "record")
+        jobs.cancel(cancelled.id)
+        assertNull(jobs.finishCancelled(cancelled.id).stage)
+
+        val waiting = jobs.enqueue(JobType.IMPORT, collectionId)
+        jobs.claim(waiting.id)
+        jobs.progress(waiting.id, stage = JobStore.AWAITING_APPROVAL_STAGE)
+        val paused = jobs.complete(waiting.id)
+        assertEquals(JobStore.AWAITING_APPROVAL_STAGE, paused.stage, "the wait for a person is what the job is")
+        assertEquals(JobStore.AWAITING_APPROVAL_STAGE, jobs.get(waiting.id)!!.stage)
+    }
+
+    @Test
     fun `a terminal job accepts nothing more`() {
         val completed = jobs.enqueue(JobType.IMPORT, collectionId)
         jobs.claim(completed.id)

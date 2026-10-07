@@ -33,7 +33,7 @@
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
-  import { fileCountLabel, stageLabel } from './importProgress';
+  import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
 
   export let collections: Collection[];
   export let selectedId: string;
@@ -779,12 +779,13 @@
 
   /**
    * What the Stage column says: the stage in a reader's words, and — while the import is unfinished — the
-   * file it is reading now, e.g. `Extracting · report.pdf`. A finished import has nothing being read, so
-   * its row keeps the stage alone, and a stage the server never reported is an em dash.
+   * file it is reading now, e.g. `Extracting · report.pdf`. A finished import is in no stage and has nothing
+   * being read, so its row is empty, except for the wait for an approval; a stage the server never reported
+   * is an em dash.
    */
   function stageCell(entry: ImportHistoryEntry): string {
     const current = TERMINAL_JOB_STATES.includes(entry.state) ? null : entry.currentItem;
-    const parts = [stageLabel(entry.stage), current ?? ''].filter((part) => part !== '');
+    const parts = [stageLabel(stageForReader(entry.state, entry.stage)), current ?? ''].filter((part) => part !== '');
     return parts.length === 0 ? '\u2014' : parts.join(' · ');
   }
 
