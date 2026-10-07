@@ -367,6 +367,32 @@ export async function getCollectionDocument(collectionId: string, documentId: st
   return (await readJson(await fetch(`/api/collections/${collection}/documents/${document}`))) as DocumentDetail;
 }
 
+/**
+ * One collection's document summary: the whole collection counted by status in one read.
+ *
+ * `total` and `byStatus` come from the same server-side snapshot, and `byStatus` names every status the
+ * server knows — a status with no documents is a zero, never an absence — so a caller can render counts
+ * for documents beyond any 50-row page without inventing one.
+ */
+export type CollectionDocumentSummary = {
+  /** Every document in the collection, from the same grouped read as `byStatus`. */
+  total: number;
+  /** An integer count for every status the server knows, including the ones with no documents. */
+  byStatus: Record<DocumentStatusName, number>;
+};
+
+/**
+ * Read a collection's status counts across the entire collection.
+ *
+ * The aggregate is deliberately its own request with no listing options: `q` and `status` belong to the
+ * page a reader is looking at, and letting them reach this call would report a filtered subset as if it
+ * were the collection. An unknown or deleting collection is a 404, like every other collection read.
+ */
+export async function getCollectionDocumentSummary(collectionId: string): Promise<CollectionDocumentSummary> {
+  const collection = encodeURIComponent(collectionId);
+  return (await readJson(await fetch(`/api/collections/${collection}/documents/summary`))) as CollectionDocumentSummary;
+}
+
 /** Search one collection using the existing search route. */
 export async function searchCollection(collection: string, query: string, mode: SearchMode, filters: SearchFilters = {}): Promise<SearchResponse> {
   const parameters = new URLSearchParams({ collection, mode, q: query });
