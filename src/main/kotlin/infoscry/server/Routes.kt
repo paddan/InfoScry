@@ -11,6 +11,7 @@ import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.domain.JobType
 import infoscry.jobs.ImportJobHandler
+import infoscry.jobs.ExtensionFilter
 import infoscry.jobs.ImportJobPayload
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
@@ -182,6 +183,9 @@ data class ImportRequest(
     // false on purpose: a directory import no longer descends into subdirectories unless recursion is
     // asked for, so a request that says nothing gets exactly that non-recursive behavior.
     val recursive: Boolean = false,
+    // Extension lists for a folder import; both default to empty, which means no filter.
+    val include: List<String> = emptyList(),
+    val exclude: List<String> = emptyList(),
 )
 
 /** What the picker is asked to choose: files (any number of them) or one folder. */
@@ -320,12 +324,15 @@ fun Application.configureRoutes(
         route("/api/imports") {
             post {
                 call.handle {
+                    // A request that names both an include and an exclude list is refused here, before the mutation
+                    // gate and before any job or copy exists.
+                    val request = call.receiveJson<ImportRequest>()
+                    val extensions = ExtensionFilter.of(request.include, request.exclude)
                     context.mutations.withMutation {
                         // The same gate every other mutating command passes: while an unsafe deletion state is
                         // unresolved, admitting an import would add work to an archive an operator has to
                         // repair first.
                         context.collectionService.requireMutationsAllowed()
-                        val request = call.receiveJson<ImportRequest>()
                         val collection = context.collectionService.requireActiveByNameOrId(request.collection)
                         // The job records the tool version it will run with, so its checkpoints are keyed by
                         // what actually produced them. That is why the probe happens once per job creation.
@@ -353,6 +360,7 @@ fun Application.configureRoutes(
                             settings = settings,
                             recursive = request.recursive,
                             ocr = snapshot,
+                            extensions = extensions,
                         )
                         val job = context.jobs.enqueue(
                             type = JobType.IMPORT,

@@ -45,15 +45,24 @@ its top level only; pass `--recursive` to descend into its subdirectories. With
 document (and exits nonzero if any failed). Without a running server, the
 import runs in this process regardless of `--wait`.
 
+`--include` imports only files with the listed extensions, and `--exclude`
+imports every file except those with the listed extensions. Both take a
+comma-separated list (`--include=pdf,docx`); extensions match without regard to
+case and with or without the leading dot. The two cannot be given together, and
+a refused list exits nonzero before anything is queued. A file the filter
+removes is skipped silently: it is not an item and not counted among the files.
+
 ```bash
 infoscry collection create Notes
 infoscry import --collection Notes /path/to/document.pdf
 infoscry import --collection Notes --recursive /path/to/dir
 infoscry import --collection Notes --wait /path/to/dir /path/to/another.pdf
 infoscry import --collection Notes --wait --json /path/to/document.pdf
+infoscry import --collection Notes --recursive --include=pdf,docx /path/to/dir
+infoscry import --collection Notes --recursive --exclude=tmp,log /path/to/dir
 ```
 
-Options: `--collection`, `--recursive`, `--wait`, `--json`, `--data-dir`.
+Options: `--collection`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`, `--data-dir`.
 
 ## search
 

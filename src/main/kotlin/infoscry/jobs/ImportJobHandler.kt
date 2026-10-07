@@ -150,10 +150,11 @@ class ImportJobHandler internal constructor(
         }
 
         // The one place a selected file is admitted. Filtering happens before the first item is queued and before
-        // any byte is copied, so a skipped file leaves no item, no document and no count. A missing source is
-        // admitted: it has no content to inspect, and its item reports that it is gone.
+        // any byte is copied, so a skipped file leaves no item, no document and no count. The payload's extension
+        // filter is applied here, so a resumed attempt applies the filter the import was queued with. A missing
+        // source that passes the filter is still admitted: its item reports that it is gone.
         val sources = enumerate(payload.sources, payload.recursive)
-            .filter { source -> !source.exists || selection.admits(source.path) }
+            .filter { source -> selection.admits(source.path, source.exists, payload.extensions) }
         stage.reportProgress(completed = 0, total = sources.size)
 
         var completed = 0
