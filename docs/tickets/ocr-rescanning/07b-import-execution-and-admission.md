@@ -13,10 +13,10 @@ A text-only import baseline has no stored revision/hash today; it comes from imm
 
 ## Required follow-up slices
 
-- [ ] [07c — Durable candidate binding and staged checkpoints](07c-durable-import-candidates.md): reuse committed OCR after restart or approval pause.
-- [ ] [07d — Retry OCR/review/dispatch integration](07d-retry-ocr-execution.md): Retry currently calls ingestion without review or dispatch wiring.
-- [ ] [07e — Non-image import compatibility](07e-non-image-import-compatibility.md): candidate-sink selection currently depends only on collection mode.
-- [ ] [07f — External review accounting coverage](07f-external-review-accounting.md): production external classification tested with a recording transport, without real uploads.
+- [ ] 07c — Durable candidate binding and staged checkpoints: reuse committed OCR after restart or approval pause.
+- [ ] 07d — Retry OCR/review/dispatch integration: Retry currently calls ingestion without review or dispatch wiring.
+- [ ] 07e — Non-image import compatibility: candidate-sink selection currently depends only on collection mode.
+- [ ] 07f — External review accounting coverage: production external classification tested with a recording transport, without real uploads.
 
 ## Remaining downstream work
 

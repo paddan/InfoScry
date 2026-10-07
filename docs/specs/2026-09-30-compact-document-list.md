@@ -14,7 +14,7 @@ constrains horizontal overflow. Details currently appear below the whole table.
 `web/src/routes/+page.svelte` unmounts CollectionsPanel when leaving Admin, so
 component-local state alone cannot preserve a session across that navigation.
 
-The existing [Collections spec](2026-09-27-collections-management.md) remains the
+The existing Collections spec remains the
 contract for import, Retry, deletion, selection and source opening. This spec
 changes presentation, search triggering and view-state lifetime only. Search
 remains literal case-insensitive filename matching, not document-content search.
