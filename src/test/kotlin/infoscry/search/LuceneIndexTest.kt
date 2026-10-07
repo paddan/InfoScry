@@ -39,13 +39,14 @@ class LuceneIndexTest {
     @Test
     fun `a scope filter naming more documents than the clause ceiling searches`() {
         // Lucene's default ceiling is 1 024 clauses and it is enforced when a query is rewritten during a
-        // search, so this exercises the real mechanism rather than a constant: 1 100 documents indexed, 1 100
-        // ids in the scope, one query. A scope expressed as one TermQuery per id would throw
-        // IndexSearcher.TooManyClauses here; a single set query searches.
+        // search, so this exercises the real mechanism rather than a constant: 1 100 ids in the scope, one
+        // query. A scope expressed as one TermQuery per id would throw IndexSearcher.TooManyClauses here; a
+        // single set query searches. The ceiling counts the ids the scope names, not the documents indexed,
+        // so only a few are indexed (each one publishes a new reader, which is what made 1 100 of them slow).
         val documentIds = (1..1_100).map { DocumentId("doc-$it") }
         LuceneIndex.open(indexDir, IDENTITY).use { index ->
             runBlocking {
-                documentIds.forEach { documentId ->
+                documentIds.take(INDEXED_DOCUMENTS).forEach { documentId ->
                     index.replaceDocument(chunksFor(documentId, listOf("budget nightfall report")))
                 }
             }
@@ -57,7 +58,7 @@ class LuceneIndexTest {
                 limit = 5,
             )
 
-            assertEquals(5, hits.size, "the scope must match the indexed documents rather than refuse")
+            assertEquals(INDEXED_DOCUMENTS, hits.size, "the scope must match the indexed documents rather than refuse")
             assertTrue(hits.all { it.text.contains("budget") })
         }
     }
@@ -318,6 +319,8 @@ class LuceneIndexTest {
         Files.readAllLines(indexDir.resolve("current")).filter { it.isNotBlank() }
 
     private companion object {
+        const val INDEXED_DOCUMENTS = 5
+
         val IDENTITY = IndexIdentity(
             schemaVersion = LuceneSchema.SCHEMA_VERSION,
             model = "intfloat/multilingual-e5-base",
