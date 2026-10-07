@@ -19,6 +19,7 @@ import infoscry.jobs.rescanEngineFactory
 import infoscry.domain.Collection
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.chunk.Chunker
 import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.E5Embedder
 import infoscry.embedding.ModelManager
@@ -227,6 +228,10 @@ class AppContext private constructor(
         // be published, not whether the accelerator is reachable this second.
         embedderAvailable = injectedRescanEmbedder
             ?: { ModelManager.production().isInstalled(paths.modelsDir) },
+        // A person's Keep existing and Edit text decisions are chunked and embedded with the same chunker and
+        // embedder an import uses, resolved when a publication needs them.
+        chunker = { attachedChunker ?: productionChunker },
+        embedder = { currentDocumentEmbedder() },
     )
 
     /**
@@ -235,6 +240,15 @@ class AppContext private constructor(
      */
     @Volatile
     private var attachedDocumentEmbedder: (() -> DocumentEmbedder?)? = null
+
+    /** The pinned model's own tokenizer, built on first use and only when no chunker was attached. */
+    private val productionChunker: Chunker by lazy {
+        Chunker(E5Embedder.productionCounter(paths.modelsDir, paths.embeddingProfileDir))
+    }
+
+    /** The embedder a restore or a review publication embeds with: the injected one, the attached one, or the pinned model's. */
+    private fun currentDocumentEmbedder(): DocumentEmbedder? =
+        (injectedRestoreEmbedder ?: attachedDocumentEmbedder ?: productionDocumentEmbedder).invoke()
 
     /** The pinned model's embedder, built on first use and only when nothing else was injected or attached. */
     private val productionDocumentEmbedder: () -> DocumentEmbedder? by lazy {
@@ -248,6 +262,18 @@ class AppContext private constructor(
      */
     fun attachDocumentEmbedder(embedder: () -> DocumentEmbedder?) {
         attachedDocumentEmbedder = embedder
+    }
+
+    /**
+     * The chunker this process's job worker chunks with, so a person's review decision is chunked by the same
+     * exact tokenizer an import measures with. Null until a composition root attaches one.
+     */
+    @Volatile
+    private var attachedChunker: Chunker? = null
+
+    /** Records the chunker this process's worker chunks with, so [rescanService] publishes decisions with it. */
+    fun attachChunker(chunker: Chunker) {
+        attachedChunker = chunker
     }
 
     /**
@@ -265,9 +291,7 @@ class AppContext private constructor(
         blockers = blockers,
         operations = ocrOperations,
         publication = revisionPublication,
-        embedder = {
-            (injectedRestoreEmbedder ?: attachedDocumentEmbedder ?: productionDocumentEmbedder).invoke()
-        },
+        embedder = { currentDocumentEmbedder() },
     )
 
     /** The published text history of a document, as the history view and its restore action read it. */

@@ -72,7 +72,6 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Tag
 
 @Tag(EXTERNAL_TAG)
@@ -181,16 +180,6 @@ class OcrBrowserAcceptanceTest {
         assertEquals(1, rescanJobCount())
     }
 
-    /**
-     * PRODUCT BUG, found by this scenario: a decision of Keep existing or Edit text replaces the staged page
-     * with a page that carries no passages or vectors (`RescanService.applyDecision` appends a bare page
-     * draft; `RescanService` has no chunker or embedder), so the publication is refused with
-     * REVISION_ARTIFACTS_INCOMPLETE and the document can never publish that decision. Use new works because
-     * its page was chunked and embedded during the attempt. The fix is to chunk and embed the replaced page
-     * before (or while) publishing, which needs a chunker and an embedder wired into the decision path; that
-     * is more than a small fix, so the scenario is kept, runnable, and disabled until it is made.
-     */
-    @Disabled("product bug: Keep existing / Edit text decisions cannot be published (REVISION_ARTIFACTS_INCOMPLETE)")
     @Test
     fun `an edited page publishes the reader's own text`() {
         val picture = seedPicture(review = true)
@@ -201,16 +190,6 @@ class OcrBrowserAcceptanceTest {
         assertEquals(EDITED_READING, publishedText(picture), "Edit text publishes exactly what the reader wrote")
     }
 
-    /**
-     * PRODUCT BUG, found by this scenario: a decision of Keep existing or Edit text replaces the staged page
-     * with a page that carries no passages or vectors (`RescanService.applyDecision` appends a bare page
-     * draft; `RescanService` has no chunker or embedder), so the publication is refused with
-     * REVISION_ARTIFACTS_INCOMPLETE and the document can never publish that decision. Use new works because
-     * its page was chunked and embedded during the attempt. The fix is to chunk and embed the replaced page
-     * before (or while) publishing, which needs a chunker and an embedder wired into the decision path; that
-     * is more than a small fix, so the scenario is kept, runnable, and disabled until it is made.
-     */
-    @Disabled("product bug: Keep existing / Edit text decisions cannot be published (REVISION_ARTIFACTS_INCOMPLETE)")
     @Test
     fun `keeping the existing text publishes the old reading and leaves search as it was`() {
         val picture = seedPicture(review = true)
@@ -365,6 +344,9 @@ class OcrBrowserAcceptanceTest {
             rescanEmbedder = { true },
             restoreEmbedder = { TestDocumentEmbedder() },
         )
+        // A kept or edited page is chunked and embedded when its decision is published, with the same
+        // deterministic tokenizer the attempt's own handler uses.
+        harness!!.context.attachChunker(Chunker(WhitespaceTokenCounter(prefixTokens = 2, specialTokens = 1)))
     }
 
     /** A server whose job worker runs the production rescan handler over the fake engine and reviewer. */
