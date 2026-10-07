@@ -7,6 +7,10 @@ val EXTERNAL_TAG = "external"
 val MODEL_TAG = "model"
 val GPU_TAG = "gpu"
 
+/** The JUnit tag for tests that need the compiled frontend on the classpath; `-PskipFrontend` excludes it. */
+val FRONTEND_TAG = "frontend"
+val skipFrontend = providers.gradleProperty("skipFrontend").isPresent
+
 /**
  * Where the embedding model is installed, and where the GPU run expects to find it.
  *
@@ -99,7 +103,10 @@ tasks.test {
     //
     // `model` and `gpu` are excluded for a stronger reason: they need the pinned weights and the
     // accelerator, so the hardware gate is `gpuIntegrationTest`, which fails rather than skips.
-    useJUnitPlatform { excludeTags(EXTERNAL_TAG, MODEL_TAG, GPU_TAG) }
+    useJUnitPlatform {
+        excludeTags(EXTERNAL_TAG, MODEL_TAG, GPU_TAG)
+        if (skipFrontend) excludeTags(FRONTEND_TAG)
+    }
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     // Test classes use temporary directories and ephemeral ports, so they can run in separate JVMs.
     maxParallelForks = (Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
@@ -126,16 +133,19 @@ val externalTest = tasks.register<Test>("externalTest") {
  */
 val externalTagSource = layout.projectDirectory.file("src/test/kotlin/infoscry/ExternalTag.kt")
 val gpuTagSource = layout.projectDirectory.file("src/test/kotlin/infoscry/GpuTag.kt")
+val frontendTagSource = layout.projectDirectory.file("src/test/kotlin/infoscry/FrontendTag.kt")
 
 val verifyTestTags = tasks.register("verifyTestTags") {
     group = "verification"
     description = "Fail if the tests and this build declare different JUnit tags"
     val externalFile = externalTagSource.asFile
     val gpuFile = gpuTagSource.asFile
+    val frontendFile = frontendTagSource.asFile
+    val frontend = FRONTEND_TAG
     val external = EXTERNAL_TAG
     val model = MODEL_TAG
     val gpu = GPU_TAG
-    inputs.files(externalFile, gpuFile)
+    inputs.files(externalFile, gpuFile, frontendFile)
     doLast {
         fun require(file: java.io.File, declaration: String) {
             check(file.readText().contains(declaration)) {
@@ -145,6 +155,7 @@ val verifyTestTags = tasks.register("verifyTestTags") {
         require(externalFile, "const val EXTERNAL_TAG: String = \"$external\"")
         require(gpuFile, "const val GPU_TAG: String = \"$gpu\"")
         require(gpuFile, "const val MODEL_TAG: String = \"$model\"")
+        require(frontendFile, "const val FRONTEND_TAG: String = \"$frontend\"")
     }
 }
 
@@ -192,11 +203,9 @@ tasks.named("check") {
 
 /**
  * `-PskipFrontend` leaves the compiled frontend out of the resources, so a backend-only run needs neither
- * Node nor a SvelteKit build. No JVM test reads the compiled shell (the server answers FRONTEND_MISSING
- * without it); the browser acceptance tests do, so `externalTest` and packaging must run without the flag.
+ * Node nor a SvelteKit build, and it excludes the tests tagged `frontend`, which read the compiled shell.
+ * The browser acceptance tests need it too, so `externalTest` and packaging must run without the flag.
  */
-val skipFrontend = providers.gradleProperty("skipFrontend").isPresent
-
 tasks.processResources {
     if (!skipFrontend) dependsOn(frontendBuild)
     // The pinned model manifest is authored in `models/` so a reader can inspect the pin without reading

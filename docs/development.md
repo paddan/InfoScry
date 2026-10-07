@@ -58,8 +58,8 @@ providers, redistributable fixtures and temporary data directories. It excludes
 tests tagged `external`, `model` or `gpu`. Initial dependency installation can
 require network access; tests do not need a real LLM provider.
 
-For focused backend work, skipping the frontend build (no Node needed; no JVM
-test reads the compiled shell):
+For focused backend work, skipping the frontend build (no Node needed; tests
+tagged `frontend`, which read the compiled shell, are excluded):
 
 ```bash
 ./gradlew test -PskipFrontend --tests infoscry.server.DocumentRoutesTest

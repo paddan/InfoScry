@@ -1,5 +1,6 @@
 package infoscry.server
 
+import infoscry.FRONTEND_TAG
 import infoscry.collection.CollectionIndexRemover
 import infoscry.domain.CollectionId
 import infoscry.domain.Document
@@ -32,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.junit.jupiter.api.Tag
 
 /**
  * The collection API over a real socket: what each request does, and which status a failure produces.
@@ -677,6 +679,7 @@ class CollectionRoutesTest {
     }
 
     @Test
+    @Tag(FRONTEND_TAG)
     fun `the compiled web application is served and client-side routes fall back to it`() = runBlocking {
         val root = harness.get("/")
 

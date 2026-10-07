@@ -1,0 +1,19 @@
+// Optional init script for environments where repo.maven.apache.org rate-limits (HTTP 429), such as
+// shared-egress cloud containers. It points Maven Central at Google's mirror of it.
+//
+//   ./gradlew -I scripts/maven-central-mirror.init.gradle test -PskipFrontend
+//
+// or copy it to ~/.gradle/init.d/. It is not applied by default, so normal builds are unchanged.
+// Keep it applied consistently: Gradle caches artifacts per repository URL.
+def mirror = "https://maven-central.storage-download.googleapis.com/maven2"
+def redirect = { repos ->
+    repos.all { r ->
+        if (r instanceof MavenArtifactRepository && r.url.host == "repo.maven.apache.org") {
+            r.url = uri(mirror)
+        }
+    }
+}
+gradle.settingsEvaluated { s ->
+    redirect(s.pluginManagement.repositories)
+    redirect(s.dependencyResolutionManagement.repositories)
+}
