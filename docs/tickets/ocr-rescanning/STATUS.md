@@ -74,12 +74,12 @@ Use one leaf ticket as the implementation/review unit. Umbrellas 02b, 08, 09, 10
 | [08b — Collection OCR defaults](08b-collection-ocr-controls.md) | 08a, 07e | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
 | [08c — Preview and control one rescan](08c-rescan-controls.md) | 08b, 07c, 07d, 07f | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
 | [08d — Read review material for imports and rescans](08d-review-read-api.md) | 03c, 07c, 07e | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [08e — Persist and publish manual page decisions](08e-review-decision-publication.md) | 08d, 02e | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
+| [08e — Persist and publish manual page decisions](08e-review-decision-publication.md) | 08d, 02e | Implemented by tickets 08/09 on the merged branch, not accepted. Keep existing and Edit text decisions could not be published until the fix in the OCR browser acceptance record below |
 | [08f — Manual page review in Admin](08f-page-review-ui.md) | 08c, 08e, 02c, 02d | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
 | [09a — Revision restoration API](09a-restore-service.md) | 08e, 02d | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
 | [09b — Published history and restore controls](09b-history-ui.md) | 09a, 08f | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
 | [09c — Deletion removes revision-owned work safely](09c-revision-deletion-acceptance.md) | 03c, 07c, 08e, 09a | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [10a — Complete manual OCR browser acceptance](10a-browser-acceptance.md) | 08f, 09b, 09c, 07f, 02d, 02e | Not started |
+| [10a — Complete manual OCR browser acceptance](10a-browser-acceptance.md) | 08f, 09b, 09c, 07f, 02d, 02e | Started — fake-provider browser acceptance for the OCR panels exists and passes (record below); multi-page review, external approval, restart, keyboard/narrow layout and the manual acceptance remain open |
 | [10b — Separate real OCR and CoreML evidence](10b-real-runtime-gates.md) | 03c, 07d, 08e | Not started |
 | [10c — Reconcile docs and manual completion evidence](10c-manual-release-checkpoint.md) | 10a, 10b | Not started |
 | [11a — Local pilot manifest and scoring runner](11a-evaluation-harness.md) | 10c | Not started |
@@ -507,6 +507,56 @@ break Collections, Search and Investigate in a browser, not that the new panels 
 Linux container. The other `external` tests (`TesseractRealToolTest`, `SuryaRealToolTest` and the Surya review
 profile test in `OcrRoutesTest`) were not run: neither tool is installed here.
 
+
+## OCR browser acceptance and the review-decision publication fix — verification record
+
+**Browser acceptance.** `OcrBrowserAcceptanceTest` with `web/e2e/ocr-browser-acceptance.mjs` (an `externalTest`
+input) drives the OCR panels in headless Chromium against a server on a temporary archive. The archive is seeded
+with `RescanHarness`; the production `RescanJobHandler` and `JobRunner` run with a gated fake page engine, the
+`RecordingReviewer` (its proposal made durable as the comparison service does), `TestDocumentEmbedder` and a
+whitespace token counter. Because Tesseract and Surya are not installed in the container, the collection selects
+the image-model engine with a loopback transcription profile. Eight scenarios:
+
+1. OCR profiles: create, list with key presence only (the variable's value never reaches the page or the API),
+   edit, a stale edit from a second tab is refused and keeps its draft, HTML-like names render literally.
+2. Collection OCR settings: engine, mode, profiles and allowance persist across a reload; an unsaved draft does
+   not leak into another collection; a non-numeric allowance is refused.
+3. Scan again: the preview shows pages, destinations and approval; a double Start creates one job and one
+   operation; a reload while the engine is gated finds the operation still reading, and it then completes.
+4. Page review with Use new, Keep existing and Edit text (three scenarios): the current page's image loads, the
+   candidate text and the difference are shown, a reload still offers Publish decisions, and search and the source
+   viewer change only after publishing; script-like OCR text renders literally.
+5. Text history (two scenarios): both versions with one active marker, cancel changes nothing, restore completes
+   and search and source show the restored text; a restore after the list changed elsewhere gets the stale message
+   and adds no version.
+
+Not covered: multi-page review and page navigation (the harness imports a single-page picture), external approval,
+a process restart mid-scan, keyboard-only and narrow-layout checks, and Search/Ask/Investigate leaving unapproved
+text out.
+
+**Bugs the acceptance found, and fixes.**
+
+- *Keep existing and Edit text could not be published.* `RescanService.applyDecision` stored the decided page
+  without passages or vectors, so `publish-decisions` was refused with `REVISION_ARTIFACTS_INCOMPLETE`; Use new
+  only worked because that page was chunked and embedded during the attempt. On a multi-page document such a page
+  could instead have been published and become silently unsearchable, because the publication check only looks for
+  some chunks and complete vectors. `publishDecisions` now chunks approved pages that have no passages with the
+  import's exact tokenizer (512 tokens, no truncation) and embeds missing vectors, outside any mutation permit, before
+  it publishes. Keep and Edit share that path, so a kept page is measured by the current tokenizer rather than reusing
+  old vectors. A missing chunker or embedder is refused with `REVIEW_EMBEDDING_UNAVAILABLE` and a failure with
+  `REVIEW_EMBEDDING_FAILED`; either way the current revision stays active, the candidate and its decisions stay
+  recorded, and a later publish embeds only what is still missing. The publication check itself was not tightened.
+  `OcrReviewDecisionPublicationTest` (four tests, seen failing with `REVISION_ARTIFACTS_INCOMPLETE` before the fix)
+  covers Keep, a 1,201-word Edit split into several passages, an embedding failure and a missing embedder.
+- *A profile with no key variable showed "undefined".* The server omits null JSON fields and the panels compared
+  with `null`; the client now maps the absent optional profile fields to null.
+
+**Runs.** Linux container, JDK 25. Whole backend suite as a non-root user: 1,488 tests, 3 environmental failures
+(`ExternalProcessTest` twice, `OfficeExtractorsTest`). `externalTest --tests '*BrowserAcceptanceTest'` (as root,
+`INFOSCRY_CHROMIUM`): OCR 8, Collections 8, Investigate 7, Search 1 — 24 tests, no failure, none skipped. Web: 16
+files, 385 Vitest tests, `npm run check` 0 errors and 0 warnings. Every engine, reviewer, embedder and tokenizer in
+these runs is a fake: nothing here exercises real Tesseract, Surya, an image-model provider, the E5 tokenizer or
+CoreML.
 
 ## Ticket 07c verification record
 
