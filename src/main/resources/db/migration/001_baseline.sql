@@ -477,6 +477,14 @@ CREATE TABLE tool_calls (
 -- tool-call exchange that introduced the entry: a continued conversation uses it to associate
 -- retained evidence with the history group that actually carried it into a provider request, so
 -- ledger membership alone never makes evidence eligible. NULL entries stay ineligible for citation.
+--
+-- `excerpt` and `revision_id` are the entry's provenance, written together with the evidence and read
+-- back from the entry itself: history never joins to the live unit for text, because a replacement can
+-- remove that unit and today's text is not what an old answer was given. `revision_id` is the revision
+-- the excerpt was read from; NULL means that cannot be proven, which a viewer reports as "revision
+-- unknown" rather than defaulting to whatever text is published now. Like `citations.revision_id` it is
+-- deliberately not a foreign key: it names a reading, and the evidence outlives nothing but its
+-- conversation.
 CREATE TABLE evidence_ledger (
     conversation_id  TEXT NOT NULL,
     evidence_id      TEXT NOT NULL,
@@ -484,6 +492,7 @@ CREATE TABLE evidence_ledger (
     locator_json     TEXT NOT NULL,
     excerpt          TEXT NOT NULL,
     message_seq      INTEGER,
+    revision_id      TEXT,
     PRIMARY KEY (conversation_id, evidence_id),
     FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
 );
@@ -684,6 +693,11 @@ CREATE TABLE page_text_revisions (
         )
     )
 );
+
+-- Resolves a saved citation or ledger entry whose unit a replacement removed to the document that once
+-- held it. Without it that lookup scans every page of every revision, once per such row, in each Ask and
+-- Investigate history read.
+CREATE INDEX page_text_revisions_unit ON page_text_revisions (unit_id);
 
 -- One revision's chunks, with the vector each chunk was embedded to. The vector is stored rather than
 -- recomputed: recovering an interrupted publication must not need the accelerator or the pinned

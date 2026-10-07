@@ -807,6 +807,57 @@ class RevisionPublicationTest {
         }
     }
 
+    /**
+     * T9: a completion failure whose switch never happened seals reads end to end, and recovery unseals.
+     *
+     * The hook is counter-based rather than tied to a timing: it fails the first AUTHORITATIVE observation
+     * (the authority is durable, the snapshot switch has not run) and then the *second* STAGED_COMMITTED
+     * observation, which is the roll-forward's own staged commit, so the publication cannot be finished in
+     * this process either. The scope still hides the target revision, so the archive's two readings
+     * disagree and every read must refuse rather than mix them. Recovery, with no hook, finishes the
+     * publication and lets readers in on the reading the database publishes.
+     */
+    @Test
+    fun aCompletionFailureWhoseSwitchNeverHappenedRefusesReadsUntilRecoveryUnseals() {
+        AppContext.open(dataDir).use { context ->
+            val fixture = published(context, BASELINE_TEXT)
+            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
+
+            var authoritative = 0
+            var stagedCommitted = 0
+            val operation = runBlocking {
+                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
+                    when (step) {
+                        PublicationStep.AUTHORITATIVE ->
+                            if (++authoritative == 1) throw IllegalStateException("died after the authority moved, before the switch")
+                        PublicationStep.STAGED_COMMITTED ->
+                            if (++stagedCommitted == 2) throw IllegalStateException("the roll-forward could not commit its staged rows")
+                        else -> Unit
+                    }
+                }
+            }
+
+            assertEquals(1, authoritative, "the failure hit the live publication's authority step once")
+            assertEquals(2, stagedCommitted, "the roll-forward reached its own staged commit, where it failed")
+            val intent = assertNotNull(context.revisions.intent(operation))
+            assertNotNull(intent.authoritativeAt, "the database already publishes the candidate")
+            assertEquals(PublicationPhase.PREPARED, intent.phase, "the publication was never finished")
+            assertEquals(candidate, context.revisions.activeRevisionId(fixture.documentId))
+
+            // The archive's two readings disagree, so a read refuses instead of serving either alone or both.
+            assertFailsWith<RevisionSnapshotUnavailableException> { context.revisionPublication.acquire() }
+            assertFailsWith<RevisionSnapshotUnavailableException> { searchTexts(context) }
+
+            val recovery = runBlocking { context.revisionPublication.recoverUnfinished() }
+            assertEquals(listOf(operation), recovery.completed)
+            assertEquals(PublicationPhase.PUBLISHED, assertNotNull(context.revisions.intent(operation)).phase)
+            context.revisionPublication.acquire().close()
+            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context), "recovery unseals onto the reading the database publishes")
+            assertEquals(emptyList(), searchFor(context, "baseline").map { it.text })
+            assertEquals(1, context.index().rowCount(fixture.documentId))
+        }
+    }
+
     // ---- Fixture ----
 
     private data class Fixture(

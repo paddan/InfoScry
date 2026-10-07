@@ -26,6 +26,7 @@
     retryDocuments,
     searchCollection,
     SOURCE_PAGE_CHARS,
+    type AskEvidence,
     type AskHistoryEntry,
     type Collection,
     type InvestigateEvidence,
@@ -85,6 +86,11 @@
   let selectedHit: SearchHit | null = null;
   let source: SourceContentResponse | null = null;
   let sourceText = '';
+  /**
+   * The excerpt a saved citation or ledger entry kept, shown instead of any fetched text when the evidence
+   * names no revision. Null for everything that is read from the server.
+   */
+  let savedExcerpt: string | null = null;
   let loadingSource = false;
   let sourceError: string | null = null;
   let sourceGeneration = 0;
@@ -421,14 +427,32 @@
     }
   }
 
-  async function openSource(hit: SearchHit, opener: HTMLElement | null = null): Promise<void> {
+  /**
+   * Opens saved evidence: at the revision it names when it has one; otherwise from the excerpt it saved,
+   * labelled "revision unknown", and never from the live unit, whose text may be a later reading than the
+   * one the answer was given. Evidence with neither (a citation just streamed, which saved nothing yet and
+   * read the live unit) opens the live unit as before.
+   */
+  function openEvidence(evidence: AskEvidence, hit: SearchHit): Promise<void> {
+    const saved = !evidence.revisionId && typeof evidence.excerpt === 'string' ? evidence.excerpt : null;
+    return openSource({ ...hit, revisionId: evidence.revisionId }, null, saved);
+  }
+
+  async function openSource(hit: SearchHit, opener: HTMLElement | null = null, saved: string | null = null): Promise<void> {
     const generation = ++sourceGeneration;
     sourceOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     selectedHit = hit;
     sourceCollectionId = hit.collectionId;
     source = null;
     sourceText = '';
+    savedExcerpt = saved;
     sourceError = null;
+    if (saved !== null) {
+      loadingSource = false;
+      await tick();
+      sourceSheet?.focus();
+      return;
+    }
     loadingSource = true;
     try {
       const pagePromise = readSource(sourceCollectionId, hit.unitId, 0, SOURCE_PAGE_CHARS, hit.revisionId);
@@ -541,6 +565,7 @@
     selectedHit = null;
     source = null;
     sourceText = '';
+    savedExcerpt = null;
     loadingSource = false;
     sourceError = null;
     sourceOpener = null;
@@ -599,7 +624,12 @@
   }
 
   function openInvestigationSource(evidence: InvestigateEvidence): Promise<void> {
-    return openSource({
+    return openEvidence(evidence, evidenceHit(evidence));
+  }
+
+  /** The viewer's own row for one piece of saved evidence; its revision and excerpt are applied by [openEvidence]. */
+  function evidenceHit(evidence: AskEvidence): SearchHit {
+    return {
       collectionId: selectedCollectionId,
       documentId: evidence.documentId,
       title: evidence.locatorLabel,
@@ -610,7 +640,7 @@
       locator: evidence.locator,
       locatorLabel: evidence.locatorLabel,
       matchedBy: [],
-    });
+    };
   }
 
   /**
@@ -955,19 +985,7 @@
       </div>
 
     {#key selectedCollectionId}
-      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onOpenSource={(evidence) => openSource({
-        collectionId: selectedCollectionId,
-        documentId: evidence.documentId,
-        title: evidence.locatorLabel,
-        unitId: evidence.unitId,
-        chunkOrdinal: 0,
-        text: '',
-        highlighted: null,
-        locator: evidence.locator,
-        locatorLabel: evidence.locatorLabel,
-        matchedBy: [],
-        revisionId: evidence.revisionId,
-      })} /></div>
+      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onOpenSource={(evidence) => openEvidence(evidence, evidenceHit(evidence))} /></div>
       <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} limits={investigateLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
     {/key}
     </div>
@@ -1009,7 +1027,10 @@
       <div class="source-heading-row"><h2 id="source-heading">Source</h2><button type="button" aria-label="Close source viewer" onclick={closeSourceSheet}>×</button></div>
       <p class="meta">{selectedHit.locatorLabel}</p>
       <p><a href={originalHref(selectedHit)}>Open original</a></p>
-      {#if loadingSource && source === null}
+      {#if savedExcerpt !== null}
+        <p class="meta" role="note">Revision unknown. This is the excerpt saved with the citation, not the document's current text.</p>
+        <pre class="source-text">{savedExcerpt}</pre>
+      {:else if loadingSource && source === null}
         <p role="status">Loading source…</p>
       {:else if sourceError !== null && source === null}
         <p role="alert">{sourceError}</p>

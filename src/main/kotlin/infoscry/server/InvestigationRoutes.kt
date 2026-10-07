@@ -152,9 +152,18 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             }
             val evidence = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT e.evidence_id, e.source_unit_id, e.locator_json, u.document_id " +
-                        "FROM evidence_ledger e JOIN content_units u ON u.id = e.source_unit_id " +
-                        "JOIN documents d ON d.id = u.document_id " +
+                    "SELECT e.evidence_id, e.source_unit_id, e.locator_json, e.excerpt, r.id AS placed_revision_id, d.id AS document_id " +
+                        "FROM evidence_ledger e " +
+                        // The excerpt and revision come from the ledger entry itself, so the unit is only needed to
+                        // find the document, and an entry whose unit a replacement removed must not drop out. A
+                        // revision that still names the entry's document, or the one that once held the unit, places
+                        // it in that case; nothing here ever reads the unit's text.
+                        "LEFT JOIN content_units u ON u.id = e.source_unit_id " +
+                        "LEFT JOIN document_revisions r ON r.id = e.revision_id " +
+                        "JOIN documents d ON d.id = COALESCE(u.document_id, r.document_id, (" +
+                        "SELECT h.document_id FROM page_text_revisions p " +
+                        "JOIN document_revisions h ON h.id = p.revision_id " +
+                        "WHERE p.unit_id = e.source_unit_id LIMIT 1)) " +
                         "WHERE e.conversation_id = ? AND d.collection_id = ? ORDER BY e.evidence_id",
                 ).use { statement ->
                     statement.setString(1, conversationId)
@@ -170,6 +179,9 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                                         unitId = rows.getString("source_unit_id"),
                                         locator = locator,
                                         locatorLabel = locator.describe(),
+                                        // Absent when nobody recorded one: revision unknown, never a guess.
+                                        revisionId = rows.getString("placed_revision_id"),
+                                        excerpt = rows.getString("excerpt"),
                                     ),
                                 )
                             }
@@ -366,6 +378,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
             snapshot.evidenceEntries.forEach { entry ->
                 context.llm.persistEvidenceLedgerEntry(
                     conversationId, entry.evidenceId, entry.sourceUnitId, entry.locatorJson, entry.excerpt, entry.messageSeq,
+                    entry.revisionId,
                 )
             }
             snapshot.limitEvents.forEach { event ->
@@ -386,7 +399,10 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
         override fun loadHistory(conversationId: String) = context.llm.loadInvestigateHistory(conversationId)
     }
     return InvestigationService(
-        tools = InvestigationTools(collectionId, context.search, context.content, context.documents),
+        tools = InvestigationTools(
+            collectionId, context.search, context.content, context.documents,
+            activeRevisionId = context.revisions::activeRevisionId,
+        ),
         prompt = PromptService(context.llm),
         promptVersion = context.llm.effectivePromptVersion(LlmPromptRole.INVESTIGATE),
         streamingClient = { selected ->
@@ -444,8 +460,8 @@ private suspend fun ApplicationCall.streamInvestigation(
 /**
  * A citation a `done` event can resolve: the stable evidence id, the unit that holds the source, and
  * the location inside it. A live citation carries no excerpt — the viewer fetches content by unit id —
- * while stored evidence carries the excerpt its own citation saved, which is the only copy of that text
- * left once a replacement has removed the unit the excerpt names.
+ * while stored evidence (an Ask citation or an Investigate ledger entry) carries the excerpt it saved,
+ * which is the only copy of that text left once a replacement has removed the unit the excerpt names.
  */
 @Serializable
 data class EvidenceWire(
@@ -503,6 +519,7 @@ internal fun InvestigateEvent.toWire() = when (this) {
             unitId = it.unitId,
             locator = it.locator,
             locatorLabel = it.locatorLabel,
+            revisionId = it.revisionId,
         )
     })
     is InvestigateEvent.Error -> InvestigateWire("error", code = code, message = message)

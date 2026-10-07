@@ -121,6 +121,32 @@ class SchemaMigratorTest {
     }
 
     @Test
+    fun `the evidence ledger holds its excerpt and revision and the resolver lookup is indexed`() {
+        newDatabase().use { database ->
+            SchemaMigrator(database).migrate()
+
+            val columns = database.read { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery("PRAGMA table_info(evidence_ledger)").use { rows ->
+                        buildList { while (rows.next()) add(rows.getString("name")) }
+                    }
+                }
+            }
+            assertTrue(columns.containsAll(listOf("excerpt", "revision_id")), "ledger provenance columns, found $columns")
+
+            val plan = database.read { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery(
+                        "EXPLAIN QUERY PLAN SELECT h.document_id FROM page_text_revisions p " +
+                            "JOIN document_revisions h ON h.id = p.revision_id WHERE p.unit_id = 'unit' LIMIT 1",
+                    ).use { rows -> buildList { while (rows.next()) add(rows.getString("detail")) }.joinToString("; ") }
+                }
+            }
+            assertTrue(plan.contains("page_text_revisions_unit"), "the citation-to-document resolver must not scan every page: $plan")
+        }
+    }
+
+    @Test
     fun `migration refuses a database written by newer code`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()

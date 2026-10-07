@@ -633,14 +633,17 @@ class LlmStore(private val database: Database) {
         excerpt: String,
         /** The seq of the assistant tool-call exchange that introduced this evidence; null for legacy rows. */
         messageSeq: Int? = null,
+        /** The revision the excerpt was read from; null when that cannot be proven ("revision unknown"). */
+        revisionId: String? = null,
     ) {
         database.transaction { connection ->
             connection.prepareStatement(
-                "INSERT INTO evidence_ledger (conversation_id,evidence_id,source_unit_id,locator_json,excerpt,message_seq) VALUES (?,?,?,?,?,?) ON CONFLICT(conversation_id,evidence_id) DO NOTHING",
+                "INSERT INTO evidence_ledger (conversation_id,evidence_id,source_unit_id,locator_json,excerpt,message_seq,revision_id) VALUES (?,?,?,?,?,?,?) ON CONFLICT(conversation_id,evidence_id) DO NOTHING",
             ).use { s ->
                 s.setString(1, conversationId); s.setString(2, evidenceId)
                 s.setString(3, sourceUnitId); s.setString(4, locatorJson)
-                s.setString(5, excerpt); setIntOrNull(s, 6, messageSeq); s.executeUpdate()
+                s.setString(5, excerpt); setIntOrNull(s, 6, messageSeq)
+                s.setString(7, revisionId); s.executeUpdate()
             }
         }
     }
@@ -815,7 +818,7 @@ class LlmStore(private val database: Database) {
         }
 
         val evidence = connection.prepareStatement(
-            "SELECT evidence_id, source_unit_id, locator_json, excerpt, message_seq FROM evidence_ledger WHERE conversation_id = ? ORDER BY evidence_id",
+            "SELECT evidence_id, source_unit_id, locator_json, excerpt, message_seq, revision_id FROM evidence_ledger WHERE conversation_id = ? ORDER BY evidence_id",
         ).use { statement ->
             statement.setString(1, conversationId)
             statement.executeQuery().use { results ->
@@ -830,6 +833,7 @@ class LlmStore(private val database: Database) {
                                 locatorJson = results.getString("locator_json"),
                                 excerpt = results.getString("excerpt"),
                                 messageSeq = messageSeq,
+                                revisionId = results.getString("revision_id"),
                             ),
                         )
                     }

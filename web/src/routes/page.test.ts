@@ -1499,6 +1499,108 @@ describe('app shell', () => {
     ).toBe(true);
   });
 
+  it('shows a stored Ask excerpt with a revision-unknown label instead of fetching the live unit', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({
+        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', undefined, 'Saved excerpt as it was')],
+      }),
+      source: () => jsonResponse(sourcePage("Today's text, which is not the old evidence", 0, 42)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+
+    expect(await screen.findByText('Saved excerpt as it was')).toBeTruthy();
+    expect(screen.getByText(/Revision unknown/)).toBeTruthy();
+    // The unit is live, but nobody recorded which reading the excerpt came from, so showing the live text
+    // here would attribute today's wording to yesterday's answer.
+    expect(calls.some((call) => call.url.includes('/sources/'))).toBe(false);
+    expect(screen.queryByText("Today's text, which is not the old evidence")).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Open original' })).toBeTruthy();
+  });
+
+  it('opens the named revision for stored Ask evidence even when an excerpt was saved', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({
+        asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', 'revision-8', 'Saved excerpt')],
+      }),
+      source: () => jsonResponse(sourcePage('Body of revision eight', 0, 22)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+
+    expect(await screen.findByText('Body of revision eight')).toBeTruthy();
+    expect(calls.some((call) => call.url.endsWith('&revision=revision-8'))).toBe(true);
+    expect(screen.queryByText(/Revision unknown/)).toBeNull();
+  });
+
+  it('reopens an Ask citation that has neither a revision nor a saved excerpt from the live unit', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] }),
+      source: () => jsonResponse(sourcePage('Live unit text', 0, 14)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+
+    // A citation that was just streamed carries no excerpt: nothing was saved, and the live unit is what it read.
+    expect(await screen.findByText('Live unit text')).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=0&limit=16384')).toBe(true);
+    expect(screen.queryByText(/Revision unknown/)).toBeNull();
+  });
+
+  it('shows saved Investigate evidence with its excerpt and a revision-unknown label when no revision was recorded', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({
+        investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it [S2]', { excerpt: 'Saved ledger excerpt' }),
+      }),
+      source: () => jsonResponse(sourcePage("Today's text, which is not the old evidence", 0, 42)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /\[S2\] Page 8/ }));
+
+    expect(await screen.findByText('Saved ledger excerpt')).toBeTruthy();
+    expect(screen.getByText(/Revision unknown/)).toBeTruthy();
+    expect(calls.some((call) => call.url.includes('/sources/'))).toBe(false);
+    expect(screen.queryByText("Today's text, which is not the old evidence")).toBeNull();
+  });
+
+  it('opens saved Investigate evidence at the revision the ledger recorded', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({
+        investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it [S2]', { revisionId: 'revision-3', excerpt: 'Saved ledger excerpt' }),
+      }),
+      source: () => jsonResponse(sourcePage('Body of revision three', 0, 22)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /\[S2\] Page 8/ }));
+
+    expect(await screen.findByText('Body of revision three')).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-2?offset=0&limit=16384&revision=revision-3')).toBe(true);
+    expect(screen.queryByText(/Revision unknown/)).toBeNull();
+  });
+
   it('clears the Ask panel to its compose state with the New conversation button', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
@@ -1895,6 +1997,7 @@ function askHistoryEntry(
   question = title,
   answer = 'Mira signed it [S1].',
   revisionId?: string,
+  excerpt?: string,
 ) {
   return {
     id,
@@ -1909,6 +2012,7 @@ function askHistoryEntry(
       locator: {},
       locatorLabel: 'Page 4',
       ...(revisionId === undefined ? {} : { revisionId }),
+      ...(excerpt === undefined ? {} : { excerpt }),
     }],
     inputTokens: 20,
     outputTokens: 9,
@@ -1916,14 +2020,19 @@ function askHistoryEntry(
   };
 }
 
-function investigationHistory(id: string, question: string, answer: string) {
+function investigationHistory(
+  id: string,
+  question: string,
+  answer: string,
+  evidenceExtras: { revisionId?: string; excerpt?: string } = {},
+) {
   return {
     id,
     messages: [
       { role: 'user', text: question },
       { role: 'assistant', text: answer },
     ],
-    evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8' }],
+    evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8', ...evidenceExtras }],
     inputTokens: 20,
     outputTokens: 9,
     costUsd: 0.0001,

@@ -149,6 +149,8 @@ data class EvidenceLedgerSnapshot(
     val excerpt: String,
     /** The seq of the assistant tool-call exchange that introduced this evidence; null for legacy rows. */
     val messageSeq: Int? = null,
+    /** The revision the excerpt was read from; null when that cannot be proven, which a viewer reports as unknown. */
+    val revisionId: String? = null,
 )
 
 data class LimitEventSnapshot(
@@ -584,6 +586,7 @@ class InvestigationService(
                             locator = kotlinx.serialization.json.Json.decodeFromString<SourceLocation>(entry.locatorJson),
                             locatorLabel = entry.locatorJson,
                             text = entry.excerpt,
+                            revisionId = entry.revisionId,
                         )
                     }
 
@@ -830,6 +833,7 @@ class InvestigationService(
                             locator = kotlinx.serialization.json.Json.decodeFromString<SourceLocation>(entry.locatorJson),
                             locatorLabel = entry.locatorJson,
                             text = entry.excerpt,
+                            revisionId = entry.revisionId,
                         )
                     }
 
@@ -950,6 +954,7 @@ class InvestigationService(
                                 sourceUnitId = ev.sourceUnitId,
                                 locatorJson = locatorJson,
                                 excerpt = ev.text,
+                                revisionId = ev.revisionId,
                             ))
                             roundEvidenceIds.add(ev.evidenceId)
                         }

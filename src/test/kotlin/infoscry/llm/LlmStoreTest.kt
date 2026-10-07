@@ -458,6 +458,21 @@ class LlmStoreTest {
     }
 
     @Test
+    fun `the ledger stores the revision with the evidence and reads it back`() {
+        val savedProfile = pricedProfile()
+        store.create(savedProfile)
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, promptVersion = 1, retrievalSnapshot = "{}")
+        store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{\"page\":1}", "excerpt one", messageSeq = 1, revisionId = "revision-a")
+        store.persistEvidenceLedgerEntry(convId, "S2", "unit-2", "{\"page\":2}", "excerpt two", messageSeq = 1)
+
+        val entries = assertNotNull(store.loadInvestigateHistory(convId)).evidence.associateBy { it.evidenceId }
+
+        assertEquals("revision-a", entries.getValue("S1").revisionId)
+        assertEquals("excerpt one", entries.getValue("S1").excerpt)
+        assertNull(entries.getValue("S2").revisionId, "evidence written without a revision reads back as revision unknown")
+    }
+
+    @Test
     fun `evidence ledger entries are durable within a conversation`() {
         val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), promptVersion = 1, retrievalSnapshot = "{}")
         store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{\"page\":1}", "excerpt one")

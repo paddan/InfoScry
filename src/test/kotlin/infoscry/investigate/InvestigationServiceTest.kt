@@ -361,6 +361,32 @@ class InvestigationServiceTest {
     }
 
     @Test
+    fun `the ledger entry a turn writes carries the excerpt and the revision it was read from`() = runBlocking {
+        val collection = CollectionStore(database).create("Provenance collection").id
+        val documentId = insertDocument(collection)
+        val unit = addUnit(documentId, ordinal = 0, "unit-p", "The meeting began at noon.")
+        val provider = PerRoundProvider(
+            listOf(
+                listOf(LlmEvent.ToolCallReady(infoscry.llm.ToolCall("c1", "read_content_unit", """{"contentUnitId":"${unit.value}"}""")), LlmEvent.Completed),
+                listOf(LlmEvent.TextDelta("It began at noon [S1]."), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed),
+            ),
+        )
+        val persistence = FakePersistence()
+        val withRevision = InvestigationTools(
+            collection, FakeSearch(collection), contentStore, documentStore, activeRevisionId = { "revision-4" },
+        )
+
+        val events = service(withRevision, provider, persistence = persistence)
+            .investigate(InvestigateRequest(collection, "When?", profile())).toList()
+
+        val entry = persistence.appended.single().second.evidenceEntries.single()
+        assertEquals("The meeting began at noon.", entry.excerpt)
+        assertEquals("revision-4", entry.revisionId, "the ledger stores the revision with the evidence at write time")
+        val done = events.filterIsInstance<InvestigateEvent.Done>().single()
+        assertEquals(listOf<String?>("revision-4"), done.evidence.map { it.revisionId })
+    }
+
+    @Test
     fun `a continued turn allocates evidence ids strictly beyond the history's highest`() = runBlocking {
         val collection = CollectionStore(database).create("Investigate collection").id
         val documentId = insertDocument(collection)
