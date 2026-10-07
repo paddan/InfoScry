@@ -345,8 +345,11 @@ class RevisionPublicationTest {
             val fixture = published(context, BASELINE_TEXT)
             val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
 
-            // The deletion runs on its own thread and the publication waits for it at the instant its rows
-            // are staged and its authority has not moved — the exact interleaving the boundary exists for.
+            // The deletion runs on its own thread, but it is only started from the INTENT_PERSISTED hook, so
+            // it cannot land before the publication has passed every earlier check: the order is fixed by
+            // the hook rather than by thread scheduling. The hook runs before the boundary takes its
+            // mutation permit, so the exclusive deletion can complete there, and the publication waits for
+            // it — its authority has not moved, which is the exact interleaving the boundary exists for.
             val staged = java.util.concurrent.CountDownLatch(1)
             val deleted = java.util.concurrent.CountDownLatch(1)
             val deleter = Thread {
@@ -354,7 +357,7 @@ class RevisionPublicationTest {
                     context.documentService.deleteConfirmed(fixture.collectionId, listOf(fixture.documentId))
                 }
                 deleted.countDown()
-            }.apply { isDaemon = true; start() }
+            }.apply { isDaemon = true }
 
             val failure = assertFailsWith<Throwable> {
                 runBlocking {
@@ -367,6 +370,7 @@ class RevisionPublicationTest {
                         // — which is exactly the ordering the recheck exists to catch.
                         if (step == PublicationStep.INTENT_PERSISTED) {
                             staged.countDown()
+                            deleter.start()
                             assertTrue(deleted.await(20, java.util.concurrent.TimeUnit.SECONDS), "the deletion finished")
                         }
                     }
