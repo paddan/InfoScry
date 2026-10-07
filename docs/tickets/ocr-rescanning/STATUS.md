@@ -452,3 +452,14 @@ stated; no macOS, real browser, live server, `externalTest`, `gpuIntegrationTest
 twice, `OfficeExtractorsTest`), 10 minutes 42 seconds with two parallel forks. This is the first whole-suite run
 since tickets 08 and 09. `./gradlew check`, `externalTest` and `gpuIntegrationTest` were not run.
 
+### Browser acceptance after 03b, the baseline and 02b
+
+`./gradlew externalTest --tests '*BrowserAcceptanceTest'` with the frontend built, in headless Chromium through
+the pinned Playwright, using `INFOSCRY_CHROMIUM` because the container's Chromium is another revision:
+`CollectionsBrowserAcceptanceTest` 8, `InvestigateBrowserAcceptanceTest` 7 and `SearchBrowserAcceptanceTest` 1,
+16 tests, no failure, 1 minute 53 seconds. These scenarios predate the OCR work: none of them opens the OCR
+profile, Scan again, page review or text history panels, so they show that tickets 08, 09 and 02b did not
+break Collections, Search and Investigate in a browser, not that the new panels work in one. Run as root in a
+Linux container. The other `external` tests (`TesseractRealToolTest`, `SuryaRealToolTest` and the Surya review
+profile test in `OcrRoutesTest`) were not run: neither tool is installed here.
+
