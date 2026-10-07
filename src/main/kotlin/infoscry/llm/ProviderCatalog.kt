@@ -24,6 +24,8 @@ data class KnownModel(
     val inputPricePerMillion: Double? = null,
     val outputPricePerMillion: Double? = null,
     val cacheReadPricePerMillion: Double? = null,
+    /** Whether the model accepts image input; null means the curated table does not say. */
+    val imageInput: Boolean? = null,
 )
 
 /** The full contents of `/llm/providers.json`. Prices are USD per 1,000,000 tokens; absent fields mean unknown. */
@@ -32,6 +34,13 @@ data class ProviderCatalogData(
     val presets: List<ProviderPreset>,
     val knownModels: Map<String, KnownModel> = emptyMap(),
 )
+
+/**
+ * Whether the curated table says [model] of [provider] accepts image input: true or false when it states it,
+ * null when the model is not in the table or the table is silent. Absence is "unknown", never "text-only".
+ */
+fun ProviderCatalogData.imageInputOf(provider: LlmProvider, model: String): Boolean? =
+    knownModels[model]?.takeIf { it.provider == provider }?.imageInput
 
 /** Loads the provider preset catalog resource and matches presets by endpoint. */
 object ProviderCatalog {

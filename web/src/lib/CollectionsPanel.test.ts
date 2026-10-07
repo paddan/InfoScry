@@ -32,6 +32,8 @@ const api = vi.hoisted(() => ({
   listUnfinishedDeletions: vi.fn(),
   updateCollectionOcrSettings: vi.fn(),
   listOcrProfiles: vi.fn(),
+  listOcrLlmCandidates: vi.fn(),
+  copyLlmProfileToOcr: vi.fn(),
   previewRescan: vi.fn(),
   admitRescan: vi.fn(),
   getRescanOperation: vi.fn(),
@@ -53,6 +55,8 @@ vi.mock('./api', () => ({
   },
   updateCollectionOcrSettings: api.updateCollectionOcrSettings,
   listOcrProfiles: api.listOcrProfiles,
+  listOcrLlmCandidates: api.listOcrLlmCandidates,
+  copyLlmProfileToOcr: api.copyLlmProfileToOcr,
   previewRescan: api.previewRescan,
   admitRescan: api.admitRescan,
   getRescanOperation: api.getRescanOperation,
@@ -185,6 +189,7 @@ describe('collections panel', () => {
     api.getDeletion.mockResolvedValue(deletion());
     // No OCR profiles and no earlier scans unless a test says so.
     api.listOcrProfiles.mockResolvedValue([]);
+    api.listOcrLlmCandidates.mockResolvedValue([]);
     api.listRescanOperations.mockResolvedValue([]);
   });
 

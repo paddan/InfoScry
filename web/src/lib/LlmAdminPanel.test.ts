@@ -46,6 +46,7 @@ function model(id: string, over: Partial<LlmCatalogModel> = {}): LlmCatalogModel
     outputPricePerMillion: null,
     cacheReadPricePerMillion: null,
     priceKnown: true,
+    imageInput: null,
     ...over,
   };
 }

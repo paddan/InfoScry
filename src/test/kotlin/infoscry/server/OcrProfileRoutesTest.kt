@@ -29,6 +29,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
@@ -597,6 +600,187 @@ class OcrProfileRoutesTest {
     }
 
     private suspend fun profileCount(): Int = harness.context.ocr.list().size
+
+    // --- LLM profiles offered as OCR profiles (local-testing-feedback 04) -------------------------------------
+
+    private fun llmProfile(name: String, model: String, endpoint: String = "http://127.0.0.1:11434/v1") =
+        infoscry.llm.LlmProfile(
+            id = java.util.UUID.randomUUID().toString(),
+            name = name,
+            provider = infoscry.llm.LlmProvider.OPENAI_COMPATIBLE,
+            model = model,
+            contextWindow = 64_000,
+            maxOutputTokens = 2_048,
+            inputPricePerMillion = 1.0,
+            outputPricePerMillion = 2.0,
+            cacheReadPricePerMillion = 0.5,
+            enabled = true,
+            endpoint = endpoint,
+            apiKeyEnvironmentVariable = "PATH",
+        ).also { harness.context.llm.create(it) }
+
+    private suspend fun fromLlm(id: String, credential: Credential = Credential.CSRF) = harness.request(
+        HttpMethod.Post,
+        "/api/ocr/profiles/from-llm",
+        """{"llmProfileId":"$id"}""",
+        credential,
+    )
+
+    @Test
+    fun `LLM profiles are offered with their image support stated, unknown stays unknown, and no key value leaks`() = runBlocking {
+        llmProfile("Reader", "gpt-4o")
+        llmProfile("Chatter", "deepseek-chat")
+        llmProfile("Mystery", "gemma3:12b")
+
+        val response = harness.get("/api/ocr/llm-profiles")
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val listed = kotlinx.serialization.json.Json.parseToJsonElement(response.bodyAsText())
+            .jsonObject["profiles"]!!.jsonArray.map { it.jsonObject }
+            .associateBy { it["name"]!!.jsonPrimitive.content }
+        assertEquals("true", listed.getValue("Reader")["imageInput"]!!.jsonPrimitive.content)
+        assertEquals("false", listed.getValue("Chatter")["imageInput"]!!.jsonPrimitive.content)
+        assertTrue(
+            listed.getValue("Mystery")["imageInput"].let { it == null || it is kotlinx.serialization.json.JsonNull },
+            "an uncatalogued model's image support is unknown, never assumed",
+        )
+        assertContains(response.bodyAsText(), "\"keyAvailable\":true")
+        assertFalse(response.bodyAsText().contains(System.getenv("PATH")!!), "a key value is never returned")
+    }
+
+    @Test
+    fun `selecting an image-capable LLM profile copies it into an OCR profile that a collection can select`() = runBlocking {
+        val llm = llmProfile("Reader", "gpt-4o")
+
+        val first = fromLlm(llm.id)
+        assertEquals(HttpStatusCode.Created, first.status, first.bodyAsText())
+        val body = first.bodyAsText()
+        assertContains(body, "\"name\":\"Reader (from LLM profile)\"")
+        assertContains(body, "\"model\":\"gpt-4o\"")
+        assertContains(body, "\"endpoint\":\"http://127.0.0.1:11434/v1\"")
+        assertContains(body, "\"apiKeyEnvironmentVariable\":\"PATH\"")
+        assertContains(body, "\"scope\":\"LOCAL\"")
+        assertFalse(body.contains("imageCapabilityMeasured"), "a copy is unmeasured until its own check runs")
+        assertFalse(body.contains(System.getenv("PATH")!!))
+
+        val again = fromLlm(llm.id)
+        assertEquals(HttpStatusCode.OK, again.status, again.bodyAsText())
+        assertEquals(profileIdOf(first), profileIdOf(again), "choosing the same LLM profile again reuses its copy")
+        assertEquals(revisionIdOf(first), revisionIdOf(again), "and adds no revision when nothing changed")
+        assertEquals(1, profileCount())
+
+        harness.createCollection("Rescans", Credential.BEARER)
+        val collectionId = harness.collectionIdOf("Rescans")
+        val selected = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$collectionId/ocr-languages",
+            body = """{"ocrEngine":"LLM","ocrTranscriptionProfileId":"${profileIdOf(first)}","ocrReviewProfileId":"${profileIdOf(first)}"}""",
+            credential = Credential.CSRF,
+        )
+        assertEquals(HttpStatusCode.OK, selected.status, selected.bodyAsText())
+    }
+
+    @Test
+    fun `a text-only LLM profile cannot be selected for transcription or review and nothing is created`() = runBlocking {
+        val llm = llmProfile("Chatter", "deepseek-chat")
+
+        val refused = fromLlm(llm.id)
+
+        assertEquals(HttpStatusCode.Conflict, refused.status, refused.bodyAsText())
+        assertContains(refused.bodyAsText(), "LLM_PROFILE_TEXT_ONLY")
+        assertEquals(0, profileCount())
+    }
+
+    @Test
+    fun `an unknown or disabled LLM profile is refused and the copy needs a credential`() = runBlocking {
+        assertEquals(HttpStatusCode.NotFound, fromLlm("no-such-profile").status)
+        val llm = llmProfile("Reader", "gpt-4o")
+        harness.context.llm.update(llm.id, llm.copy(enabled = false))
+        assertEquals(HttpStatusCode.BadRequest, fromLlm(llm.id).status)
+        assertEquals(HttpStatusCode.Unauthorized, fromLlm(llm.id, Credential.NONE).status)
+        assertEquals(0, profileCount())
+    }
+
+    @Test
+    fun `renaming the LLM profile keeps its copy linked by id and follows the new name`() = runBlocking {
+        val llm = llmProfile("Reader", "gpt-4o")
+        val copy = fromLlm(llm.id)
+        assertContains(copy.bodyAsText(), "\"sourceLlmProfileId\":\"${llm.id}\"")
+
+        harness.context.llm.update(llm.id, llm.copy(name = "Page reader"))
+        val again = fromLlm(llm.id)
+
+        assertEquals(HttpStatusCode.OK, again.status, again.bodyAsText())
+        assertEquals(profileIdOf(copy), profileIdOf(again), "a rename keeps the link, so no second copy appears")
+        assertContains(again.bodyAsText(), "\"name\":\"Page reader (from LLM profile)\"")
+        assertEquals(1, profileCount())
+    }
+
+    @Test
+    fun `an unrelated OCR profile with the copy's name is never adopted as the copy`() = runBlocking {
+        val unrelated = create(profileBody.replace("Local vision", "Reader (from LLM profile)"))
+        val unrelatedId = profileIdOf(unrelated)
+        val unrelatedRevision = revisionIdOf(unrelated)
+        val llm = llmProfile("Reader", "gpt-4o")
+
+        val response = fromLlm(llm.id)
+
+        assertEquals(HttpStatusCode.Conflict, response.status, response.bodyAsText())
+        val after = harness.context.ocr.require(unrelatedId)
+        assertEquals(unrelatedRevision, after.revision.revisionId, "the unrelated profile gained no revision")
+        assertEquals("vision-model", after.revision.model)
+        assertEquals(null, after.sourceLlmProfileId, "and was not linked to the LLM profile")
+        assertEquals(1, profileCount())
+    }
+
+    @Test
+    fun `deleting the LLM profile leaves its copy and an admitted attempt untouched`() = runBlocking {
+        val llm = llmProfile("Reader", "gpt-4o")
+        val profileId = profileIdOf(fromLlm(llm.id))
+        val settings = infoscry.ocr.CollectionOcrSettings(
+            language = "eng",
+            engine = infoscry.ocr.OcrEngine.LLM,
+            transcriptionProfileId = profileId,
+        )
+        val admitted = harness.context.ocr.snapshotFor(settings, extractorVersion = "test")
+
+        llmProfile("Other", "gpt-4o-mini") // the last LLM profile cannot be deleted
+        harness.context.llm.deleteById(llm.id)
+
+        val kept = harness.context.ocr.require(profileId)
+        assertTrue(kept.enabled, "the copy stays selectable")
+        assertEquals(llm.id, kept.sourceLlmProfileId, "the link is left dangling, not rewritten")
+        assertEquals(
+            admitted.transcriptionProfileRevisionId,
+            harness.context.ocr.snapshotFor(settings, extractorVersion = "test").transcriptionProfileRevisionId,
+        )
+    }
+
+    @Test
+    fun `editing the LLM profile after admission leaves the admitted attempt on the revision it pinned`() = runBlocking {
+        val llm = llmProfile("Reader", "gpt-4o")
+        val copy = fromLlm(llm.id)
+        val profileId = profileIdOf(copy)
+        val pinnedRevision = revisionIdOf(copy)
+        val settings = infoscry.ocr.CollectionOcrSettings(
+            language = "eng",
+            engine = infoscry.ocr.OcrEngine.LLM,
+            transcriptionProfileId = profileId,
+        )
+        val admitted = harness.context.ocr.snapshotFor(settings, extractorVersion = "test")
+        assertEquals(pinnedRevision, admitted.transcriptionProfileRevisionId)
+
+        harness.context.llm.update(llm.id, llm.copy(model = "gpt-4o-mini", endpoint = "https://api.openai.com/v1"))
+        val refreshed = fromLlm(llm.id)
+
+        assertEquals(HttpStatusCode.OK, refreshed.status, refreshed.bodyAsText())
+        assertEquals(profileId, profileIdOf(refreshed))
+        assertNotEquals(pinnedRevision, revisionIdOf(refreshed), "an edit of the LLM profile is a new OCR revision")
+        assertContains(refreshed.bodyAsText(), "gpt-4o-mini")
+        val stillPinned = harness.context.ocrProfiles.findRevision(admitted.transcriptionProfileRevisionId!!)!!
+        assertEquals("gpt-4o", stillPinned.model, "the admitted attempt still describes what it was admitted with")
+        assertEquals("http://127.0.0.1:11434/v1", stillPinned.endpoint)
+    }
 
     private companion object {
         const val TIMEOUT_MILLIS = 20_000L

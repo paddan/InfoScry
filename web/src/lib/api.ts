@@ -235,6 +235,8 @@ export type OcrProfile = {
   /** null: never measured; the measurement is a synthetic-image check, not a declaration. */
   imageCapabilityMeasured: boolean | null;
   imageCapabilityCheckedAt: string | null;
+  /** The LLM profile this profile was copied from; absent or null for an OCR profile made directly. */
+  sourceLlmProfileId?: string | null;
 };
 
 /** The complete next state of a profile; an edit is a new revision, so there is no sparse update. */
@@ -282,6 +284,8 @@ export type LlmCatalogModel = {
   outputPricePerMillion: number | null;
   cacheReadPricePerMillion: number | null;
   priceKnown: boolean;
+  /** Whether the model accepts image input; null when the catalog does not say, which is not "no". */
+  imageInput: boolean | null;
 };
 
 export type LlmCatalog = { live: boolean; models: LlmCatalogModel[] };
@@ -518,8 +522,11 @@ export async function fetchLlmCatalog(
   provider: LlmProvider,
   endpoint: string,
   apiKeyEnvironmentVariable: string | null,
+  imageInputOnly = false,
 ): Promise<LlmCatalog> {
   const parameters = new URLSearchParams({ provider, endpoint });
+  // The server drops a model the catalog states is text-only and keeps one it does not state.
+  if (imageInputOnly) parameters.append('imageInput', 'true');
   if (apiKeyEnvironmentVariable !== null) {
     parameters.append('apiKeyEnvironmentVariable', apiKeyEnvironmentVariable);
   }
@@ -537,7 +544,9 @@ export async function fetchLlmCatalog(
       response = await send();
     }
   }
-  return (await readJson(response)) as LlmCatalog;
+  const catalog = (await readJson(response)) as LlmCatalog;
+  // The server leaves an unknown field out, and the form tells "unknown" from "no" by comparing with null.
+  return { ...catalog, models: catalog.models.map((model) => ({ ...model, imageInput: model.imageInput ?? null })) };
 }
 
 export async function createLlmProfile(profile: LlmProfileInput): Promise<LlmProfile> {
@@ -605,6 +614,42 @@ export async function updateOcrProfile(
     'PATCH',
     expectedRevisionId === undefined ? profile : { ...profile, expectedRevisionId },
   )) as { profile: OcrProfile };
+  return normaliseOcrProfile(body.profile);
+}
+
+/**
+ * One LLM profile as a collection's OCR selects see it. `imageInput` is what the catalog states about the
+ * model; null means it does not say. `keyAvailable` is presence only; no key value is ever returned.
+ */
+export type OcrLlmCandidate = {
+  id: string;
+  name: string;
+  provider: LlmProvider;
+  endpoint: string;
+  scope: OcrEndpointScope;
+  model: string;
+  apiKeyEnvironmentVariable: string | null;
+  keyAvailable: boolean;
+  imageInput: boolean | null;
+};
+
+/** The enabled LLM profiles, with what the catalog states about each model's image input. */
+export async function listOcrLlmCandidates(): Promise<OcrLlmCandidate[]> {
+  const body = (await readJson(await fetch('/api/ocr/llm-profiles'))) as { profiles: OcrLlmCandidate[] };
+  return body.profiles.map((candidate) => ({
+    ...candidate,
+    apiKeyEnvironmentVariable: candidate.apiKeyEnvironmentVariable ?? null,
+    imageInput: candidate.imageInput ?? null,
+  }));
+}
+
+/**
+ * Offer an LLM profile for transcription or review: the server copies it into an OCR profile (or brings its
+ * existing copy up to date) and answers with that profile, which is what a collection selects and an attempt
+ * pins. A model the catalog states is text-only is refused with 409 `LLM_PROFILE_TEXT_ONLY`.
+ */
+export async function copyLlmProfileToOcr(llmProfileId: string): Promise<OcrProfile> {
+  const body = (await mutate('/api/ocr/profiles/from-llm', 'POST', { llmProfileId })) as { profile: OcrProfile };
   return normaliseOcrProfile(body.profile);
 }
 

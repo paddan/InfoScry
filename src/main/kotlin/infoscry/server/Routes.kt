@@ -488,6 +488,7 @@ fun Application.configureRoutes(
         configureSourceRoutes(context)
         configureLlmProfileRoutes(context)
         configureOcrProfileRoutes(context)
+        configureOcrLlmCandidateRoutes(context)
         configureOcrRescanRoutes(context)
         configureLlmCatalogRoutes(credentials)
         configureAskRoutes(context)
