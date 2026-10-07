@@ -82,33 +82,52 @@ class ImportCommandProcessTest {
     @Test
     fun `a foreground import reports every document and exits nonzero when one could not be read`() {
         val good = writeSource("good.txt", "Readable.\n")
+        // A supported file whose extraction fails: it is an item and a failure, as it always was.
+        val broken = writeSource("broken.txt", "${HarnessExtractor.FAILING_CONTENT}\n")
+        // Unsupported content is skipped: it is not a document, not a failure and not one of the import's files.
         val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
 
         val result = runHarness(
             "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json",
-            good.toString(), blob.toString(),
+            good.toString(), broken.toString(), blob.toString(),
         )
 
         assertNotEquals(0, result.exitCode, "an import with a failed document reported success")
         val report = ApiJson.decodeFromString<ImportResult>(result.stdout.lines().last { it.isNotBlank() })
         assertEquals(1, report.imported)
         assertEquals(1, report.failed)
-        assertTrue(report.items.any { it.sourcePath?.endsWith("blob.bin") == true && it.errorCode == "UNSUPPORTED_MEDIA_TYPE" })
+        assertEquals(listOf("broken.txt", "good.txt"), report.items.map { Path.of(it.sourcePath!!).fileName.toString() }.sorted())
+        assertTrue(report.items.any { it.sourcePath?.endsWith("broken.txt") == true && it.errorCode == "EXTRACTION_FAILED" })
         assertContains(result.stderr, "1 of 2 document(s) could not be imported")
     }
 
     @Test
-    fun `standalone text import keeps its local per-file diagnostic`() {
+    fun `an import whose every file is unsupported exits zero with no documents`() {
         val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
 
         val result = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", blob.toString(),
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", blob.toString(),
+        )
+
+        assertEquals(0, result.exitCode, result.stderr)
+        val report = ApiJson.decodeFromString<ImportResult>(result.stdout.lines().last { it.isNotBlank() })
+        assertEquals(0, report.imported)
+        assertEquals(0, report.failed)
+        assertTrue(report.items.isEmpty(), "a skipped file must not appear in the import's items")
+        assertFalse((result.stdout + result.stderr).contains("UNSUPPORTED_MEDIA_TYPE"))
+    }
+
+    @Test
+    fun `standalone text import keeps its local per-file diagnostic`() {
+        val broken = writeSource("broken.txt", "${HarnessExtractor.FAILING_CONTENT}\n")
+
+        val result = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default", broken.toString(),
         )
         val output = result.stdout + result.stderr
 
         assertNotEquals(0, result.exitCode)
-        assertContains(output, "UNSUPPORTED_MEDIA_TYPE")
-        assertContains(output.lowercase(), "no extractor")
+        assertContains(output, "EXTRACTION_FAILED")
         assertFalse(output.contains("omitted by the local API"), output)
         assertFalse(output.contains("server log"), output)
     }
@@ -201,19 +220,19 @@ class ImportCommandProcessTest {
 
     @Test
     fun `server-attached wait reports the failure sentence the API derived, not the stored one`() {
-        val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
+        val broken = writeSource("broken.txt", "${HarnessExtractor.FAILING_CONTENT}\n")
         val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
         try {
             server.awaitStdoutLine("{")
 
             val result = runHarness(
-                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "--wait", blob.toString(),
+                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "--wait", broken.toString(),
             )
 
             assertNotEquals(0, result.exitCode, "a failed server-owned item must still make --wait fail")
-            assertContains(result.stdout, "UNSUPPORTED_MEDIA_TYPE")
-            assertContains(result.stdout, "blob.bin")
-            assertContains(result.stdout, "the pipeline has no extractor for this kind of file")
+            assertContains(result.stdout, "EXTRACTION_FAILED")
+            assertContains(result.stdout, "broken.txt")
+            assertContains(result.stdout, "the extractor stopped before it delivered every unit of this document")
             // The message stored beside the item names the media type it detected, and that text is the
             // server's diagnostic rather than the API's answer: only the derived sentence crosses.
             assertTrue(!result.stdout.contains("application/octet-stream"), result.stdout)
@@ -225,19 +244,19 @@ class ImportCommandProcessTest {
 
     @Test
     fun `server-attached text wait reports the per-file failure the API derived`() {
-        val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
+        val broken = writeSource("broken.txt", "${HarnessExtractor.FAILING_CONTENT}\n")
         val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
         try {
             server.awaitStdoutLine("{")
 
             val result = runHarness(
-                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--wait", blob.toString(),
+                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--wait", broken.toString(),
             )
             val output = result.stdout + result.stderr
 
             assertNotEquals(0, result.exitCode)
-            assertContains(output, "UNSUPPORTED_MEDIA_TYPE")
-            assertContains(output, "the pipeline has no extractor for this kind of file")
+            assertContains(output, "EXTRACTION_FAILED")
+            assertContains(output, "the extractor stopped before it delivered every unit of this document")
             assertFalse(output.contains("application/octet-stream"), output)
             assertFalse(output.contains(dataDir.toString()), output)
         } finally {
