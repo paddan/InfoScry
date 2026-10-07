@@ -92,6 +92,14 @@ dependencies {
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
+/**
+ * `-PskipFrontend` leaves the compiled frontend out of the resources, so a backend-only run needs neither
+ * Node nor a SvelteKit build. Only the test that fetches the shell over HTTP reads it, and it is skipped
+ * when the flag is set (the server answers FRONTEND_MISSING without it); the browser acceptance tests need
+ * it too, so `externalTest` and packaging must run without the flag.
+ */
+val skipFrontend = providers.gradleProperty("skipFrontend").isPresent
+
 tasks.test {
     // `external` is the tag for the tests that need a tool installed on this machine: the real OCR
     // reading, and later the real Calibre conversion. They are excluded here and run by `externalTest`,
@@ -103,6 +111,9 @@ tasks.test {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     // Test classes use temporary directories and ephemeral ports, so they can run in separate JVMs.
     maxParallelForks = (Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
+    // Tells the one test that reads the compiled frontend shell that `-PskipFrontend` left it out, so it is
+    // skipped by name rather than failing. Without the flag the property is absent and the test must run.
+    if (skipFrontend) systemProperty("infoscry.skipFrontend", "true")
 }
 
 val externalTest = tasks.register<Test>("externalTest") {
@@ -112,6 +123,9 @@ val externalTest = tasks.register<Test>("externalTest") {
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // These tests depend on tools installed on this machine (Tesseract, Chromium) that are not task inputs,
+    // so a cached pass could be replayed where the tool is absent. They must run, never be restored.
+    outputs.cacheIf { false }
     // The browser acceptance tests drive these scripts, so a change to one is an input.
     inputs.file(layout.projectDirectory.file("web/e2e/investigate-browser-acceptance.mjs"))
     inputs.file(layout.projectDirectory.file("web/e2e/collections-browser-acceptance.mjs"))
@@ -190,13 +204,6 @@ tasks.named("check") {
     dependsOn(frontendTest)
 }
 
-/**
- * `-PskipFrontend` leaves the compiled frontend out of the resources, so a backend-only run needs neither
- * Node nor a SvelteKit build. No JVM test reads the compiled shell (the server answers FRONTEND_MISSING
- * without it); the browser acceptance tests do, so `externalTest` and packaging must run without the flag.
- */
-val skipFrontend = providers.gradleProperty("skipFrontend").isPresent
-
 tasks.processResources {
     if (!skipFrontend) dependsOn(frontendBuild)
     // The pinned model manifest is authored in `models/` so a reader can inspect the pin without reading
@@ -227,6 +234,8 @@ val gpuIntegrationTest = tasks.register<Test>("gpuIntegrationTest") {
     classpath = sourceSets["test"].runtimeClasspath
     systemProperty("infoscry.dataDir", dataDir)
     outputs.upToDateWhen { false }
+    // The gate proves the hardware, so a result restored from the build cache would prove nothing.
+    outputs.cacheIf { false }
     jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
 
