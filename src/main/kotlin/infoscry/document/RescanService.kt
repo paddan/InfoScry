@@ -119,6 +119,11 @@ data class RescanOverrides(
     val importMode: infoscry.ocr.OcrImportMode? = null,
     val transcriptionProfileId: String? = null,
     val reviewProfileId: String? = null,
+    /**
+     * The OCR language list for this reading, or null for the collection's. A rescan preview never sets it; a
+     * retry with a chosen method may, and it travels through the same resolution as every other choice.
+     */
+    val language: String? = null,
 )
 
 
@@ -425,7 +430,7 @@ class RescanService(
         val collection = requireActiveCollection(collectionId)
         val document = requireDocument(collectionId, documentId)
         val settings = collection.ocrSettings().withOverrides(overrides)
-        val snapshot = snapshotFor(settings, collection, document)
+        val snapshot = snapshotFor(settings)
         requireRescanable(document, snapshot)
         val baselineRevisionId = revisions.activeRevisionId(documentId)
         val managedPath = paths.documentDir(collectionId, documentId)
@@ -459,6 +464,23 @@ class RescanService(
         ).also { preview ->
             operations.recordPreview(collectionId.value, documentId, preview)
         }
+    }
+
+    /**
+     * The reading a choice would make for [collection], validated exactly as a preview validates it.
+     *
+     * It is the half of [preview] that does not depend on one document: the collection's settings with the
+     * choice applied are resolved into the snapshot (profiles must exist and be enabled, the engine's runtime
+     * is probed), and the snapshot is then refused when its engine is not in this build, no embedder exists, or
+     * an external profile was never measured as image capable or lacks its key. A retry with a chosen OCR
+     * method admits through this, so it can never accept a reading a rescan preview would refuse.
+     *
+     * @throws RescanRefusalException with the same codes a preview answers with.
+     */
+    suspend fun resolveChosenReading(collection: Collection, overrides: RescanOverrides): OcrSettingsSnapshot {
+        val snapshot = snapshotFor(collection.ocrSettings().withOverrides(overrides))
+        requireReadingUsable(snapshot)
+        return snapshot
     }
 
     // ---- admission ----
@@ -1213,12 +1235,32 @@ class RescanService(
      * are all refusals with a remedy — and none of them sends a page anywhere.
      */
     private fun requireRescanable(document: Document, snapshot: OcrSettingsSnapshot) {
-        if (!pages.supports(document.mediaType)) {
-            throw RescanRefusalException(
+        pageImagesRefusal(document)?.let { throw it }
+        requireReadingUsable(snapshot)
+    }
+
+    /**
+     * The refusal for a document whose format has no page images to read, or null when it has them.
+     *
+     * Public because a retry with a chosen OCR method asks the same question per document, and a second
+     * list of readable formats would drift from this one.
+     */
+    fun pageImagesRefusal(document: Document): RescanRefusalException? =
+        if (pages.supports(document.mediaType)) {
+            null
+        } else {
+            RescanRefusalException(
                 RescanRefusalException.PAGE_IMAGES_UNSUPPORTED,
                 pages.unsupportedReason(document.mediaType),
             )
         }
+
+    /**
+     * Whether a reading's settings can be honoured on this machine at all: its engine exists, a replacement
+     * could be embedded, and every external profile it dispatches to was measured as able to read an image and
+     * has its key. None of it sends a page anywhere.
+     */
+    private fun requireReadingUsable(snapshot: OcrSettingsSnapshot) {
         if (engines(snapshot.engine, snapshot, null) == null) {
             throw RescanRefusalException(
                 RescanRefusalException.ENGINE_UNAVAILABLE,
@@ -1273,11 +1315,7 @@ class RescanService(
     }
 
     /** The snapshot of one attempt: the settings' engine, mode, allowance and the revisions they name now. */
-    private suspend fun snapshotFor(
-        settings: CollectionOcrSettings,
-        collection: Collection,
-        document: Document,
-    ): OcrSettingsSnapshot {
+    private suspend fun snapshotFor(settings: CollectionOcrSettings): OcrSettingsSnapshot {
         val transcription = settings.transcriptionProfileId?.let { profileId ->
             requireProfileRevision(profileId, OcrProfileRole.TRANSCRIPTION)
         }
@@ -1652,7 +1690,7 @@ private fun RescanPreviewOverrides?.asOverrides(): RescanOverrides = RescanOverr
 /** The collection's OCR settings with a caller's overrides applied. */
 private fun CollectionOcrSettings.withOverrides(overrides: RescanOverrides): CollectionOcrSettings =
     CollectionOcrSettings(
-        language = language,
+        language = overrides.language ?: language,
         engine = overrides.engine ?: engine,
         importMode = overrides.importMode ?: importMode,
         transcriptionProfileId = overrides.transcriptionProfileId ?: transcriptionProfileId,

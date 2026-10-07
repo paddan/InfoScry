@@ -36,6 +36,7 @@
     type LlmProfilePrice,
     type RetryAdmission,
     type RetryAttempt,
+    type RetryOcrChoice,
     type SearchHit,
     type SearchFilters,
     type SearchMode,
@@ -713,8 +714,11 @@
    * show. The server decides per document, so a refusal is a normal answer with its own sentence rather than
    * a failed request, and the retry keeps the document's identity either way.
    */
-  async function retryManagedDocument(documentId: string): Promise<RetryAttempt> {
-    const admission = await retryDocuments(managedCollectionId, { documentIds: [documentId] });
+  async function retryManagedDocument(documentId: string, ocr?: RetryOcrChoice): Promise<RetryAttempt> {
+    const admission = await retryDocuments(
+      managedCollectionId,
+      ocr === undefined ? { documentIds: [documentId] } : { documentIds: [documentId], ocr },
+    );
     const jobId = admission.acceptedJobIds[0];
     if (jobId !== undefined) return { accepted: true, jobId };
     return {
@@ -731,8 +735,8 @@
    * documents it refused. The panel shows that answer; the work itself belongs to the server, so a navigation,
    * a disconnect or a restart does not lose it.
    */
-  async function retryAllManagedDocuments(): Promise<RetryAdmission> {
-    return retryDocuments(managedCollectionId, { allEligible: true });
+  async function retryAllManagedDocuments(ocr?: RetryOcrChoice): Promise<RetryAdmission> {
+    return retryDocuments(managedCollectionId, ocr === undefined ? { allEligible: true } : { allEligible: true, ocr });
   }
 
   /**

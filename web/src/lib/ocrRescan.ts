@@ -1,4 +1,47 @@
-import type { OcrEngine, OcrImportMode, OcrLlmCandidate, OcrOperation, OcrOperationStage, OcrProfile } from './api';
+import type {
+  OcrEngine,
+  OcrImportMode,
+  OcrLlmCandidate,
+  OcrOperation,
+  OcrOperationStage,
+  OcrProfile,
+  RescanPreviewOverrides,
+  RetryOcrChoice,
+} from './api';
+
+/**
+ * What a person picked in the shared OCR method controls. An empty string means "the collection's default",
+ * which is also what an absent field means to the server, so a choice that names nothing changes nothing.
+ */
+export type OcrChoice = {
+  engine: OcrEngine | '';
+  mode: OcrImportMode | '';
+  transcription: string;
+  review: string;
+  language: string;
+};
+
+export function emptyChoice(): OcrChoice {
+  return { engine: '', mode: '', transcription: '', review: '', language: '' };
+}
+
+/** The fields of a choice that name something, as a rescan preview's overrides. */
+export function rescanOverrides(choice: OcrChoice): RescanPreviewOverrides {
+  const chosen: RescanPreviewOverrides = {};
+  if (choice.engine !== '') chosen.engine = choice.engine;
+  if (choice.mode !== '') chosen.importMode = choice.mode;
+  if (choice.transcription !== '') chosen.transcriptionProfileId = choice.transcription;
+  if (choice.review !== '') chosen.reviewProfileId = choice.review;
+  return chosen;
+}
+
+/** The same choice for a retry, or undefined when it names nothing so the request stays as it always was. */
+export function retryChoice(choice: OcrChoice): RetryOcrChoice | undefined {
+  const chosen: RetryOcrChoice = { ...rescanOverrides(choice) };
+  const language = choice.language.trim();
+  if (language !== '') chosen.language = language;
+  return Object.keys(chosen).length === 0 ? undefined : chosen;
+}
 
 /** The words a reader sees for each engine; the value sent to the server stays the enum. */
 export const ENGINE_LABELS: Record<OcrEngine, string> = {

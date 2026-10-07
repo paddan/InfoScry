@@ -11,6 +11,6 @@
 | [05 — Files that cannot be imported are skipped and not shown](05-skip-unsupported-files.md) | None | Implemented; browser scenario not done |
 | [06 — Include or exclude file extensions when importing a folder](06-include-exclude-extensions.md) | 05 | Not started |
 | [07 — Per-collection ignore patterns for files that are never imported](07-ignore-patterns.md) | 05 | Not started |
-| [08 — Read a document again with a chosen OCR method, including after a failed import](08-retry-with-chosen-ocr.md) | 04 | Not started |
+| [08 — Read a document again with a chosen OCR method, including after a failed import](08-retry-with-chosen-ocr.md) | 04 | Implemented; browser scenario not done |
 
 A profile can be measured in Admin → LLM profiles ("Check tool calling") or with `infoscry llm test <profile name>`.

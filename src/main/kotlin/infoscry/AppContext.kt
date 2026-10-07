@@ -353,6 +353,20 @@ class AppContext private constructor(
         jobs = jobs,
         coordinator = mutations,
         blockers = blockers,
+        // A retry with a chosen OCR method is admitted through the rescan service's own validation and frozen
+        // as its snapshot, so the two can never disagree about what an engine or profile may be used for.
+        choices = object : infoscry.document.RetryReadingChoices {
+            override suspend fun resolve(
+                collection: Collection,
+                choice: infoscry.document.RetryOcrChoice,
+            ) = rescanService.resolveChosenReading(collection, choice.toOverrides())
+
+            override fun pageImagesRefusal(document: infoscry.domain.Document) =
+                rescanService.pageImagesRefusal(document)
+
+            override fun publishesText(documentId: infoscry.domain.DocumentId) =
+                revisions.activeRevisionId(documentId) != null
+        },
         prerequisites = injectedRetryPrerequisites ?: { collection ->
             RetryPrerequisites.probe(
                 collection = collection,

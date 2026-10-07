@@ -580,7 +580,14 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                 val jobId = call.jobId()
                 val job = context.jobs.get(jobId)
                     ?: throw NoSuchElementException("no job with id ${jobId.value}")
-                val snapshot = infoscry.jobs.ImportJobPayload.decode(job.payload).ocr
+                // An import's files and a retry's documents share one allowance each, so the scope is approved
+                // on the job whichever kind it is; the two payloads name the same snapshot.
+                val recorded = if (job.type == infoscry.domain.JobType.RETRY) {
+                    infoscry.jobs.RetryJobPayload.decode(job.payload).ocr
+                } else {
+                    infoscry.jobs.ImportJobPayload.decode(job.payload).ocr
+                }
+                val snapshot = recorded
                     ?: throw BadRequestException(
                         "this job recorded no OCR selection, so it has no external page scope to approve",
                     )

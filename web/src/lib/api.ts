@@ -1095,7 +1095,13 @@ export async function deleteDocuments(
 }
 
 /** One document a retry refused, and InfoScry's own sentence for the reason. */
-export type RetryRejection = { documentId: string; reason: string };
+export type RetryRejection = { documentId: string; reason: string; code?: string | null };
+
+/**
+ * The OCR method a retry reads with instead of the collection's. Every field is optional and an absent one
+ * means the collection's value; the server validates and admits it as it does a Scan again preview.
+ */
+export type RetryOcrChoice = RescanPreviewOverrides & { language?: string };
 
 /**
  * What a retry asks for: the documents to read again, or every eligible one in the collection.
@@ -1103,7 +1109,9 @@ export type RetryRejection = { documentId: string; reason: string };
  * The two are mutually exclusive because they are different requests — one may explain a document the user
  * named, and the other picks the set itself.
  */
-export type RetryRequest = { documentIds: string[] } | { allEligible: true };
+export type RetryRequest =
+  | { documentIds: string[]; ocr?: RetryOcrChoice }
+  | { allEligible: true; ocr?: RetryOcrChoice };
 
 /** What an admitted retry answers with: the attempts it queued and the documents it refused. */
 export type RetryAdmission = {

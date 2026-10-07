@@ -305,20 +305,20 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                     )
                 }
                 val admission = if (request.allEligible) {
-                    context.retryService.admitRetryOfEligible(collection.id)
+                    context.retryService.admitRetryOfEligible(collection.id, request.ocr)
                 } else {
                     val documentIds = request.documentIds.map { raw ->
                         raw.takeIf(String::isNotBlank)?.let(::DocumentId)
                             ?: throw BadRequestException("a document id in the request was blank")
                     }
-                    context.retryService.admitRetry(collection.id, documentIds)
+                    context.retryService.admitRetry(collection.id, documentIds, request.ocr)
                 }
                 call.respondJson(
                     HttpStatusCode.Accepted,
                     RetryDocumentsResponse(
                         collectionId = collection.id.value,
                         acceptedJobIds = admission.acceptedJobIds,
-                        rejected = admission.rejected.map { RejectedRetryView(it.documentId, it.reason) },
+                        rejected = admission.rejected.map { RejectedRetryView(it.documentId, it.reason, it.code) },
                     ),
                 )
             }
@@ -336,11 +336,16 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
 data class RetryDocumentsRequest(
     val documentIds: List<String> = emptyList(),
     val allEligible: Boolean = false,
+    /**
+     * The OCR method to read with instead of the collection's, or absent to keep the collection's settings.
+     * It is validated and admitted like a rescan preview, and applies to every document of the request.
+     */
+    val ocr: infoscry.document.RetryOcrChoice? = null,
 )
 
 /** One document a retry refused, and InfoScry's own sentence for the reason. */
 @Serializable
-data class RejectedRetryView(val documentId: String, val reason: String)
+data class RejectedRetryView(val documentId: String, val reason: String, val code: String? = null)
 
 /**
  * What an admitted retry answers with: the attempts that were queued, and the documents that were not.
