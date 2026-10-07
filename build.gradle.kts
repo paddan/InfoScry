@@ -101,6 +101,8 @@ tasks.test {
     // accelerator, so the hardware gate is `gpuIntegrationTest`, which fails rather than skips.
     useJUnitPlatform { excludeTags(EXTERNAL_TAG, MODEL_TAG, GPU_TAG) }
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // Test classes use temporary directories and ephemeral ports, so they can run in separate JVMs.
+    maxParallelForks = (Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
 }
 
 val externalTest = tasks.register<Test>("externalTest") {
@@ -176,20 +178,37 @@ val frontendBuild = tasks.register<Exec>("frontendBuild") {
     outputs.dir(webDir.dir("build"))
 }
 
+val frontendCheck = tasks.register<Exec>("frontendCheck") {
+    group = "verification"
+    description = "Run svelte-check over the frontend"
+    dependsOn(frontendInstall)
+    workingDir = file("web")
+    commandLine("npm", "run", "check")
+}
+
 tasks.named("check") {
     dependsOn(frontendTest)
 }
 
+/**
+ * `-PskipFrontend` leaves the compiled frontend out of the resources, so a backend-only run needs neither
+ * Node nor a SvelteKit build. No JVM test reads the compiled shell (the server answers FRONTEND_MISSING
+ * without it); the browser acceptance tests do, so `externalTest` and packaging must run without the flag.
+ */
+val skipFrontend = providers.gradleProperty("skipFrontend").isPresent
+
 tasks.processResources {
-    dependsOn(frontendBuild)
+    if (!skipFrontend) dependsOn(frontendBuild)
     // The pinned model manifest is authored in `models/` so a reader can inspect the pin without reading
     // Kotlin, and copied onto the classpath so the application and its tests read that one file.
     from(project.layout.projectDirectory.dir("models")) {
         include("embedding-model.json")
         into("models")
     }
-    from(webDir.dir("build")) {
-        into("static")
+    if (!skipFrontend) {
+        from(webDir.dir("build")) {
+            into("static")
+        }
     }
 }
 

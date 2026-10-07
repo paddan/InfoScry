@@ -58,10 +58,12 @@ providers, redistributable fixtures and temporary data directories. It excludes
 tests tagged `external`, `model` or `gpu`. Initial dependency installation can
 require network access; tests do not need a real LLM provider.
 
-For focused backend work:
+For focused backend work, skipping the frontend build (no Node needed; no JVM
+test reads the compiled shell):
 
 ```bash
-./gradlew test --tests infoscry.server.DocumentRoutesTest
+./gradlew test -PskipFrontend --tests infoscry.server.DocumentRoutesTest
+./gradlew test -PskipFrontend            # whole backend suite
 ```
 
 For frontend work, after dependencies have been installed:
@@ -72,6 +74,13 @@ npm test -- --run
 npm run check
 npm run build
 ```
+
+or through Gradle: `./gradlew frontendTest frontendCheck`. Do not use
+`-PskipFrontend` for `externalTest` or packaging; they need the compiled frontend.
+
+Which to run: Kotlin changes use the focused or backend command; Svelte/TypeScript
+changes use the frontend commands; run `./gradlew check` before reporting a
+task done.
 
 `check` runs Vitest through Gradle; run `npm run check` explicitly for
 Svelte/TypeScript diagnostics.
