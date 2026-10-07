@@ -4,10 +4,12 @@ import infoscry.AppContext
 import infoscry.chunk.Chunker
 import infoscry.chunk.WhitespaceTokenCounter
 import infoscry.document.PageReviewer
+import infoscry.document.RescanRefusalException
 import infoscry.document.RescanService
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
+import infoscry.domain.DocumentStatus
 import infoscry.domain.ExtractionMethod
 import infoscry.domain.JobId
 import infoscry.domain.JobState
@@ -55,7 +57,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import javax.imageio.ImageIO
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -98,6 +102,33 @@ class RescanJobHandlerTest {
             assertEquals(1, result.indexedChunks)
             assertEquals(picture.baselineRevisionId, result.activeRevisionId)
             assertEquals(1, engine.calls)
+        }
+    }
+
+    @Test
+    fun `an explicit rescan of a format without page images is refused with the clear reason`() {
+        withHarness { harness ->
+            val documentId = harness.importTextDocument()
+
+            val refusal = harness.previewRefusal(documentId)
+
+            val exception = assertIs<RescanRefusalException>(
+                refusal,
+                "a rescan of a format without page images was not refused with the project's own refusal: $refusal",
+            )
+            assertEquals(RescanRefusalException.PAGE_IMAGES_UNSUPPORTED, exception.code)
+            assertContains(
+                exception.message.orEmpty(),
+                "text/plain has no page images to read, so it cannot be read again from them",
+                message = "the refusal must keep the clear reason a person acts on",
+            )
+            // The refusal is about the format, not about this document's reading: the ordinary extraction the
+            // import published is untouched by the rescan that could not be asked for.
+            AppContext.open(harness.archiveDir).use { context ->
+                val document = assertNotNull(context.documents.get(documentId))
+                assertEquals("text/plain", document.mediaType)
+                assertEquals(DocumentStatus.COMPLETE, document.status)
+            }
         }
     }
 
@@ -632,6 +663,24 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
             return Picture(documentId, revisionId, page.unitId.value, file)
         }
     }
+
+    /** One imported plain-text document: a format without page images, so a rescan has nothing to read again. */
+    fun importTextDocument(): DocumentId {
+        val file = harness.sourcesDir.resolve("notes.txt")
+        Files.writeString(file, "Ordinary notes about the meeting\n")
+        val run = harness.importDurably(listOf(file), RecordingUnits(units = 1))
+        return assertNotNull(run.items.single().documentId)
+    }
+
+    /** What one rescan preview answered for [documentId], or the refusal it was refused with. */
+    fun previewRefusal(documentId: DocumentId): Throwable? =
+        AppContext.open(harness.dataDir).use { context ->
+            runBlocking {
+                runCatching {
+                    rescanServiceOf(context, FakePageEngine()).preview(CollectionId("default"), documentId)
+                }.exceptionOrNull()
+            }
+        }
 
     /** The text the document publishes now, as its active revision holds it. */
     fun publishedTextOf(picture: Picture): String = AppContext.open(harness.dataDir).use { context ->

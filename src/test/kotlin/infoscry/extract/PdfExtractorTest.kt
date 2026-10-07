@@ -30,6 +30,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
+import java.util.HexFormat
 import javax.imageio.ImageIO
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -481,8 +483,9 @@ class PdfExtractorTest {
         )
 
         val settings = ExtractionSettings(ocrLanguages = "eng")
+        val input = inputFor(fixture(MIXED_NAME), probe(), settings = settings)
         val units = units(
-            collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe(), settings = settings), probe()),
+            collect(pdfExtractor(spy), input, probe()),
         )
         val ocred = units.single { pageOf(it.key) == 3 }
         val parsed = units.single { pageOf(it.key) == 1 }
@@ -510,22 +513,110 @@ class PdfExtractorTest {
             parsed.unit.sourceImage,
             "a page whose own text layer was read named an image nobody rendered for it",
         )
-        // The page the tool read names the image it was read from, at the place a later reader resolves
-        // artifacts from: this attempt's own directory under the document's artifact root, with the name a
-        // page's image has. A fill-missing render is working material, so it is the attempt's `working`
-        // directory rather than the `pages` a reviewed rescan keeps — the reading says which image it came
-        // from either way, which is the point. A page whose text came out of the container names nothing.
-        val rendered = assertNotNull(ocred.unit.sourceImage)
-        assertEquals(SourceImageRoot.ARTIFACTS, rendered.root)
-        assertEquals(
-            "${fingerprint(settings).value}/working/page-000003.png",
-            rendered.relativePath,
-            "the reading does not name the page image it was rendered from where a reader can find it",
+        // The page the tool read records no image reference: in fill-missing mode this render is working
+        // material — it is deleted the moment the reading commits and its directory when the attempt ends
+        // — so naming it would leave a durable page pointing at a file this attempt removed. The durable
+        // evidence of such a page is its word boxes above, which are still on disk; the pixels are gone by
+        // design. A page whose text came out of the container names nothing either.
+        assertNull(
+            ocred.unit.sourceImage,
+            "fill-missing named the temporary render it deletes after committing: ${ocred.unit.sourceImage}",
         )
+        // What the tool was handed is still observable through the seam: the engine saw a real page image
+        // at its own attempt path, and that path is inside the attempt's working directory.
         val pageThree = spy.pages.single { image -> image.ordinal == 2 }
-        assertEquals(pageThree.width, rendered.width)
-        assertEquals(pageThree.height, rendered.height)
-        assertEquals(PageImage.RENDER_VERSION, rendered.renderVersion)
+        assertTrue(
+            pageThree.imagePath.startsWith(
+                input.artifactRoot.resolve(fingerprint(settings).value).resolve("working"),
+            ),
+            "the fill-missing render was not working material under the attempt's own directory: " +
+                pageThree.imagePath,
+        )
+    }
+
+    // ---- Artifact lifetime: what a finished attempt may leave behind (ticket 03c) ---------------------
+
+    @Test
+    fun `fill-missing finish leaves every recorded image reference resolvable and hash-matched`() {
+        // Ticket 03c, scenario 1: a finished fill-missing attempt may leave behind only references that
+        // open — the word boxes the engine wrote beside the attempt's artifacts, and any image a unit
+        // names — and the recorded hash has to be the file's own bytes. A reference whose file is gone is
+        // exactly the lifetime bug this pins, so the engine here writes real artifact bytes rather than
+        // naming a file that was never written.
+        val settings = ExtractionSettings(ocrLanguages = "eng")
+        val attempt = fingerprint(settings).value
+        val spy = OcrSpy(
+            text = { page -> "läst sida $page" },
+            artifact = { page ->
+                val relative = "ocr/page-$page.tsv.gz"
+                val target = directory.resolve("artifacts").resolve(attempt).resolve(relative)
+                Files.createDirectories(target.parent)
+                val bytes = "boxes of page $page".toByteArray()
+                Files.write(target, bytes)
+                relative to sha256(bytes)
+            },
+        )
+        val input = inputFor(fixture(MIXED_NAME), probe(), settings = settings)
+
+        val events = collect(pdfExtractor(spy), input, probe())
+
+        val recorded = units(events)
+        assertTrue(
+            recorded.any { unit -> unit.unit.artifactRelativePath != null },
+            "no unit recorded a word-box artifact, so this test proves nothing",
+        )
+        recorded.forEach { unit ->
+            unit.unit.artifactRelativePath?.let { relative ->
+                val file = input.artifactRoot.resolve(relative)
+                assertTrue(
+                    Files.isRegularFile(file),
+                    "a unit records a word-box artifact that is not there: $relative",
+                )
+                assertEquals(unit.unit.artifactSha256, sha256Of(file), "artifact hash mismatch for $relative")
+            }
+            unit.unit.sourceImage?.let { source ->
+                val root = when (source.root) {
+                    SourceImageRoot.ARTIFACTS -> input.artifactRoot
+                    SourceImageRoot.MANAGED_COPY -> directory.resolve("managed")
+                }
+                val file = root.resolve(source.relativePath)
+                assertTrue(
+                    Files.isRegularFile(file),
+                    "a unit records an image that is not there: ${source.root}/${source.relativePath}",
+                )
+                assertEquals(
+                    source.sha256,
+                    sha256Of(file),
+                    "the recorded image is no longer the bytes its hash describes: ${source.relativePath}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `a fill-missing render is working material and records no durable reference`() {
+        // Ticket 03c, scenario 1 — the deliberate half: a fill-missing render is deleted when its reading
+        // commits (and its directory when the attempt ends), so it is working material by design and the
+        // unit may not name it. The durable evidence of such a page is the engine's word boxes; a durable
+        // page that named the deleted render would be a reference nothing could ever open again.
+        val spy = OcrSpy(text = { page -> "läst sida $page" })
+        val input = inputFor(fixture(MIXED_NAME), probe())
+
+        val events = collect(pdfExtractor(spy), input, probe())
+
+        val ocred = units(events).filter { unit -> unit.unit.method == ExtractionMethod.OCR }
+        assertTrue(ocred.isNotEmpty(), "no page was read by OCR, so this test proves nothing")
+        ocred.forEach { unit ->
+            assertNull(
+                unit.unit.sourceImage,
+                "fill-missing recorded a reference to its temporary render: ${unit.unit.sourceImage}",
+            )
+        }
+        val parsed = units(events).filter { unit -> unit.unit.method == ExtractionMethod.DIRECT_TEXT }
+        assertTrue(parsed.isNotEmpty(), "no directly-read page was committed, so this test proves nothing")
+        parsed.forEach { unit ->
+            assertNull(unit.unit.sourceImage, "a page nobody rendered named an image: ${unit.unit.sourceImage}")
+        }
     }
 
     // ---- What the document says about itself before it is read ----------------------------------------
@@ -1111,6 +1202,13 @@ class PdfExtractorTest {
         stream.use { Files.copy(it, target, REPLACE_EXISTING) }
         return target
     }
+
+    /** The SHA-256 of [bytes], in the only form a digest has in this pipeline. */
+    private fun sha256(bytes: ByteArray): String =
+        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))
+
+    /** The SHA-256 of a file's bytes: how a recorded reference is checked against what it names. */
+    private fun sha256Of(path: Path): String = sha256(Files.readAllBytes(path))
 
     private fun fixtureDirectory(): Path = Path.of("src/test/resources/fixtures")
 

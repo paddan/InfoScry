@@ -7,6 +7,7 @@ import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.OcrProfileStore
 import infoscry.storage.OcrReviewStore
 import infoscry.storage.PageApproval
+import io.ktor.client.engine.HttpClientEngine
 import java.nio.file.Path
 
 /**
@@ -110,6 +111,13 @@ internal fun ocrReviewerFactory(
     reviews: OcrReviewStore,
     profiles: OcrProfileStore,
     lookup: (String) -> String? = System::getenv,
+    /**
+     * The transport engine every review client this factory builds is constructed on, or null for each
+     * client's own CIO engine — the seam a test injects a recording transport through so an external
+     * review dispatch can be observed without leaving the machine. The client's own rules (redirects off,
+     * permits, key handling) still apply to whatever transport it is built on.
+     */
+    clientEngine: HttpClientEngine? = null,
 ): (OcrSettingsSnapshot, OcrDispatchAuthority?) -> PageReviewer = { snapshot, dispatch ->
     val comparison = OcrComparisonService(
         revisions = revisions,
@@ -122,6 +130,7 @@ internal fun ocrReviewerFactory(
         lookup = lookup,
         permits = dispatch,
         calls = dispatch?.let { authority -> authority::attemptAboutToBeSent },
+        clientEngine = clientEngine,
     )
     PageReviewer { input -> comparison.compare(input) }
 }

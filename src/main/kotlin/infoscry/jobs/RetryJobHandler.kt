@@ -8,6 +8,8 @@ import infoscry.domain.DocumentStatus
 import infoscry.domain.Job
 import infoscry.extract.ExtractionSettings
 import infoscry.library.ManagedLibrary
+import infoscry.ocr.OcrDispatchStage
+import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.DocumentBeingDeletedException
@@ -49,6 +51,12 @@ class RetryJobHandler internal constructor(
     private val jobs: JobStore,
     private val library: ManagedLibrary,
     private val mutations: MutationCoordinator,
+    /**
+     * The attempt-level wiring an import and this retry share: the dispatch authority a page is sent through
+     * and the review a staged page is judged by come from the same job-owned scope and the same snapshotted
+     * reviewer an import admitted with, so Retry is not a second answer to what either may do.
+     */
+    private val attemptDispatch: AttemptDispatch,
     private val ingest: DocumentIngest,
 ) : JobHandler {
 
@@ -66,13 +74,27 @@ class RetryJobHandler internal constructor(
         val documentsToRetry = payload.documentIds
             .map(::DocumentId)
             .mapNotNull { id -> documents.get(id)?.takeIf { it.collectionId == collectionId } }
+        // What an earlier run of this same job completed, kept in the job's counters across a pause or a
+        // requeue and re-read here, before this attempt reports its own zero. The gate exists because a
+        // status-only skip would silently swallow a fresh explicit retry of a document that stands COMPLETE
+        // or COMPLETE_WITH_WARNINGS — the runtime-forced re-read and the revisit of a failed unit are exactly
+        // such retries — while under this gate only a document a previous run of *this* job already finished
+        // is skipped, which is what a resumed job must not repeat.
+        val completedByPreviousRun = job.completed
         stage.reportProgress(completed = 0, total = documentsToRetry.size)
 
         var completed = 0
         try {
             for (document in documentsToRetry) {
                 try {
-                    retryOne(collection, payload.settings, document, stage)
+                    // A document an earlier run of this job already finished is not read again: the wait for an
+                    // external approval may have paused after an earlier document completed, and re-reading it would
+                    // repeat committed work — or reopen a published check-and-improve candidate as review-pending.
+                    val finishedByPreviousRun = completedByPreviousRun > 0 &&
+                        document.status in ImportJobHandler.FINISHED_STATUSES
+                    if (!finishedByPreviousRun) {
+                        retryOne(job, collection, payload.settings, payload.ocr, document, stage)
+                    }
                 } catch (deleted: DocumentBeingDeletedException) {
                     // A deletion won this race. The document stays deleted: nothing here publishes it again,
                     // and the deletion's own phases own whatever is left of it.
@@ -83,6 +105,16 @@ class RetryJobHandler internal constructor(
                 completed++
                 stage.reportProgress(completed, documentsToRetry.size)
             }
+        } catch (waiting: AttemptAwaitingApproval) {
+            // A page would have exceeded this job's external scope, and it was not sent. The waiting state is
+            // durable and the attempt ends here rather than reading the next document: no page of any document
+            // may be dispatched until a person approves the scope, and the documents this attempt already
+            // finished are not revisited when the approved job runs again, so the wait costs no work.
+            stage.run(STAGE_RECORD) { jobs.progress(job.id, stage = JobStore.AWAITING_APPROVAL_STAGE) }
+            LOGGER.atInfo()
+                .addKeyValue(JOB_ID_FIELD, waiting.jobId.value)
+                .log("a retry waits for an external page scope to be approved before another page is sent")
+            return
         } catch (cancelled: CancellationException) {
             // An interrupted attempt must not leave a document looking permanently active. A shutdown that
             // only requeues the job is not a cancellation — the next process finishes the same document — so
@@ -94,8 +126,10 @@ class RetryJobHandler internal constructor(
 
     /** Reads one document again, retaining its identity and its compatible committed work. */
     private suspend fun retryOne(
+        job: Job,
         collection: Collection,
         settings: ExtractionSettings,
+        snapshot: OcrSettingsSnapshot?,
         document: Document,
         stage: JobStage,
     ) {
@@ -116,6 +150,24 @@ class RetryJobHandler internal constructor(
             // The one thing an explicit retry does differently from a crash resume.
             revisitFailedUnits = true,
             onFailure = { code, message -> recordFailure(stage, document, code, message) },
+            // The page allowance this document's pages leave under: the *job's*, because the retry's
+            // documents share one scope exactly as an import's files do, and this attempt's, because nothing
+            // may be dispatched before the scope was approved.
+            dispatch = attemptDispatch.authorityFor(
+                job = job,
+                document = document,
+                snapshot = snapshot,
+                dispatchStage = OcrDispatchStage.TRANSCRIPTION,
+            ),
+            // How this document's staged pages are judged, or null when the attempt has no reviewer: the
+            // page's own text is compared with the engine's reading while the draft is in hand, and the
+            // review is recorded for a person — the same rules an import's staged pages are judged by.
+            review = attemptDispatch.stagedPageReviewOf(
+                job = job,
+                document = document,
+                collection = collection,
+                snapshot = snapshot,
+            ),
         )
     }
 
@@ -155,6 +207,9 @@ class RetryJobHandler internal constructor(
     private companion object {
 
         const val STAGE_RECORD = "record"
+
+        /** The job the waiting attempt belongs to, for the log line that says what it waits for. */
+        const val JOB_ID_FIELD = "job_id"
 
         /** The managed copy this attempt was admitted for is not on disk any more. */
         const val MANAGED_COPY_MISSING = "MANAGED_COPY_MISSING"

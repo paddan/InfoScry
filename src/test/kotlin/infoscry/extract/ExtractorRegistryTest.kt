@@ -122,6 +122,32 @@ class ExtractorRegistryTest {
     }
 
     @Test
+    fun `every format the production registry claims says whether its pages can be read as images`() {
+        val registry = ExtractorRegistry.production()
+        val renderable = setOf("application/pdf", "image/png", "image/jpeg", "image/tiff")
+
+        // Sink selection for a check-and-improve import answers from this declaration, so it has to be total
+        // and correct for every format the registry can read: exactly the paginated raster formats say they
+        // render page images, and every other claimed format keeps its ordinary extraction and names the
+        // safe reason instead.
+        registry.claimedMediaTypes().forEach { mediaType ->
+            val support = registry.select(mediaType).pageImageSupport
+            if (mediaType in renderable) {
+                assertIs<PageImageSupport.Supported>(
+                    support,
+                    "$mediaType renders page images, so it has to say so",
+                )
+            } else {
+                assertIs<PageImageSupport.Unsupported>(
+                    support,
+                    "$mediaType claims page images it cannot render",
+                )
+                assertEquals(PAGE_IMAGES_UNSUPPORTED_CODE, support.code, "$mediaType must name the safe reason")
+            }
+        }
+    }
+
+    @Test
     fun `the production registry reads a scanned page with the engine it was configured with`() = runBlocking {
         // The wiring, end to end: the registry selects the PDF reader, the reader renders the page, and
         // the engine hands it to the tool the registry was built with.

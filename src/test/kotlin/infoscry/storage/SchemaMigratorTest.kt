@@ -73,8 +73,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(24, database.userVersion())
-            assertEquals(24, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(27, database.userVersion())
+            assertEquals(27, SchemaMigrator.SUPPORTED_VERSION)
         }
     }
 
@@ -120,8 +120,140 @@ class SchemaMigratorTest {
                 "missing tables, found $tables",
             )
 
-            assertEquals(24, count(database, "schema_version"))
+            assertEquals(27, count(database, "schema_version"))
             assertEquals(0, count(database, "collections"), "a new archive must expose no collection")
+        }
+    }
+
+    /**
+     * Scenario 1 of ticket 02d: provenance is one new nullable column, never a second excerpt
+     * column, and the excerpts a legacy archive already stored come back byte for byte.
+     * Legacy rows name no revision — unknown provenance is reported, never invented.
+     */
+    @Test
+    fun `the evidence ledger gains a revision column while its stored excerpts survive byte for byte`() {
+        newDatabase().use { database ->
+            val now = "2026-10-06T07:00:00Z"
+            SchemaMigrator(database).migrate(upToVersion = 27)
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute(
+                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                            "VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now')",
+                    )
+                    statement.execute(
+                        "INSERT INTO conversations (id, collection_id, mode, profile_provider, profile_model, " +
+                            "profile_name, prompt_version, created_at) VALUES " +
+                            "('conv1', 'c1', 'INVESTIGATE', 'OPENAI_COMPATIBLE', 'model', 'prof', 3, '$now')",
+                    )
+                    // One excerpt with the characters escaping rewrites, one with a message_seq: both must
+                    // survive the migration untouched.
+                    statement.execute(
+                        "INSERT INTO evidence_ledger (conversation_id, evidence_id, source_unit_id, locator_json, excerpt) " +
+                            "VALUES ('conv1', 'S1', 'unit-1', '{\"type\":\"text_lines\":\"start\":1,\"end\":1}', " +
+                            "'a < b & c > d — exact bytes')",
+                    )
+                    statement.execute(
+                        "INSERT INTO evidence_ledger (conversation_id, evidence_id, source_unit_id, locator_json, excerpt, message_seq) " +
+                            "VALUES ('conv1', 'S2', 'unit-2', '{}', 'second excerpt', 4)",
+                    )
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+
+            val columns = database.read { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery("SELECT name FROM pragma_table_info('evidence_ledger')").use { rows ->
+                        buildList { while (rows.next()) add(rows.getString(1)) }
+                    }
+                }
+            }
+            assertEquals(
+                listOf("conversation_id", "evidence_id", "source_unit_id", "locator_json", "excerpt", "message_seq", "revision_id"),
+                columns,
+                "migration 028 must add exactly one revision column and no further excerpt column, got $columns",
+            )
+
+            data class Row(val excerpt: String, val messageSeq: Int?, val revisionId: String?)
+            val rows = database.read { connection ->
+                connection.prepareStatement(
+                    "SELECT excerpt, message_seq, revision_id FROM evidence_ledger ORDER BY evidence_id",
+                ).use { statement ->
+                    statement.executeQuery().use { results ->
+                        buildList {
+                            while (results.next()) {
+                                val seq = results.getInt("message_seq")
+                                add(
+                                    Row(
+                                        excerpt = results.getString("excerpt"),
+                                        messageSeq = if (results.wasNull()) null else seq,
+                                        revisionId = results.getString("revision_id"),
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            assertEquals(listOf("a < b & c > d — exact bytes", "second excerpt"), rows.map { it.excerpt })
+            assertEquals(listOf(null, 4), rows.map { it.messageSeq })
+            assertTrue(
+                rows.all { it.revisionId == null },
+                "rows written before the migration must name no revision, got ${rows.map { it.revisionId }}",
+            )
+        }
+    }
+
+    /**
+     * Scenario 4 of ticket 02d: migration 028 runs, the conversations and evidence it was applied to
+     * keep their counts, and a collection delete still cascades through conversations to evidence.
+     * (Collection scoping of saved history is pinned by InvestigationRoutesTest's
+     * `saved history is readable only through its collection`.)
+     */
+    @Test
+    fun `migration 028 preserves conversations and evidence and collection deletion still cascades`() {
+        newDatabase().use { database ->
+            val now = "2026-10-06T07:00:00Z"
+            SchemaMigrator(database).migrate(upToVersion = 27)
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute(
+                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                            "VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now')",
+                    )
+                    listOf("conv1", "conv2").forEach { conv ->
+                        statement.execute(
+                            "INSERT INTO conversations (id, collection_id, mode, profile_provider, profile_model, " +
+                                "profile_name, prompt_version, created_at) VALUES " +
+                                "('$conv', 'c1', 'INVESTIGATE', 'OPENAI_COMPATIBLE', 'model', 'prof', 3, '$now')",
+                        )
+                    }
+                    listOf("'conv1', 'S1'" to "unit-1", "'conv1', 'S2'" to "unit-2", "'conv2', 'S3'" to "unit-3")
+                        .forEach { (keys, unit) ->
+                            statement.execute(
+                                "INSERT INTO evidence_ledger (conversation_id, evidence_id, source_unit_id, locator_json, excerpt) " +
+                                    "VALUES ($keys, '$unit', '{}', 'kept excerpt')",
+                            )
+                        }
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+
+            assertEquals("28", pragma(database, "user_version"), "migration 028 must have been applied")
+            assertEquals(2, count(database, "conversations"), "the migration must not drop conversations")
+            assertEquals(3, count(database, "evidence_ledger"), "the migration must not drop evidence")
+
+            // Deletion is still enforced through the migrated schema: a collection delete reaches
+            // its conversations and their evidence rows through the same foreign keys as before.
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute("DELETE FROM collections WHERE id = 'c1'")
+                }
+            }
+            assertEquals(0, count(database, "conversations"))
+            assertEquals(0, count(database, "evidence_ledger"))
         }
     }
 
@@ -378,6 +510,308 @@ class SchemaMigratorTest {
             assertEquals(1200, read.width)
             assertEquals(1600, read.height)
             assertEquals(1, read.renderVersion)
+        }
+    }
+
+    /**
+     * The raw SQL boundary: a half-present core provenance (root/path/hash/render version), a
+     * half-measured image (width without height) and a reference that would leave its named root are all
+     * refused by the schema itself, while the two shapes the store writes — fully present and entirely
+     * absent — still land, on insert and on update alike.
+     */
+    @Test
+    fun `raw sql cannot write half-present or root-escaping source image provenance`() {
+        newDatabase().use { database ->
+            val now = "2026-09-30T07:00:00Z"
+            SchemaMigrator(database).migrate()
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    listOf(
+                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                            "VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now')",
+                        "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, " +
+                            "original_path, size_bytes, status, created_at, updated_at) VALUES ('d1', 'c1', " +
+                            "'${"a".repeat(64)}', 'image/png', 'scan.png', '/tmp/scan.png', 42, 'COMPLETE', " +
+                            "'$now', '$now')",
+                        "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, " +
+                            "provenance, created_at) VALUES ('r1', 'd1', NULL, 'CANDIDATE', 'TEST', '$now')",
+                    ).forEach(statement::execute)
+                }
+            }
+
+            fun pageInsert(ordinal: Int, columns: String = "", values: String = ""): String =
+                "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, extracted_text, " +
+                    "search_text${columns.takeIf { it.isNotEmpty() }?.let { part -> ", $part" } ?: ""}, " +
+                    "approval, created_at) VALUES ('r1', $ordinal, 'unit-$ordinal', " +
+                    "'{\"type\":\"pdf_page\",\"page\":${ordinal + 1}}', 'the reading', 'the reading'" +
+                    "${values.takeIf { it.isNotEmpty() }?.let { part -> ", $part" } ?: ""}, 'PENDING', '$now')"
+
+            val hash = "a".repeat(64)
+            val refused = listOf(
+                // The core present without its hash.
+                pageInsert(
+                    0,
+                    "source_image_root, source_image_relative_path, source_image_render_version",
+                    "'ARTIFACTS', 'attempt/pages/page-000001.png', 1",
+                ),
+                // The hash without the reference it names a file by.
+                pageInsert(1, "source_image_root, source_image_sha256, source_image_render_version", "'ARTIFACTS', '$hash', 1"),
+                // The reference without the root it resolves against.
+                pageInsert(2, "source_image_relative_path, source_image_sha256, source_image_render_version", "'attempt/pages/page-000003.png', '$hash', 1"),
+                // The rendering without the artifact it produced.
+                pageInsert(3, "source_image_root, source_image_render_version", "'ARTIFACTS', 1"),
+                // A width with no height: half a measurement is not a measurement.
+                pageInsert(
+                    4,
+                    "source_image_root, source_image_relative_path, source_image_sha256, source_image_width, source_image_render_version",
+                    "'ARTIFACTS', 'attempt/pages/page-000005.png', '$hash', 1200, 1",
+                ),
+                // An absolute reference: a page image is relative to the root its provenance names.
+                pageInsert(
+                    5,
+                    "source_image_root, source_image_relative_path, source_image_sha256, source_image_render_version",
+                    "'ARTIFACTS', '/etc/passwd', '$hash', 1",
+                ),
+                // A reference that climbs out of its named root.
+                pageInsert(
+                    6,
+                    "source_image_root, source_image_relative_path, source_image_sha256, source_image_render_version",
+                    "'ARTIFACTS', '../../outside.png', '$hash', 1",
+                ),
+                // A reference that cancels its way out of its named root.
+                pageInsert(
+                    7,
+                    "source_image_root, source_image_relative_path, source_image_sha256, source_image_render_version",
+                    "'MANAGED_COPY', 'attempt/../../outside.png', '$hash', 1",
+                ),
+                // A reference that names the root itself rather than a file inside it.
+                pageInsert(
+                    8,
+                    "source_image_root, source_image_relative_path, source_image_sha256, source_image_render_version",
+                    "'ARTIFACTS', '.', '$hash', 1",
+                ),
+            )
+            refused.forEach { statement ->
+                val failure = assertFailsWith<java.sql.SQLException>("the schema must refuse: $statement") {
+                    database.transaction { connection ->
+                        connection.createStatement().use { it.execute(statement) }
+                    }
+                }
+                assertTrue(
+                    failure.message!!.contains("CHECK constraint failed"),
+                    "the refusal must be the provenance constraint, not a syntax error: ${failure.message}",
+                )
+            }
+
+            // The two shapes a write may take still land: the whole provenance, or none of it.
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute(
+                        pageInsert(
+                            9,
+                            "source_image_root, source_image_relative_path, source_image_sha256, " +
+                                "source_image_width, source_image_height, source_image_render_version",
+                            "'ARTIFACTS', 'attempt/pages/page-000010.png', '$hash', 1200, 1600, 1",
+                        ),
+                    )
+                    statement.execute(pageInsert(10, "", ""))
+                }
+            }
+            assertEquals(2, count(database, "page_text_revisions"))
+
+            // And an update may not widen a complete provenance into a half-present one either.
+            val heightWidened = assertFailsWith<java.sql.SQLException> {
+                database.transaction { connection ->
+                    connection.createStatement().use { statement ->
+                        statement.execute(
+                            "UPDATE page_text_revisions SET source_image_height = NULL " +
+                                "WHERE revision_id = 'r1' AND ordinal = 9",
+                        )
+                    }
+                }
+            }
+            assertTrue(
+                heightWidened.message!!.contains("CHECK constraint failed"),
+                "the refusal must be the provenance constraint: ${heightWidened.message}",
+            )
+            val escapingWidened = assertFailsWith<java.sql.SQLException> {
+                database.transaction { connection ->
+                    connection.createStatement().use { statement ->
+                        statement.execute(
+                            "UPDATE page_text_revisions SET source_image_relative_path = '../moved.png' " +
+                                "WHERE revision_id = 'r1' AND ordinal = 9",
+                        )
+                    }
+                }
+            }
+            assertTrue(
+                escapingWidened.message!!.contains("CHECK constraint failed"),
+                "the refusal must be the provenance constraint: ${escapingWidened.message}",
+            )
+        }
+    }
+
+    /**
+     * An archive as version 19 left it — rows written directly, as the build that stored them could —
+     * migrates with its page text intact: an entirely absent provenance stays valid, a complete and
+     * confined provenance survives byte for byte under its own root, and a half-present or escaping one
+     * is cleared by the migration's audit rather than read back as a silent absence or kept as a
+     * reference that names nothing.
+     */
+    @Test
+    fun `a legacy archive's unusable source image provenance is cleared while its pages stay readable`() {
+        newDatabase().use { database ->
+            val now = "2026-09-30T07:00:00Z"
+            SchemaMigrator(database).migrate(upToVersion = 19)
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    listOf(
+                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                            "VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now')",
+                        "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, " +
+                            "original_path, size_bytes, status, created_at, updated_at) VALUES ('d1', 'c1', " +
+                            "'${"a".repeat(64)}', 'application/pdf', 'scan.pdf', '/tmp/scan.pdf', 42, " +
+                            "'COMPLETE', '$now', '$now')",
+                        "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, " +
+                            "provenance, created_at) VALUES ('r1', 'd1', NULL, 'PUBLISHED', 'LEGACY', '$now')",
+                        // A text-layer page: no image was ever observed, and all-absent provenance stays valid.
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, approval, created_at) VALUES ('r1', 0, 'unit-0', " +
+                            "'{\"type\":\"pdf_page\",\"page\":1}', 'the text layer page', " +
+                            "'the text layer page', 'APPROVED', '$now')",
+                        // A half-present core provenance a legacy write left behind: root and hash, no
+                        // reference — demonstrably unusable, since a hash beside no reference names no file.
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, source_image_root, source_image_sha256, " +
+                            "source_image_render_version, approval, created_at) VALUES ('r1', 1, 'unit-1', " +
+                            "'{\"type\":\"pdf_page\",\"page\":2}', 'the half-present page', " +
+                            "'the half-present page', 'ARTIFACTS', '${"b".repeat(64)}', 1, 'APPROVED', '$now')",
+                        // A complete provenance whose reference climbs out of its named root: it names a
+                        // file no root of this document holds, so it is unusable rather than evidence.
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, source_image_root, source_image_relative_path, " +
+                            "source_image_sha256, source_image_render_version, approval, created_at) VALUES " +
+                            "('r1', 2, 'unit-2', '{\"type\":\"pdf_page\",\"page\":3}', 'the escaping page', " +
+                            "'the escaping page', 'ARTIFACTS', '../../outside.png', '${"c".repeat(64)}', 1, " +
+                            "'APPROVED', '$now')",
+                        // A picture that is the document, read as itself: the managed-copy root.
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, source_image_root, source_image_relative_path, " +
+                            "source_image_sha256, source_image_width, source_image_height, " +
+                            "source_image_render_version, approval, created_at) VALUES ('r1', 3, 'unit-3', " +
+                            "'{\"type\":\"image\",\"name\":\"scan.png\"}', 'the as-is picture', 'the as-is picture', " +
+                            "'MANAGED_COPY', 'scan.png', '${"d".repeat(64)}', 1200, 1600, 1, 'APPROVED', '$now')",
+                        // A page this pipeline rendered: the artifacts root, under its attempt directory.
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, source_image_root, source_image_relative_path, " +
+                            "source_image_sha256, source_image_width, source_image_height, " +
+                            "source_image_render_version, approval, created_at) VALUES ('r1', 4, 'unit-4', " +
+                            "'{\"type\":\"pdf_page\",\"page\":5}', 'the rendered page', 'the rendered page', " +
+                            "'ARTIFACTS', 'attempt/pages/page-000005.png', '${"e".repeat(64)}', 800, 600, 2, " +
+                            "'APPROVED', '$now')",
+                    ).forEach(statement::execute)
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+
+            val revisions = DocumentRevisionStore(database, ContentStore(database))
+            // Every page is still readable, with exactly the text the archive held: the audit clears
+            // provenance, never a revision and never a page.
+            assertEquals(listOf(0, 1, 2, 3, 4), revisions.pages("r1").map { it.ordinal })
+            assertEquals(
+                listOf(
+                    "the text layer page",
+                    "the half-present page",
+                    "the escaping page",
+                    "the as-is picture",
+                    "the rendered page",
+                ),
+                revisions.pages("r1").map { it.extractedText },
+                "the migration changed what a page says",
+            )
+
+            // The all-absent row stays a valid absence — no image was observed for it.
+            assertNull(revisions.page("r1", 0)?.sourceImage)
+
+            // The two unusable rows had their provenance cleared: every column is NULL in the archive
+            // itself, so the answer is a recorded fact rather than a read path guessing.
+            val cleared = database.read { connection ->
+                connection.prepareStatement(
+                    "SELECT count(*) FROM page_text_revisions WHERE revision_id = 'r1' AND ordinal IN (1, 2) " +
+                        "AND (source_image_root IS NOT NULL OR source_image_relative_path IS NOT NULL OR " +
+                        "source_image_sha256 IS NOT NULL OR source_image_width IS NOT NULL OR " +
+                        "source_image_height IS NOT NULL OR source_image_render_version IS NOT NULL)",
+                ).use { statement ->
+                    statement.executeQuery().use { rows ->
+                        rows.next()
+                        rows.getInt(1)
+                    }
+                }
+            }
+            assertEquals(0, cleared, "a demonstrably unusable legacy provenance survived the audit")
+            assertNull(revisions.page("r1", 1)?.sourceImage)
+            assertNull(revisions.page("r1", 2)?.sourceImage)
+
+            // The two usable rows survive byte for byte, each under the distinct root its reference names.
+            val asIs = assertNotNull(revisions.page("r1", 3)?.sourceImage)
+            assertEquals(SourceImageRoot.MANAGED_COPY, asIs.root)
+            assertEquals("scan.png", asIs.relativePath)
+            assertEquals("d".repeat(64), asIs.sha256)
+            assertEquals(1200, asIs.width)
+            assertEquals(1600, asIs.height)
+            assertEquals(1, asIs.renderVersion)
+            val derived = assertNotNull(revisions.page("r1", 4)?.sourceImage)
+            assertEquals(SourceImageRoot.ARTIFACTS, derived.root)
+            assertEquals("attempt/pages/page-000005.png", derived.relativePath)
+            assertEquals("e".repeat(64), derived.sha256)
+            assertEquals(800, derived.width)
+            assertEquals(600, derived.height)
+            assertEquals(2, derived.renderVersion)
+        }
+    }
+
+    /**
+     * A malformed row cannot silently read back as absent provenance. The store is the read boundary
+     * this build owns, so at the schema version that could still hold such a row — before the
+     * constraints and the migration's audit — reading it is an error naming the rule, not a quiet
+     * `null` that would report a half-written provenance as "no image was observed".
+     */
+    @Test
+    fun `a malformed source image row cannot read back as absent provenance`() {
+        newDatabase().use { database ->
+            val now = "2026-09-30T07:00:00Z"
+            SchemaMigrator(database).migrate(upToVersion = 19)
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    listOf(
+                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                            "VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now')",
+                        "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, " +
+                            "original_path, size_bytes, status, created_at, updated_at) VALUES ('d1', 'c1', " +
+                            "'${"a".repeat(64)}', 'application/pdf', 'scan.pdf', '/tmp/scan.pdf', 42, " +
+                            "'COMPLETE', '$now', '$now')",
+                        "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, " +
+                            "provenance, created_at) VALUES ('r1', 'd1', NULL, 'CANDIDATE', 'LEGACY', '$now')",
+                        // Root and hash set, reference absent: the shape a half-written row has, which the
+                        // 019-era schema admitted because presence was all-or-nothing only in Kotlin.
+                        "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
+                            "extracted_text, search_text, source_image_root, source_image_sha256, " +
+                            "source_image_render_version, approval, created_at) VALUES ('r1', 0, 'unit-0', " +
+                            "'{\"type\":\"pdf_page\",\"page\":1}', 'the malformed row', " +
+                            "'the malformed row', 'ARTIFACTS', '${"b".repeat(64)}', 1, 'PENDING', '$now')",
+                    ).forEach(statement::execute)
+                }
+            }
+
+            val revisions = DocumentRevisionStore(database, ContentStore(database))
+            val failure = assertFailsWith<IllegalStateException> {
+                revisions.page("r1", 0)
+            }
+            assertTrue(
+                failure.message!!.contains("source image"),
+                "the refusal should name the provenance rule, was ${failure.message}",
+            )
         }
     }
 

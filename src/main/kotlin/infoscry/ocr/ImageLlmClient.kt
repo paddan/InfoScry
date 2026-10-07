@@ -4,6 +4,7 @@ import infoscry.llm.LlmJson
 import infoscry.llm.LlmProvider
 import infoscry.llm.RetryPolicy
 import io.ktor.client.HttpClient
+import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -376,6 +377,16 @@ class ImageLlmClient(
     private val maxImageBytes: Int = MAX_IMAGE_BYTES,
     private val maxResponseBytes: Int = MAX_RESPONSE_BYTES,
     private val retryPolicy: RetryPolicy = RetryPolicy(),
+    /**
+     * The transport's engine, or null for this client's own CIO engine.
+     *
+     * This is the seam a test uses to inject a recording engine so an external dispatch can be observed
+     * without a socket opening. What a test injects is an *engine* rather than a whole [HttpClient]
+     * precisely so it cannot weaken the two rules below: the client still builds the [HttpClient] around
+     * it and still sets `followRedirects = false` and `expectSuccess = false` itself. Null is production:
+     * the client then builds its own CIO engine and owns closing it, exactly as before this seam existed.
+     */
+    private val engine: HttpClientEngine? = null,
 ) : AutoCloseable {
 
     private val endpoint: String = profile.endpoint.trimEnd('/')
@@ -385,11 +396,27 @@ class ImageLlmClient(
      *
      * This is not a preference: with Ktor's default, a loopback endpoint that answers `302` would make this
      * client re-send the page image to whatever host the response named, before any code here could refuse
-     * it. The client owns its transport for that reason, and nothing injects one.
+     * it. The client therefore builds its own transport — around an injected [engine] when a test supplies
+     * one, around its own CIO engine otherwise — and applies these two settings in either case, so what
+     * the transport is cannot turn redirects back on.
      */
-    private val transport: HttpClient = HttpClient(CIO) {
-        followRedirects = false
-        expectSuccess = false
+    private val transport: HttpClient = if (engine != null) {
+        // A test's injected engine still gets this client's own rules: the HttpClient is built here, so
+        // redirects and expectSuccess are set on it no matter what the transport is, and what an injected
+        // engine can script (a 3xx, a 5xx) is still judged by this client rather than by the transport.
+        // The client does not manage an injected engine's lifetime: one recording engine serves every
+        // per-page client a run builds, and closing one page's client must not close it.
+        HttpClient(engine) {
+            followRedirects = false
+            expectSuccess = false
+        }
+    } else {
+        // Production: the client's own CIO engine, which the client owns and closes with it — the
+        // behaviour this code had before any seam existed.
+        HttpClient(CIO) {
+            followRedirects = false
+            expectSuccess = false
+        }
     }
 
     init {

@@ -17,6 +17,7 @@ import infoscry.extract.LEGACY_EBOOK_MEDIA_TYPE
 import infoscry.extract.MOBIPOCKET_MEDIA_TYPE
 import infoscry.extract.TesseractOcr
 import infoscry.jobs.RetryJobPayload
+import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.storage.CollectionStore
 import infoscry.storage.Database
 import infoscry.storage.DocumentStore
@@ -37,6 +38,15 @@ import java.sql.Connection
  */
 data class RetryPrerequisites(
     val settings: ExtractionSettings,
+    /**
+     * The snapshotted OCR selection the retry was admitted with, or null when none was resolved.
+     *
+     * It travels in the payload beside the settings for the same reason they do: the external page allowance
+     * and the profile revisions a dispatch or an approval binds to are decided at admission, so a running
+     * retry reads its pages through the engines that were chosen rather than whatever the collection says
+     * later. Null means a legacy admission — Tesseract/fill-missing, no external pages.
+     */
+    val ocr: OcrSettingsSnapshot? = null,
     val ocrToolAvailable: Boolean,
     val ebookToolAvailable: Boolean,
     val embeddingModelAvailable: Boolean,
@@ -64,13 +74,15 @@ data class RetryPrerequisites(
         suspend fun probe(
             collection: Collection,
             modelsDir: Path,
-            ocrSnapshot: suspend (infoscry.ocr.CollectionOcrSettings) -> infoscry.ocr.OcrSettingsSnapshot? = { null },
+            ocrSnapshot: suspend (infoscry.ocr.CollectionOcrSettings) -> OcrSettingsSnapshot? = { null },
         ): RetryPrerequisites {
+            val snapshot = ocrSnapshot(collection.ocrSettings())
             val settings = ToolProbe.extractionSettings(collection.ocrLanguages).let { probed ->
-                ocrSnapshot(collection.ocrSettings())?.let(probed::forOcrSettings) ?: probed
+                snapshot?.let(probed::forOcrSettings) ?: probed
             }
             return RetryPrerequisites(
                 settings = settings,
+                ocr = snapshot,
                 ocrToolAvailable = settings.ocrTool != null && settings.ocrTool != ToolProbe.OCR_TOOL_ABSENT,
                 ebookToolAvailable =
                 settings.ebookTool != null && settings.ebookTool != ToolProbe.CALIBRE_TOOL_ABSENT,
@@ -187,6 +199,7 @@ class RetryService(
                     collectionId = collectionId.value,
                     documentIds = accepted.map { it.value },
                     settings = reconciled.settings,
+                    ocr = reconciled.ocr,
                 )
                 val job = jobs.enqueue(
                     type = JobType.RETRY,

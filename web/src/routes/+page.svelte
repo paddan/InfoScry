@@ -25,6 +25,7 @@
     retryDocuments,
     searchCollection,
     SOURCE_PAGE_CHARS,
+    type AskEvidence,
     type AskHistoryEntry,
     type Collection,
     type InvestigateEvidence,
@@ -86,6 +87,13 @@
   let sourceText = '';
   let loadingSource = false;
   let sourceError: string | null = null;
+  /**
+   * A saved citation's own excerpt, shown when nothing recorded which reading it came from. Non-null
+   * only for that revision-unknown fallback: the sheet shows it instead of any server read, because
+   * asking for the live unit would put today's text under yesterday's answer — or fail outright once
+   * the unit is gone.
+   */
+  let revisionUnknownExcerpt: string | null = null;
   let sourceGeneration = 0;
   /**
    * The collection the open viewer reads from. It is the collection of the hit that opened it, not the
@@ -420,7 +428,11 @@
     }
   }
 
-  async function openSource(hit: SearchHit, opener: HTMLElement | null = null): Promise<void> {
+  /**
+   * Arm the source sheet for one selected hit: the new generation drops whatever read is still in
+   * flight for whatever was open before, the viewer clears, and the hit drives the header and links.
+   */
+  function prepareSourceSheet(hit: SearchHit, opener: HTMLElement | null): number {
     const generation = ++sourceGeneration;
     sourceOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     selectedHit = hit;
@@ -428,6 +440,12 @@
     source = null;
     sourceText = '';
     sourceError = null;
+    revisionUnknownExcerpt = null;
+    return generation;
+  }
+
+  async function openSource(hit: SearchHit, opener: HTMLElement | null = null): Promise<void> {
+    const generation = prepareSourceSheet(hit, opener);
     loadingSource = true;
     try {
       const pagePromise = readSource(sourceCollectionId, hit.unitId, 0, SOURCE_PAGE_CHARS, hit.revisionId);
@@ -542,6 +560,7 @@
     sourceText = '';
     loadingSource = false;
     sourceError = null;
+    revisionUnknownExcerpt = null;
     sourceOpener = null;
     sourceCollectionId = '';
   }
@@ -610,6 +629,47 @@
       locatorLabel: evidence.locatorLabel,
       matchedBy: [],
     });
+  }
+
+  /**
+   * Open one stored Ask citation.
+   *
+   * A citation that names the revision its excerpt was saved from is read from that reading, so an
+   * old answer keeps showing the source it was written from after the document publishes another one.
+   * A citation that names no revision belongs to a reading nobody recorded: the excerpt it saved is
+   * the only text that can be shown without attributing the document's current wording to yesterday's
+   * answer, so the sheet shows that excerpt and makes no request at all — the live unit may have been
+   * replaced, and it may not exist any more. A live citation carries no saved excerpt and still reads
+   * its unit, because that unit is the reading the citation just came from.
+   */
+  function openAskEvidence(evidence: AskEvidence): void {
+    const hit: SearchHit = {
+      collectionId: selectedCollectionId,
+      documentId: evidence.documentId,
+      title: evidence.locatorLabel,
+      unitId: evidence.unitId,
+      chunkOrdinal: 0,
+      text: '',
+      highlighted: null,
+      locator: evidence.locator,
+      locatorLabel: evidence.locatorLabel,
+      matchedBy: [],
+      revisionId: evidence.revisionId,
+    };
+    if (evidence.revisionId == null && typeof evidence.excerpt === 'string') {
+      openRevisionUnknownExcerpt(hit, evidence.excerpt);
+    } else {
+      void openSource(hit);
+    }
+  }
+
+  /** Show a citation's own excerpt with the revision-unknown label, without any server read. */
+  function openRevisionUnknownExcerpt(hit: SearchHit, excerpt: string): void {
+    prepareSourceSheet(hit, null);
+    loadingSource = false;
+    revisionUnknownExcerpt = excerpt;
+    // The same modal sheet a source read opens, so focus enters it the same way once it exists.
+    void tick().then(() => sourceSheet?.focus());
   }
 
   /**
@@ -941,19 +1001,7 @@
       </div>
 
     {#key selectedCollectionId}
-      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onOpenSource={(evidence) => openSource({
-        collectionId: selectedCollectionId,
-        documentId: evidence.documentId,
-        title: evidence.locatorLabel,
-        unitId: evidence.unitId,
-        chunkOrdinal: 0,
-        text: '',
-        highlighted: null,
-        locator: evidence.locator,
-        locatorLabel: evidence.locatorLabel,
-        matchedBy: [],
-        revisionId: evidence.revisionId,
-      })} /></div>
+      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onOpenSource={openAskEvidence} /></div>
       <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} limits={investigateLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
     {/key}
     </div>
@@ -999,6 +1047,9 @@
         <p role="status">Loading source…</p>
       {:else if sourceError !== null && source === null}
         <p role="alert">{sourceError}</p>
+      {:else if revisionUnknownExcerpt !== null}
+        <p class="meta">Revision unknown — showing the excerpt saved with this answer, not the document's current text.</p>
+        <pre class="source-text">{revisionUnknownExcerpt}</pre>
       {:else if source !== null}
         <pre class="source-text">{sourceText}</pre>
         {#if sourceError !== null}<p role="alert">{sourceError}</p>{/if}

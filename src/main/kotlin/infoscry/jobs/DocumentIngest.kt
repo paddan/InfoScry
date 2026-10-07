@@ -171,8 +171,11 @@ internal class DocumentIngest(
 
         // Which sink this document's units go to is decided per document, because a check-and-improve
         // attempt's reading is a candidate revision of the document it read — a revision that has to name its
-        // own document, which the pipeline cannot know when it is built.
-        val sink = pipeline.sinkFor(document.id, settings.ocrMode)
+        // own document, which the pipeline cannot know when it is built. It is decided from the extractor
+        // selected for this document's format as well as from the mode: a format that reports no page images
+        // has nothing check-and-improve could read again, so its units commit as the ordinary published text
+        // they have always been rather than as a proposal nobody could act on.
+        val sink = pipeline.sinkFor(document.id, settings.ocrMode, extractor.pageImageSupport)
 
         if (!sink.storesUnits) {
             // No durable unit store exists, so the extraction phase is an explicit no-op: extraction is not
@@ -240,20 +243,9 @@ internal class DocumentIngest(
                 } else {
                     null
                 }
-                sink.deliver(document.id, fingerprint, event)
-                if (judged == PageApproval.APPROVED && event is ExtractionEvent.UnitReady) {
-                    // Nobody owes this page a decision: the staged reading is the text the page already
-                    // carried, which is not a reading anybody has to accept. It is approved as the revision
-                    // records it, and only now, because the page the approval is about exists only once the
-                    // sink has staged it.
-                    revisions.recordPageApproval(
-                        revisionId = requireNotNull(sink.candidateRevisionId) {
-                            "a page staged for review names the revision it was staged into"
-                        },
-                        ordinal = event.ordinal,
-                        approval = PageApproval.APPROVED,
-                    )
-                }
+                // The decision is staged with the page, in the same commit: a page approved by a later write
+                // could be staged, lost to an interruption, and skipped as committed on resume, undecided.
+                sink.deliver(document.id, fingerprint, event, judged)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -267,7 +259,7 @@ internal class DocumentIngest(
             // reference that the deletion has already taken away. The attempt's own record of that is the
             // item's `CANCELLED` disposition, which the caller writes when this exception reaches it.
             throw deleted
-        } catch (waiting: ImportAwaitingApproval) {
+        } catch (waiting: AttemptAwaitingApproval) {
             // A page would have exceeded the attempt's external scope, so it was not sent. That is not this
             // document's failure and not a partial reading to keep: the caller ends the attempt in its own
             // durable waiting state, and the pages this document already committed stay committed.

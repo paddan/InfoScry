@@ -136,7 +136,11 @@ endpoint, which may be external. See the
 
 In **Ask**, select a collection and LLM profile and enter a question. Ask answers
 from one retrieval pass and streams an answer with citations. Open a citation
-to inspect the source passage.
+to inspect the source passage. A citation saved with a recorded revision opens
+that exact reading, so a later rescan cannot change what an old answer shows.
+When the saved citation names no revision, the viewer shows the excerpt saved
+with the answer under a “Revision unknown” label rather than the document's
+current text.
 
 Reopen stored answers from that collection's conversation history. A default
 profile only preselects a choice; a configured profile must be selected.

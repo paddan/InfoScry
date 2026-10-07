@@ -153,3 +153,139 @@ without explicit permission for that experiment.
 
 Documentation-only changes require local Markdown link/anchor checks, fence
 balance, spec-to-ticket consistency and `git diff --check`, not app suites.
+
+## Continuation boundaries (2026-10-02)
+
+Use the leaf execution tickets in STATUS.md. Preserve implemented code and repair demonstrable gaps; umbrella tickets are coordination records. Each leaf handoff records final DTO/service signatures here before dependent work consumes them. Existing review/decision and revision-list routes are a starting point, not proof that imports and restoration are supported.
+
+- 07c owns durable `(job, document, immutable attempt settings) → candidate` binding and successful page checkpoints. Resume must load them from SQLite, including a staged page whose approval write was interrupted; an in-memory set is insufficient. Transcription checkpoints remain independent of review and embedding.
+- 07d owns retry dispatch/reviewer wiring using the same durable ownership and allowance semantics. 07e limits candidate staging to supported page-image extractors; non-image imports retain ordinary extraction.
+- 08d owns review-read DTOs: candidate/owner identity, document/ordinal/stable-unit mapping, baseline and candidate text/hashes, bounded reasons and opaque image links. A proposal without an LLM review row still appears. Keep existing for an import must have an actual recoverable direct-text baseline; missing is not empty or candidate text.
+- 08e owns manual-decision/publication DTOs for an initial import with no active revision and for an already partially published import. Decide against immutable candidate hash and expected active revision (including explicitly absent); later decisions create a new revision rather than editing a published one. Preserve request-id idempotency and page-hash-aware rebase.
+- 03b permits entirely absent provenance and optional dimensions as a pair; partially present core provenance is invalid. 03c retains images referenced by candidates/history; no new garbage collector is needed to close the lifetime bug.
+- 02d reuses the existing `evidence_ledger.excerpt` column. Add revision provenance and remove dependence on the continued existence of a live unit when returning saved history.
+
+### 07c: Durable staged-import candidate resumption
+
+**Migrations:** 025_candidate_resume_binding.sql adds nullable `document_revisions.attempt_fingerprint` and `page_text_revisions.unit_key` (old rows NULL, never resumed). Migration 026_candidate_resume_uniqueness.sql adds partial unique index `document_revisions_resume_uniqueness` on (document_id, attempt_fingerprint) WHERE state='CANDIDATE' AND attempt_fingerprint IS NOT NULL. SchemaMigrator SUPPORTED_VERSION is now 26.
+
+**Interfaces:**
+- `DocumentRevisionStore.openCandidate(..., attemptFingerprint)`: adopts the existing candidate on unique violation; new `resumableCandidate(documentId, fingerprint)` loads newest CANDIDATE row for that fingerprint; new `stagedKeys(revisionId)` lists unit keys staged in that candidate.
+- `RevisionPageDraft` has new field `unitKey`.
+- `CandidateRevisionSink.committedKeys`: adopts resumable candidate and returns its staged keys (so staged pages skip repeat OCR); never reuses WITHDRAWN candidate or one from different snapshot/fingerprint.
+- `ExtractionSink` default method `deliver(documentId, fingerprint, event, approval: PageApproval?)`: writes page and its approval decision in ONE transaction (closes crash window between staging and decision recording).
+
+**Test coverage:** ImportJobHandlerTest covers five scenarios: kill/resume reuses candidate/page (no repeat OCR); pause/resume without resetting counters; interruption after staging completes page decision on resume; changed snapshot creates distinct attempt; cancellation/failure leaves recoverable CANDIDATE, publishes nothing. Unique-index adoption under true concurrency tested at store level in CandidateResumeUniquenessTest.
+
+### 07d: Retry uses admitted OCR and review authority
+
+**Migrations:** None required — the retry's snapshot travels in the existing `jobs.payload` JSON (`RetryJobPayload` is serialized there), and no schema, counter or approval surface changes; the persisted job-owned external scope (tickets 07/07b) is reused as is. SchemaMigrator SUPPORTED_VERSION stays 26.
+
+**Interfaces:**
+- `RetryJobPayload.ocr: OcrSettingsSnapshot? = null`: the snapshotted OCR selection the retry was admitted with, mirroring `ImportJobPayload.ocr` (engines, profile revisions, external-page allowance). Null is a legacy payload: Tesseract, fill-missing, no external pages, no reviewer.
+- `RetryPrerequisites.ocr: OcrSettingsSnapshot? = null`: `RetryPrerequisites.probe` now captures the resolved snapshot instead of folding it into the settings and discarding it, and `RetryService.admit` writes `ocr = reconciled.ocr` into the payload (reconciliation inside the mutation permit still decides which snapshot is enqueued).
+- `AttemptDispatch` (new internal helper, `src/main/kotlin/infoscry/jobs/AttemptDispatch.kt`), built once in `ImportJobHandler.attachTo` and shared by the import and retry handlers: `authorityFor(job, document, snapshot, dispatchStage)` builds the job-owned `OcrDispatchAuthority` for one stage (external revisions only; local dispatches count nothing), and `stagedPageReviewOf(job, document, collection, snapshot)` builds the `StagedPageReview` with the review-stage authority and the snapshot's prompt/policy versions. The import's former private `dispatchAuthorityFor`/`stagedPageReviewOf` are deleted; its constructor's `operations`, `profileRevisionOf`, `paths` and `reviewerFor` fields are replaced by this one `attemptDispatch` field (`jobs` stays).
+- `AttemptAwaitingApproval(jobId)` replaces and absorbs `ImportAwaitingApproval` (same package, same control-flow role; `DocumentIngest.ingest`'s catch clause follows the rename). Its `onExhausted` is what both handlers' waiting state routes through.
+- `RetryJobHandler` gains `attemptDispatch`; `retryOne(job, collection, settings, snapshot, document, stage)` passes `dispatch = attemptDispatch.authorityFor(... TRANSCRIPTION)` and `review = attemptDispatch.stagedPageReviewOf(...)` to `DocumentIngest.ingest` (alongside the unchanged `revisitFailedUnits = true`/`onFailure`), and `handle` catches `AttemptAwaitingApproval` to write `JobStore.AWAITING_APPROVAL_STAGE` durably and return, mirroring `ImportJobHandler.handle`. Retry and import therefore share one allowance per job and one reviewer wiring; no production call site passes a fake.
+
+**Test coverage:** RetryJobHandlerTest adds six tests pinning the ticket's four scenarios: a differing check-and-improve retry calls the scripted reviewer and leaves a `PROPOSE` (pilot) pending review (identical nonblank text records no review and sends nothing); external transcription and review of one page count one distinct page and two calls against the job's scope (external reviewer profile, not loopback); allowance 0 waits at `AWAITING_APPROVAL_STAGE` before any dispatch rather than failing; resume after approval continues the same account's counters and decodes the original `ocr`/`settings` from the payload; and `RetryService.ELIGIBLE_STATUSES` still excludes `COMPLETE`, `COMPLETE_WITH_WARNINGS` and `NEEDS_REVIEW`, with `an explicit retry revisits the unit a crash resume would skip` kept green. Red first: both wiring tests failed behaviorally (no review row; `extractor.sent == 0`) against a compiling suite before the implementation.
+
+### 07f: Injected recording transport for external dispatch
+
+**Migrations:** None — no schema, counter, approval or DTO change; SchemaMigrator SUPPORTED_VERSION stays 26.
+
+**Interfaces:**
+- `ImageLlmClient(profile, lookup, permits, calls, timeout, maxImageBytes, maxResponseBytes, retryPolicy, engine: HttpClientEngine? = null)`: the optional `engine` is the transport seam. Null (production) keeps the client's own CIO engine, owned and closed by the client; a non-null engine is wrapped in the `HttpClient` this client builds itself with `followRedirects = false` and `expectSuccess = false`, so an injected transport cannot turn redirects on or make a status pass as success. Permit, credential, budgeting, retry and call-counting behavior is identical for any transport, and the client never closes an injected engine (one recording engine serves every per-page client a run builds).
+- Pass-through `clientEngine: HttpClientEngine? = null` on `LlmOcr`, `OcrComparisonService`, `ocrReviewerFactory(...)`, `rescanEngineFactory(...)` and `ImportJobHandler.attachTo`/pipeline construction: each defaults to null, so every production call site is unchanged in behavior; a test injects once at `attachTo` and both transcription and review dispatch through it.
+- `OcrDispatchAuthority` and `OcrOperationStore` (`allowanceFor`, `authorizePage`, `recordCall`) are unchanged; 07f's tests confirmed the existing guards with revert proofs rather than requiring a fix.
+- Test-only (`src/test`, `internal`): `RecordingImageLlmEngine(script)` — a scripted `HttpClientEngineBase` that records `RecordedImageRequest(method, url, headers, body)` instead of opening a socket; `RecordedImageResponse(statusCode, body, headers)` where the last script entry repeats. It cannot weaken the client's rules because the client owns the `HttpClient` around it.
+
+**Test coverage:** ImageLlmClientTest pins a permitted external dispatch arriving at the classified endpoint on the recorder (and a refused one never reaching it), bounded retries as one permit plus one counted call per attempt, and no endpoint/key/page text in any refusal error; ImportJobHandlerTest pins transcription + review = 1 distinct page / 2 calls with the next document pausing before the transport, wrong profile/document/stale-scope refusal under a live approval, and resume continuing counters; RetryJobHandlerTest pins retry's 1 page / 2 calls, allowance-0 wait with zero recorded requests, resumed counters, and a 429 retry as a third call on the same page. All four scenarios were proven to fail under temporary reverts (see the 07f record in STATUS.md).
+
+### 07e: Sink selection follows page-image support
+
+**Migrations:** None — no schema, counter, approval or DTO change; SchemaMigrator SUPPORTED_VERSION stays 26.
+
+**Interfaces:**
+- `ImportPipeline.sinkFor(documentId, mode, pageImageSupport)`: the third parameter is the *selected*
+  extractor's `PageImageSupport` (DocumentIngest passes `extractor.pageImageSupport` for the document's own
+  media type). The candidate sink is opened only when the mode is `CHECK_AND_IMPROVE` **and** the support is
+  `PageImageSupport.Supported`; every other combination returns the ordinary `sink`. A format without page
+  images therefore keeps its ordinary searchable extraction (units, chunks, index rows, `COMPLETE`) under
+  Check and improve, and no page-image rebuild and no image-provider request can be made for it, because the
+  staged-page review only exists for a sink that stages.
+- `DocumentExtractor.pageImageSupport` is unchanged as a contract (default `Unsupported(PAGE_IMAGES_UNSUPPORTED)`;
+  only `PdfExtractor` and `ImageExtractor` report `Supported`) and its KDoc now names the import consumer.
+  The explicit rescan refusal (`RescanRefusalException.PAGE_IMAGES_UNSUPPORTED` / `RescanJobHandler`'s
+  preflight) is untouched and still the answer a rescan of an unsupported format gets.
+
+**Test coverage:** ImportJobHandlerTest pins the three behavioral modes: plain text and the committed
+`sample.docx` fixture under an admitted check-and-improve snapshot publish ordinary text/chunks/index rows
+with the candidate sink never opened (red first: `expected: <COMPLETE> but was: <NEEDS_REVIEW>`); an
+extractor that reports no page images is routed to the ordinary sink even when its draft carries a baseline
+and an image reference (red first: `expected: <0> but was: <1>` reviewer requests); and a supported page with
+no direct baseline still stages `PENDING`, publishes nothing and writes no review row. ExtractorRegistryTest
+classifies every format the production registry claims (Supported exactly for PDF/pictures). RescanJobHandlerTest
+pins the existing refusal for a `text/plain` document. Red evidence and green counts are in the 07e record in STATUS.md.
+
+### 03c: Retained image references remain usable
+
+**Migrations:** None — no schema, counter, approval or DTO change; SchemaMigrator SUPPORTED_VERSION stays 027.
+
+**Interfaces and lifetime rule:**
+- `ContentUnitDraft.sourceImage` (PdfExtractor) is non-null exactly when the named file is kept for the
+  record's life: a check-and-improve page render under `{fingerprint}/pages`, a managed original, or a
+  bounded derived copy under the attempt's artifacts. A fill-missing working render — deleted when its
+  reading commits and whose directory is deleted when the attempt ends, including on cancellation or
+  failure — records no reference at all; the unit's durable evidence there is its word-box artifact
+  (`artifactRelativePath`/`artifactSha256`), which is written beside the attempt's artifacts and survives.
+- Images referenced by staged candidates and by published history are retained on disk until normal
+  document/collection deletion owns cleanup; no artifact garbage collector exists or was added, and no
+  deletion path changed. A restart adopts the staged candidate through `CandidateRevisionSink`
+  `committedKeys` and skips its pages before rendering, so nothing rewrites what those pages name.
+- `ImageExtractor` and `CandidateRevisionSink` needed no change (byte-identical); the managed-original and
+  bounded-derived roots are unchanged and pinned by `ImageExtractorTest` plus the existing contract tests.
+
+**Test coverage:** PdfExtractorTest pins scenario 1 red-first (dangling working reference, then the
+deliberate absence of one); OcrEngineContractTest pins cancellation/restart/competing-attempt retention;
+ImageExtractorTest pins the distinct managed/artifact roots. Red messages and gate counts are in the 03c
+record in STATUS.md. Residual flagged there by inspection: the rescan path's shared
+`documentArtifactRoot/rescan/pages` directory (08d/09c question, untouched here).
+
+### 02c: Saved Ask excerpt fallback
+
+**Migrations:** None — no schema, DTO, HTTP or backend change; SchemaMigrator SUPPORTED_VERSION stays 027.
+
+**Interfaces (client-side, `web/`):**
+- `openAskEvidence(evidence: AskEvidence)` in `web/src/routes/+page.svelte` replaces the AskPanel
+  inline `onOpenSource` lambda. It builds the hit once, then routes: a recorded revision keeps the
+  existing `readSource(..., revisionId)` path; a citation with no revision **and** a saved excerpt
+  goes to `openRevisionUnknownExcerpt(hit, excerpt)`, which performs no request at all and shows the
+  excerpt under the source sheet's English label `Revision unknown — showing the excerpt saved with
+  this answer, not the document's current text.`; a live citation (no saved excerpt) keeps reading
+  the live unit, because that unit is the reading it just came from.
+- `prepareSourceSheet(hit, opener)` is the shared preamble of both paths: it bumps the source
+  generation, adopts the hit and clears the previous view (including any fallback excerpt), so a
+  late response for a previously opened source — or a pending read after the reader picks another
+  citation or collection — is dropped rather than shown.
+- No new wire fields or signatures: `AskEvidence.revisionId`/`.excerpt` are consumed as already served
+  by `loadAskEvidence` (`citations.snippet` is `NOT NULL`, and a recorded-but-deleted revision is
+  already reported as absent via the history route's LEFT JOIN), and `readSource` is unchanged.
+  `openInvestigationSource` is untouched — Investigate provenance is ticket 02d's slice.
+
+**Test coverage:** `web/src/routes/page.test.ts` pins the ticket's three scenarios (red first: four
+failures recorded in the 02c record in STATUS.md) plus the modal focus contract for the fallback path
+(a fifth test, red first in its own cycle): unknown revision → no `/sources/` request, excerpt
+and label shown even when the source route answers 404; known revision passed to `readSource` and kept
+across `Load more` (green pin before the fix); excerpt rendered literally; a first citation's late
+response dropped after the reader opens a second citation; and focus entering the sheet when the
+excerpt opens it. UI gates: `npm test -- --run` (219 passed), `npm run check`, `npm run build`, plus
+the final-tree `./gradlew check` — counts in STATUS.md.
+
+### Known publication wording conflict
+
+The spec, “Publication and history”, says a whole rescan revision may combine approved new text with retained baseline text on uncertain pages. The implementation (`RevisionPublicationService.refusalFor`, `CandidateRevisionPhases.publishCandidate`) and the recorded owner decision in 07b instead refuse a rescan with any pending page. Initial imports may publish approved pages while others remain pending. This plan preserves current behavior and does not silently reinterpret either contract. Before changing the rescan publication rule, reconcile that exact spec/recorded-decision conflict with the owner and update spec, publisher, tests and consumers together. It does not block checkpoint/provenance repairs, UI profile management or proof of the existing publication rule.
+
+### Gate discipline
+
+Run one focused regression cycle per independent behavior, then the applicable accumulated gate once on the final slice tree. Do not repeatedly run a passing full gate without new changes, failures or unresolved concerns. Every code slice still requires `./gradlew check`; browser and hardware tests remain separate. Documentation-only planning uses link/fence/dependency/diff checks. Use actual commands/results and dates; preserve historical evidence without copying it as current proof.

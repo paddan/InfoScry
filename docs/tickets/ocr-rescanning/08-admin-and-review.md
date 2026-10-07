@@ -1,48 +1,24 @@
-# 08: Admin profiles, collection controls and page review
+# 08: Admin controls and manual review
 
-**Status:** Not started. Unchecked criteria are requirements, not evidence.
-**Blocked by:** 07.
+**Status:** Open coordination ticket, decomposed on 2026-10-02. Execute a child ticket, not this umbrella as one implementation task.
 **Spec:** [Selectable OCR and rescanning](../../specs/2026-09-30-ocr-rescanning.md).
-Read [shared contracts and gates](CONTRACTS.md) before implementation.
+**Contracts and evidence:** [CONTRACTS.md](CONTRACTS.md), [STATUS.md](STATUS.md).
 
-## Deliverable
+## Current baseline
 
-Users can configure OCR, start a reviewed rescan and resolve uncertain pages entirely in Admin.
+Profile, collection-setting, rescan-operation, review-decision and revision-list routes already exist. Extend and verify them rather than rebuilding them. Current review routes require a rescan operation; staged/partially published imports still lack a usable decision surface. OCR Admin/review panels are not implemented.
 
-## Files and interfaces
+## Independently reviewable slices
 
-- `web/src/lib/OcrProfilesPanel.svelte (new)`
-- `web/src/lib/OcrReviewPanel.svelte (new)`
-- `web/src/lib/CollectionsPanel.svelte`
-- `web/src/lib/api.ts`
-- `web/src/routes/+page.svelte`
-- `src/main/kotlin/infoscry/server/OcrRoutes.kt`
+- [ ] [08a — OCR profiles](08a-ocr-profile-admin.md)
+- [ ] [08b — Collection defaults](08b-collection-ocr-controls.md)
+- [ ] [08c — Preview, approval and operation controls](08c-rescan-controls.md)
+- [ ] [08d — Bounded review/image API for import and rescan](08d-review-read-api.md)
+- [ ] [08e — Guarded decisions and publication](08e-review-decision-publication.md)
+- [ ] [08f — Page review UI](08f-page-review-ui.md)
 
-Use CONTRACTS.md DTOs, revision guards and job APIs; integrate existing source-image serving with opaque collection/document/page IDs, never arbitrary filesystem paths.
+## Completion boundary
 
-**Tests:** Create web/src/lib/OcrProfilesPanel.test.ts and OcrReviewPanel.test.ts; extend CollectionsPanel.test.ts and server review-route tests.
+A user can configure, import/rescan, approve external scope and resolve pages in Admin. Both initial/partially published imports and rescans are covered; publication is durable and pending text stays outside retrieval.
 
-## Test-first implementation
-
-- [ ] Add meaningful failing tests for the following observable scenarios before changing production behavior:
-  - Switch collection during settings save, preview or review fetch; late results never overwrite the new selection.
-  - Reload waiting-for-approval/review and resume from persisted state; duplicate clicks dispatch once.
-  - Concurrent tab edits return a conflict; HTML/script-like OCR is displayed literally.
-  - Keyboard-only review, focus return, narrow layout, large-document page navigation and manual edits preserve decisions without loading every image at once.
-- [ ] Run the focused command below and record the expected behavioral failure. For an external test, first prove missing/invalid-runtime diagnostics using the fake transport; do not download private fixtures.
-- [ ] Add reusable OCR profile management, image capability status and key-presence indicators, independent of Ask/Investigate profiles.
-- [ ] Collection controls show engine, transcription/review profiles, import mode and external allowance. Preserve defaults while changing collection and reject stale asynchronous responses.
-- [ ] Scan again previews pages, overrides, destinations and available cost estimates. Show durable awaiting-approval, resume, cancel and processing states after reload.
-- [ ] Review shows image, baseline, candidate, plain-text differences and reason. Implement Keep existing, Use new, Edit text, and explicit whole-document scope actions; show revision conflicts and preserve unsaved input.
-- [ ] Manual decisions form a publication batch; only after successful chunk/embed/index does searchable text change. Flag image-only uncertain pages and explain why they are not in search.
-- [ ] Run focused tests green, then the accumulated gates in CONTRACTS.md. Record failures and environment blockers separately.
-- [ ] Review the diff against the spec and update STATUS.md with verified behavior and remaining gates. Commit/push only under the user's separately authorized Git workflow.
-
-## Focused verification
-
-```sh
-./gradlew test --tests 'infoscry.server.OcrRoutesTest'
-(cd web && npm test -- --run && npm run check && npm run build)
-```
-
-New test classes above are planned paths, not existing tests. A successful fake-provider run does not satisfy a real-tool or hardware gate.
+Children retain their own focused tests, files, exclusion boundaries and stop conditions. An umbrella closes only after every child has current verification evidence. Preserve historical passing runs; do not describe future criteria as implemented behavior. No product implementation, runtime installation, private-data experiment, commit or push is authorized by this planning document.

@@ -6,6 +6,7 @@ import kotlinx.serialization.Transient
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
+import java.nio.file.Path
 
 // Every `createdAt`/`updatedAt` field in this file is an ISO-8601 instant string (for example
 // `2026-09-21T07:45:12.345Z`). The persistence boundary parses and formats them, so the domain stays
@@ -87,6 +88,12 @@ enum class SourceImageRoot {
  * An absent provenance is not an empty one: it says no image was read at all, which is the truthful answer
  * for a page whose own text layer a parser read. It is not a claim of a zero-sized image, and it is not a
  * default that may be filled in from whatever image happens to be around later.
+ *
+ * A reference is confined to the root [root] names: it is relative, it does not climb out of that root
+ * with a `..` segment, and it does not name the root itself. The rule is the one `PageImage.resolveInside`
+ * applies when an artifact is opened, so a durable record cannot name something a later rebuild of the
+ * page image would refuse — an escaping reference is rejected here, before persistence, rather than kept
+ * as a claim about pixels no root of the document holds.
  */
 data class SourceImageProvenance(
     val root: SourceImageRoot,
@@ -103,6 +110,7 @@ data class SourceImageProvenance(
 
     init {
         require(relativePath.isNotBlank()) { "a source image reference must not be blank" }
+        requireStaysInsideNamedRoot(relativePath)
         require(sha256.length == SHA256_HEX_LENGTH && sha256.all { character -> character.isHexCharacter() }) {
             "a source image names its artifact's SHA-256, was '${sha256.take(MAX_REPORTED_HASH_CHARACTERS)}'"
         }
@@ -120,6 +128,27 @@ data class SourceImageProvenance(
 
         /** Hex as `HexFormat` writes it — the only form a digest in this pipeline has. */
         fun Char.isHexCharacter(): Boolean = this in '0'..'9' || this in 'a'..'f'
+
+        /**
+         * The rule a source image reference must satisfy, applied wherever one is built.
+         *
+         * The pair of root and reference is what confines an image — the root decides which directory the
+         * reference resolves against — so a reference that is absolute, that climbs out with `..`, or that
+         * names the root itself is refused. This is the same lexical rule `PageImage.resolveInside`
+         * applies when an artifact is opened (it resolves and normalises against the root without touching
+         * the filesystem), so a record and a rebuild of its page image agree on what the record names.
+         */
+        fun requireStaysInsideNamedRoot(reference: String) {
+            val relative = Path.of(reference)
+            require(!relative.isAbsolute) {
+                "a source image reference is relative to the root it names, was '$reference'"
+            }
+            val normalized = relative.normalize()
+            val climbsOut = normalized.any { segment -> segment.toString() == ".." }
+            require(!climbsOut && normalized.toString().isNotEmpty()) {
+                "a source image reference stays inside the root it names, was '$reference'"
+            }
+        }
     }
 }
 

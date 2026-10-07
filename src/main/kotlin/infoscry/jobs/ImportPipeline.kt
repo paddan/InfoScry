@@ -5,6 +5,7 @@ import infoscry.domain.DocumentId
 import infoscry.extract.ExtractionSink
 import infoscry.extract.ExtractorRegistry
 import infoscry.extract.MediaTypeDetector
+import infoscry.extract.PageImageSupport
 import infoscry.ocr.CandidateRevisionSink
 import infoscry.ocr.OcrImportMode
 
@@ -35,15 +36,27 @@ class ImportPipeline(
 ) {
 
     /**
-     * Where one document's units go, given what its attempt is for.
+     * Where one document's units go, given what its attempt is for and what its format can be read from.
      *
-     * A check-and-improve attempt re-reads pages a document already has text for, so what it reads is a
-     * *proposal* about them rather than the text the document publishes: it is staged as a candidate revision
-     * and nothing published changes. A fill-missing attempt completes the document's published content, which
-     * is what every import did before the two were told apart.
+     * A check-and-improve attempt re-reads *page images* a document already has text for, so what it reads is
+     * a *proposal* about them rather than the text the document publishes: it is staged as a candidate
+     * revision and nothing published changes. That is why the sink follows the selected extractor's
+     * [pageImageSupport] and not the mode alone: a format that reports no page images has nothing the mode
+     * could read again, so its units commit through the ordinary [sink] — its ordinary searchable extraction —
+     * instead of being stranded as a proposal no page image could ever justify. A fill-missing attempt
+     * completes the document's published content, which is what every import did before the two were told
+     * apart, and it never stages either.
      */
-    fun sinkFor(documentId: DocumentId, mode: OcrImportMode): ExtractionSink =
-        if (mode == OcrImportMode.CHECK_AND_IMPROVE) candidateSinkFor?.invoke(documentId) ?: sink else sink
+    fun sinkFor(
+        documentId: DocumentId,
+        mode: OcrImportMode,
+        pageImageSupport: PageImageSupport,
+    ): ExtractionSink =
+        if (mode == OcrImportMode.CHECK_AND_IMPROVE && pageImageSupport is PageImageSupport.Supported) {
+            candidateSinkFor?.invoke(documentId) ?: sink
+        } else {
+            sink
+        }
 
     companion object {
 

@@ -71,3 +71,7 @@ Consume engine, comparison and publication services. Expose the scoped preview/a
 ```
 
 New test classes above are planned paths, not existing tests. A successful fake-provider run does not satisfy a real-tool or hardware gate.
+
+## Continuation ownership (2026-10-02)
+
+The implemented rescan backend is retained. The import baseline is [07b](07b-import-execution-and-admission.md), whose remaining repair gate is split into [07c](07c-durable-import-candidates.md), [07d](07d-retry-ocr-execution.md), [07e](07e-non-image-import-compatibility.md) and [07f](07f-external-review-accounting.md). Execute those leaf tickets rather than repeating this ticket.

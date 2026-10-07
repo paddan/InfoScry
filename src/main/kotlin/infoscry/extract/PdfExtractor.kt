@@ -61,7 +61,8 @@ data class RenderedPage(
  * the page carried — relative to that root, the same way [ContentUnitDraft] names its artifact — so the
  * unit and its artifact commit together and a reader can later verify they still belong to each other.
  * An implementation that writes no artifact leaves both absent rather than naming a file that is not
- * there.
+ * there. The same rule holds for [ContentUnitDraft.sourceImage]: it names an image only when the file is
+ * kept for the life of the record, never a working render this attempt deletes.
  */
 data class OcrResult(
     val text: String,
@@ -196,9 +197,12 @@ data class PdfPageCandidate(val page: Int, val text: String) {
  * fingerprint, because a page image has to be a file this process can point at rather than one shared by
  * two attempts with different settings. Where *inside* that directory it goes is the mode's decision, and it
  * is a decision about evidence: a page image read for review is kept, since a reviewer has to be able to
- * open the image the reading was made from, while a render that only filled in missing text is working
- * material for one attempt and is deleted — every page image when its reading is committed, the directory
- * itself when the attempt ends, including when it is cancelled or fails.
+ * open the image the reading was made from — and it is named by the durable page, because the file is
+ * still there after the attempt ends — while a render that only filled in missing text is working material
+ * for one attempt and is deleted — every page image when its reading is committed, the directory itself
+ * when the attempt ends, including when it is cancelled or fails. Such a render is therefore named by
+ * nothing durable: the reference exists only while the file does, so a finished unit records the engine's
+ * word boxes as its evidence and no image reference it could never open again.
  *
  * The resolution is the job's own ([ExtractionSettings.renderDpi]) when it carries one, and the page is
  * brought within the renderer's pixel bound when it does not fit; the reading records the resolution it was
@@ -431,10 +435,15 @@ class PdfExtractor(
                         artifactSha256 = verified.artifactSha256,
                         meanConfidence = verified.meanConfidence,
                         // The page image the engine was handed, named against the document's artifact root
-                        // so a later reader can open the pixels this page's text was read from. In
-                        // fill-missing mode this render is deleted with the attempt, and the reading still
-                        // says which image it came from: the record survives, the working copy does not.
-                        sourceImage = image.artifactProvenance(input.artifactRoot),
+                        // so a later reader can open the pixels this page's text was read from — but only
+                        // when the image is kept. A check-and-improve render outlives this attempt in the
+                        // attempt's `pages` directory, so its reference still opens after the attempt ends.
+                        // A fill-missing render is working material that is deleted the moment its reading
+                        // commits (and its directory when the attempt ends), so it records no reference at
+                        // all: a durable page may never name a file this attempt deliberately removes.
+                        sourceImage = image
+                            .takeIf { readsEveryPage }
+                            ?.artifactProvenance(input.artifactRoot),
                     )
                     if (!readsEveryPage) {
                         // The collector has committed the unit by the time `emit` returns, so a working image

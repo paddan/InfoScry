@@ -584,7 +584,9 @@ interface DocumentExtractor {
      * A rescan has to render pages, and a format that has none says so here rather than having a rendering
      * invented for it: the answer is what an admission path reports before it asks anyone to pay for
      * reading a document whose pages do not exist. The default is the honest one for every format that is
-     * not a paginated raster document.
+     * not a paginated raster document. An import's check-and-improve mode consults the same declaration per
+     * document: a format that reports no pages keeps its ordinary extraction published rather than staged
+     * as a candidate (see `ImportPipeline.sinkFor`).
      */
     val pageImageSupport: PageImageSupport get() = PageImageSupport.Unsupported(PAGE_IMAGES_UNSUPPORTED_CODE)
 
@@ -669,6 +671,21 @@ interface ExtractionSink {
         fingerprint: ExtractionFingerprint,
         event: ExtractionEvent,
     )
+
+    /**
+     * Commits one delivered event together with the decision already made about it.
+     *
+     * [approval] is what the attempt's review concluded for a page about to be staged. A sink that stages a
+     * reading for review writes it with the page, in the same commit, because a decision recorded by a later
+     * write can be lost to an interruption between the two: the page would then be staged, skipped as already
+     * committed on resume, and never decided. A sink that has no pages to decide about ignores it.
+     */
+    suspend fun deliver(
+        documentId: DocumentId,
+        fingerprint: ExtractionFingerprint,
+        event: ExtractionEvent,
+        approval: infoscry.storage.PageApproval?,
+    ) = deliver(documentId, fingerprint, event)
 
     /**
      * How many of this document's committed units still await a person's decision.

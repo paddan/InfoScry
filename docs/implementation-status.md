@@ -28,9 +28,7 @@ image-capable LLM profiles can transcribe page images; documents carry immutable
 revisions with a recoverable publication boundary; a rescan compares its reading
 with the published text, a reviewer recommends and a person decides. Everything
 stays in pilot mode: no replacement happens without a manual decision, and
-"Scan again" is driven by the operations API rather than a UI panel. The remaining
-import-execution and admission gaps and the still-open verification gates are
-recorded in the [ticket plan](tickets/ocr-rescanning/STATUS.md).
+"Scan again" is driven by the operations API rather than a UI panel. The manual UI and history/restore are unfinished. Retry wiring, non-image import compatibility, saved evidence and image provenance/lifetime still have open correctness gates. The [ticket plan](tickets/ocr-rescanning/STATUS.md) splits these repairs and the remaining UI/acceptance work into independently testable slices.
 
 ## Planned compact document list
 

@@ -667,7 +667,10 @@ function parseInvestigationFrame(frame: string): InvestigateEvent | null {
  * Read one bounded page from the exact source unit represented by a search hit.
  *
  * A citation that names the revision it was read from passes it, so the page comes from that reading
- * rather than from whatever the document publishes now; a citation that names none reads the live unit.
+ * rather than from whatever the document publishes now; a caller with no revision to name reads the
+ * live unit. The Ask viewer only reaches that case for a citation with no saved excerpt: evidence
+ * whose revision is unknown is shown from its own excerpt without any request (the source sheet's
+ * revision-unknown label), so a live read can never restate today's text as yesterday's answer.
  */
 export async function readSource(
   collectionId: string,

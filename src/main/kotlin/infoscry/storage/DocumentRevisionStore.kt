@@ -96,6 +96,8 @@ data class RevisionPageDraft(
     val sourceImage: SourceImageProvenance? = null,
     val approval: PageApproval = PageApproval.PENDING,
     val chunks: List<RevisionChunkDraft> = emptyList(),
+    /** The extractor's key for this page, recorded so a resumed attempt can tell which pages it already staged. */
+    val unitKey: String? = null,
 ) {
     init {
         require(ordinal >= 0) { "RevisionPageDraft.ordinal must not be negative, was $ordinal" }
@@ -296,25 +298,79 @@ class DocumentRevisionStore(private val database: Database, private val content:
      *
      * The revision is empty and invisible: nothing about the document's published text changes, and
      * nothing about it changes when the candidate is filled in, published or withdrawn.
+     *
+     * If a candidate with the same [attemptFingerprint] already exists (a racing resume), adopts that
+     * candidate instead of failing. This happens when two processes try to resume the same attempt
+     * concurrently: only one insert succeeds, and the other finds and reuses the existing candidate.
      */
-    fun openCandidate(documentId: DocumentId, parentRevisionId: String?, provenance: String): String {
+    fun openCandidate(
+        documentId: DocumentId,
+        parentRevisionId: String?,
+        provenance: String,
+        attemptFingerprint: String? = null,
+    ): String {
         require(provenance.isNotBlank()) { "a revision records why it exists" }
         val id = "revision-" + UUID.randomUUID()
-        database.transaction { connection ->
-            connection.prepareStatement(
-                "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, provenance, " +
-                    "created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ).use { statement ->
-                statement.setString(1, id)
-                statement.setString(2, documentId.value)
-                statement.setString(3, parentRevisionId)
-                statement.setString(4, RevisionState.CANDIDATE.name)
-                statement.setString(5, provenance)
-                statement.setString(6, Instants.now())
-                statement.executeUpdate()
+        try {
+            database.transaction { connection ->
+                connection.prepareStatement(
+                    "INSERT INTO document_revisions (id, document_id, parent_revision_id, state, provenance, " +
+                        "created_at, attempt_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ).use { statement ->
+                    statement.setString(1, id)
+                    statement.setString(2, documentId.value)
+                    statement.setString(3, parentRevisionId)
+                    statement.setString(4, RevisionState.CANDIDATE.name)
+                    statement.setString(5, provenance)
+                    statement.setString(6, Instants.now())
+                    statement.setString(7, attemptFingerprint)
+                    statement.executeUpdate()
+                }
+            }
+            return id
+        } catch (e: java.sql.SQLException) {
+            // A unique constraint violation when attemptFingerprint is not null means a candidate with
+            // the same document+fingerprint already exists. Adopt it instead of failing.
+            if (e.message?.contains("UNIQUE constraint failed") == true && attemptFingerprint != null) {
+                val existing = resumableCandidate(documentId, attemptFingerprint)
+                    ?: throw IllegalStateException(
+                        "a unique constraint violation suggests an existing candidate, but resumableCandidate found none",
+                        e,
+                    )
+                return existing
+            }
+            throw e
+        }
+    }
+
+    /**
+     * The candidate an interrupted attempt under [attemptFingerprint] staged for [documentId], or `null`.
+     *
+     * Only a still-open candidate opened under the same reading qualifies: a candidate staged under other
+     * settings is never reused, and a withdrawn or published one is no longer stageable.
+     */
+    fun resumableCandidate(documentId: DocumentId, attemptFingerprint: String): String? = database.read { connection ->
+        connection.prepareStatement(
+            "SELECT id FROM document_revisions WHERE document_id = ? AND state = ? AND attempt_fingerprint = ? " +
+                "ORDER BY created_at DESC, id LIMIT 1",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setString(2, RevisionState.CANDIDATE.name)
+            statement.setString(3, attemptFingerprint)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getString("id") else null }
+        }
+    }
+
+    /** The extractor keys whose pages [revisionId] already holds. */
+    fun stagedKeys(revisionId: String): Set<String> = database.read { connection ->
+        connection.prepareStatement(
+            "SELECT unit_key FROM page_text_revisions WHERE revision_id = ? AND unit_key IS NOT NULL",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            statement.executeQuery().use { rows ->
+                buildSet { while (rows.next()) add(rows.getString("unit_key")) }
             }
         }
-        return id
     }
 
     /**
@@ -753,7 +809,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
                 "artifact_sha256, source_image_root, source_image_relative_path, source_image_sha256, " +
                 "source_image_width, source_image_height, source_image_render_version, approval, " +
-                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "created_at, unit_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (revision_id, ordinal) DO UPDATE SET unit_id = excluded.unit_id, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, text_sha256 = excluded.text_sha256, " +
@@ -767,7 +823,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "source_image_width = excluded.source_image_width, " +
                 "source_image_height = excluded.source_image_height, " +
                 "source_image_render_version = excluded.source_image_render_version, " +
-                "approval = excluded.approval",
+                "approval = excluded.approval, unit_key = excluded.unit_key",
         ).use { statement ->
             statement.setString(1, revisionId)
             statement.setInt(2, page.ordinal)
@@ -805,6 +861,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
             }
             statement.setString(18, page.approval.name)
             statement.setString(19, now)
+            statement.setString(20, page.unitKey)
             statement.executeUpdate()
         }
     }
@@ -877,20 +934,39 @@ class DocumentRevisionStore(private val database: Database, private val content:
     /**
      * The source image the row names, or `null` when it names none.
      *
-     * The columns are written together and read together, so a row whose reference is absent has no image
-     * even if one of the other columns were somehow set: a reference is the only thing that can name a file,
-     * and a hash beside no reference names nothing. The dimensions are read as a pair for the same reason a
-     * page image carries them as one statement.
+     * The columns are all present or all absent — that is what the schema enforces and what this read
+     * assumes — so absent means the one honest thing: no image was observed for the page. A row that
+     * breaks the rule is refused rather than read as an absence, because "no image was observed" and
+     * "an image was observed but the row is half-written" are different facts, and the second is a
+     * corrupted archive rather than an answer. The dimensions are read as a pair for the same reason a
+     * page image carries them as one statement, and a present reference goes through the same validation
+     * a write does — a record may not name something outside its root.
      */
     private fun ResultSet.toSourceImage(): SourceImageProvenance? {
-        val relativePath = getString("source_image_relative_path") ?: return null
+        val root = getString("source_image_root")
+        val relativePath = getString("source_image_relative_path")
+        val sha256 = getString("source_image_sha256")
+        val width = getInt("source_image_width").takeUnless { wasNull() }
+        val height = getInt("source_image_height").takeUnless { wasNull() }
+        val renderVersion = getInt("source_image_render_version").takeUnless { wasNull() }
+        if (root == null && relativePath == null && sha256 == null && width == null && height == null &&
+            renderVersion == null
+        ) {
+            return null
+        }
+        check(
+            root != null && relativePath != null && sha256 != null && renderVersion != null &&
+                (width == null) == (height == null)
+        ) {
+            "a revision page's source image columns are all present or all absent"
+        }
         return SourceImageProvenance(
-            root = SourceImageRoot.valueOf(getString("source_image_root")),
+            root = SourceImageRoot.valueOf(root),
             relativePath = relativePath,
-            sha256 = getString("source_image_sha256"),
-            width = getInt("source_image_width").takeUnless { wasNull() },
-            height = getInt("source_image_height").takeUnless { wasNull() },
-            renderVersion = getInt("source_image_render_version"),
+            sha256 = sha256,
+            width = width,
+            height = height,
+            renderVersion = renderVersion,
         )
     }
 
