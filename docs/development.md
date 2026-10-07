@@ -107,6 +107,8 @@ npx playwright install chromium
 ```
 
 This downloads Chromium for acceptance tests; it is not needed to run the app.
+A machine that already has a Chromium build of another revision can point the
+acceptance scripts at it instead, with `INFOSCRY_CHROMIUM=/path/to/chrome`.
 See [Playwright's browser setup](https://playwright.dev/docs/browsers).
 Return to the repository root before running the Gradle checks.
 
