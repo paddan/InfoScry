@@ -444,3 +444,11 @@ stated; no macOS, real browser, live server, `externalTest`, `gpuIntegrationTest
 - Run: `RevisionPublication*`, storage, investigate, `Ask*`, `Investigation*` and `LlmStoreTest`, 272 tests, no
   failure; web 16 files, 383 Vitest tests, `npm run check` 0 errors and 0 warnings, build succeeded. The backend
   tests for the ledger were not seen failing before the change (they did not compile without the new fields).
+
+### Whole backend suite after 03b, the baseline and 02b
+
+`./gradlew test -PskipFrontend` (every backend test except those tagged `external`, `model`, `gpu` and
+`frontend`) as a non-root user: 112 classes, 1,431 tests, 3 failures, all environmental (`ExternalProcessTest`
+twice, `OfficeExtractorsTest`), 10 minutes 42 seconds with two parallel forks. This is the first whole-suite run
+since tickets 08 and 09. `./gradlew check`, `externalTest` and `gpuIntegrationTest` were not run.
+
