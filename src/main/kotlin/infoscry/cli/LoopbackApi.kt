@@ -9,6 +9,7 @@ import infoscry.server.ApiJson
 import infoscry.server.CollectionResponse
 import infoscry.server.CollectionsResponse
 import infoscry.server.CreateCollectionRequest
+import infoscry.server.IgnorePatternsBody
 import infoscry.server.ImportAcceptedResponse
 import infoscry.server.ImportRequest
 import infoscry.server.JobResponse
@@ -19,6 +20,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.get
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -66,6 +68,31 @@ class LoopbackApi(
             setBody(ApiJson.encodeToString(request))
         }
         return ApiJson.decodeFromString<CollectionResponse>(expect(response)).collection
+    }
+
+    /** The ignore patterns of the collection named or identified by [collection]. */
+    suspend fun ignorePatterns(collection: String): List<String> {
+        val id = resolveCollectionId(collection)
+        val response = client.get("$base/api/collections/$id/ignore-patterns") { header() }
+        return ApiJson.decodeFromString<IgnorePatternsBody>(expect(response)).patterns
+    }
+
+    /** Replaces the collection's ignore patterns; the server validates them and answers with the saved list. */
+    suspend fun setIgnorePatterns(collection: String, patterns: List<String>): List<String> {
+        val id = resolveCollectionId(collection)
+        val response = client.put("$base/api/collections/$id/ignore-patterns") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(IgnorePatternsBody(patterns)))
+        }
+        return ApiJson.decodeFromString<IgnorePatternsBody>(expect(response)).patterns
+    }
+
+    private suspend fun resolveCollectionId(reference: String): String {
+        val all = listCollections()
+        return (all.firstOrNull { it.id.value == reference } ?: all.firstOrNull { it.name.equals(reference, ignoreCase = true) })
+            ?.id?.value
+            ?: throw NoSuchElementException("no usable collection named or identified by '$reference'")
     }
 
     suspend fun listJobs(limit: Int): List<Job> =

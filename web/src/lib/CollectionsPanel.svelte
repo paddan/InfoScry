@@ -7,11 +7,13 @@
     deleteDocuments,
     getCollectionDocument,
     getDeletion,
+    getCollectionIgnorePatterns,
     getImportItems,
     listCollectionDocuments,
     listCollectionImports,
     listUnfinishedDeletions,
     renameCollection,
+    updateCollectionIgnorePatterns,
     updateCollectionOcrLanguages,
     type Collection,
     type DeletionOperation,
@@ -161,6 +163,13 @@
   let renameError: string | null = null;
   let renameSaved = false;
   let ocrLanguages = '';
+  // The ignore patterns draft: one pattern per line. `ignoreLoaded` is false until the saved list has been read, so a
+  // save can never replace a list the reader has not seen.
+  let ignoreText = '';
+  let ignoreLoaded = false;
+  let ignoreSaving = false;
+  let ignoreError: string | null = null;
+  let ignoreSaved = false;
   let ocrSaving = false;
   let ocrError: string | null = null;
   let ocrSaved = false;
@@ -384,6 +393,50 @@
     ocrSaving = false;
     ocrError = null;
     ocrSaved = false;
+    ignoreText = '';
+    ignoreLoaded = false;
+    ignoreSaving = false;
+    ignoreError = null;
+    ignoreSaved = false;
+    void loadIgnorePatterns(collectionId, settingsGeneration);
+  }
+
+  /** Reads the saved ignore list into the draft; an answer for a collection no longer managed is dropped. */
+  async function loadIgnorePatterns(collectionId: string, generation: number): Promise<void> {
+    try {
+      const patterns = await getCollectionIgnorePatterns(collectionId);
+      if (generation !== settingsGeneration) return;
+      ignoreText = patterns.join('\n');
+      ignoreLoaded = true;
+    } catch (failure) {
+      if (generation !== settingsGeneration) return;
+      ignoreError = describe(failure);
+    }
+  }
+
+  /**
+   * Saves the ignore list. The server refuses an invalid pattern, and the draft is kept so it can be fixed. Only
+   * future imports use the new list: an import already queued or running keeps the list it was admitted with.
+   */
+  async function saveIgnorePatterns(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const collection = selected;
+    if (collection === null || ignoreSaving || !ignoreLoaded) return;
+    const generation = settingsGeneration;
+    ignoreSaving = true;
+    ignoreError = null;
+    ignoreSaved = false;
+    try {
+      const saved = await updateCollectionIgnorePatterns(collection.id, ignoreText.split('\n'));
+      if (generation !== settingsGeneration) return;
+      ignoreText = saved.join('\n');
+      ignoreSaved = true;
+    } catch (failure) {
+      if (generation !== settingsGeneration) return;
+      ignoreError = describe(failure);
+    } finally {
+      if (generation === settingsGeneration) ignoreSaving = false;
+    }
   }
 
   /**
@@ -1368,6 +1421,36 @@
             </p>
           </form>
 
+          <form class="settings-form" onsubmit={saveIgnorePatterns}>
+            <div class="field">
+              <label for="collection-settings-ignore">Ignored files</label>
+              <textarea
+                id="collection-settings-ignore"
+                rows="8"
+                spellcheck="false"
+                autocapitalize="off"
+                bind:value={ignoreText}
+                oninput={() => (ignoreSaved = false)}
+                disabled={!ignoreLoaded}
+                aria-invalid={ignoreError !== null && ignoreLoaded}
+                aria-describedby="collection-settings-ignore-note"
+              ></textarea>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" disabled={ignoreSaving || !ignoreLoaded}>
+                {ignoreSaving ? 'Saving ignored files…' : 'Save ignored files'}
+              </button>
+            </div>
+            {#if ignoreError !== null}<p role="alert">{ignoreError}</p>{/if}
+            {#if ignoreSaved}<p role="status">Ignored files saved.</p>{/if}
+            <p class="hint" id="collection-settings-ignore-note">
+              One pattern per line, like a .gitignore file: * and ? match within a name, ** matches across folders, a
+              trailing / matches a folder (its contents are never read), ! re-includes, and # starts a comment. Every
+              import into this collection skips matching files before anything else. A change applies to imports
+              started afterwards, not to one already queued or running.
+            </p>
+          </form>
+
           <CollectionOcrSettings collection={selected} onChanged={() => onCollectionsChanged()} {onOpenOcrProfiles} />
         </section>
 
@@ -1896,6 +1979,7 @@
   .collection-settings { display: grid; gap: 0.9rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .settings-form { display: grid; gap: 0.6rem; }
   .settings-form .actions { justify-content: start; }
+  .settings-form textarea { font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0.5rem; resize: vertical; width: 100%; box-sizing: border-box; }
   .hint { color: #929997; font-size: 0.82rem; }
   .eyebrow { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }

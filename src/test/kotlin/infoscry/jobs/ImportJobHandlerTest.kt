@@ -223,6 +223,120 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `the default ignore patterns keep system files, temp files and tool folders out of a folder import`() {
+        withHarness { harness ->
+            harness.writeText("tree/keep.txt", "Keep\n")
+            harness.writeText("tree/sub/also.txt", "Also\n")
+            harness.writeText("tree/.DS_Store", "junk\n")
+            harness.writeText("tree/sub/._also.txt", "junk\n")
+            harness.writeText("tree/scratch.tmp", "junk\n")
+            harness.writeText("tree/.git/notes.txt", "junk\n")
+            harness.writeText("tree/pkg/node_modules/dep/readme.txt", "junk\n")
+
+            val run = harness.import(
+                listOf(harness.sourcesDir.resolve("tree")),
+                harness.pipeline(RecordingUnits(units = 1)),
+                recursive = true,
+                ignore = IgnorePatterns.of(IgnorePatterns.DEFAULTS),
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(
+                listOf("also.txt", "keep.txt"),
+                run.items.map { Path.of(it.sourcePath).fileName.toString() }.sorted(),
+            )
+            assertEquals(2, run.job.total, "an ignored file is not among the import's files")
+            assertEquals(0, run.items.count { it.outcome != ImportItemOutcome.IMPORTED })
+        }
+    }
+
+    @Test
+    fun `an ignored directory is not walked`() {
+        withHarness { harness ->
+            harness.writeText("tree/keep.txt", "Keep\n")
+            harness.writeText("tree/.git/objects/pack/p.txt", "junk\n")
+            harness.writeText("tree/sub/node_modules/x.txt", "junk\n")
+
+            val entered = mutableListOf<String>()
+            val selection = ImportSelection(MediaTypeDetector(), ExtractorRegistry(emptyList(), TextualFallbackExtractor()))
+            val found = selection.walk(
+                harness.sourcesDir.resolve("tree"),
+                recursive = true,
+                ignore = IgnorePatterns.of(listOf(".git/", "node_modules/")),
+                entered = { entered.add(it) },
+            )
+
+            assertEquals(listOf("keep.txt"), found.map { it.relativePath })
+            assertEquals(listOf("sub"), entered, "only the directory that is not ignored was entered")
+        }
+    }
+
+    @Test
+    fun `a pattern matches the path relative to the imported folder`() {
+        withHarness { harness ->
+            harness.writeText("tree/docs/draft.txt", "Draft\n")
+            harness.writeText("tree/other/docs/draft.txt", "Kept\n")
+            harness.writeText("tree/final.txt", "Final\n")
+
+            val run = harness.import(
+                listOf(harness.sourcesDir.resolve("tree")),
+                harness.pipeline(RecordingUnits(units = 1)),
+                recursive = true,
+                ignore = IgnorePatterns.of(listOf("/docs/")),
+            )
+
+            assertEquals(
+                listOf("final.txt", "other/docs/draft.txt"),
+                run.items.map { Path.of(it.sourcePath).toString().substringAfter("tree/") }.sorted(),
+            )
+        }
+    }
+
+    @Test
+    fun `an explicitly chosen file that matches a pattern is skipped, and a directory pattern does not apply to it`() {
+        withHarness { harness ->
+            val junk = harness.writeText("junk.tmp", "junk\n")
+            val store = harness.writeText("node_modules/real.txt", "A real document\n")
+            val ok = harness.writeText("ok.txt", "Fine\n")
+
+            val run = harness.import(
+                listOf(junk, store, ok),
+                harness.pipeline(RecordingUnits(units = 1)),
+                ignore = IgnorePatterns.of(IgnorePatterns.DEFAULTS),
+            )
+
+            assertEquals(
+                listOf("ok.txt", "real.txt"),
+                run.items.map { Path.of(it.sourcePath).fileName.toString() }.sorted(),
+                "the file named directly is judged by its own name; the folders above it are outside the import",
+            )
+        }
+    }
+
+    @Test
+    fun `a queued import keeps the ignore list it was admitted with when the collection's list changes`() {
+        withHarness { harness ->
+            val notes = harness.writeText("notes.txt", "Alpha\n")
+            val backup = harness.writeText("notes.bak", "Beta\n")
+            val jobId = harness.enqueueQueuedImport(listOf(notes, backup), ignore = IgnorePatterns.of(listOf("*.bak")))
+            // After admission the owner empties the list; the resumed attempt must still apply the saved snapshot.
+            harness.editCollectionIgnoreList(emptyList())
+
+            val run = harness.resume(jobId, harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(listOf("notes.txt"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+        }
+    }
+
+    @Test
+    fun `a payload written before ignore patterns existed reads as no patterns`() {
+        val legacy = """{"collectionId":"default","sources":["/tmp/a.txt"],"settings":{"ocrLanguages":"eng"}}"""
+
+        assertEquals(IgnorePatterns.NONE, ImportJobPayload.decode(legacy).ignore)
+    }
+
+    @Test
     fun `a file is skipped by what its content is, not by its name`() {
         withHarness { harness ->
             // Binary bytes under a text name are skipped, and text bytes under a binary-looking name are read.
@@ -2378,8 +2492,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
         recursive: Boolean = false,
         ocr: OcrSettingsSnapshot? = null,
         extensions: ExtensionFilter = ExtensionFilter.NONE,
+        ignore: IgnorePatterns = IgnorePatterns.NONE,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId, recursive, ocr, extensions)
+        val job = enqueue(context, sources, settings, collectionId, recursive, ocr, extensions, ignore)
         attach(context, storedPipeline(context, extractor), embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -2461,8 +2576,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
         recursive: Boolean = false,
         extensions: ExtensionFilter = ExtensionFilter.NONE,
+        ignore: IgnorePatterns = IgnorePatterns.NONE,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId, recursive, extensions = extensions)
+        val job = enqueue(context, sources, settings, collectionId, recursive, extensions = extensions, ignore = ignore)
         attach(context, pipeline, embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -2511,10 +2627,24 @@ internal class Harness(val directory: Path) : AutoCloseable {
      * Queues an import with [extensions] and attaches no worker, so the job waits in the queue the way it does
      * after a restart. The filter has to survive that wait inside the payload.
      */
-    fun enqueueQueuedImport(sources: List<Path>, extensions: ExtensionFilter): JobId =
+    fun enqueueQueuedImport(
+        sources: List<Path>,
+        extensions: ExtensionFilter = ExtensionFilter.NONE,
+        ignore: IgnorePatterns = IgnorePatterns.NONE,
+    ): JobId =
         AppContext.open(dataDir).use { context ->
-            enqueue(context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"), extensions = extensions).id
+            enqueue(
+                context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"),
+                extensions = extensions, ignore = ignore,
+            ).id
         }
+
+    /** Replaces the saved ignore list of the default collection, the way an edit made after admission would. */
+    fun editCollectionIgnoreList(patterns: List<String>) {
+        AppContext.open(dataDir).use { context ->
+            context.collections.replaceIgnorePatterns(CollectionId("default"), patterns)
+        }
+    }
 
     /** Runs an already queued job to its end in a fresh process, as the next start would after a kill. */
     fun resume(
@@ -2773,6 +2903,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
         recursive: Boolean = false,
         ocr: OcrSettingsSnapshot? = null,
         extensions: ExtensionFilter = ExtensionFilter.NONE,
+        ignore: IgnorePatterns = IgnorePatterns.NONE,
     ): Job {
         val payload = ImportJobPayload(
             collectionId = collectionId.value,
@@ -2781,6 +2912,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
             ocr = ocr,
             recursive = recursive,
             extensions = extensions,
+            ignore = ignore,
         )
         return context.jobs.enqueue(
             type = JobType.IMPORT,

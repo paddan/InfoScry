@@ -26,6 +26,8 @@ const api = vi.hoisted(() => ({
   getCollectionDocument: vi.fn(),
   renameCollection: vi.fn(),
   updateCollectionOcrLanguages: vi.fn(),
+  getCollectionIgnorePatterns: vi.fn(),
+  updateCollectionIgnorePatterns: vi.fn(),
   deleteCollection: vi.fn(),
   deleteDocuments: vi.fn(),
   getDeletion: vi.fn(),
@@ -74,6 +76,8 @@ vi.mock('./api', () => ({
   getCollectionDocument: api.getCollectionDocument,
   renameCollection: api.renameCollection,
   updateCollectionOcrLanguages: api.updateCollectionOcrLanguages,
+  getCollectionIgnorePatterns: api.getCollectionIgnorePatterns,
+  updateCollectionIgnorePatterns: api.updateCollectionIgnorePatterns,
   deleteCollection: api.deleteCollection,
   deleteDocuments: api.deleteDocuments,
   getDeletion: api.getDeletion,
@@ -183,6 +187,7 @@ describe('collections panel', () => {
     vi.resetAllMocks();
     api.listCollectionDocuments.mockResolvedValue(page([]));
     api.listCollectionImports.mockResolvedValue(history([]));
+    api.getCollectionIgnorePatterns.mockResolvedValue(['.DS_Store', '*.tmp']);
     // Nothing is being deleted unless a test says so, and a followed operation stays unfinished by
     // default so a late poll cannot turn into a phantom completion.
     api.listUnfinishedDeletions.mockResolvedValue([]);
@@ -1435,6 +1440,90 @@ describe('collections panel', () => {
 
     expect((screen.getByLabelText('OCR languages') as HTMLInputElement).value).toBe('swe');
     expect(screen.queryByText('OCR languages saved.')).toBeNull();
+  });
+
+  it('shows the collection saved ignore patterns, one per line, in the settings', async () => {
+    api.getCollectionIgnorePatterns.mockResolvedValue(['.DS_Store', '# mine', '*.tmp']);
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+
+    const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.value).toBe('.DS_Store\n# mine\n*.tmp'));
+    expect(api.getCollectionIgnorePatterns).toHaveBeenCalledWith('nightfall');
+  });
+
+  it('saves the ignore patterns as lines and shows the list the server kept', async () => {
+    api.updateCollectionIgnorePatterns.mockResolvedValue(['*.bak', '!keep.bak']);
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+
+    const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.disabled).toBe(false));
+    await fireEvent.input(field, { target: { value: '*.bak\n\n!keep.bak' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save ignored files' }));
+
+    expect(api.updateCollectionIgnorePatterns).toHaveBeenCalledWith('nightfall', ['*.bak', '', '!keep.bak']);
+    expect(await screen.findByText('Ignored files saved.')).toBeTruthy();
+    expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).toBe('*.bak\n!keep.bak');
+  });
+
+  it('keeps the draft and shows the reason when the server refuses a pattern', async () => {
+    api.updateCollectionIgnorePatterns.mockRejectedValue(
+      new ApiError('INVALID_REQUEST', "ignore pattern '!': names nothing"),
+    );
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+
+    const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.disabled).toBe(false));
+    await fireEvent.input(field, { target: { value: '*.bak\n!' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save ignored files' }));
+
+    const settings = screen.getByRole('region', { name: 'Settings for Nightfall' });
+    expect((await within(settings).findByRole('alert')).textContent).toContain('names nothing');
+    expect(within(settings).queryByText('Ignored files saved.')).toBeNull();
+    expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).toBe('*.bak\n!');
+  });
+
+  it('cannot save before the saved list has been read', async () => {
+    api.getCollectionIgnorePatterns.mockImplementation(() => new Promise<string[]>(() => {}));
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+
+    const save = (await screen.findByRole('button', { name: 'Save ignored files' })) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).disabled).toBe(true);
+  });
+
+  it('ignores a list read or save answer that arrives after another collection was selected', async () => {
+    let finishFirstRead!: (patterns: string[]) => void;
+    api.getCollectionIgnorePatterns
+      .mockImplementationOnce(() => new Promise<string[]>((resolve) => { finishFirstRead = resolve; }))
+      .mockResolvedValue(['*.nightfall']);
+    let finishSave!: (patterns: string[]) => void;
+    api.updateCollectionIgnorePatterns.mockImplementation(
+      () => new Promise<string[]>((resolve) => { finishSave = resolve; }),
+    );
+
+    const { rerender } = render(CollectionsPanel, props({
+      collections: [collection('Default'), collection('Nightfall')],
+      selectedId: 'default',
+    }));
+
+    // The first read for Default is still on its way when the reader manages Nightfall.
+    await rerender({ selectedId: 'nightfall' });
+    const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.value).toBe('*.nightfall'));
+    await act(async () => { finishFirstRead(['*.default']); });
+    expect(field.value).toBe('*.nightfall');
+
+    // A save of Nightfall that completes after Default is selected again must not touch Default's draft.
+    await fireEvent.click(screen.getByRole('button', { name: 'Save ignored files' }));
+    await rerender({ selectedId: 'default' });
+    await waitFor(() => expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).toBe('*.nightfall'));
+    await act(async () => { finishSave(['saved-for-nightfall']); });
+    expect(screen.queryByText('Ignored files saved.')).toBeNull();
+    expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).not.toBe('saved-for-nightfall');
   });
 
   it('ignores a history response that a newly selected collection already replaced', async () => {

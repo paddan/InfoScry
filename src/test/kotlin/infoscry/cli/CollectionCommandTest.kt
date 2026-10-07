@@ -105,6 +105,64 @@ class CollectionCommandTest {
         assertContains(listed.stdout, "ocr: eng")
     }
 
+    @Test
+    fun `ignore list shows the defaults of a new collection`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+
+        val listed = CliProcess.run(*args("collection", "ignore", "Acme", "list"))
+
+        assertEquals(0, listed.exitCode, listed.stderr)
+        assertEquals(
+            listOf(".DS_Store", "._*", "Thumbs.db", "desktop.ini", "~$*", "*.tmp", ".git/", "node_modules/"),
+            listed.stdout.trim().lines(),
+        )
+    }
+
+    @Test
+    fun `ignore set replaces the list and list --json reads it back`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        CliProcess.run(*args("collection", "create", "Other"))
+
+        val saved = CliProcess.run(*args("collection", "ignore", "Acme", "set", "*.bak", "!keep.bak"))
+        val listed = CliProcess.run(*args("collection", "ignore", "Acme", "list", "--json"))
+        val untouched = CliProcess.run(*args("collection", "ignore", "Other", "list"))
+
+        assertEquals(0, saved.exitCode, saved.stderr)
+        assertEquals("""{"patterns":["*.bak","!keep.bak"]}""", listed.stdout.trim())
+        assertContains(untouched.stdout, ".DS_Store")
+    }
+
+    @Test
+    fun `ignore set can read the patterns from a file and can clear the list`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val file = dataDir.resolve("patterns.txt")
+        Files.writeString(file, "# mine\n*.bak\n\n")
+
+        val fromFile = CliProcess.run(*args("collection", "ignore", "Acme", "set", "--file", file.toString()))
+        val afterFile = CliProcess.run(*args("collection", "ignore", "Acme", "list", "--json"))
+        val cleared = CliProcess.run(*args("collection", "ignore", "Acme", "set", "--clear"))
+        val afterClear = CliProcess.run(*args("collection", "ignore", "Acme", "list", "--json"))
+
+        assertEquals(0, fromFile.exitCode, fromFile.stderr)
+        assertEquals("""{"patterns":["# mine","*.bak"]}""", afterFile.stdout.trim())
+        assertEquals(0, cleared.exitCode, cleared.stderr)
+        assertEquals("""{"patterns":[]}""", afterClear.stdout.trim())
+    }
+
+    @Test
+    fun `ignore set refuses an invalid pattern, no patterns at all, and an unknown collection`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+
+        val invalid = CliProcess.run(*args("collection", "ignore", "Acme", "set", "*.bak", "!"))
+        val nothing = CliProcess.run(*args("collection", "ignore", "Acme", "set"))
+        val unknown = CliProcess.run(*args("collection", "ignore", "Nowhere", "list"))
+
+        assertNotEquals(0, invalid.exitCode)
+        assertNotEquals(0, nothing.exitCode, "an empty set must say --clear, not silently empty the list")
+        assertNotEquals(0, unknown.exitCode)
+        assertContains(CliProcess.run(*args("collection", "ignore", "Acme", "list")).stdout, ".DS_Store")
+    }
+
     private fun args(vararg extra: String): Array<String> =
         (listOf("--data-dir", dataDir.toString()) + extra).toTypedArray()
 }

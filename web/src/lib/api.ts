@@ -1024,6 +1024,27 @@ export async function updateCollectionOcrLanguages(collectionId: string, ocrLang
   return body.collection;
 }
 
+/** A collection's ignore patterns: files and folders that no import into it attempts. One entry per line. */
+export async function getCollectionIgnorePatterns(collectionId: string): Promise<string[]> {
+  const body = (await readJson(
+    await fetch(`/api/collections/${encodeURIComponent(collectionId)}/ignore-patterns`),
+  )) as { patterns: string[] };
+  return body.patterns;
+}
+
+/**
+ * Replaces a collection's ignore patterns. The server validates every line and refuses an invalid one with
+ * `INVALID_REQUEST`; it answers with the list as saved (trimmed, blank lines dropped).
+ */
+export async function updateCollectionIgnorePatterns(collectionId: string, patterns: string[]): Promise<string[]> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/ignore-patterns`,
+    'PUT',
+    { patterns },
+  )) as { patterns: string[] };
+  return body.patterns;
+}
+
 /**
  * One collection OCR-settings edit. Every field is optional and absent keeps what the collection has; a
  * profile id sent as an empty string clears that profile.

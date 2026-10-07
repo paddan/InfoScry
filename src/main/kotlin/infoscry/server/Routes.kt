@@ -48,6 +48,7 @@ import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.patch
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.server.http.content.staticResources
@@ -114,6 +115,10 @@ data class UpdateOcrLanguagesRequest(
         externalPageLimit = ocrExternalPageLimit,
     )
 }
+
+/** A collection's ignore patterns, as read and as saved: one entry per line, in order. */
+@Serializable
+data class IgnorePatternsBody(val patterns: List<String>)
 
 @Serializable
 data class DeleteCollectionRequest(val confirmName: String)
@@ -309,6 +314,30 @@ fun Application.configureRoutes(
                 }
             }
 
+            // The collection's ignore patterns: read, and replaced whole. A save is a mutation like the OCR settings
+            // save beside it (CSRF, the mutation gate, the collection's own lifecycle), and an invalid pattern is
+            // refused here with a 400 rather than discovered by a later import.
+            get("/ignore-patterns") {
+                call.handle {
+                    val id = call.collectionId()
+                    call.respondJson(
+                        HttpStatusCode.OK,
+                        IgnorePatternsBody(context.collectionService.ignorePatterns(id).patterns),
+                    )
+                }
+            }
+
+            put("/ignore-patterns") {
+                call.handle {
+                    val id = call.collectionId()
+                    val request = call.receiveJson<IgnorePatternsBody>()
+                    call.respondJson(
+                        HttpStatusCode.OK,
+                        IgnorePatternsBody(context.collectionService.updateIgnorePatterns(id, request.patterns).patterns),
+                    )
+                }
+            }
+
             patch("/ocr-languages") {
                 call.handle {
                     val id = call.collectionId()
@@ -361,6 +390,9 @@ fun Application.configureRoutes(
                             recursive = request.recursive,
                             ocr = snapshot,
                             extensions = extensions,
+                            // Snapshotted here, with the OCR settings: a later edit of the list changes future
+                            // imports only.
+                            ignore = context.collectionService.ignorePatterns(collection.id),
                         )
                         val job = context.jobs.enqueue(
                             type = JobType.IMPORT,

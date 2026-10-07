@@ -205,6 +205,7 @@ class ImportCommand(
                 recursive = recursiveFlag,
                 ocr = snapshot,
                 extensions = extensions,
+                ignore = open.collectionService.ignorePatterns(collection.id),
             )
             val job = try {
                 runBlocking {

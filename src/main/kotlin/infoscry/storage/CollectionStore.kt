@@ -3,6 +3,7 @@ package infoscry.storage
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.jobs.IgnorePatterns
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
@@ -67,6 +68,8 @@ class CollectionStore(private val database: Database) {
                     statement.setString(7, collection.updatedAt)
                     statement.executeUpdate()
                 }
+                // A new collection starts with the default ignore patterns, in the same transaction as the collection.
+                writeIgnorePatterns(connection, collection.id, IgnorePatterns.DEFAULTS)
             } catch (failure: SQLException) {
                 failure.rethrowAsNameConflict(collection.name)
             }
@@ -208,6 +211,51 @@ class CollectionStore(private val database: Database) {
             statement.executeUpdate()
         }
         true
+    }
+
+    /** The collection's ignore patterns in order; empty for a collection that has none or does not exist. */
+    fun ignorePatterns(id: CollectionId): List<String> = database.read { connection ->
+        readIgnorePatterns(connection, id)
+    }
+
+    /**
+     * Replaces the collection's whole ignore list. An emptied list stays empty: the defaults are given to a new
+     * collection only, so a person who removes them is not handed them back. The caller validates the lines.
+     */
+    fun replaceIgnorePatterns(id: CollectionId, patterns: List<String>) {
+        database.transaction { connection ->
+            if (selectById(connection, id) == null) {
+                throw NoSuchElementException("no collection with id ${id.value} exists")
+            }
+            writeIgnorePatterns(connection, id, patterns)
+        }
+    }
+
+    private fun readIgnorePatterns(connection: Connection, id: CollectionId): List<String> =
+        connection.prepareStatement(
+            "SELECT pattern FROM collection_ignore_patterns WHERE collection_id = ? ORDER BY position",
+        ).use { statement ->
+            statement.setString(1, id.value)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(rows.getString(1)) }
+            }
+        }
+
+    private fun writeIgnorePatterns(connection: Connection, id: CollectionId, patterns: List<String>) {
+        connection.prepareStatement("DELETE FROM collection_ignore_patterns WHERE collection_id = ?").use { statement ->
+            statement.setString(1, id.value)
+            statement.executeUpdate()
+        }
+        connection.prepareStatement(
+            "INSERT INTO collection_ignore_patterns (collection_id, position, pattern) VALUES (?, ?, ?)",
+        ).use { statement ->
+            patterns.forEachIndexed { position, pattern ->
+                statement.setString(1, id.value)
+                statement.setInt(2, position)
+                statement.setString(3, pattern)
+                statement.executeUpdate()
+            }
+        }
     }
 
     private fun selectById(connection: Connection, id: CollectionId): Collection? =

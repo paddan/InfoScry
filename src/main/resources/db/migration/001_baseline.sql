@@ -45,6 +45,17 @@ CREATE TABLE collections (
 -- index is the authority; the store translates its violation into a typed error.
 CREATE UNIQUE INDEX collections_name_unique ON collections (name COLLATE NOCASE);
 
+-- A collection's ignore patterns (ticket 07 of the local-testing feedback): one row per line of the list, in order.
+-- `position` is the line's place, because the last matching pattern wins. The rows belong to the collection and
+-- go with it, so a collection deletion, including its recovery, needs no step of its own for them. Comments are
+-- rows too, so a saved list reads back as written. An import copies the list into its job payload at admission.
+CREATE TABLE collection_ignore_patterns (
+    collection_id TEXT NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    pattern TEXT NOT NULL CHECK (length(pattern) > 0),
+    PRIMARY KEY (collection_id, position)
+) WITHOUT ROWID;
+
 -- One immutable imported original. sha256 identifies the bytes; the unique constraint is per
 -- collection, so the same bytes may exist in two collections as two documents.
 --
