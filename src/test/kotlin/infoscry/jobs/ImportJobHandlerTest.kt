@@ -102,26 +102,80 @@ import kotlinx.serialization.json.putJsonObject
 class ImportJobHandlerTest {
 
     @Test
-    fun `a good document is imported while an unreadable one fails without aborting the job`() {
+    fun `a folder with supported and unsupported files imports only the supported ones`() {
         withHarness { harness ->
             val good = harness.writeText("good.txt", "Alpha\nBeta\n")
             val blob = harness.writeBinary("blob.bin")
 
-            val run = harness.import(listOf(good, blob), harness.pipeline(RecordingUnits(units = 2)))
+            val run = harness.importDurably(listOf(good, blob), RecordingUnits(units = 2))
 
             assertEquals(JobState.COMPLETE, run.job.state)
-            val byName = run.items.associateBy { Path.of(it.sourcePath).fileName.toString() }
-            assertEquals(ImportItemOutcome.IMPORTED, byName.getValue("good.txt").outcome)
-            assertEquals(ImportItemOutcome.FAILED, byName.getValue("blob.bin").outcome)
-            assertEquals("UNSUPPORTED_MEDIA_TYPE", byName.getValue("blob.bin").errorCode)
-            assertEquals(2, run.items.size)
+            // The skipped file is not an item, not a document and not a count: the import has one file.
+            assertEquals(listOf("good.txt"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+            assertEquals(1, run.documents.size)
+            assertEquals(DocumentStatus.COMPLETE, run.documents.values.single().status)
+            assertEquals(1, run.job.total, "a skipped file is counted among the import's files")
+            assertEquals(1, run.job.completed)
+            // Nothing durable was made for the skipped file: the managed library holds one document only.
+            assertEquals(1, managedDocumentCount(harness))
+        }
+    }
 
-            // The unreadable document is stored and marked with the reason, rather than pretending to be
-            // usable or disappearing from the collection.
-            val failedId = byName.getValue("blob.bin").documentId!!
-            assertEquals(DocumentStatus.FAILED, run.documents.getValue(failedId).status)
-            assertEquals("UNSUPPORTED_MEDIA_TYPE", run.documents.getValue(failedId).errorCode)
-            assertTrue(Files.exists(harness.managedOriginal(failedId)))
+    @Test
+    fun `an import whose every file is unsupported finishes with zero files rather than failing`() {
+        withHarness { harness ->
+            val first = harness.writeBinary("first.bin")
+            val second = harness.writeBinary("second.bin")
+
+            val run = harness.import(listOf(first, second), harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(null, run.job.errorCode)
+            assertEquals(0, run.job.total)
+            assertEquals(0, run.job.completed)
+            assertTrue(run.items.isEmpty())
+            assertTrue(run.documents.isEmpty())
+            assertEquals(0, managedDocumentCount(harness))
+        }
+    }
+
+    @Test
+    fun `a file is skipped by what its content is, not by its name`() {
+        withHarness { harness ->
+            // Binary bytes under a text name are skipped, and text bytes under a binary-looking name are read.
+            val binaryText = harness.writeBinary("notes.txt")
+            val textBinary = harness.writeText("data.bin", "Ordinary text\n")
+
+            val run = harness.import(listOf(binaryText, textBinary), harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(listOf("data.bin"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+            assertEquals(1, run.job.total)
+        }
+    }
+
+    @Test
+    fun `a supported file that fails extraction still fails its own item`() {
+        withHarness { harness ->
+            val good = harness.writeText("good.txt", "Alpha\nBeta\n")
+            val broken = harness.writeText("broken.txt", "Gamma\nDelta\n")
+
+            // The extractor dies on the first unit of every file, so both are supported and both fail. The durable
+            // pipeline is used because a sink that stores nothing never runs extraction at all.
+            val run = harness.importDurably(
+                listOf(good, broken),
+                RecordingUnits(units = 2, failProducingUnit = 0),
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(2, run.items.size, "a supported file must not be skipped because its extraction failed")
+            assertEquals(
+                listOf(ImportItemOutcome.FAILED, ImportItemOutcome.FAILED),
+                run.items.map { it.outcome },
+            )
+            assertTrue(run.items.none { it.errorCode == "UNSUPPORTED_MEDIA_TYPE" }, run.items.map { it.errorCode }.toString())
+            assertEquals(2, run.documents.size)
         }
     }
 
@@ -1998,6 +2052,13 @@ class ImportJobHandlerTest {
                 "a format without page images produced a review",
             )
         }
+    }
+
+    /** How many managed document directories the default collection holds: each stored file is one. */
+    private fun managedDocumentCount(harness: Harness): Int {
+        val library = harness.dataDir.resolve("library/default")
+        if (!Files.isDirectory(library)) return 0
+        return Files.list(library).use { entries -> entries.count().toInt() }
     }
 
     private fun withHarness(block: (Harness) -> Unit) {

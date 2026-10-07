@@ -78,6 +78,11 @@ class ImportJobHandler internal constructor(
      * reviewer rules a rescan uses, so there is no second wiring of either in this class.
      */
     private val attemptDispatch: AttemptDispatch,
+    /**
+     * The import-or-skip decision for each selected file, made before anything durable exists for it. Built from
+     * the same detector and registry the reader uses, so a file it admits is one the reader can be handed.
+     */
+    private val selection: ImportSelection,
     /** The job's own row, which is where a wait for an external page approval is written durably. */
     private val jobs: JobStore,
     /**
@@ -144,7 +149,11 @@ class ImportJobHandler internal constructor(
             throw CollectionNotActiveException(collectionId)
         }
 
+        // The one place a selected file is admitted. Filtering happens before the first item is queued and before
+        // any byte is copied, so a skipped file leaves no item, no document and no count. A missing source is
+        // admitted: it has no content to inspect, and its item reports that it is gone.
         val sources = enumerate(payload.sources, payload.recursive)
+            .filter { source -> !source.exists || selection.admits(source.path) }
         stage.reportProgress(completed = 0, total = sources.size)
 
         var completed = 0
@@ -788,6 +797,7 @@ class ImportJobHandler internal constructor(
                 library = context.library,
                 items = context.importItems,
                 attemptDispatch = attemptDispatch,
+                selection = ImportSelection(pipeline.detector, pipeline.registry),
                 jobs = context.jobs,
                 ingest = ingest,
                 afterIngestion = afterIngestion,

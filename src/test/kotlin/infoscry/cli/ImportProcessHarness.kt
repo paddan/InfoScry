@@ -131,6 +131,9 @@ internal class HarnessExtractor : DocumentExtractor {
                         authority.attemptAboutToBeSent(request)
                     }
                     val text = Files.readString(input.managedPath)
+                    // A supported file the reader refuses on purpose: its extraction fails, and the failure is the
+                    // item's own, as it is for any reader that stops on a document.
+                    check(!text.startsWith(FAILING_CONTENT)) { "the harness extractor was asked to fail this file" }
                     emit(
                         ExtractionEvent.UnitReady(
                             key = key,
@@ -149,8 +152,11 @@ internal class HarnessExtractor : DocumentExtractor {
         input.boundary.unit { emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = units)) }
     }
 
-    private companion object {
+    companion object {
         const val GATE_POLL_MILLIS = 20L
         const val GATE_TIMEOUT_NANOS = 120_000_000_000L
+
+        /** The first line of a text file the harness extractor is asked to fail on. */
+        const val FAILING_CONTENT = "HARNESS-FAILS-THIS-FILE"
     }
 }
