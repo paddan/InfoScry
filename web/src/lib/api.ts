@@ -9,10 +9,23 @@
 
 import type { InvestigationLimits } from './investigationLimits';
 
+/** Which reader a collection's OCR uses; `LLM` reads page images through an OCR profile. */
+export type OcrEngine = 'TESSERACT' | 'SURYA' | 'LLM';
+
+/** Whether a reading only fills pages with no text, or also checks and improves text that exists. */
+export type OcrImportMode = 'FILL_MISSING' | 'CHECK_AND_IMPROVE';
+
 export type Collection = {
   id: string;
   name: string;
   ocrLanguages: string;
+  ocrEngine: OcrEngine;
+  ocrImportMode: OcrImportMode;
+  /** Nulls are omitted from the wire: absent means no profile is selected. */
+  ocrTranscriptionProfileId?: string | null;
+  ocrReviewProfileId?: string | null;
+  /** Distinct pages one operation may send to an external provider before it needs an approval. */
+  ocrExternalPageLimit: number;
   createdAt: string;
   updatedAt: string;
   description?: string | null;
@@ -878,6 +891,32 @@ export async function updateCollectionOcrLanguages(collectionId: string, ocrLang
 }
 
 /**
+ * One collection OCR-settings edit. Every field is optional and absent keeps what the collection has; a
+ * profile id sent as an empty string clears that profile.
+ */
+export type CollectionOcrSettingsPatch = {
+  ocrLanguages?: string;
+  ocrEngine?: OcrEngine;
+  ocrImportMode?: OcrImportMode;
+  ocrTranscriptionProfileId?: string;
+  ocrReviewProfileId?: string;
+  ocrExternalPageLimit?: number;
+};
+
+/** Saves any of a collection's OCR settings. Nothing is reprocessed; the next import or rescan snapshots them. */
+export async function updateCollectionOcrSettings(
+  collectionId: string,
+  patch: CollectionOcrSettingsPatch,
+): Promise<Collection> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/ocr-languages`,
+    'PATCH',
+    patch,
+  )) as { collection: Collection };
+  return body.collection;
+}
+
+/**
  * One deletion operation as the server reports it.
  *
  * It carries no managed or trash path: the ids, the phase, whether the deletion has finished, and — when
@@ -1048,4 +1087,188 @@ async function readJson(response: Response): Promise<unknown> {
     throw new ApiError(error?.code ?? `HTTP_${response.status}`, error?.message ?? response.statusText, response.status);
   }
   return body;
+}
+
+// ---- rescanning one document ----
+
+/** The settings one operation is bound to; nulls are omitted from the wire. */
+export type OcrSettingsSnapshot = {
+  engine: OcrEngine;
+  mode: OcrImportMode;
+  language: string;
+  extractorVersion: string;
+  transcriptionPromptVersion: number;
+  reviewPromptVersion: number;
+  policyVersion: number;
+  externalPageLimit: number;
+  transcriptionProfileRevisionId?: string | null;
+  reviewProfileRevisionId?: string | null;
+  toolVersion?: string | null;
+  modelVersion?: string | null;
+  renderDpi?: number | null;
+  autoValidationId?: string | null;
+  runtimeIdentity?: string | null;
+};
+
+/** Where one stage of a rescan would dispatch; `endpoint` is empty for a provider's own default. */
+export type OcrNamedDestination = {
+  role: string;
+  engine: OcrEngine;
+  scope: OcrEndpointScope;
+  endpoint: string;
+  model: string;
+  profileRevisionId?: string | null;
+};
+
+/** What a rescan would do. A missing price is not a zero price: see `costUnavailableReason`. */
+export type RescanPreview = {
+  previewId: string;
+  documentId: string;
+  baseRevisionId?: string | null;
+  managedHash: string;
+  snapshot: OcrSettingsSnapshot;
+  /** What an external approval binds to; the operation read does not return it. */
+  snapshotHash: string;
+  pageTotal?: number | null;
+  externalPageUpperBound?: number | null;
+  destinations: OcrNamedDestination[];
+  costEstimate?: { amountUsd: number; basis: string } | null;
+  costUnavailableReason?: string | null;
+  approvalRequired: boolean;
+  externalAllowance: number;
+  expiresAt: string;
+};
+
+/** What a preview may override; the collection's settings are used for everything absent. */
+export type RescanPreviewOverrides = {
+  engine?: OcrEngine;
+  importMode?: OcrImportMode;
+  transcriptionProfileId?: string;
+  reviewProfileId?: string;
+};
+
+export type OcrOperationStage =
+  | 'PREFLIGHT'
+  | 'AWAITING_APPROVAL'
+  | 'OCR'
+  | 'REVIEW'
+  | 'CHUNKING'
+  | 'EMBEDDING'
+  | 'INDEXING'
+  | 'COMPLETE'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'NEEDS_TOOL';
+
+/** `distinctPages` is the allowance's unit; `calls` is what was paid for (a page read then reviewed is two). */
+export type OcrExternalAccount = {
+  distinctPages: number;
+  calls: number;
+  allowance: number;
+  approvedDistinctPages?: number | null;
+};
+
+/** One durable rescan operation: no page text, no path, no provider message. */
+export type OcrOperation = {
+  operationId: string;
+  collectionId: string;
+  documentId: string;
+  jobId?: string | null;
+  baseRevisionId?: string | null;
+  candidateRevisionId?: string | null;
+  snapshot: OcrSettingsSnapshot;
+  stage: OcrOperationStage;
+  pageTotal?: number | null;
+  pagesCommitted: number;
+  pagesFailed: number;
+  external: OcrExternalAccount;
+  pendingReviewCount: number;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  requestId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function ocrPath(collectionId: string, documentId: string): string {
+  return `/api/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/ocr`;
+}
+
+/** What a rescan would do, without reading a page or sending anything anywhere. */
+export async function previewRescan(
+  collectionId: string,
+  documentId: string,
+  overrides: RescanPreviewOverrides = {},
+): Promise<RescanPreview> {
+  return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', overrides)) as RescanPreview;
+}
+
+/** Admits a previewed rescan; the same request id with the same body answers with the same operation. */
+export async function admitRescan(
+  collectionId: string,
+  documentId: string,
+  previewId: string,
+  requestId: string,
+): Promise<OcrOperation> {
+  return (await mutate(`${ocrPath(collectionId, documentId)}/rescan`, 'POST', {
+    previewId,
+    requestId,
+  })) as OcrOperation;
+}
+
+export async function getRescanOperation(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+): Promise<OcrOperation> {
+  return (await readJson(
+    await fetch(`${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}`),
+  )) as OcrOperation;
+}
+
+/** One document's operations, newest first. */
+export async function listRescanOperations(collectionId: string, documentId: string): Promise<OcrOperation[]> {
+  const body = (await readJson(await fetch(`${ocrPath(collectionId, documentId)}/operations`))) as {
+    operations: OcrOperation[];
+  };
+  return body.operations;
+}
+
+/** Approves up to `maxDistinctPages` external pages for the snapshot the hash names, and resumes the operation. */
+export async function approveRescanExternal(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  expectedSnapshotHash: string,
+  maxDistinctPages: number,
+): Promise<OcrOperation> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/approve-external`,
+    'POST',
+    { expectedSnapshotHash, maxDistinctPages },
+  )) as OcrOperation;
+}
+
+/** A durable cancellation request; a running attempt ends the operation between pages. */
+export async function cancelRescan(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+): Promise<OcrOperation> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/cancel`,
+    'POST',
+  )) as OcrOperation;
+}
+
+/** Another attempt of an operation that stopped, with the same snapshot and counters. */
+export async function resumeRescan(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+): Promise<OcrOperation> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/resume`,
+    'POST',
+  )) as OcrOperation;
 }
