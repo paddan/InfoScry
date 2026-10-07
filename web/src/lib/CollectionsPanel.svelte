@@ -30,6 +30,7 @@
   } from './api';
   import CollectionOcrSettings from './CollectionOcrSettings.svelte';
   import DocumentRescan from './DocumentRescan.svelte';
+  import OcrHistoryPanel from './OcrHistoryPanel.svelte';
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageLabel } from './importProgress';
@@ -1615,6 +1616,11 @@
             {#if detail !== null}
               {#key `${selected.id}:${detail.document.id}`}
                 <DocumentRescan
+                  collectionId={selected.id}
+                  documentId={detail.document.id}
+                  documentName={detail.document.originalFilename}
+                />
+                <OcrHistoryPanel
                   collectionId={selected.id}
                   documentId={detail.document.id}
                   documentName={detail.document.originalFilename}

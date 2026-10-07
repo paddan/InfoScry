@@ -1378,16 +1378,46 @@ export type PublicationDecisionResponse = {
   errorCode?: string | null;
 };
 
+/** What the rescan behind a revision was configured with; absent for an import or a restore. */
+export type RevisionReading = {
+  engine: string;
+  mode: string;
+  language: string;
+  toolVersion?: string | null;
+  modelVersion?: string | null;
+  transcriptionModel?: string | null;
+  reviewModel?: string | null;
+};
+
+/** How a revision's pages differ from its parent's; `automatic`/`manual` are inferred from recorded reviews. */
+export type PageChanges = {
+  unchanged: number;
+  added: number;
+  automatic: number;
+  manual: number;
+  unknown: number;
+  restored: number;
+  notPublished: number;
+};
+
+/** One published text version with the provenance the archive recorded; nothing here is guessed. */
+export type RevisionView = {
+  revisionId: string;
+  parentRevisionId?: string | null;
+  state: string;
+  provenance: string;
+  createdAt: string;
+  active: boolean;
+  pageCount: number;
+  publishedAt?: string | null;
+  restoredFromRevisionId?: string | null;
+  reading?: RevisionReading | null;
+  extractionMethods?: string[];
+  pageChanges?: PageChanges;
+};
+
 export type RevisionsResponse = {
-  revisions: {
-    revisionId: string;
-    parentRevisionId?: string | null;
-    state: string;
-    provenance: string;
-    createdAt: string;
-    active: boolean;
-    pageCount: number;
-  }[];
+  revisions: RevisionView[];
   total: number;
   activeRevisionId?: string | null;
 };
@@ -1436,6 +1466,49 @@ export async function listDocumentRevisions(
   return (await readJson(
     await fetch(`${ocrPath(collectionId, documentId)}/revisions?offset=${offset}&limit=${limit}`),
   )) as RevisionsResponse;
+}
+
+/** One restore request as the server stores it; `phase` is STAGED, PUBLISHED or FAILED. */
+export type RestoreOperation = {
+  restoreId: string;
+  documentId: string;
+  requestId: string;
+  expectedRevisionId: string;
+  restoredFromRevisionId: string;
+  newRevisionId: string;
+  phase: string;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * Restores a historical revision as a new one. Nothing is rescanned. The same request id with the same body
+ * answers with the same operation; `expectedRevisionId` is the active revision the person was looking at.
+ */
+export async function restoreRevision(
+  collectionId: string,
+  documentId: string,
+  requestId: string,
+  expectedRevisionId: string,
+  restoreRevisionId: string,
+): Promise<RestoreOperation> {
+  return (await mutate(`${ocrPath(collectionId, documentId)}/restore`, 'POST', {
+    requestId,
+    expectedRevisionId,
+    restoreRevisionId,
+  })) as RestoreOperation;
+}
+
+export async function getRestoreOperation(
+  collectionId: string,
+  documentId: string,
+  restoreId: string,
+): Promise<RestoreOperation> {
+  return (await readJson(
+    await fetch(`${ocrPath(collectionId, documentId)}/restores/${encodeURIComponent(restoreId)}`),
+  )) as RestoreOperation;
 }
 
 /** Saves one decision batch; a 409 means the active revision or a page's candidate is no longer the one decided on. */
