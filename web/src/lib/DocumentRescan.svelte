@@ -5,20 +5,19 @@
     approveRescanExternal,
     cancelRescan,
     getRescanOperation,
-    listOcrProfiles,
     listRescanOperations,
     previewRescan,
     resumeRescan,
-    type OcrEngine,
-    type OcrImportMode,
     type OcrOperation,
-    type OcrProfile,
     type RescanPreview,
     type RescanPreviewOverrides,
   } from './api';
   import {
     ENGINE_LABELS,
     IMPORT_MODE_LABELS,
+    emptyChoice,
+    rescanOverrides,
+    type OcrChoice,
     STAGE_LABELS,
     formatUsd,
     decidedUnpublished,
@@ -26,10 +25,10 @@
     needsReviewStep,
     isTerminalStage,
     newRequestId,
-    ocrProfileLabel,
     pageCount,
     sameSnapshot,
   } from './ocrRescan';
+  import OcrChoiceFields from './OcrChoiceFields.svelte';
   import OcrReviewPanel from './OcrReviewPanel.svelte';
 
   /** The document is named by both ids, because an operation is only ever read under its own collection. */
@@ -38,9 +37,6 @@
   export let documentName: string;
   /** How long a scan that is not finished waits before it is read again. */
   export let pollMillis = 2000;
-
-  const ENGINES = Object.keys(ENGINE_LABELS) as OcrEngine[];
-  const MODES = Object.keys(IMPORT_MODE_LABELS) as OcrImportMode[];
 
   /**
    * Everything below belongs to one collection and one document. Each asynchronous step captures the
@@ -59,16 +55,9 @@
   let controlError: string | null = null;
   let cancelRequestedFor: string | null = null;
 
-  let profiles: OcrProfile[] = [];
-  let profilesLoaded = false;
-  let profilesLoading = false;
-  let profilesError: string | null = null;
-
   let previewOpen = false;
-  let engineChoice: OcrEngine | '' = '';
-  let modeChoice: OcrImportMode | '' = '';
-  let transcriptionChoice = '';
-  let reviewChoice = '';
+  /** The engine, mode and profiles chosen for this scan; an empty field is the collection's default. */
+  let choice: OcrChoice = emptyChoice();
   let previewing = false;
   let previewError: string | null = null;
   let preview: RescanPreview | null = null;
@@ -98,7 +87,6 @@
 
   $: key = `${collectionId}\u0000${documentId}`;
   $: if (key !== boundKey) start(key);
-  $: selectable = profiles.filter((profile) => profile.enabled);
   $: holds = latest !== null && holdsDocument(latest);
   $: approvalSent = latest?.external.distinctPages ?? 0;
 
@@ -113,10 +101,7 @@
     controlError = null;
     cancelRequestedFor = null;
     previewOpen = false;
-    engineChoice = '';
-    modeChoice = '';
-    transcriptionChoice = '';
-    reviewChoice = '';
+    choice = emptyChoice();
     previewing = false;
     previewError = null;
     preview = null;
@@ -212,29 +197,11 @@
     }
   }
 
-  async function ensureProfiles(): Promise<void> {
-    if (profilesLoaded || profilesLoading) return;
-    profilesLoading = true;
-    try {
-      const listed = (await listOcrProfiles()) ?? [];
-      if (!alive) return;
-      profiles = listed;
-      profilesLoaded = true;
-      profilesError = null;
-    } catch (failure) {
-      if (!alive) return;
-      profilesError = describe(failure);
-    } finally {
-      profilesLoading = false;
-    }
-  }
-
   // ---- preview and start ----
 
   async function openPreview(): Promise<void> {
     if (holds) return;
     previewOpen = true;
-    void ensureProfiles();
     await tick();
     previewHeading?.focus();
   }
@@ -258,12 +225,7 @@
   }
 
   function overrides(): RescanPreviewOverrides {
-    const chosen: RescanPreviewOverrides = {};
-    if (engineChoice !== '') chosen.engine = engineChoice;
-    if (modeChoice !== '') chosen.importMode = modeChoice;
-    if (transcriptionChoice !== '') chosen.transcriptionProfileId = transcriptionChoice;
-    if (reviewChoice !== '') chosen.reviewProfileId = reviewChoice;
-    return chosen;
+    return rescanOverrides(choice);
   }
 
   async function runPreview(): Promise<void> {
@@ -627,39 +589,7 @@
         Nothing is read or sent until you start the scan. A choice left on the collection default uses the
         collection's settings.
       </p>
-      <div class="controls">
-        <div class="field">
-          <label for="rescan-engine">Engine for this scan</label>
-          <select id="rescan-engine" bind:value={engineChoice} onchange={overridesChanged}>
-            <option value="">Collection default</option>
-            {#each ENGINES as value (value)}<option {value}>{ENGINE_LABELS[value]}</option>{/each}
-          </select>
-        </div>
-        <div class="field">
-          <label for="rescan-mode">Import mode for this scan</label>
-          <select id="rescan-mode" bind:value={modeChoice} onchange={overridesChanged}>
-            <option value="">Collection default</option>
-            {#each MODES as value (value)}<option {value}>{IMPORT_MODE_LABELS[value]}</option>{/each}
-          </select>
-        </div>
-        <div class="field">
-          <label for="rescan-transcription">Transcription profile for this scan</label>
-          <select id="rescan-transcription" bind:value={transcriptionChoice} onchange={overridesChanged}>
-            <option value="">Collection default</option>
-            {#each selectable as profile (profile.id)}<option value={profile.id}>{ocrProfileLabel(profile)}</option>{/each}
-          </select>
-        </div>
-        <div class="field">
-          <label for="rescan-review">Review profile for this scan</label>
-          <select id="rescan-review" bind:value={reviewChoice} onchange={overridesChanged}>
-            <option value="">Collection default</option>
-            {#each selectable as profile (profile.id)}<option value={profile.id}>{ocrProfileLabel(profile)}</option>{/each}
-          </select>
-        </div>
-      </div>
-      {#if profilesError !== null}
-        <p class="hint">The OCR profiles could not be listed: {profilesError}</p>
-      {/if}
+      <OcrChoiceFields idPrefix="rescan" purpose="scan" bind:choice onChange={overridesChanged} />
       <div class="actions">
         <button type="button" class="primary" onclick={() => void runPreview()} disabled={previewing}>
           {previewing ? 'Previewing…' : preview === null ? 'Preview scan' : 'Preview again'}
@@ -741,10 +671,7 @@
   .panel { display: grid; gap: 0.6rem; border: 1px solid #303535; border-radius: 0.55rem; background: #1d2021; padding: 0.9rem; }
   .panel h3, .panel h4 { margin: 0; font-size: 0.95rem; }
   .panel h3:focus, .panel h4:focus { outline: 2px solid #c4a77d; outline-offset: 2px; }
-  .controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
-  .field { display: grid; gap: 0.35rem; align-content: start; }
   label { color: #b8bcbb; font-size: 0.82rem; }
-  select,
   input { min-width: 0; border: 1px solid #383d3e; border-radius: 0.48rem; background: #202324; padding: 0.62rem 0.72rem; color: #e8e9e7; }
   .actions { display: flex; flex-wrap: wrap; gap: 0.55rem; }
   .preview { display: grid; gap: 0.5rem; border-top: 1px solid #2b3030; padding-top: 0.6rem; }
@@ -754,7 +681,4 @@
   .destinations { margin: 0; padding-left: 1.1rem; overflow-wrap: anywhere; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
   button.primary:hover:not(:disabled) { background: #d4ba94; }
-  @media (max-width: 36rem) {
-    .controls { grid-template-columns: minmax(0, 1fr); }
-  }
 </style>

@@ -727,6 +727,79 @@ describe('collections panel', () => {
     expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2);
   });
 
+  it('retries one document with a chosen OCR method, and leaves the choice out when nothing was chosen', async () => {
+    const onRetryDocument = vi.fn(async () => ({ accepted: true as const, jobId: 'job-9' }));
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
+    api.getCollectionDocument.mockResolvedValue({
+      document: documentRow('doc-1', { status: 'FAILED', errorCode: 'EXTRACTION_FAILED' }),
+      errorMessage: 'the extractor stopped',
+      sourceId: 'unit-1',
+      retryEligible: true,
+    });
+    api.listOcrProfiles.mockResolvedValue([]);
+
+    render(CollectionsPanel, props({
+      collections: [collection('Nightfall', 1)],
+      selectedId: 'nightfall',
+      onRetryDocument,
+    }));
+    await screen.findByRole('table');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const details = await screen.findByRole('region', { name: 'Document details' });
+
+    // An open form that names nothing is the plain Retry.
+    await fireEvent.click(within(details).getByLabelText('Choose the OCR method for this retry'));
+    await fireEvent.click(within(details).getByRole('button', { name: 'Retry' }));
+    expect(onRetryDocument).toHaveBeenLastCalledWith('doc-1');
+
+    // The same engine, mode and language controls Scan again uses.
+    await fireEvent.change(within(details).getByLabelText('Engine for this retry'), { target: { value: 'TESSERACT' } });
+    await fireEvent.change(within(details).getByLabelText('Import mode for this retry'), {
+      target: { value: 'CHECK_AND_IMPROVE' },
+    });
+    await fireEvent.input(within(details).getByLabelText('OCR languages for this retry'), {
+      target: { value: ' swe+eng ' },
+    });
+    await fireEvent.click(within(details).getByRole('button', { name: 'Retry' }));
+
+    expect(onRetryDocument).toHaveBeenLastCalledWith('doc-1', {
+      engine: 'TESSERACT',
+      importMode: 'CHECK_AND_IMPROVE',
+      language: 'swe+eng',
+    });
+    expect(api.listOcrProfiles).toHaveBeenCalled();
+  });
+
+  it('retries every eligible document with a chosen OCR method', async () => {
+    const onRetryAllDocuments = vi.fn(async () => ({
+      collectionId: 'nightfall',
+      acceptedJobIds: ['job-1'],
+      rejected: [
+        {
+          documentId: 'doc-2',
+          code: 'RETRY_USE_SCAN_AGAIN',
+          reason: 'this document already has a published text, so use Scan again',
+        },
+      ],
+    }));
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
+
+    render(CollectionsPanel, props({
+      collections: [collection('Nightfall', 1)],
+      selectedId: 'nightfall',
+      onRetryAllDocuments,
+    }));
+    await screen.findByRole('table');
+    const section = screen.getByRole('region', { name: 'Retry documents in Nightfall' });
+
+    await fireEvent.click(within(section).getByLabelText('Choose the OCR method for this retry'));
+    await fireEvent.change(within(section).getByLabelText('Engine for this retry'), { target: { value: 'SURYA' } });
+    await fireEvent.click(within(section).getByRole('button', { name: 'Retry all eligible documents' }));
+
+    expect(onRetryAllDocuments).toHaveBeenCalledWith({ engine: 'SURYA' });
+    expect(await within(section).findByText(/use Scan again/)).toBeTruthy();
+  });
+
   it('shows the server sentence for a refused retry and claims nothing was queued', async () => {
     const refusal = 'the OCR tool (Tesseract) is not installed, so this document cannot be read again: install it with brew';
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'NEEDS_TOOL' })]));

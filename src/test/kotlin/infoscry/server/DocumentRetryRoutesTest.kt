@@ -578,7 +578,7 @@ class DocumentRetryRoutesTest {
 
     private fun retryPath(collectionId: String): String = "/api/collections/$collectionId/documents/retry"
 
-    private companion object {
+    internal companion object {
 
         /** A machine that has everything a retry could need, unless a test says otherwise. */
         fun availablePrerequisites(

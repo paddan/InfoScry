@@ -25,15 +25,18 @@
     type JobState,
     type RetryAdmission,
     type RetryAttempt,
+    type RetryOcrChoice,
     type RetryRejection,
     type UnitKindName,
   } from './api';
   import CollectionOcrSettings from './CollectionOcrSettings.svelte';
   import DocumentRescan from './DocumentRescan.svelte';
+  import OcrChoiceFields from './OcrChoiceFields.svelte';
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
+  import { emptyChoice, retryChoice } from './ocrRescan';
 
   export let collections: Collection[];
   export let selectedId: string;
@@ -64,13 +67,13 @@
    * request and hands back what to show: the attempt it queued, or the server's own sentence for a refusal.
    * The panel never touches the viewer, so nothing about the page's source state moves for a retry.
    */
-  export let onRetryDocument: (documentId: string) => Promise<RetryAttempt>;
+  export let onRetryDocument: (documentId: string, ocr?: RetryOcrChoice) => Promise<RetryAttempt>;
   /**
    * Asks for every eligible document of the managed collection to be read again, across all pages. It names
    * no documents and carries no filter or page, because the collection-wide set is the server's to pick; the
    * page answers with what the server admitted and refused.
    */
-  export let onRetryAllDocuments: () => Promise<RetryAdmission>;
+  export let onRetryAllDocuments: (ocr?: RetryOcrChoice) => Promise<RetryAdmission>;
 
   /** The rows one page asks for; the server's own maximum stays 200. */
   const PAGE_SIZE = 50;
@@ -197,6 +200,12 @@
   let retrySubmitting = false;
   let retryMessage: string | null = null;
   let retryError: string | null = null;
+  /**
+   * Whether this retry reads with a method chosen here instead of the collection's settings, and the choice.
+   * Closed by default, and an open form that names nothing is the same request as a closed one.
+   */
+  let retryChoiceOpen = false;
+  let retryChoiceValue = emptyChoice();
 
   /**
    * The collection-wide retry: one submission at a time, what the server answered, and the documents it
@@ -207,6 +216,8 @@
   let retryAllMessage: string | null = null;
   let retryAllRejected: RetryRejection[] = [];
   let retryAllError: string | null = null;
+  let retryAllChoiceOpen = false;
+  let retryAllChoiceValue = emptyChoice();
 
   let imports: ImportHistoryEntry[] = [];
   let importsTotal = 0;
@@ -355,6 +366,8 @@
     retryAllMessage = null;
     retryAllRejected = [];
     retryAllError = null;
+    retryAllChoiceOpen = false;
+    retryAllChoiceValue = emptyChoice();
     startImports();
     void loadDocuments();
   }
@@ -562,6 +575,8 @@
     retrySubmitting = false;
     retryMessage = null;
     retryError = null;
+    retryChoiceOpen = false;
+    retryChoiceValue = emptyChoice();
   }
 
   /**
@@ -578,7 +593,8 @@
     retryMessage = null;
     retryError = null;
     try {
-      const attempt = await onRetryDocument(documentId);
+      const ocr = retryChoiceOpen ? retryChoice(retryChoiceValue) : undefined;
+      const attempt = ocr === undefined ? await onRetryDocument(documentId) : await onRetryDocument(documentId, ocr);
       if (!attempt.accepted) {
         retryError = attempt.reason;
         return;
@@ -609,7 +625,8 @@
     retryAllRejected = [];
     retryAllError = null;
     try {
-      const admission = await onRetryAllDocuments();
+      const ocr = retryAllChoiceOpen ? retryChoice(retryAllChoiceValue) : undefined;
+      const admission = ocr === undefined ? await onRetryAllDocuments() : await onRetryAllDocuments(ocr);
       retryAllRejected = admission.rejected;
       retryAllMessage = retryAllSummary(admission);
       await loadDocuments();
@@ -1411,6 +1428,17 @@
             filter, sort order and current page do not restrict which documents it selects. Completed
             documents, and documents that only have warnings, are left alone.
           </p>
+          <label class="choice-toggle">
+            <input type="checkbox" bind:checked={retryAllChoiceOpen} />
+            Choose the OCR method for this retry
+          </label>
+          {#if retryAllChoiceOpen}
+            <p class="hint">
+              A choice left on the collection default uses the collection's settings. The collection itself is not
+              changed, and documents that already have a published text are left to Scan again.
+            </p>
+            <OcrChoiceFields idPrefix="retry-all" purpose="retry" showLanguage bind:choice={retryAllChoiceValue} />
+          {/if}
           <div class="actions">
             <button
               type="button"
@@ -1602,6 +1630,18 @@
                 </div>
               {/if}
               {#if detail.retryEligible}
+                <label class="choice-toggle">
+                  <input type="checkbox" bind:checked={retryChoiceOpen} />
+                  Choose the OCR method for this retry
+                </label>
+                {#if retryChoiceOpen}
+                  <p class="hint">
+                    A choice left on the collection default uses the collection's settings. A document that already
+                    has a published text is read again with Scan again instead, which shows the new reading before
+                    it replaces the old one.
+                  </p>
+                  <OcrChoiceFields idPrefix="retry" purpose="retry" showLanguage bind:choice={retryChoiceValue} />
+                {/if}
                 <div class="actions">
                   <button type="button" onclick={() => void retryDocument(detail)} disabled={retrySubmitting}>
                     {retrySubmitting ? 'Retrying…' : 'Retry'}
@@ -1863,6 +1903,7 @@
   .document-controls { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 0.75rem; align-items: end; padding-top: 0.35rem; }
   .collection-retry { display: grid; justify-items: start; gap: 0.6rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .collection-retry p { margin: 0; }
+  .choice-toggle { display: flex; align-items: center; gap: 0.5rem; color: #b8bcbb; font-size: 0.85rem; }
   .retry-refusals { margin: 0; padding-left: 1.1rem; max-height: 8rem; overflow-y: auto; color: #d8c9a8; font-size: 0.82rem; }
   .document-search { display: flex; gap: 0.55rem; align-items: end; }
   .document-search .field { flex: 1 1 auto; }
