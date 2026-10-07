@@ -15,6 +15,7 @@ const api = vi.hoisted(() => ({
   listPendingReviews: vi.fn(),
   listDocumentRevisions: vi.fn(),
   readSource: vi.fn(),
+  readPendingCandidate: vi.fn(),
   decideReviews: vi.fn(),
   publishReviewDecisions: vi.fn(),
 }));
@@ -40,6 +41,8 @@ vi.mock('./api', () => ({
   listPendingReviews: api.listPendingReviews,
   listDocumentRevisions: api.listDocumentRevisions,
   readSource: api.readSource,
+  readPendingCandidate: api.readPendingCandidate,
+  pendingImageUrl: () => '/image',
   decideReviews: api.decideReviews,
   publishReviewDecisions: api.publishReviewDecisions,
 }));
@@ -101,6 +104,7 @@ function operation(stage: OcrOperationStage, over: Partial<OcrOperation> = {}): 
     pagesFailed: 0,
     external: { distinctPages: 0, calls: 0, allowance: 5 },
     pendingReviewCount: 0,
+    decidedUnpublishedCount: 0,
     requestId: 'request-1',
     createdAt: '2026-09-21T07:00:00Z',
     updatedAt: '2026-09-21T07:00:01Z',
@@ -467,6 +471,67 @@ describe('document rescan', () => {
       await act(async () => {});
       expect(screen.queryByRole('region', { name: 'Review pages' })).toBeNull();
       expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Review pages' }));
+    });
+
+    it('offers Publish decisions after a reload with nothing pending and decided pages waiting', async () => {
+      api.listRescanOperations.mockResolvedValue([
+        operation('COMPLETE', { pendingReviewCount: 0, decidedUnpublishedCount: 2 }),
+      ]);
+      api.listDocumentRevisions.mockResolvedValue({ revisions: [], total: 1, activeRevisionId: 'rev-1' });
+      api.listPendingReviews.mockResolvedValue({
+        reviews: [], total: 0, pendingPages: 0, pendingReviewCount: 0, decidedUnpublishedCount: 2, externalAccounting: '',
+      });
+      await renderRescan();
+
+      const latest = screen.getByRole('group', { name: 'Latest scan' });
+      expect(latest.textContent).toContain('2 decided pages are waiting to be published');
+      expect(screen.queryByRole('button', { name: 'Review pages' })).toBeNull();
+      await fireEvent.click(screen.getByRole('button', { name: 'Publish decisions' }));
+      await act(async () => {});
+      await act(async () => {});
+
+      expect(screen.getByRole('region', { name: 'Review pages' })).toBeTruthy();
+      expect(screen.getByText('2 decided pages are waiting to be published.')).toBeTruthy();
+      const panelPublish = within(screen.getByRole('region', { name: 'Review pages' }))
+        .getByRole('button', { name: 'Publish decisions' }) as HTMLButtonElement;
+      expect(panelPublish.disabled).toBe(false);
+    });
+
+    it('removes the publish entry once the decisions are published', async () => {
+      api.listRescanOperations.mockResolvedValue([
+        operation('COMPLETE', { pendingReviewCount: 0, decidedUnpublishedCount: 2 }),
+      ]);
+      api.listDocumentRevisions.mockResolvedValue({ revisions: [], total: 1, activeRevisionId: 'rev-1' });
+      api.listPendingReviews.mockResolvedValue({
+        reviews: [], total: 0, pendingPages: 0, pendingReviewCount: 0, decidedUnpublishedCount: 2, externalAccounting: '',
+      });
+      api.publishReviewDecisions.mockResolvedValue({
+        operation: operation('COMPLETE', { pendingReviewCount: 0, decidedUnpublishedCount: 0 }),
+        publicationId: 'pub-1',
+        phase: 'PUBLISHED',
+      });
+      await renderRescan();
+      await fireEvent.click(screen.getByRole('button', { name: 'Publish decisions' }));
+      await act(async () => {});
+      await act(async () => {});
+      const region = screen.getByRole('region', { name: 'Review pages' });
+      await fireEvent.click(within(region).getByRole('button', { name: 'Publish decisions' }));
+      await act(async () => {});
+      await act(async () => {});
+
+      expect(api.publishReviewDecisions).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('group', { name: 'Latest scan' }).textContent).not.toContain('waiting to be published');
+      expect(screen.queryByRole('button', { name: 'Review pages' })).toBeNull();
+      // Only the panel's own button remains (the entry in the scan summary is gone).
+      expect(screen.getAllByRole('button', { name: 'Publish decisions' }).length).toBe(1);
+    });
+
+    it('does not block a new scan only because decided pages are waiting to be published', async () => {
+      api.listRescanOperations.mockResolvedValue([
+        operation('COMPLETE', { pendingReviewCount: 0, decidedUnpublishedCount: 2 }),
+      ]);
+      await renderRescan();
+      expect((screen.getByRole('button', { name: 'Scan again' }) as HTMLButtonElement).disabled).toBe(false);
     });
 
     it('says when the earlier scans cannot be read instead of offering a scan blindly', async () => {

@@ -41,6 +41,16 @@ export function holdsDocument(operation: OcrOperation): boolean {
   return !isTerminalStage(operation.stage) || (operation.stage === 'COMPLETE' && operation.pendingReviewCount > 0);
 }
 
+/** Decided pages waiting to be published; an older server that omits the count means none. */
+export function decidedUnpublished(source: { decidedUnpublishedCount?: number | null }): number {
+  return source.decidedUnpublishedCount ?? 0;
+}
+
+/** Whether the review step has something to do: pages to decide, or decided pages to publish. */
+export function needsReviewStep(operation: OcrOperation): boolean {
+  return operation.stage === 'COMPLETE' && (operation.pendingReviewCount > 0 || decidedUnpublished(operation) > 0);
+}
+
 /** One selectable profile in a reader's words: where it sends pages, its key and its image check. */
 export function ocrProfileLabel(profile: OcrProfile): string {
   const where = profile.scope === 'EXTERNAL' ? 'external' : 'local';

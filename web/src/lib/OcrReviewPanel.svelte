@@ -4,7 +4,9 @@
     decideReviews,
     listDocumentRevisions,
     listPendingReviews,
+    pendingImageUrl,
     publishReviewDecisions,
+    readPendingCandidate,
     readSource,
     type OcrOperation,
     type PendingReview,
@@ -12,7 +14,8 @@
     type ReviewDecisionInput,
     type ReviewReason,
   } from './api';
-  import { newRequestId } from './ocrRescan';
+  import { decidedUnpublished, newRequestId } from './ocrRescan';
+  import { diffTexts, type DiffPart } from './reviewDiff';
 
   /** The document is named by both ids, because a review is only ever read under its own collection. */
   export let collectionId: string;
@@ -48,6 +51,19 @@
     | { state: 'ready'; text: string; truncated: boolean }
     | { state: 'error'; message: string };
 
+  type Candidate =
+    | { state: 'none' }
+    | { state: 'loading' }
+    | { state: 'ready'; text: string; truncated: boolean; totalChars: number }
+    | { state: 'stale' }
+    | { state: 'error'; message: string };
+
+  type Comparison =
+    | { kind: 'none' }
+    | { kind: 'partial' }
+    | { kind: 'too-large' }
+    | { kind: 'diff'; parts: DiffPart[]; changed: boolean };
+
   type ProblemKind = 'load' | 'conflict' | 'other';
 
   /**
@@ -58,6 +74,9 @@
   let generation = 0;
   let loadSequence = 0;
   let baselineSequence = 0;
+  let candidateSequence = 0;
+  /** The page and reading a hash mismatch was already refreshed for, so a persistent mismatch cannot loop. */
+  let refreshedFor: string | null = null;
   let alive = true;
 
   let loading = true;
@@ -68,6 +87,9 @@
   let accounting: string | null = null;
   let current: PendingReview | null = null;
   let baseline: Baseline = { state: 'none' };
+  let candidate: Candidate = { state: 'none' };
+  let imageFailedFor: string | null = null;
+  let decided = 0;
 
   let drafts: Record<string, Draft> = {};
   let busy: 'save' | 'publish' | null = null;
@@ -92,14 +114,21 @@
   $: unsaved = Object.values(drafts).filter((draft) => draft.choice !== null).length;
   $: draft = current === null ? null : drafts[current.unitId] ?? null;
   $: segments = current === null ? [] : markedSegments(baseline, current.reasons);
+  $: comparison = compare(baseline, candidate);
   $: noRevision = revisionKnown && activeRevisionId === null;
-  $: canPublish = total === 0 && !loading && problemKind !== 'load' && activeRevisionId !== null;
+  $: canPublish = total === 0 && !loading && problemKind !== 'load' && activeRevisionId !== null
+    && publication?.published !== true;
 
   function start(next: string): void {
     boundKey = next;
     generation += 1;
     loadSequence += 1;
     baselineSequence += 1;
+    candidateSequence += 1;
+    refreshedFor = null;
+    candidate = { state: 'none' };
+    imageFailedFor = null;
+    decided = 0;
     loading = true;
     revisionKnown = false;
     activeRevisionId = null;
@@ -128,6 +157,7 @@
     generation += 1;
     loadSequence += 1;
     baselineSequence += 1;
+    candidateSequence += 1;
   });
 
   function describe(failure: unknown): string {
@@ -165,6 +195,7 @@
         revisionKnown = true;
       }
       total = answer.total;
+      decided = decidedUnpublished(answer);
       accounting = answer.externalAccounting ?? null;
       // Decisions that were saved shrink the list: a position past its end steps back to the last page.
       if (answer.reviews.length === 0 && answer.total > 0 && nextOffset > 0) {
@@ -195,6 +226,8 @@
     if (review === null) {
       baseline = { state: 'none' };
       baselineSequence += 1;
+      candidate = { state: 'none' };
+      candidateSequence += 1;
       return;
     }
     // A choice taken against another reading of this page is not applied to the one shown now: the choice is
@@ -207,6 +240,44 @@
       };
     }
     void loadBaseline(review);
+    void loadCandidate(review);
+  }
+
+  /** The new reading of the shown page only; it is read from its own route, never in bulk. */
+  async function loadCandidate(review: PendingReview): Promise<void> {
+    const sequence = ++candidateSequence;
+    const mine = generation;
+    candidate = { state: 'loading' };
+    try {
+      const answer = await readPendingCandidate(collectionId, documentId, operationId, review.unitId);
+      if (mine !== generation || sequence !== candidateSequence) return;
+      if (answer.candidateHash !== review.candidateHash) {
+        // Two answers about one page disagree, so no decision is taken against either: read the listing again, once.
+        candidate = { state: 'stale' };
+        const marker = `${review.unitId}\u0000${review.candidateHash}`;
+        if (refreshedFor !== marker) {
+          refreshedFor = marker;
+          void load(offset);
+        }
+        return;
+      }
+      candidate = { state: 'ready', text: answer.text, truncated: answer.truncated, totalChars: answer.totalChars };
+    } catch (failure) {
+      if (mine !== generation || sequence !== candidateSequence) return;
+      candidate = { state: 'error', message: describe(failure) };
+    }
+  }
+
+  function compare(from: Baseline, to: Candidate): Comparison {
+    if (from.state !== 'ready' || to.state !== 'ready') return { kind: 'none' };
+    if (from.truncated || to.truncated) return { kind: 'partial' };
+    const result = diffTexts(from.text, to.text);
+    return result.kind === 'too-large' ? result : { kind: 'diff', parts: result.parts, changed: result.changed };
+  }
+
+  function refreshPage(): void {
+    refreshedFor = null;
+    void load(offset);
   }
 
   async function loadBaseline(review: PendingReview): Promise<void> {
@@ -288,7 +359,11 @@
       return;
     }
     let text = held?.text ?? '';
-    if (choice === 'EDIT' && text === '' && baseline.state === 'ready') text = baseline.text;
+    if (choice === 'EDIT' && text === '') {
+      // The new reading is the better starting point, unless it is cut: editing a cut text would drop the rest.
+      if (candidate.state === 'ready' && !candidate.truncated) text = candidate.text;
+      else if (baseline.state === 'ready') text = baseline.text;
+    }
     drafts = {
       ...drafts,
       [review.unitId]: {
@@ -424,6 +499,7 @@
       if (mine !== generation) return;
       if (result.phase === 'PUBLISHED') {
         publication = { published: true, text: 'Published. Searchable text now uses the decided pages.' };
+        decided = 0;
         onpublished(result.operation);
       } else {
         publication = {
@@ -467,6 +543,9 @@
     {/if}
   </p>
   {#if accounting}<p class="hint">{accounting}</p>{/if}
+  {#if decided > 0}
+    <p class="decided">{decided === 1 ? '1 decided page is' : `${decided} decided pages are`} waiting to be published.</p>
+  {/if}
 
   {#if problem !== null}
     <p role="alert" class="problem">{problem}</p>
@@ -499,10 +578,21 @@
         </p>
       {/if}
 
-      <p class="hint">
-        The page image is not available here: the server has no page-image route for review, so judge this page
-        against the original document.
-      </p>
+      {#key current.unitId}
+        {#if current.imageAvailable !== true}
+          <p class="hint">No page image is available for this page.</p>
+        {:else if imageFailedFor === current.unitId}
+          <p role="note" class="hint">The page image could not be loaded.</p>
+        {:else}
+          <img
+            class="scan"
+            src={pendingImageUrl(collectionId, documentId, operationId, current.unitId)}
+            alt={`Scanned page ${current.ordinal + 1}`}
+            loading="lazy"
+            onerror={() => (imageFailedFor = current?.unitId ?? null)}
+          />
+        {/if}
+      {/key}
 
       <p>
         Reviewer recommendation: <strong>{recommendation(current.recommendation)}</strong>
@@ -550,25 +640,58 @@
         </div>
         <div>
           <h5>New reading</h5>
-          <p class="hint">
-            The new reading's text is not sent to this screen: the server provides its hash and the reasons above only.
-          </p>
+          {#if candidate.state === 'loading'}
+            <p class="hint">Loading the new reading…</p>
+          {:else if candidate.state === 'error'}
+            <p class="hint">The new reading could not be read: {candidate.message}</p>
+          {:else if candidate.state === 'stale'}
+            <p class="hint">
+              The reading of this page changed while it was being shown, so it cannot be decided from here yet.
+            </p>
+            <div class="actions">
+              <button type="button" onclick={refreshPage}>Refresh this page</button>
+            </div>
+          {:else if candidate.state === 'ready'}
+            <p class="candidate">{candidate.text}</p>
+            {#if candidate.truncated}
+              <p class="hint">
+                Only the first {candidate.text.length} of {candidate.totalChars} characters of the new reading are
+                shown. Use new still applies to the whole reading.
+              </p>
+            {/if}
+          {/if}
         </div>
       </div>
+
+      {#if comparison.kind === 'diff'}
+        <div>
+          <h5>Differences</h5>
+          {#if comparison.changed}
+            <p class="diff">{#each comparison.parts as part, index (index)}{#if part.type === 'removed'}<del>{part.text}</del>{:else if part.type === 'added'}<ins>{part.text}</ins>{:else}{part.text}{/if}{/each}</p>
+            <p class="hint">Removed text is struck through and new text is underlined.</p>
+          {:else}
+            <p class="hint">The new reading is the same as the existing text.</p>
+          {/if}
+        </div>
+      {:else if comparison.kind === 'partial'}
+        <p class="hint">Differences are not shown because one of the texts is cut. Compare the two readings above.</p>
+      {:else if comparison.kind === 'too-large'}
+        <p class="hint">This page is too long to compare word by word, so both texts are shown side by side.</p>
+      {/if}
 
       <div class="actions" role="group" aria-label="Decision for this page">
         <button
           type="button"
           aria-pressed={draft?.choice === 'KEEP'}
-          disabled={!current.baselineRevisionId || busy !== null}
+          disabled={!current.baselineRevisionId || busy !== null || candidate.state === 'stale'}
           onclick={() => void choose('KEEP')}
         >
           Keep existing
         </button>
-        <button type="button" aria-pressed={draft?.choice === 'USE_NEW'} disabled={busy !== null} onclick={() => void choose('USE_NEW')}>
+        <button type="button" aria-pressed={draft?.choice === 'USE_NEW'} disabled={busy !== null || candidate.state === 'stale'} onclick={() => void choose('USE_NEW')}>
           Use new
         </button>
-        <button type="button" aria-pressed={draft?.choice === 'EDIT'} disabled={busy !== null} onclick={() => void choose('EDIT')}>
+        <button type="button" aria-pressed={draft?.choice === 'EDIT'} disabled={busy !== null || candidate.state === 'stale'} onclick={() => void choose('EDIT')}>
           Edit text
         </button>
       </div>
@@ -674,6 +797,11 @@
   .page { display: grid; gap: 0.5rem; border: 1px solid #303535; border-radius: 0.55rem; padding: 0.75rem; }
   .reasons { margin: 0; padding-left: 1.1rem; overflow-wrap: anywhere; }
   .texts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+  .candidate, .diff { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16rem; overflow: auto; }
+  .decided { color: #d8c9a8; }
+  .scan { display: block; max-width: 100%; max-height: 28rem; object-fit: contain; border: 1px solid #303535; border-radius: 0.4rem; background: #fff; }
+  ins { background: #2b4a2e; color: #dcefd8; }
+  del { background: #5a2f2f; color: #f0d6d6; }
   .baseline { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16rem; overflow: auto; }
   mark { background: #5b4a2c; color: #f1e6cf; }
   .field { display: grid; gap: 0.35rem; }

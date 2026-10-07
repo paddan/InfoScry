@@ -178,7 +178,7 @@ describe('OCR profiles panel', () => {
     expect(api.updateOcrProfile).toHaveBeenCalledWith('p1', expect.objectContaining({
       name: 'Reader',
       model: 'vision-2',
-    }));
+    }), 'p1-r1');
     expect(await screen.findByText(/'Reader' saved/)).toBeDefined();
   });
 
@@ -232,6 +232,112 @@ describe('OCR profiles panel', () => {
 
     expect(await screen.findByText(/changed-elsewhere/)).toBeDefined();
     expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('my-unsaved-model');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('sends the revision the form was loaded from on an edit, and never on create', async () => {
+    api.listOcrProfiles.mockResolvedValueOnce([profile('p1', 'Reader', { revisionId: 'p1-r7' })]);
+    api.updateOcrProfile.mockResolvedValue(profile('p1', 'Reader', { revisionId: 'p1-r8' }));
+    api.createOcrProfile.mockResolvedValue(profile('p2', 'Other'));
+
+    render(OcrProfilesPanel);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit Reader' }));
+    await fireEvent.input(screen.getByLabelText('Model'), { target: { value: 'next-model' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await act(async () => {});
+
+    expect(api.updateOcrProfile).toHaveBeenCalledTimes(1);
+    expect(api.updateOcrProfile.mock.calls[0][0]).toBe('p1');
+    expect(api.updateOcrProfile.mock.calls[0][2]).toBe('p1-r7');
+    expect(api.updateOcrProfile.mock.calls[0][1]).not.toHaveProperty('expectedRevisionId');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'New profile' }));
+    await fireEvent.input(screen.getByLabelText('Name'), { target: { value: 'Other' } });
+    await fireEvent.input(screen.getByLabelText('Model'), { target: { value: 'm' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Create profile' }));
+    await act(async () => {});
+    expect(api.createOcrProfile).toHaveBeenCalledTimes(1);
+    expect(api.createOcrProfile.mock.calls[0]).toHaveLength(1);
+  });
+
+  it('uses the newly saved revision for the next edit', async () => {
+    api.listOcrProfiles.mockResolvedValueOnce([profile('p1', 'Reader', { revisionId: 'p1-r7' })]);
+    api.updateOcrProfile.mockResolvedValue(profile('p1', 'Reader', { revisionId: 'p1-r8' }));
+
+    render(OcrProfilesPanel);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit Reader' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await act(async () => {});
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await act(async () => {});
+
+    expect(api.updateOcrProfile.mock.calls.map((call) => call[2])).toEqual(['p1-r7', 'p1-r8']);
+  });
+
+  it('says a profile was changed elsewhere on a stale revision, keeps the input and offers both choices', async () => {
+    api.listOcrProfiles.mockResolvedValueOnce([profile('p1', 'Reader', { revisionId: 'p1-r1' })]);
+    api.updateOcrProfile.mockRejectedValue(
+      await apiError('STALE_OCR_PROFILE_REVISION', 'the profile is at revision p1-r2', 409),
+    );
+
+    render(OcrProfilesPanel);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit Reader' }));
+    await fireEvent.input(screen.getByLabelText('Model'), { target: { value: 'my-unsaved-model' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('This profile was changed elsewhere');
+    expect(alert.textContent).toContain('nothing was saved');
+    expect(alert.textContent).not.toContain('conflicts with the saved profiles');
+    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('my-unsaved-model');
+    expect(within(alert).getByRole('button', { name: 'Reload latest' })).toBeTruthy();
+    expect(within(alert).getByRole('button', { name: 'Discard my edits and load latest' })).toBeTruthy();
+  });
+
+  it('Reload latest shows what changed but keeps the draft, and a retry then carries the new revision', async () => {
+    api.listOcrProfiles.mockResolvedValueOnce([profile('p1', 'Reader', { revisionId: 'p1-r1' })]);
+    api.updateOcrProfile
+      .mockRejectedValueOnce(await apiError('STALE_OCR_PROFILE_REVISION', 'stale', 409))
+      .mockResolvedValueOnce(profile('p1', 'Reader', { revisionId: 'p1-r3', model: 'my-unsaved-model' }));
+
+    render(OcrProfilesPanel);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit Reader' }));
+    await fireEvent.input(screen.getByLabelText('Model'), { target: { value: 'my-unsaved-model' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    const alert = await screen.findByRole('alert');
+
+    api.listOcrProfiles.mockResolvedValueOnce([
+      profile('p1', 'Reader', { revisionId: 'p1-r2', model: 'changed-elsewhere' }),
+    ]);
+    await fireEvent.click(within(alert).getByRole('button', { name: 'Reload latest' }));
+    await act(async () => {});
+
+    expect(screen.getByRole('listitem', { name: 'Reader' }).textContent).toContain('changed-elsewhere');
+    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('my-unsaved-model');
+    expect(screen.getByText(/saved profile now has model changed-elsewhere/i)).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await act(async () => {});
+    expect(api.updateOcrProfile.mock.calls[1][2]).toBe('p1-r2');
+  });
+
+  it('Discard my edits and load latest replaces the draft with the latest saved profile', async () => {
+    api.listOcrProfiles.mockResolvedValueOnce([profile('p1', 'Reader', { revisionId: 'p1-r1' })]);
+    api.updateOcrProfile.mockRejectedValue(await apiError('STALE_OCR_PROFILE_REVISION', 'stale', 409));
+
+    render(OcrProfilesPanel);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit Reader' }));
+    await fireEvent.input(screen.getByLabelText('Model'), { target: { value: 'my-unsaved-model' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    const alert = await screen.findByRole('alert');
+
+    api.listOcrProfiles.mockResolvedValueOnce([
+      profile('p1', 'Reader', { revisionId: 'p1-r2', model: 'changed-elsewhere' }),
+    ]);
+    await fireEvent.click(within(alert).getByRole('button', { name: 'Discard my edits and load latest' }));
+    await act(async () => {});
+
+    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('changed-elsewhere');
     expect(screen.queryByRole('alert')).toBeNull();
   });
 

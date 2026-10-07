@@ -21,7 +21,9 @@
     IMPORT_MODE_LABELS,
     STAGE_LABELS,
     formatUsd,
+    decidedUnpublished,
     holdsDocument,
+    needsReviewStep,
     isTerminalStage,
     newRequestId,
     ocrProfileLabel,
@@ -455,7 +457,8 @@
   async function closeReview(): Promise<void> {
     reviewOpen = false;
     await tick();
-    reviewPagesButton?.focus();
+    // After a publication the entry button is gone; focus then goes to the scan summary.
+    (reviewPagesButton ?? latestGroup)?.focus();
   }
 
   /** A publication changes the pending count, so the scan is read again from the server. */
@@ -484,6 +487,9 @@
         {#if latest.stage === 'COMPLETE' && latest.pendingReviewCount > 0}
           <span> · Needs review: {pageCount(latest.pendingReviewCount)}</span>
         {/if}
+        {#if latest.stage === 'COMPLETE' && decidedUnpublished(latest) > 0}
+          <span> · {decidedUnpublished(latest) === 1 ? '1 decided page is' : `${decidedUnpublished(latest)} decided pages are`} waiting to be published</span>
+        {/if}
       </p>
       <p role="status" class="progress">
         {#if latest.pageTotal !== null && latest.pageTotal !== undefined}
@@ -510,6 +516,10 @@
         <p class="hint">
           Pages that need review keep their existing text in search until a decision is made.
         </p>
+      {:else if latest.stage === 'COMPLETE' && decidedUnpublished(latest) > 0}
+        <p class="hint">
+          Decided pages change what search finds only after they are published.
+        </p>
       {/if}
       {#if cancelRequestedFor === latest.operationId}
         <p class="hint">Cancellation requested. The scan stops between pages.</p>
@@ -520,9 +530,9 @@
             Review approval
           </button>
         {/if}
-        {#if latest.stage === 'COMPLETE' && latest.pendingReviewCount > 0}
+        {#if needsReviewStep(latest)}
           <button type="button" class="primary" bind:this={reviewPagesButton} onclick={() => (reviewOpen = true)}>
-            Review pages
+            {latest.pendingReviewCount > 0 ? 'Review pages' : 'Publish decisions'}
           </button>
         {/if}
         {#if !isTerminalStage(latest.stage)}

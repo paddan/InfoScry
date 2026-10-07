@@ -28,6 +28,12 @@
   let saving = false;
   let error: string | null = null;
   let conflict = false;
+  /** The save was refused because the profile moved on since the form was loaded. */
+  let stale = false;
+  /** The revision the form was loaded from (or last saved as); sent with an edit so a stale one is refused. */
+  let loadedRevisionId: string | null = null;
+  /** The settings the form was loaded with, to show what changed elsewhere. */
+  let loadedInput: OcrProfileInput | null = null;
   let flash: string | null = null;
   let probing = false;
   let probeResult: { profileId: string; probe: OcrProfileProbe } | null = null;
@@ -111,6 +117,59 @@
     }
   }
 
+  const FIELD_LABELS: [keyof OcrProfileInput, string][] = [
+    ['name', 'name'],
+    ['provider', 'provider'],
+    ['endpoint', 'endpoint'],
+    ['model', 'model'],
+    ['contextWindow', 'context window'],
+    ['maxOutputTokens', 'maximum output tokens'],
+    ['inputPricePerMillion', 'input price per million'],
+    ['outputPricePerMillion', 'output price per million'],
+    ['enabled', 'enabled'],
+    ['apiKeyEnvironmentVariable', 'key variable'],
+  ];
+
+  /** What the saved profile now says where it differs from what the form was loaded with. */
+  function changedElsewhere(latest: OcrProfile): string {
+    const before = loadedInput;
+    const changes = FIELD_LABELS
+      .filter(([field]) => before === null || before[field] !== latest[field])
+      .map(([field, label]) => `${label} ${latest[field] === null || latest[field] === '' ? '(none)' : String(latest[field])}`);
+    return changes.length === 0
+      ? 'The saved profile has a newer revision with the same settings.'
+      : `The saved profile now has ${changes.join(', ')}.`;
+  }
+
+  /**
+   * After a stale save: read the saved profiles again. Without `discard` the person's draft stays and the next
+   * save is made against the latest revision (an explicit choice to overwrite); with it the draft is replaced.
+   */
+  async function reloadLatest(discard: boolean): Promise<void> {
+    const id = selectedId;
+    try {
+      setProfiles(await listOcrProfiles());
+      const latest = profiles.find((profile) => profile.id === id);
+      error = null;
+      conflict = false;
+      stale = false;
+      if (latest === undefined) {
+        flash = 'This profile is no longer in the list.';
+        return;
+      }
+      if (discard) {
+        draft = toInput(latest);
+        flash = 'Your edits were discarded and the latest saved profile is loaded.';
+      } else {
+        flash = `${changedElsewhere(latest)} Your unsaved input is kept; saving now replaces the saved profile with it.`;
+      }
+      loadedRevisionId = latest.revisionId;
+      loadedInput = toInput(latest);
+    } catch (failure) {
+      error = describe(failure);
+    }
+  }
+
   async function focusHeading(): Promise<void> {
     await tick();
     heading?.focus();
@@ -121,8 +180,11 @@
     selectionGeneration += 1;
     creating = false;
     draft = toInput(profile);
+    loadedRevisionId = profile.revisionId;
+    loadedInput = toInput(profile);
     error = null;
     conflict = false;
+    stale = false;
     flash = null;
     probeResult = null;
     probeError = null;
@@ -134,8 +196,11 @@
     selectionGeneration += 1;
     creating = true;
     draft = emptyDraft();
+    loadedRevisionId = null;
+    loadedInput = null;
     error = null;
     conflict = false;
+    stale = false;
     flash = null;
     probeResult = null;
     probeError = null;
@@ -146,6 +211,7 @@
     creating = false;
     error = null;
     conflict = false;
+    stale = false;
     await tick();
     newButton?.focus();
   }
@@ -163,6 +229,7 @@
     saving = true;
     error = null;
     conflict = false;
+    stale = false;
     const payload: OcrProfileInput = {
       name,
       provider: draft.provider,
@@ -178,15 +245,20 @@
     try {
       const saved = creating
         ? await createOcrProfile(payload)
-        : await updateOcrProfile(selectedId, payload);
+        : await updateOcrProfile(selectedId, payload, loadedRevisionId ?? undefined);
       replaceProfile(saved);
       selectedId = saved.id;
       creating = false;
       draft = toInput(saved);
+      loadedRevisionId = saved.revisionId;
+      loadedInput = toInput(saved);
       flash = `'${saved.name}' saved.`;
       await focusHeading();
     } catch (failure) {
-      if (failure instanceof ApiError && failure.status === 409) {
+      if (failure instanceof ApiError && failure.status === 409 && failure.code === 'STALE_OCR_PROFILE_REVISION') {
+        stale = true;
+        error = 'This profile was changed elsewhere, so nothing was saved. Your input is kept. Reload the latest saved profile to see what changed, or discard your edits and load it.';
+      } else if (failure instanceof ApiError && failure.status === 409) {
         conflict = true;
         error = `This change conflicts with the saved profiles, so nothing was saved. Your input is kept. ${failure.message}`;
       } else {
@@ -207,7 +279,11 @@
       await disableOcrProfile(id);
       setProfiles(await listOcrProfiles());
       const current = profiles.find((profile) => profile.id === id);
-      if (current && selectedId === id) draft = toInput(current);
+      if (current && selectedId === id) {
+        draft = toInput(current);
+        loadedRevisionId = current.revisionId;
+        loadedInput = toInput(current);
+      }
       flash = 'Profile disabled. Existing jobs and history keep their recorded revisions.';
     } catch (failure) {
       error = describe(failure);
@@ -270,6 +346,11 @@
         <p>{error}</p>
         {#if conflict}
           <button type="button" onclick={reloadKeepingDraft}>Reload profiles</button>
+        {:else if stale}
+          <div class="actions">
+            <button type="button" onclick={() => void reloadLatest(false)}>Reload latest</button>
+            <button type="button" onclick={() => void reloadLatest(true)}>Discard my edits and load latest</button>
+          </div>
         {/if}
       </div>
     {/if}

@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
   listPendingReviews: vi.fn(),
   listDocumentRevisions: vi.fn(),
   readSource: vi.fn(),
+  readPendingCandidate: vi.fn(),
   decideReviews: vi.fn(),
   publishReviewDecisions: vi.fn(),
 }));
@@ -24,6 +25,9 @@ vi.mock('./api', () => ({
   listPendingReviews: api.listPendingReviews,
   listDocumentRevisions: api.listDocumentRevisions,
   readSource: api.readSource,
+  readPendingCandidate: api.readPendingCandidate,
+  pendingImageUrl: (collection: string, document: string, operation: string, unit: string) =>
+    `/api/collections/${collection}/documents/${document}/ocr/reviews/${unit}/image?operationId=${operation}`,
   decideReviews: api.decideReviews,
   publishReviewDecisions: api.publishReviewDecisions,
 }));
@@ -57,6 +61,7 @@ function review(ordinal: number, over: Partial<PendingReview> = {}): PendingRevi
     reviewPromptVersion: 1,
     policyVersion: 1,
     searchable: true,
+    imageAvailable: true,
     ...over,
   };
 }
@@ -67,6 +72,7 @@ function page(reviews: PendingReview[], total = reviews.length, over: Partial<Re
     total,
     pendingPages: total,
     pendingReviewCount: total,
+    decidedUnpublishedCount: 0,
     externalAccounting: '1 distinct page(s) sent to an external provider; 2 provider call(s)',
     ...over,
   };
@@ -94,6 +100,7 @@ function operation(over: Partial<OcrOperation> = {}): OcrOperation {
     pagesFailed: 0,
     external: { distinctPages: 1, calls: 2, allowance: 5 },
     pendingReviewCount: 0,
+    decidedUnpublishedCount: 0,
     requestId: 'request-1',
     createdAt: '2026-09-21T07:00:00Z',
     updatedAt: '2026-09-21T07:00:01Z',
@@ -103,6 +110,20 @@ function operation(over: Partial<OcrOperation> = {}): OcrOperation {
 
 function source(text: string) {
   return { id: 'unit', documentId: 'doc-1', ordinal: 0, locator: null, text, offset: 0, totalChars: text.length, truncated: false };
+}
+
+function candidate(ordinal: number, text = 'Total 128 due', over: Record<string, unknown> = {}) {
+  return {
+    operationId: 'op-1',
+    unitId: `unit-${ordinal}`,
+    ordinal,
+    candidateHash: `cand-${ordinal}`,
+    baselineRevisionId: 'rev-1',
+    text,
+    totalChars: text.length,
+    truncated: false,
+    ...over,
+  };
 }
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
@@ -142,6 +163,8 @@ describe('OcrReviewPanel', () => {
     api.listPendingReviews.mockImplementation(async (_c: string, _d: string, _o: string, offset: number) =>
       page([review(offset)], 3));
     api.readSource.mockImplementation(async () => source('Total 123 due'));
+    api.readPendingCandidate.mockImplementation(async (_c: string, _d: string, _o: string, unitId: string) =>
+      candidate(Number(unitId.replace('unit-', ''))));
     api.decideReviews.mockResolvedValue({ operation: operation(), applied: [] });
     api.publishReviewDecisions.mockResolvedValue({ operation: operation(), publicationId: 'pub-1', phase: 'PUBLISHED' });
   });
@@ -162,12 +185,14 @@ describe('OcrReviewPanel', () => {
       expect(api.readSource.mock.calls[0][1]).toBe('unit-0');
       expect(api.readSource.mock.calls[0][4]).toBe('rev-1');
       expect(screen.getByRole('status', { name: 'Position' }).textContent).toContain('1 of 40');
-      expect(document.querySelectorAll('img').length).toBe(0);
+      expect(document.querySelectorAll('img').length).toBe(1);
 
       await click('Next page');
       expect(api.listPendingReviews).toHaveBeenLastCalledWith('nightfall', 'doc-1', 'op-1', 1, 1);
       expect(api.readSource).toHaveBeenCalledTimes(2);
       expect(screen.getByRole('status', { name: 'Position' }).textContent).toContain('2 of 40');
+      expect(api.readPendingCandidate).toHaveBeenCalledTimes(2);
+      expect(document.querySelectorAll('img').length).toBe(1);
     });
 
     it('shows the recommendation, the bounded reasons and the baseline with the differing span marked', async () => {
@@ -183,13 +208,6 @@ describe('OcrReviewPanel', () => {
       expect(card.querySelector('.baseline')?.textContent).toBe('Total 123 due');
     });
 
-    it('says plainly that no page image and no candidate text is available from the server', async () => {
-      await renderPanel();
-
-      expect(screen.getByText(/page image is not available here/i)).toBeTruthy();
-      expect(screen.getByText(/new reading's text is not sent to this screen/i)).toBeTruthy();
-    });
-
     it('shows OCR text literally: markup and script-like text becomes text, never elements', async () => {
       const hostile = '<img src=x onerror="alert(1)"><script>window.hacked=1</script> **bold** &amp;';
       api.readSource.mockResolvedValue(source(hostile));
@@ -200,7 +218,9 @@ describe('OcrReviewPanel', () => {
 
       const card = screen.getByRole('article', { name: 'Page 1' });
       expect(card.querySelector('.baseline')?.textContent).toBe(hostile);
-      expect(card.querySelector('img')).toBeNull();
+      // The only image is the scan itself; the hostile text created no element.
+      expect(card.querySelectorAll('img').length).toBe(1);
+      expect(card.querySelector('img')?.getAttribute('alt')).toBe('Scanned page 1');
       expect(card.querySelector('script')).toBeNull();
       expect(card.querySelector('b')).toBeNull();
       expect(card.textContent).toContain('<script>x()</script>');
@@ -257,12 +277,12 @@ describe('OcrReviewPanel', () => {
       expect(screen.getByRole('status', { name: 'Unsaved decisions' }).textContent).toContain('1');
     });
 
-    it('starts an edit from the existing text and sends the batch with the revision and candidate hash', async () => {
+    it('starts an edit from the new reading and sends the batch with the revision and candidate hash', async () => {
       await renderPanel();
       await click('Edit text');
       const box = screen.getByLabelText('Your text for page 1') as HTMLTextAreaElement;
-      expect(box.value).toBe('Total 123 due');
-      await fireEvent.input(box, { target: { value: 'Total 128 due' } });
+      expect(box.value).toBe('Total 128 due');
+      await fireEvent.input(box, { target: { value: 'Total 128 due.' } });
       await click('Save decisions');
 
       expect(api.decideReviews).toHaveBeenCalledTimes(1);
@@ -272,7 +292,7 @@ describe('OcrReviewPanel', () => {
       expect(typeof body.requestId).toBe('string');
       expect(body.requestId.length).toBeGreaterThan(0);
       expect(body.decisions).toEqual([{
-        unitId: 'unit-0', ordinal: 0, candidateHash: 'cand-0', choice: 'EDIT', text: 'Total 128 due',
+        unitId: 'unit-0', ordinal: 0, candidateHash: 'cand-0', choice: 'EDIT', text: 'Total 128 due.',
       }]);
       expect(body.documentWide ?? null).toBeNull();
     });
@@ -571,6 +591,206 @@ describe('OcrReviewPanel', () => {
 
       expect(screen.getByRole('button', { name: 'Use new' }).getAttribute('aria-pressed')).toBe('true');
       expect(screen.getByRole('button', { name: 'Keep existing' }).getAttribute('aria-pressed')).toBe('false');
+    });
+  });
+
+  describe('page image', () => {
+    it('shows the image of the current page only, by its opaque route, with alternative text', async () => {
+      await renderPanel();
+
+      const images = document.querySelectorAll('img');
+      expect(images.length).toBe(1);
+      const image = screen.getByRole('img', { name: 'Scanned page 1' });
+      expect(image.getAttribute('src')).toBe(
+        '/api/collections/nightfall/documents/doc-1/ocr/reviews/unit-0/image?operationId=op-1',
+      );
+
+      await click('Next page');
+      expect(document.querySelectorAll('img').length).toBe(1);
+      expect(screen.getByRole('img', { name: 'Scanned page 2' }).getAttribute('src')).toContain('/reviews/unit-1/image');
+    });
+
+    it('says so when the image cannot be loaded, even though the listing said it was available', async () => {
+      await renderPanel();
+      await fireEvent.error(screen.getByRole('img', { name: 'Scanned page 1' }));
+      await settle();
+
+      expect(screen.queryByRole('img', { name: 'Scanned page 1' })).toBeNull();
+      expect(screen.getByText('The page image could not be loaded.')).toBeTruthy();
+      // The text decision is still possible.
+      expect((screen.getByRole('button', { name: 'Use new' }) as HTMLButtonElement).disabled).toBe(false);
+
+      await click('Next page');
+      expect(screen.getByRole('img', { name: 'Scanned page 2' })).toBeTruthy();
+      expect(screen.queryByText('The page image could not be loaded.')).toBeNull();
+    });
+
+    it('does not request an image when the listing says there is none', async () => {
+      api.listPendingReviews.mockResolvedValue(page([review(0, { imageAvailable: false })], 1));
+      await renderPanel();
+
+      expect(document.querySelectorAll('img').length).toBe(0);
+      expect(screen.getByText(/no page image is available for this page/i)).toBeTruthy();
+    });
+  });
+
+  describe('new reading and differences', () => {
+    it('shows the new reading and a plain-text difference against the existing text', async () => {
+      await renderPanel();
+
+      const card = screen.getByRole('article', { name: 'Page 1' });
+      expect(api.readPendingCandidate).toHaveBeenCalledWith('nightfall', 'doc-1', 'op-1', 'unit-0');
+      expect(card.querySelector('.candidate')?.textContent).toBe('Total 128 due');
+      const removed = card.querySelectorAll('.diff del');
+      const added = card.querySelectorAll('.diff ins');
+      expect(Array.from(removed).map((node) => node.textContent)).toEqual(['123']);
+      expect(Array.from(added).map((node) => node.textContent)).toEqual(['128']);
+      expect(within(card).getByText(/removed text is struck through/i)).toBeTruthy();
+    });
+
+    it('shows hostile candidate text literally, in both the reading and the difference', async () => {
+      const hostile = '<img src=x onerror="alert(2)"> <script>window.hacked2=1</script> done';
+      api.readPendingCandidate.mockResolvedValue(candidate(0, hostile));
+      await renderPanel();
+
+      const card = screen.getByRole('article', { name: 'Page 1' });
+      expect(card.querySelector('.candidate')?.textContent).toBe(hostile);
+      expect(card.querySelector('.diff')?.textContent).toContain('<script>window.hacked2=1</script>');
+      expect(card.querySelector('script')).toBeNull();
+      expect(card.querySelectorAll('img').length).toBe(1);
+      expect(card.querySelector('img')?.getAttribute('alt')).toBe('Scanned page 1');
+      expect((window as unknown as { hacked2?: number }).hacked2).toBeUndefined();
+    });
+
+    it('says the display is cut when the candidate is truncated, and still allows Use new', async () => {
+      api.readPendingCandidate.mockResolvedValue(candidate(0, 'Total 128', { totalChars: 900_000, truncated: true }));
+      await renderPanel();
+
+      expect(screen.getByText(/only the first 9 of 900000 characters of the new reading are shown/i)).toBeTruthy();
+      expect(screen.getByText(/differences are not shown/i)).toBeTruthy();
+      await click('Use new');
+      await click('Save decisions');
+      expect(api.decideReviews.mock.calls[0][3].decisions[0]).toEqual({
+        unitId: 'unit-0', ordinal: 0, candidateHash: 'cand-0', choice: 'USE_NEW',
+      });
+    });
+
+    it('does not prefill an edit with cut text: it starts from the existing text instead', async () => {
+      api.readPendingCandidate.mockResolvedValue(candidate(0, 'Total 128', { totalChars: 900_000, truncated: true }));
+      await renderPanel();
+      await click('Edit text');
+
+      expect((screen.getByLabelText('Your text for page 1') as HTMLTextAreaElement).value).toBe('Total 123 due');
+    });
+
+    it('falls back to the two texts side by side when they are too long to compare', async () => {
+      const left = Array.from({ length: 6000 }, (_, index) => `a${index}`).join(' ');
+      const right = Array.from({ length: 6000 }, (_, index) => `b${index}`).join(' ');
+      api.readSource.mockResolvedValue(source(left));
+      api.readPendingCandidate.mockResolvedValue(candidate(0, right));
+      await renderPanel();
+
+      const card = screen.getByRole('article', { name: 'Page 1' });
+      expect(card.querySelector('.diff')).toBeNull();
+      expect(within(card).getByText(/too long to compare word by word/i)).toBeTruthy();
+      expect(card.querySelector('.baseline')?.textContent).toBe(left);
+      expect(card.querySelector('.candidate')?.textContent).toBe(right);
+    });
+
+    it('does not diff against a missing existing text', async () => {
+      api.listPendingReviews.mockResolvedValue(page([review(0, {
+        baselineRevisionId: null, baselineTextHash: null, searchable: false, reasons: [],
+      })], 1));
+      await renderPanel();
+
+      expect(screen.getByRole('article', { name: 'Page 1' }).querySelector('.candidate')?.textContent).toBe('Total 128 due');
+      expect(document.querySelector('.diff')).toBeNull();
+    });
+
+    it('keeps the existing text and decisions usable when the new reading cannot be read', async () => {
+      api.readPendingCandidate.mockRejectedValue(new Error('candidate unavailable'));
+      await renderPanel();
+
+      expect(screen.getByText(/new reading could not be read: candidate unavailable/i)).toBeTruthy();
+      expect(document.querySelector('.baseline')?.textContent).toBe('Total 123 due');
+      await click('Keep existing');
+      expect(screen.getByRole('button', { name: 'Keep existing' }).getAttribute('aria-pressed')).toBe('true');
+    });
+
+    it('refreshes once when the candidate hash differs from the listing, and never decides against it', async () => {
+      api.readPendingCandidate
+        .mockResolvedValueOnce(candidate(0, 'Total 128 due', { candidateHash: 'cand-other' }))
+        .mockResolvedValue(candidate(0));
+      await renderPanel();
+
+      expect(api.listPendingReviews).toHaveBeenCalledTimes(2);
+      expect(api.readPendingCandidate).toHaveBeenCalledTimes(2);
+      expect(document.querySelector('.candidate')?.textContent).toBe('Total 128 due');
+    });
+
+    it('stops refreshing and says so when the hashes keep differing', async () => {
+      api.readPendingCandidate.mockResolvedValue(candidate(0, 'x', { candidateHash: 'cand-other' }));
+      await renderPanel();
+
+      expect(api.listPendingReviews.mock.calls.length).toBeLessThanOrEqual(2);
+      expect(screen.getByText(/reading of this page changed/i)).toBeTruthy();
+      expect(document.querySelector('.candidate')).toBeNull();
+    });
+
+    it('drops a candidate that arrives after the reader moved to another page', async () => {
+      const late = deferred<ReturnType<typeof candidate>>();
+      api.readPendingCandidate.mockImplementationOnce(() => late.promise);
+      await renderPanel();
+      await click('Next page');
+      late.resolve(candidate(0, 'STALE TEXT'));
+      await settle();
+
+      expect(document.querySelector('.candidate')?.textContent).toBe('Total 128 due');
+      expect(document.body.textContent).not.toContain('STALE TEXT');
+    });
+  });
+
+  describe('publishing decided pages after a reload', () => {
+    it('offers Publish with 0 pending and decided pages waiting, and says how many', async () => {
+      api.listPendingReviews.mockResolvedValue(page([], 0, { decidedUnpublishedCount: 3 }));
+      await renderPanel();
+
+      expect(screen.getByText('3 decided pages are waiting to be published.')).toBeTruthy();
+      expect((screen.getByRole('button', { name: 'Publish decisions' }) as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it('uses the singular for one decided page', async () => {
+      api.listPendingReviews.mockResolvedValue(page([], 0, { decidedUnpublishedCount: 1 }));
+      await renderPanel();
+
+      expect(screen.getByText('1 decided page is waiting to be published.')).toBeTruthy();
+    });
+
+    it('keeps Publish disabled while pages are still pending, though decided pages wait', async () => {
+      api.listPendingReviews.mockImplementation(async (_c: string, _d: string, _o: string, offset: number) =>
+        page([review(offset)], 2, { decidedUnpublishedCount: 2 }));
+      await renderPanel();
+
+      expect((screen.getByRole('button', { name: 'Publish decisions' }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByText('2 decided pages are waiting to be published.')).toBeTruthy();
+    });
+
+    it('clears the waiting note after a successful publish', async () => {
+      api.listPendingReviews.mockResolvedValue(page([], 0, { decidedUnpublishedCount: 2 }));
+      await renderPanel();
+      await click('Publish decisions');
+
+      expect(screen.getByRole('status', { name: 'Publication' }).textContent).toMatch(/Searchable text now uses/);
+      expect(screen.queryByText(/waiting to be published/)).toBeNull();
+    });
+
+    it('treats an older server without the count as zero', async () => {
+      const old = page([], 0);
+      delete (old as { decidedUnpublishedCount?: number }).decidedUnpublishedCount;
+      api.listPendingReviews.mockResolvedValue(old);
+      await renderPanel();
+
+      expect(screen.queryByText(/waiting to be published/)).toBeNull();
     });
   });
 });

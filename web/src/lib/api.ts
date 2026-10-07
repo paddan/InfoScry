@@ -535,8 +535,21 @@ export async function createOcrProfile(profile: OcrProfileInput): Promise<OcrPro
   return body.profile;
 }
 
-export async function updateOcrProfile(id: string, profile: OcrProfileInput): Promise<OcrProfile> {
-  const body = (await mutate(`/api/ocr/profiles/${encodeURIComponent(id)}`, 'PATCH', profile)) as { profile: OcrProfile };
+/**
+ * Replaces a profile with its next state. `expectedRevisionId` is the revision the edit was made from: when the
+ * profile has moved on the server answers 409 `STALE_OCR_PROFILE_REVISION` and changes nothing. Creating never
+ * sends it.
+ */
+export async function updateOcrProfile(
+  id: string,
+  profile: OcrProfileInput,
+  expectedRevisionId?: string,
+): Promise<OcrProfile> {
+  const body = (await mutate(
+    `/api/ocr/profiles/${encodeURIComponent(id)}`,
+    'PATCH',
+    expectedRevisionId === undefined ? profile : { ...profile, expectedRevisionId },
+  )) as { profile: OcrProfile };
   return body.profile;
 }
 
@@ -1183,6 +1196,8 @@ export type OcrOperation = {
   pagesFailed: number;
   external: OcrExternalAccount;
   pendingReviewCount: number;
+  /** Pages already decided whose decisions are not published yet; absent from an older server, which means 0. */
+  decidedUnpublishedCount?: number;
   errorCode?: string | null;
   errorMessage?: string | null;
   requestId: string;
@@ -1286,7 +1301,10 @@ export type ReviewReason = {
   explanation?: string | null;
 };
 
-/** One proposed page. The wire carries hashes and reasons, not the candidate text and not an image. */
+/**
+ * One proposed page. The listing carries hashes and reasons; the candidate text and the page image are read
+ * from their own routes, one page at a time.
+ */
 export type PendingReview = {
   unitId: string;
   ordinal: number;
@@ -1302,13 +1320,30 @@ export type PendingReview = {
   reviewPromptVersion: number;
   policyVersion: number;
   searchable: boolean;
+  /** A cheap hint that the image route can be asked; the route is the authority, so a failed load is handled. */
+  imageAvailable?: boolean;
 };
 
+/** The pending page's new reading, bounded; `candidateHash` names the WHOLE text even when it is cut. */
+export type PendingCandidate = {
+  operationId: string;
+  unitId: string;
+  ordinal: number;
+  candidateHash: string;
+  baselineRevisionId?: string | null;
+  text: string;
+  totalChars: number;
+  truncated: boolean;
+};
+
+/** Only pages still waiting for a decision are listed; decided ones are counted in `decidedUnpublishedCount`. */
 export type ReviewsResponse = {
   reviews: PendingReview[];
   total: number;
   pendingPages: number;
   pendingReviewCount: number;
+  /** Decided pages not yet published; absent from an older server, which means 0. */
+  decidedUnpublishedCount?: number;
   externalAccounting: string;
 };
 
@@ -1367,6 +1402,28 @@ export async function listPendingReviews(
 ): Promise<ReviewsResponse> {
   const query = `operationId=${encodeURIComponent(operationId)}&offset=${offset}&limit=${limit}`;
   return (await readJson(await fetch(`${ocrPath(collectionId, documentId)}/reviews?${query}`))) as ReviewsResponse;
+}
+
+function reviewPagePath(collectionId: string, documentId: string, unitId: string): string {
+  return `${ocrPath(collectionId, documentId)}/reviews/${encodeURIComponent(unitId)}`;
+}
+
+/** One pending page's new reading, capped by the server; the page must still be pending. */
+export async function readPendingCandidate(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+  unitId: string,
+): Promise<PendingCandidate> {
+  const query = `operationId=${encodeURIComponent(operationId)}`;
+  return (await readJson(
+    await fetch(`${reviewPagePath(collectionId, documentId, unitId)}/candidate?${query}`),
+  )) as PendingCandidate;
+}
+
+/** The URL of one pending page's image, for an `<img>`; built from opaque ids only, never from a path. */
+export function pendingImageUrl(collectionId: string, documentId: string, operationId: string, unitId: string): string {
+  return `${reviewPagePath(collectionId, documentId, unitId)}/image?operationId=${encodeURIComponent(operationId)}`;
 }
 
 /** The document's published history; the review reads the active revision id from it, nothing else. */
