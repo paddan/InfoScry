@@ -1,5 +1,7 @@
 # OCR and rescanning implementation plan
 
+> **Superseded (2026-10-08):** tickets 08–11 (08a–08f, 09a–09c, 10a–10c, 11a, 11b) were removed and replaced by the [OCR workflow redesign](../../specs/2026-10-08-ocr-workflow-redesign.md), its [plan](../../plans/2026-10-08-ocr-workflow-redesign.md) and its [tickets](../ocr-workflow-redesign/). This file now records only the shipped baseline (01–07b) and the follow-up rows that were not removed. The verification records for 08 and 09 below are kept as history of code merged on 2026-10-07; they are not acceptance evidence for the redesign.
+
 > **For agentic workers:** Use superpowers:executing-plans for inline implementation or superpowers:subagent-driven-development if the user selects delegated execution. Steps use unchecked criteria; these are requirements, not completion evidence.
 
 **Goal:** Select OCR engines, compare rescans with published text, review differences and publish reversible document revisions safely.
@@ -14,7 +16,7 @@
 Product scope was authorized on 2026-09-30. This plan was decomposed on 2026-10-02 after a targeted assessment through `97d7ce8`. Tickets 01–06 and the 07/07b backend provide an implemented baseline with historical passing tests. The manual product is unfinished, and 07b's repair gate is open. No unchecked criterion or old full-suite count establishes current end-to-end readiness. No implementation, installation, model download, private-data experiment, commit or push is authorized by this planning document.
 
 **Merge of `claude/happy-rubin-8sxq4l` (2026-10-07).** That branch implemented the ticket-08 and ticket-09 scope
-(covering 08a–08f and 09a–09c below) and its own 02b and 03b; it was merged with this branch as the base for
+(covering the removed 08a–08f and 09a–09c) and its own 02b and 03b; it was merged with this branch as the base for
 overlapping work. Where both lines implemented the same thing (source-image provenance, evidence revision
 provenance), the branch's implementation was kept and the other removed, except that both source-image reference
 checks are kept. The schema is now one baseline (`001_baseline.sql`) that includes this line's candidate-resume
@@ -33,7 +35,7 @@ columns and index; the migration numbers named in older records refer to the his
 
 ## Execution units and dependency order
 
-Use one leaf ticket as the implementation/review unit. Umbrellas 02b, 08, 09, 10 and 11 coordinate completion; do not implement them as large batches. Dependencies are correctness gates, not an instruction to delegate. Files overlap; serialize migrations and integration edits even where behavior is independent.
+Use one leaf ticket as the implementation/review unit. Umbrella 02b coordinates completion; the former umbrellas 08–11 are superseded (see the notice above). Do not implement leaf tickets as large batches. Dependencies are correctness gates, not an instruction to delegate. Files overlap; serialize migrations and integration edits even where behavior is independent.
 
 | Baseline | Current status |
 |---|---|
@@ -42,7 +44,7 @@ Use one leaf ticket as the implementation/review unit. Umbrellas 02b, 08, 09, 10
 | 03 | OCR seam implemented; 03b/03c provenance gates open |
 | 04 | Adapter and historical real Mac run recorded; final runtime gate remains 10b |
 | 05 | Image transport/profile capability implemented; final local image-model gate remains 10b |
-| 06 | Comparison/pilot decisions implemented; review material/decision surface remains 08d–08f |
+| 06 | Comparison/pilot decisions implemented; review material/decision surface is superseded (see the notice above) |
 | [07](07-jobs-and-admission.md) | Rescan backend implemented; import repair gate is 07b plus 07c–07f |
 | [07b](07b-import-execution-and-admission.md) | Implemented baseline with unresolved correctness work; open gate |
 
@@ -57,11 +59,7 @@ Use one leaf ticket as the implementation/review unit. Umbrellas 02b, 08, 09, 10
 | 05 — Image-based LLM transcription and profile capability | 03 | Done — `ImageLlmClient` speaks both image protocols from the page's own bytes (hash-checked, format-checked, `max_tokens`-bounded, response-size bounded, per-attempt timeout, bounded retries on 429/5xx only, redirects refused unfollowed, whole request budgeted against the window and reserved output, resolved model version carried back) and refuses a non-local destination without ticket 07's permit validator; `LlmOcr` reads only through the snapshotted revision and the shipped prompt version; `prompts/ocr-transcription.txt` v1 ships with the transcription schema; `POST /api/ocr/profiles/{profileId}/probe` sends only the synthetic image and records `imageCapabilityMeasured`/`imageCapabilityCheckedAt`; focused suites green with both key invariants proven by guard-revert runs, and `./gradlew check` green (102 suites, 1268 tests, 0 failures, 15m55s); a security round closed the credentialed-endpoint hole across the OCR, LLM and catalog validators and remediated stored ones with migration 020 (credential removed, repaired conversation snapshots marked, repaired profiles switched off), and made "a switched-off profile is not a dispatch destination" hold at the routes, the CLI and the services that dispatch; a migration delimiter bug the parent found (`COALESCE` order, which would have rewritten `https://host?email=a@b/c` into `https://b/c`) was fixed and is covered by regression cases. Unverified: no real provider gate (ticket 10), and the engine is deliberately not wired into `ExtractorRegistry` — that is ticket 07's admission path (external-page accounting, previews, approval) |
 | 06 — Image-grounded comparison and pilot decisions | 03, 05 | Done — deterministic diagnostics, the side-neutral A/B review call (prompt v2) with its answer mapped to the application's vocabulary in code, pilot mode enforced server-side so every difference is `PROPOSE`, durable reviews keyed by baseline/candidate/reviewer/prompt/policy, identical-nonblank no-ops, empty pairs pending and unsearchable, and failures that keep the baseline with zero re-transcription; `./gradlew check` green (104 suites, 1313 tests, 0 failures, 15m53s); four review rounds made approval structural (a policy that holds the review store, whose acceptance can only be resolved from a live row) and verified baselines against the stored revision page before every shortcut |
 | [07 — Rescan jobs, import modes and external approval](07-jobs-and-admission.md) | 04, 05, 06 | Partially implemented — the rescan path is verified: `RESCAN` job type and operation record (migration 023), preview/admission with request-id idempotency, per-page checkpoints and bounded cancellation, external-page accounting, `AWAITING_APPROVAL`, comparison and review wiring, decisions and publication, and operation ownership that holds a document while an operation is unfinished or awaiting review (migration 024 adds review-pending imports); `./gradlew check` green after three hand repairs (106 suites, 1340 tests, 0 failures, 16m27s). The import half executes none of what it admits, admission does not revalidate the whole settings snapshot, and resume/approval can start a second attempt — all carried by 07b |
-| [07b — Import execution, admission revalidation and attempt claiming](07b-import-execution-and-admission.md) | 07 | Done — job-owned external approval with `AWAITING_APPROVAL`, the two-file allowance (distinct pages once, calls apart), settings revalidation at admission, attempt claiming through `OcrOperationStore.startAttempt`, the CLI surfacing a waiting-approval requirement, the admitted runtime identity carried into execution, `NEEDS_REVIEW` reachable and a finished status for imports, and a check-and-improve import that compares each page against its own text, records the reviews a person owes, publishes the pages it approved and leaves pending pages with no content unit, chunk or index row (rescans keep all-or-nothing refusal). Focused suites green (26 suites / 542 tests; a forced 2m34s run over jobs/document/ocr/extract). Residuals in the ticket: no decision surface for an import's pending pages yet (ticket 08), a pure scan in check-and-improve publishes nothing by design, the embedder is now required, a check-and-improve retry stages without reviews, and external review dispatch is untested because the tests are loopback |
-| [08 — Admin profiles, collection controls and page review](08-admin-and-review.md) | 07 | Implemented, not accepted — web panels for profiles, collection controls, Scan again and page review, plus the backend routes the review needed (candidate text, page image, decided-unpublished count, profile edit guard). Verified in jsdom and focused backend suites only; no browser, live-backend or `externalTest` run. Gaps and residuals in the verification record below |
-| [09 — Revision history and explicit restoration](09-history-and-restore.md) | 08 | Implemented, not accepted — restore through the unchanged publication boundary (migration 025), extended history view, deletion coverage and the web history panel. Tested with the fake embedder only; no real CoreML run, no browser run. Revision-aware source link not built |
-| [10 — Integrated browser and real-runtime acceptance](10-integrated-acceptance.md) | 09 | Not started |
-| [11 — Measured pilot and guarded automatic replacement](11-pilot-and-auto-activation.md) | 10 | Not started |
+| [07b — Import execution, admission revalidation and attempt claiming](07b-import-execution-and-admission.md) | 07 | Done — job-owned external approval with `AWAITING_APPROVAL`, the two-file allowance (distinct pages once, calls apart), settings revalidation at admission, attempt claiming through `OcrOperationStore.startAttempt`, the CLI surfacing a waiting-approval requirement, the admitted runtime identity carried into execution, `NEEDS_REVIEW` reachable and a finished status for imports, and a check-and-improve import that compares each page against its own text, records the reviews a person owes, publishes the pages it approved and leaves pending pages with no content unit, chunk or index row (rescans keep all-or-nothing refusal). Focused suites green (26 suites / 542 tests; a forced 2m34s run over jobs/document/ocr/extract). Residuals in the ticket: no decision surface for an import's pending pages yet (superseded; see the notice above), a pure scan in check-and-improve publishes nothing by design, the embedder is now required, a check-and-improve retry stages without reviews, and external review dispatch is untested because the tests are loopback |
 | 02c — Saved Ask excerpt fallback | 02 | Implemented |
 | 02d — Investigate evidence survives replacement | 02, 02c | Covered by 02b (merged branch): the ledger stores each evidence's revision with its excerpt and history no longer joins live units |
 | 02e — Publication seal failure and recovery | 02 | Implemented |
@@ -70,28 +68,11 @@ Use one leaf ticket as the implementation/review unit. Umbrellas 02b, 08, 09, 10
 | 07d — Retry uses admitted OCR and review authority | 07c | Implemented |
 | 07e — Keep ordinary extraction for non-image formats | 07b implementation | Implemented |
 | 07f — Exercise external review admission locally | 07c, 07d | Implemented |
-| [08a — OCR profile administration](08a-ocr-profile-admin.md) | 01, 05 | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [08b — Collection OCR defaults](08b-collection-ocr-controls.md) | 08a, 07e | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [08c — Preview and control one rescan](08c-rescan-controls.md) | 08b, 07c, 07d, 07f | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [08d — Read review material for imports and rescans](08d-review-read-api.md) | 03c, 07c, 07e | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [08e — Persist and publish manual page decisions](08e-review-decision-publication.md) | 08d, 02e | Implemented by tickets 08/09 on the merged branch, not accepted. Keep existing and Edit text decisions could not be published until the fix in the OCR browser acceptance record below |
-| [08f — Manual page review in Admin](08f-page-review-ui.md) | 08c, 08e, 02c, 02d | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [09a — Revision restoration API](09a-restore-service.md) | 08e, 02d | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [09b — Published history and restore controls](09b-history-ui.md) | 09a, 08f | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [09c — Deletion removes revision-owned work safely](09c-revision-deletion-acceptance.md) | 03c, 07c, 08e, 09a | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [10a — Complete manual OCR browser acceptance](10a-browser-acceptance.md) | 08f, 09b, 09c, 07f, 02d, 02e | Started — fake-provider browser acceptance for the OCR panels exists and passes (record below; 12 scenarios after the [local-testing fixes](../local-testing-feedback/STATUS.md) added import reading in history and the OCR profile catalog on 2026-10-08); multi-page review, external approval, restart, keyboard/narrow layout and the manual acceptance remain open |
-| [10b — Separate real OCR and CoreML evidence](10b-real-runtime-gates.md) | 03c, 07d, 08e | Not started |
-| [10c — Reconcile docs and manual completion evidence](10c-manual-release-checkpoint.md) | 10a, 10b | Not started |
-| [11a — Local pilot manifest and scoring runner](11a-evaluation-harness.md) | 10c | Not started |
-| [11b — Measured pilot and explicit activation gate](11b-pilot-and-activation.md) | 11a | Not started |
 
 ### Recommended sequence
 
 1. Correctness foundation: 07c → 07d → 07f; 07e is independent of that chain. Complete 03b → 03c and 02c → 02d, plus independent 02e, before opening a user-facing rescan/review flow.
-2. Bounded UI/API slices: 08a → 08b; 08d → 08e can proceed once their repair dependencies pass. Then 08c and 08f integrate the verified controls and decision contracts.
-3. History: 09a → 09b; 09c verifies deletion/recovery after backend decision/restore behavior exists.
-4. Manual finish line: 10a browser acceptance and 10b real runtime evidence are separate gates; 10c reconciles all required evidence and user documentation.
-5. Later, separately accepted quality work: 11a → 11b. Automatic replacement stays disabled while any activation prerequisite is missing.
+2. Former steps 2–5 (UI/API slices 08, history 09, browser and real-runtime acceptance 10, measured pilot 11) are superseded by the [OCR workflow redesign](../../specs/2026-10-08-ocr-workflow-redesign.md), its [plan](../../plans/2026-10-08-ocr-workflow-redesign.md) and [tickets](../ocr-workflow-redesign/).
 
 Per-ticket dependencies in the table are the minimum implementation dependencies. User-facing rescan/review release additionally requires 02c–02e, 03b–03c and 07c–07f, even when a profile/settings panel can be built earlier. "Independent" means separately testable, not automatically safe to edit shared files concurrently.
 
@@ -110,8 +91,8 @@ The records below describe prior slices and runs, not the current completion sta
 - Publication crash or concurrent read exposing mixed text/index versions — ticket 02.
 - A readable-looking PDF text layer hiding incorrect/missing text — ticket 03.
 - External review accidentally sending local OCR output without allowance — ticket 07.
-- Model fluency masking invented names, numbers or omitted handwriting — tickets 06 and 11.
-- Stale review/restore overwriting current text or changing saved citation meaning — tickets 02, 08 and 09.
+- Model fluency masking invented names, numbers or omitted handwriting — ticket 06 (pilot measurement is superseded).
+- Stale review/restore overwriting current text or changing saved citation meaning — ticket 02 (the removed 08/09 review and restore work is superseded).
 
 ## Verification record
 

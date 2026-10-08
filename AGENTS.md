@@ -53,6 +53,27 @@ a real provider or GPU.
   preserve all collections and publish its writer, reader, and embedder together.
 - A standalone CLI import retains process ownership until completion. Returning
   after enqueue is valid only when a running server owns the job.
+- InfoScry is a single-user application. Do not add protection, refusals or
+  waiting for other readers of a document during import or rescanning. Keep the
+  safeguards that protect data (checkpoints, immutable originals, atomic index
+  publication, recovery); those are not about concurrency.
+- A stopped import or rescan (cancelled, failed, interrupted, process killed)
+  must never block starting again, and starting again must never answer with
+  "waiting for approval", "pending review" or "cannot start yet". Recover or
+  discard stale state instead of surfacing it.
+- Idempotence is a core principle for everything, not only OCR: every
+  operation (HTTP route, CLI command, job, migration, recovery step,
+  publication, cleanup) must be safe to repeat or resume, returning the current
+  result instead of an error or a duplicate side effect, and must converge from
+  any partial state a crash can leave. Design and test it for each new
+  operation: run it twice, interrupt it at each step and run it again.
+- OCR direction (approved 2026-10-08, not yet implemented; shipped behavior
+  differs until the plan lands): the reading method (engine and profile as one
+  choice) is confirmed in a start dialog on every import and rescan, with the
+  collection default only pre-filling it; all pages are read; external sending
+  is approved once in that dialog, never by a mid-run pause; there is no
+  reviewer, and a finished run replaces the text with the previous version kept
+  in history. See `docs/specs/2026-10-08-ocr-workflow-redesign.md`.
 
 ## Embeddings, LLMs, and local boundaries
 

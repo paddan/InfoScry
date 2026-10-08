@@ -66,5 +66,5 @@ profiles when an image-model engine is chosen.
 
 ## Out of scope
 
-The OCR acceptance and pilot work still open in [ocr-rescanning](../tickets/ocr-rescanning/STATUS.md) (10a–11b),
+The OCR acceptance and pilot work, formerly tickets 10a–11b in [ocr-rescanning](../tickets/ocr-rescanning/STATUS.md), is superseded by the [OCR workflow redesign](../specs/2026-10-08-ocr-workflow-redesign.md),
 the compact document list tickets 02–04, and any change to how reviews are decided or published.

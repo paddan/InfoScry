@@ -38,7 +38,7 @@ only the explicit synthetic image. Fake tests cannot become a production bypass.
 - Ticket 02: `RevisionPublicationService.publish(documentId, baseRevisionId,
   candidateRevisionId)` admits a durable operation and returns its opaque ID.
   Progress/errors are read from persisted state, not an HTTP connection lifetime.
-- Ticket 09: `restore(documentId, expectedRevisionId, restoreRevisionId)` uses
+- Former ticket 09 (removed; superseded, see [STATUS](STATUS.md)): `restore(documentId, expectedRevisionId, restoreRevisionId)` uses
   the same publisher, retaining provenance and creating a new revision.
 
 Use opaque ID aliases in the shared models to keep signatures consistent.
@@ -115,8 +115,8 @@ These declarative cases are acceptance inputs for tests, not production code:
 ]
 ```
 
-Ticket 06 owns the first three cases, 07 owns page accounting and 08 owns stale
-edit conflicts. Ticket 02's recovery harness must inject faults on both sides of
+Ticket 06 owns the first three cases, 07 owns page accounting and the removed ticket 08 owned stale
+edit conflicts (superseded, see [STATUS](STATUS.md)). Ticket 02's recovery harness must inject faults on both sides of
 every DB/index/reader handoff, using a real temporary SQLite/Lucene instance.
 
 ## Accumulated gates and stop conditions
@@ -139,7 +139,7 @@ npm run build
 ```
 
 Run relevant `externalTest` browser/tool acceptance as each affected scenario
-lands. Ticket 10 runs all applicable browser/external and real CoreML gates.
+lands. The removed ticket 10 gates (browser/external and real CoreML) are superseded; see [STATUS](STATUS.md).
 Do not classify a still-running timed fixture as a hang before its configured
 timeout. A dependency/runtime/test infrastructure failure is not evidence of
 application correctness. Keep those checks explicitly unverified until runnable.
@@ -147,7 +147,7 @@ application correctness. Keep those checks explicitly unverified until runnable.
 Stop dependent implementation when ticket 02 cannot prove coherent publication,
 when Surya's real Mac runtime fails, or when image transport cannot pass its
 capability gate. Preserve manual Tesseract behavior; never hide a missing gate
-behind fallback. Ticket 11 cannot enable auto mode without accepted measured
+behind fallback. The removed ticket 11 gate: auto mode cannot be enabled without accepted measured
 thresholds and held-out evidence. No private documents go to external evaluation
 without explicit permission for that experiment.
 
@@ -160,8 +160,8 @@ Use the leaf execution tickets in STATUS.md. Preserve implemented code and repai
 
 - 07c owns durable `(job, document, immutable attempt settings) → candidate` binding and successful page checkpoints. Resume must load them from SQLite, including a staged page whose approval write was interrupted; an in-memory set is insufficient. Transcription checkpoints remain independent of review and embedding.
 - 07d owns retry dispatch/reviewer wiring using the same durable ownership and allowance semantics. 07e limits candidate staging to supported page-image extractors; non-image imports retain ordinary extraction.
-- 08d owns review-read DTOs: candidate/owner identity, document/ordinal/stable-unit mapping, baseline and candidate text/hashes, bounded reasons and opaque image links. A proposal without an LLM review row still appears. Keep existing for an import must have an actual recoverable direct-text baseline; missing is not empty or candidate text.
-- 08e owns manual-decision/publication DTOs for an initial import with no active revision and for an already partially published import. Decide against immutable candidate hash and expected active revision (including explicitly absent); later decisions create a new revision rather than editing a published one. Preserve request-id idempotency and page-hash-aware rebase.
+- Removed ticket 08d (superseded by the [OCR workflow redesign](../../specs/2026-10-08-ocr-workflow-redesign.md)) owned review-read DTOs: candidate/owner identity, document/ordinal/stable-unit mapping, baseline and candidate text/hashes, bounded reasons and opaque image links. A proposal without an LLM review row still appears. Keep existing for an import must have an actual recoverable direct-text baseline; missing is not empty or candidate text.
+- Removed ticket 08e (superseded by the [OCR workflow redesign](../../specs/2026-10-08-ocr-workflow-redesign.md)) owned manual-decision/publication DTOs for an initial import with no active revision and for an already partially published import. Decide against immutable candidate hash and expected active revision (including explicitly absent); later decisions create a new revision rather than editing a published one. Preserve request-id idempotency and page-hash-aware rebase.
 - 03b permits entirely absent provenance and optional dimensions as a pair; partially present core provenance is invalid. 03c retains images referenced by candidates/history; no new garbage collector is needed to close the lifetime bug.
 - 02d reuses the existing `evidence_ledger.excerpt` column. Add revision provenance and remove dependence on the continued existence of a live unit when returning saved history.
 
@@ -250,7 +250,7 @@ pins the existing refusal for a `text/plain` document. Red evidence and green co
 deliberate absence of one); OcrEngineContractTest pins cancellation/restart/competing-attempt retention;
 ImageExtractorTest pins the distinct managed/artifact roots. Red messages and gate counts are in the 03c
 record in STATUS.md. Residual flagged there by inspection: the rescan path's shared
-`documentArtifactRoot/rescan/pages` directory (08d/09c question, untouched here).
+`documentArtifactRoot/rescan/pages` directory (removed 08d/09c question, untouched here).
 
 ### 02c: Saved Ask excerpt fallback
 

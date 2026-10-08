@@ -4,6 +4,8 @@ Status: design interview completed and documentation authorized on 2026-09-30.
 **Partially implemented; manual workflow and correctness gates remain open.** [Implementation tickets](../tickets/ocr-rescanning/STATUS.md)
 record current dependencies and verification; design requirements below are not completion evidence.
 
+> **Partly superseded (2026-10-08):** the review, reviewer, candidate-hold, import-mode and mid-run approval parts of this spec are superseded by the [OCR workflow redesign](2026-10-08-ocr-workflow-redesign.md) once that design is implemented. Until then this spec still describes the shipped behavior for those parts.
+
 ## Purpose and scope
 
 Improve recognition errors and missed text in typed, printed, handwritten and

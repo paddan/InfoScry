@@ -32,8 +32,8 @@ or a copy of an image-capable LLM profile), collection OCR controls, Scan again,
 page review and a text history that names the OCR settings each revision was
 read with, with explicit restoration. Everything stays in pilot mode: no
 replacement happens without a manual decision. Fake-provider browser acceptance
-passes; real-runtime acceptance (ticket 10) and the measured pilot (ticket 11)
-are open. See the [ticket plan](tickets/ocr-rescanning/STATUS.md).
+passes; real-runtime acceptance and the measured pilot are open; the remaining
+work is superseded by the [OCR workflow redesign](specs/2026-10-08-ocr-workflow-redesign.md). See the [ticket plan](tickets/ocr-rescanning/STATUS.md).
 
 ## Fixes from local testing
 

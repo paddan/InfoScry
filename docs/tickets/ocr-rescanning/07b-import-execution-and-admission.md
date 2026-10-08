@@ -20,7 +20,7 @@ A text-only import baseline has no stored revision/hash today; it comes from imm
 
 ## Remaining downstream work
 
-[08d](08d-review-read-api.md) and [08e](08e-review-decision-publication.md) own reading and deciding pending import proposals, including partially published imports. A pure scanned page with no baseline remains a proposal outside retrieval; do not solve this by silently switching mode or auto-approving. Missing embedding runtime remains an explicit publication prerequisite; staging and decisions must remain durable.
+Reading and deciding pending import proposals, including partially published imports, was assigned to the removed tickets 08d and 08e and is superseded by the [OCR workflow redesign](../../specs/2026-10-08-ocr-workflow-redesign.md). A pure scanned page with no baseline remains a proposal outside retrieval; do not solve this by silently switching mode or auto-approving. Missing embedding runtime remains an explicit publication prerequisite; staging and decisions must remain durable.
 
 ## Closing this gate
 
