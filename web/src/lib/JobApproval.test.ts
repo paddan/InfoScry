@@ -6,6 +6,7 @@ import type { ExternalApproval } from './api';
 
 const api = vi.hoisted(() => ({
   approveJobExternal: vi.fn(),
+  cancelJob: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -17,6 +18,7 @@ vi.mock('./api', () => ({
     }
   },
   approveJobExternal: api.approveJobExternal,
+  cancelJob: api.cancelJob,
 }));
 
 function approval(over: Partial<ExternalApproval> = {}): ExternalApproval {
@@ -121,5 +123,33 @@ describe('job approval', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('the OCR selection changed since it was previewed');
     expect(pagesInput().value).toBe('7');
     expect(onapproved).not.toHaveBeenCalled();
+  });
+
+  it('offers no cancel button unless the host handles a cancelled import', () => {
+    render(JobApproval, { jobId: 'j1', approval: approval(), onapproved: vi.fn() });
+    expect(screen.queryByRole('button', { name: 'Cancel import' })).toBeNull();
+  });
+
+  it('cancels the job and tells the host, without approving anything', async () => {
+    api.cancelJob.mockResolvedValue({});
+    const oncancelled = vi.fn();
+    render(JobApproval, { jobId: 'j1', approval: approval(), onapproved: vi.fn(), oncancelled });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel import' }));
+
+    await waitFor(() => expect(oncancelled).toHaveBeenCalledTimes(1));
+    expect(api.cancelJob).toHaveBeenCalledWith('j1');
+    expect(api.approveJobExternal).not.toHaveBeenCalled();
+  });
+
+  it('shows a refused cancel and keeps the form', async () => {
+    api.cancelJob.mockRejectedValue(new Error('The server refused.'));
+    const oncancelled = vi.fn();
+    render(JobApproval, { jobId: 'j1', approval: approval(), onapproved: vi.fn(), oncancelled });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel import' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('The server refused.');
+    expect(oncancelled).not.toHaveBeenCalled();
   });
 });

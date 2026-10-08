@@ -982,6 +982,15 @@ export async function approveJobExternal(
   })) as ImportExternalApprovalResponse;
 }
 
+/**
+ * Cancels a job. A queued job ends at once, a running one at its next stage boundary, and an import paused
+ * for an external-page approval ends as cancelled; a job that already ended is answered unchanged.
+ */
+export async function cancelJob(id: string): Promise<JobApiView> {
+  const body = (await mutate(`/api/jobs/${encodeURIComponent(id)}/cancel`, 'POST')) as { job: JobApiView };
+  return body.job;
+}
+
 /** The per-file results an import finished with. */
 export async function getImportItems(id: string): Promise<ImportItemApiView[]> {
   const body = (await readJson(await fetch(`/api/jobs/${encodeURIComponent(id)}/items`))) as {

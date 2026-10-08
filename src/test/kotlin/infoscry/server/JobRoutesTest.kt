@@ -2,6 +2,7 @@ package infoscry.server
 
 import infoscry.domain.CollectionId
 import infoscry.domain.JobId
+import infoscry.domain.JobState
 import infoscry.domain.JobType
 import infoscry.extract.EXTRACTOR_SCHEMA_VERSION
 import infoscry.extract.ExtractionSettings
@@ -246,6 +247,48 @@ class JobRoutesTest {
         // The approval resumes the job, so it no longer waits and the block is gone with the stage.
         val resumed = jobObject(harness.get("/api/jobs/${waiting.value}").bodyAsText())
         assertFalse(resumed.containsKey("externalApproval"), "a resumed job is not awaiting approval")
+    }
+
+    @Test
+    fun `cancelling a job paused for an external approval ends it as cancelled and refuses a later approval`() = runBlocking {
+        val collectionId = harness.context.collectionService.requireActiveByNameOrId("Default").id
+        val snapshot = OcrSettingsSnapshot(
+            engine = OcrEngine.TESSERACT,
+            mode = OcrImportMode.FILL_MISSING,
+            language = "eng",
+            extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+            externalPageLimit = 1,
+        )
+        val waiting = pausedForApproval(
+            collectionId,
+            ImportJobPayload(
+                collectionId = "default",
+                sources = listOf("/private/evidence/scan.png"),
+                settings = ExtractionSettings(ocrLanguages = "eng"),
+                ocr = snapshot,
+            ).encode(),
+        )
+        val snapshotHash = OcrOperationStore.snapshotHashOf(snapshot)
+
+        val cancelled = harness.request(HttpMethod.Post, "/api/jobs/${waiting.value}/cancel", null, Credential.CSRF)
+        assertEquals(HttpStatusCode.OK, cancelled.status, cancelled.bodyAsText())
+        val job = jobObject(cancelled.bodyAsText())
+        assertEquals("CANCELLED", job["state"]!!.jsonPrimitive.content)
+        assertFalse(job.containsKey("externalApproval"))
+        assertFalse(job["stage"]?.jsonPrimitive?.content == JobStore.AWAITING_APPROVAL_STAGE)
+
+        // Idempotent: a second cancel answers the same ended job.
+        val again = harness.request(HttpMethod.Post, "/api/jobs/${waiting.value}/cancel", null, Credential.CSRF)
+        assertEquals("CANCELLED", jobObject(again.bodyAsText())["state"]!!.jsonPrimitive.content)
+
+        val refused = harness.request(
+            HttpMethod.Post,
+            "/api/jobs/${waiting.value}/approve-external",
+            """{"expectedSnapshotHash":"$snapshotHash","maxDistinctPages":2}""",
+            Credential.CSRF,
+        )
+        assertEquals(HttpStatusCode.BadRequest, refused.status, refused.bodyAsText())
+        assertEquals(JobState.CANCELLED, harness.context.jobs.get(waiting)!!.state)
     }
 
     /** Enqueues an import with [payload] and leaves it paused the way the import handler does. */

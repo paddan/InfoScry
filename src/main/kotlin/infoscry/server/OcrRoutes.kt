@@ -592,6 +592,9 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                 val jobId = call.jobId()
                 val job = context.jobs.get(jobId)
                     ?: throw NoSuchElementException("no job with id ${jobId.value}")
+                if (job.state == infoscry.domain.JobState.CANCELLED) {
+                    throw BadRequestException("this job was cancelled, so there is nothing left to approve")
+                }
                 val snapshot = job.recordedOcrSelection()
                     ?: throw BadRequestException(
                         "this job recorded no OCR selection, so it has no external page scope to approve",

@@ -4,7 +4,7 @@
 </script>
 
 <script lang="ts">
-  import { approveJobExternal, type ExternalApproval, type ImportExternalApprovalResponse } from './api';
+  import { approveJobExternal, cancelJob, type ExternalApproval, type ImportExternalApprovalResponse } from './api';
 
   /** The import job waiting for the approval. */
   export let jobId: string;
@@ -13,9 +13,16 @@
   /** Called with the server's answer once the approval is recorded; the job then resumes on the server. */
   export let onapproved: (answer: ImportExternalApprovalResponse) => void;
 
+  /**
+   * Called once the server has cancelled the job. The cancel button is offered only when the host passes
+   * this, because the host is what stops showing the form afterwards.
+   */
+  export let oncancelled: (() => void) | undefined = undefined;
+
   /** The default names a batch of pages beyond what was already sent, so the import is unlikely to pause again. */
   let pages = String(approval.distinctPagesSent + DEFAULT_APPROVAL_STEP);
   let approving = false;
+  let cancelling = false;
   let error: string | null = null;
 
   /**
@@ -55,6 +62,21 @@
     }
     onapproved(answer);
   }
+
+  async function cancel(): Promise<void> {
+    if (cancelling || approving) return;
+    cancelling = true;
+    error = null;
+    try {
+      await cancelJob(jobId);
+    } catch (failure) {
+      error = describe(failure);
+      return;
+    } finally {
+      cancelling = false;
+    }
+    oncancelled?.();
+  }
 </script>
 
 <section class="job-approval" aria-label="Approve external pages">
@@ -77,9 +99,12 @@
   </div>
   {#if error !== null}<p role="alert">{error}</p>{/if}
   <div class="actions">
-    <button type="button" class="primary" onclick={() => void approve()} disabled={approving}>
+    <button type="button" class="primary" onclick={() => void approve()} disabled={approving || cancelling}>
       Approve external pages
     </button>
+    {#if oncancelled}
+      <button type="button" onclick={() => void cancel()} disabled={approving || cancelling}>Cancel import</button>
+    {/if}
   </div>
 </section>
 

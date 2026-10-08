@@ -177,6 +177,12 @@
     job = { ...job, state, stage: answer.stage ?? null, externalApproval: undefined };
   }
 
+  /** The server ended the paused import as cancelled, so the form leaves and the polling loop sees it ended. */
+  function cancelled(): void {
+    if (job === null) return;
+    job = { ...job, state: 'CANCELLED', stage: null, externalApproval: undefined };
+  }
+
   /**
    * The status line for the job as it is now. It takes its inputs as arguments so the reactive statement
    * below re-runs whenever the job, the run state or the results change.
@@ -230,7 +236,7 @@
     </div>
   {/if}
   {#if importing && job !== null && job.externalApproval && awaitingApproval(job)}
-    <JobApproval jobId={job.id} approval={job.externalApproval} onapproved={approved} />
+    <JobApproval jobId={job.id} approval={job.externalApproval} onapproved={approved} oncancelled={cancelled} />
   {/if}
   {#if !importing && job !== null && isTerminal(job.state)}
     <p role={job.state === 'FAILED' ? 'alert' : 'status'}>{status}</p>

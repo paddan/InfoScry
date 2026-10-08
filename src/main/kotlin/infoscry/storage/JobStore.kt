@@ -280,7 +280,8 @@ open class JobStore(private val database: Database) {
      *
      * A queued job is cancelled outright: nothing has started, so there is no stage to interrupt. A
      * running job is only flagged — its worker may still be inside work that has to finish and record
-     * what it did — and [finishCancelled] is the honest end of it. A job that already ended is returned
+     * what it did — and [finishCancelled] is the honest end of it. A job paused for an external approval is
+     * cancelled outright (its wait ends). A job that already ended is returned
      * unchanged: cancelling finished work is not an error, it is simply too late.
      */
     fun cancel(id: JobId): Job = database.transaction { connection ->
@@ -308,6 +309,22 @@ open class JobStore(private val database: Database) {
                 id.value,
                 JobState.RUNNING.name,
             )
+
+            // A job paused for an external approval has no attempt to interrupt: it is COMPLETE only because
+            // its attempt ended while a person decides. Cancelling it is that decision, so the wait ends here
+            // and the job reads as cancelled. Files it already imported are not touched.
+            JobState.COMPLETE -> if (job.stage == AWAITING_APPROVAL_STAGE) {
+                updateIn(
+                    connection,
+                    "UPDATE jobs SET state = ?, stage = NULL, current_item = NULL, cancel_requested = 1, " +
+                        "updated_at = ? WHERE id = ? AND state = ? AND stage = ?",
+                    JobState.CANCELLED.name,
+                    Instants.now(),
+                    id.value,
+                    JobState.COMPLETE.name,
+                    AWAITING_APPROVAL_STAGE,
+                )
+            }
 
             else -> Unit
         }

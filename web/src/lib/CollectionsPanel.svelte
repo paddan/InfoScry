@@ -860,6 +860,15 @@
   }
 
   /**
+   * What the State column says. A job paused for an external approval is COMPLETE in its record, but it has
+   * not completed: it waits for a person, so the row says so.
+   */
+  function stateCell(entry: ImportHistoryEntry): string {
+    if (entry.state === 'COMPLETE' && entry.stage === 'awaiting-approval') return 'Waiting for approval';
+    return JOB_STATE_LABELS[entry.state] ?? entry.state;
+  }
+
+  /**
    * What the Stage column says: the stage in a reader's words, and — while the import is unfinished — the
    * file it is reading now, e.g. `Extracting · report.pdf`. A finished import is in no stage and has nothing
    * being read, so its row is empty, except for the wait for an approval; a stage the server never reported
@@ -1798,7 +1807,7 @@
                   {#each imports as entry (entry.id)}
                     <tr>
                       <th scope="row">{formatDate(entry.createdAt)}</th>
-                      <td>{JOB_STATE_LABELS[entry.state] ?? entry.state}{entry.errorCode ? ` (${entry.errorCode})` : ''}</td>
+                      <td>{stateCell(entry)}{entry.errorCode ? ` (${entry.errorCode})` : ''}</td>
                       <td>{stageCell(entry)}</td>
                       <td>{fileCountLabel(entry.filesCompleted, entry.filesTotal)}</td>
                       <td>
@@ -1815,7 +1824,7 @@
                     {#if entry.externalApproval}
                       <tr class="approval-row">
                         <td colspan="5">
-                          <JobApproval jobId={entry.id} approval={entry.externalApproval} onapproved={() => void loadImports()} />
+                          <JobApproval jobId={entry.id} approval={entry.externalApproval} onapproved={() => void loadImports()} oncancelled={() => void loadImports()} />
                         </td>
                       </tr>
                     {/if}

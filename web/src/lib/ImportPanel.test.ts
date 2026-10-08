@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   getJob: vi.fn(),
   getImportItems: vi.fn(),
   approveJobExternal: vi.fn(),
+  cancelJob: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -25,6 +26,7 @@ vi.mock('./api', () => ({
   getJob: api.getJob,
   getImportItems: api.getImportItems,
   approveJobExternal: api.approveJobExternal,
+  cancelJob: api.cancelJob,
 }));
 
 /** A job the server holds at the external-page approval: COMPLETE in the record, waiting in its stage. */
@@ -352,5 +354,29 @@ describe('import panel', () => {
     server = job('j1', 'COMPLETE', 3, 3);
     expect(await screen.findByText('Import complete. 1 file.', undefined, { timeout: 5000 })).toBeTruthy();
     expect(screen.getByText('Imported')).toBeTruthy();
+  });
+
+  it('cancels an import waiting for approval, then reads Import cancelled and drops the form', async () => {
+    let server: JobApiView = awaitingJob('j1');
+    api.pickPaths.mockResolvedValue(['/home/example/a.pdf']);
+    api.enqueueImport.mockResolvedValue({ accepted: true, job: job('j1', 'RUNNING', 0, 3) });
+    api.getJob.mockImplementation(async () => server);
+    api.cancelJob.mockImplementation(async () => {
+      server = { ...job('j1', 'CANCELLED', 1, 3), stage: null };
+      return server;
+    });
+    api.getImportItems.mockResolvedValue([item('i1', 'IMPORTED', { sourceName: 'a.pdf', documentId: 'd1' })]);
+
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await screen.findByText('/home/example/a.pdf');
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+
+    await screen.findByRole('region', { name: 'Approve external pages' }, { timeout: 3000 });
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel import' }));
+
+    expect(api.cancelJob).toHaveBeenCalledWith('j1');
+    expect(await screen.findByText('Import cancelled.', undefined, { timeout: 3000 })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Approve external pages' })).toBeNull();
   });
 });

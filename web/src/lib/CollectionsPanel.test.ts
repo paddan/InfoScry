@@ -44,6 +44,7 @@ const api = vi.hoisted(() => ({
   cancelRescan: vi.fn(),
   resumeRescan: vi.fn(),
   approveJobExternal: vi.fn(),
+  cancelJob: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -68,6 +69,7 @@ vi.mock('./api', () => ({
   cancelRescan: api.cancelRescan,
   resumeRescan: api.resumeRescan,
   approveJobExternal: api.approveJobExternal,
+  cancelJob: api.cancelJob,
   createCollection: api.createCollection,
   pickPaths: api.pickPaths,
   enqueueImport: api.enqueueImport,
@@ -1107,7 +1109,10 @@ describe('collections panel', () => {
     await screen.findByText('2 of 2 files');
     expect(within(area).queryByText('Queued')).toBeNull();
     // Newest first: the waiting import is listed before the one that finished with a stale stage.
-    const [waiting, done] = within(area).getAllByRole('row', { name: /Complete/ });
+    const [waiting, done] = within(area).getAllByRole('row', { name: /Complete|Waiting for approval/ });
+    // A job waiting for a person has not completed, so its State column says what it waits for.
+    expect(within(waiting).getByText('Waiting for approval')).toBeTruthy();
+    expect(within(waiting).queryByText('Complete')).toBeNull();
     expect(within(waiting).getByText('Awaiting approval')).toBeTruthy();
     expect(within(done).queryByText(/Queued|Awaiting/)).toBeNull();
     const failed = within(area).getByRole('row', { name: /Failed/ });
@@ -1305,6 +1310,29 @@ describe('collections panel', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('cancels a waiting import from its approval form and stops showing the form', async () => {
+    const waiting = importEntry('job-1', {
+      state: 'COMPLETE',
+      stage: 'awaiting-approval',
+      filesCompleted: 0,
+      filesTotal: 1,
+      externalApproval: { snapshotHash: 'hash-1', distinctPagesSent: 0, allowance: 0, calls: 0 },
+    });
+    api.listCollectionImports
+      .mockResolvedValueOnce(history([waiting]))
+      .mockResolvedValue(history([importEntry('job-1', { state: 'CANCELLED', stage: null, filesCompleted: 0, filesTotal: 1 })]));
+    api.cancelJob.mockResolvedValue({});
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+
+    const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
+    await fireEvent.click(await within(area).findByRole('button', { name: 'Cancel import' }));
+
+    expect(api.cancelJob).toHaveBeenCalledWith('job-1');
+    await waitFor(() => expect(within(area).queryByRole('region', { name: 'Approve external pages' })).toBeNull());
+    expect(within(area).getByText('Cancelled')).toBeTruthy();
   });
 
   it('renames the selected collection, showing pending then success, and refreshes the selectors', async () => {
