@@ -446,8 +446,10 @@ describe('app shell', () => {
     // The viewer reads the collection Admin manages, not the workspace's own selected collection,
     // and the managed original link names the same document.
     expect(calls.some((call) => call.url === '/api/collections/nightfall/sources/unit-9?offset=0&limit=16384')).toBe(true);
-    expect(screen.getByRole('link', { name: 'Open original' }).getAttribute('href'))
-      .toBe('/api/collections/nightfall/documents/document-1/original');
+    const originalLink = screen.getByRole('link', { name: 'Open original' });
+    expect(originalLink.getAttribute('href')).toBe('/api/collections/nightfall/documents/document-1/original');
+    expect(originalLink.getAttribute('target')).toBe('_blank');
+    expect(originalLink.getAttribute('rel')).toContain('noopener');
   });
 
   it('asks the server for every eligible document of the managed collection, not the displayed page', async () => {

@@ -1048,7 +1048,7 @@
     >
       <div class="source-heading-row"><h2 id="source-heading">Source</h2><button type="button" aria-label="Close source viewer" onclick={closeSourceSheet}>×</button></div>
       <p class="meta">{selectedHit.locatorLabel}</p>
-      <p><a href={originalHref(selectedHit)}>Open original</a></p>
+      <p><a href={originalHref(selectedHit)} target="_blank" rel="noopener noreferrer">Open original</a></p>
       {#if savedExcerpt !== null}
         <p class="meta" role="note">Revision unknown. This is the excerpt saved with the citation, not the document's current text.</p>
         <pre class="source-text">{savedExcerpt}</pre>
