@@ -187,6 +187,9 @@ class OcrProfileService(
             lookup = environment,
             permits = permits,
             timeout = ImageLlmClient.PROBE_TIMEOUT,
+            // The user-triggered check may send its constant synthetic image to an external endpoint with no
+            // permit validator; real page dispatch through this client never gets this exception.
+            allowSyntheticProbeWithoutPermit = true,
         )
         val measurement = client.use { probe ->
             try {

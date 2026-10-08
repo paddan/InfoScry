@@ -886,6 +886,108 @@ class ImageLlmClientTest {
         }
     }
 
+    // ---- the synthetic probe's external exception ----
+
+    @Test
+    fun `a probe may reach an external destination without a permit only when the client is told so`() = runBlocking {
+        val external = revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE)
+        val recorder = RecordingImageLlmEngine(
+            script = listOf(
+                RecordedImageResponse(
+                    body = openAiAnswer(
+                        transcription(
+                            PageDispatchIdentity(unitId = ImageLlmClient.CAPABILITY_PROBE_UNIT_ID, ordinal = 0),
+                            text = "InfoScry image capability probe",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        // No validator at all: the synthetic image is constant and names no document, so the explicit
+        // user-triggered check may send it without a per-page permit.
+        val client = ImageLlmClient(
+            external,
+            lookup = { KEY_VALUE },
+            engine = recorder,
+            allowSyntheticProbeWithoutPermit = true,
+        )
+        try {
+            assertEquals("InfoScry image capability probe", client.probeCapability().text)
+
+            assertEquals(1, recorder.requestCount, "the probe reached the transport")
+            assertEquals("$EXTERNAL_ENDPOINT/chat/completions", recorder.requests.single().url)
+        } finally {
+            client.close()
+            recorder.close()
+        }
+    }
+
+    @Test
+    fun `a probe still asks a present validator and is refused when it says no`() = runBlocking {
+        val external = revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE)
+        val recorder = RecordingImageLlmEngine()
+        val asked = mutableListOf<ExternalDispatchPermitRequest>()
+        val client = ImageLlmClient(
+            external,
+            lookup = { KEY_VALUE },
+            permits = ExternalDispatchPermitValidator { request -> asked.add(request); false },
+            engine = recorder,
+            allowSyntheticProbeWithoutPermit = true,
+        )
+        try {
+            val refused = assertFailsWith<ImageLlmException> { client.probeCapability() }
+
+            assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, refused.code)
+            assertFalse(refused.dispatched)
+            assertEquals(1, asked.size, "the validator was consulted rather than bypassed")
+            assertEquals(0, recorder.requestCount, "a refused probe never reaches the transport")
+        } finally {
+            client.close()
+            recorder.close()
+        }
+    }
+
+    @Test
+    fun `the exception does not open transcription or review on an external destination without a validator`() =
+        runBlocking {
+            val page = page()
+            val external = revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE)
+            val recorder = RecordingImageLlmEngine()
+            val client = ImageLlmClient(
+                external,
+                lookup = { KEY_VALUE },
+                engine = recorder,
+                allowSyntheticProbeWithoutPermit = true,
+            )
+            try {
+                val transcribeRefused = assertFailsWith<ImageLlmException> { client.transcribe(page) }
+                assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, transcribeRefused.code)
+                assertFalse(transcribeRefused.dispatched)
+
+                val reviewRefused = assertFailsWith<ImageLlmException> {
+                    client.review(page, readingA = "the first reading", readingB = "the second reading")
+                }
+                assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, reviewRefused.code)
+                assertFalse(reviewRefused.dispatched)
+
+                assertEquals(0, recorder.requestCount, "a page image never reaches the transport without a permit")
+            } finally {
+                client.close()
+                recorder.close()
+            }
+        }
+
+    @Test
+    fun `without the flag an external destination still cannot be built without a validator`() {
+        val external = revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE)
+
+        val refused = assertFailsWith<ImageLlmException> {
+            ImageLlmClient(external, lookup = { KEY_VALUE }, allowSyntheticProbeWithoutPermit = false)
+        }
+        assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, refused.code)
+        assertFalse(refused.dispatched)
+    }
+
     // ---- the shared entry point the review call will use ----
 
     @Test

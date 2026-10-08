@@ -489,18 +489,20 @@ class OcrProfileRoutesTest {
 
     @Test
     fun `a probe of an external profile is refused before anything leaves this machine`() = runBlocking {
+        // The probe needs no dispatch permit (the synthetic image names no document), so the refusal here is the
+        // missing credential: the variable is named but unset, which the route cannot change. Nothing is sent.
         val created = create(
             profileBody
                 .replace("http://127.0.0.1:11434/v1", "https://vision.example.invalid/v1")
-                .replace("\"apiKeyEnvironmentVariable\":\"PATH\"", "\"apiKeyEnvironmentVariable\":\"FAKE_OCR_KEY\""),
+                .replace("\"apiKeyEnvironmentVariable\":\"PATH\"", "\"apiKeyEnvironmentVariable\":\"INFOSCRY_UNSET_TEST_KEY\""),
         )
         val id = profileIdOf(created)
 
         val probed = harness.request(HttpMethod.Post, "/api/ocr/profiles/$id/probe", credential = Credential.CSRF)
 
-        // No dispatch permit is integrated yet (ticket 07), so production external dispatch is unavailable.
         assertEquals(HttpStatusCode.Conflict, probed.status, probed.bodyAsText())
-        assertContains(probed.bodyAsText(), "OCR_EXTERNAL_DISPATCH_NOT_PERMITTED")
+        assertContains(probed.bodyAsText(), "OCR_MISSING_CREDENTIAL")
+        assertFalse(probed.bodyAsText().contains("vision.example.invalid"), "the endpoint is never echoed")
         val listed = harness.get("/api/ocr/profiles").bodyAsText()
         assertFalse(
             listed.contains("imageCapabilityMeasured"),

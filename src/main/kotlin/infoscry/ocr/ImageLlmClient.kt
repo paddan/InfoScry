@@ -165,6 +165,11 @@ data class ExternalDispatchPermitRequest(
  * Ticket 07 owns the persisted admission service that implements this; this build injects **nothing**, so
  * an external destination cannot be dispatched to at all — and because the validator is an injected
  * capability with no permissive default, a fake one in a test cannot become a production bypass.
+ *
+ * One exception exists and is not a permit: the explicit capability probe of a client built with
+ * `allowSyntheticProbeWithoutPermit` may dispatch its constant synthetic image to an external endpoint with no
+ * validator at all. That image names no document and the check runs only on a user's request, so there is
+ * nothing here for a permit to protect. Transcription and review never get this exception.
  */
 fun interface ExternalDispatchPermitValidator {
     fun isPermitted(request: ExternalDispatchPermitRequest): Boolean
@@ -349,8 +354,9 @@ private fun renderPrompt(body: String, values: Map<String, String>): String =
  * - **A redirect is never followed.** The transport is configured not to, and a 3xx is refused as itself:
  *   following one would carry a page image to a destination the profile never named.
  * - **A non-local destination needs ticket 07's permit.** Constructing a client for one without a validator
- *   is refused, and every dispatch asks the validator about the revision and the page first. Local loopback
- *   endpoints need neither, which is what makes a local model usable today.
+ *   is refused, and every dispatch asks the validator about the revision and the page first. The one
+ *   exception is the synthetic capability probe, and only with `allowSyntheticProbeWithoutPermit`; see
+ *   [probeCapability]. Local loopback endpoints need neither, which is what makes a local model usable today.
  * - **The answer has to be a complete reading of *this* page.** The provider's own document is parsed,
  *   the finish reason must mean "complete output", and the answer must name the unit id and ordinal it was
  *   asked about; a truncated, throttled, timed-out, malformed or misattributed answer is a failure rather
@@ -387,6 +393,16 @@ class ImageLlmClient(
      * the client then builds its own CIO engine and owns closing it, exactly as before this seam existed.
      */
     private val engine: HttpClientEngine? = null,
+    /**
+     * Whether the explicit capability probe may reach an external destination without a permit validator.
+     *
+     * The product owner's exception, and only that: the probe's synthetic image is this build's constant
+     * page of project words, so no user document can be in it, and the check runs only because a user asked
+     * for it. With this flag set, [probeCapability] is the one call that may dispatch to an external endpoint
+     * with no validator; it still asks a validator when one is present. Transcription and review never gain
+     * this exception, whatever the flag says. False is the default and keeps the strict rule.
+     */
+    private val allowSyntheticProbeWithoutPermit: Boolean = false,
 ) : AutoCloseable {
 
     private val endpoint: String = profile.endpoint.trimEnd('/')
@@ -430,7 +446,7 @@ class ImageLlmClient(
                     "sent and no reading could be made from it",
             )
         }
-        if (profile.scope == OcrEndpointScope.EXTERNAL && permits == null) {
+        if (profile.scope == OcrEndpointScope.EXTERNAL && permits == null && !allowSyntheticProbeWithoutPermit) {
             throw ImageLlmException(
                 ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED,
                 "sending a page image off this machine needs the external dispatch permit of an admitted " +
@@ -466,6 +482,12 @@ class ImageLlmClient(
      * document. What a passing check proves is *transport*: the provider accepted an image block and
      * answered a complete, schema-valid reading of the synthetic page. It says nothing about transcription
      * quality.
+     *
+     * This is the one exception to ticket 07's permit rule. An external destination is dispatched to without
+     * a permit validator only when this client was built with [allowSyntheticProbeWithoutPermit]: the synthetic
+     * image is a constant that names no document, and the check runs only because a user asked for it. A
+     * validator that is present is still asked, and a refusal stops the probe before anything is sent.
+     * Transcription and review have no such exception.
      */
     suspend fun probeCapability(): ImageReading {
         val identity = PageDispatchIdentity(unitId = CAPABILITY_PROBE_UNIT_ID, ordinal = 0)
@@ -475,6 +497,7 @@ class ImageLlmClient(
             image = image,
             form = imageFormOf(image),
             instructions = OcrTranscriptionPrompt.forPage(identity),
+            probe = true,
         ) { content -> transcriptionOf(content) }
         return ImageReading(
             text = answer.value.text,
@@ -538,18 +561,25 @@ class ImageLlmClient(
         image: ByteArray,
         form: ImageForm,
         instructions: String,
+        probe: Boolean = false,
         decode: (String) -> T,
     ): ImageAnswer<T> {
         // Nothing is sent before the permit: a page image that leaves this machine without one is the
         // failure this whole path exists to prevent, and the permit is asked about this revision and this
-        // page rather than about the profile in general.
+        // page rather than about the profile in general. The one exception is the synthetic capability probe
+        // of a client built with [allowSyntheticProbeWithoutPermit]; every other caller still needs a validator.
         if (profile.scope == OcrEndpointScope.EXTERNAL) {
-            val validator = permits ?: throw ImageLlmException(
-                ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED,
-                "sending a page image off this machine needs the external dispatch permit of an admitted " +
-                    "rescan, and this build has no permit validator: the image was not sent",
-            )
-            if (!validator.isPermitted(ExternalDispatchPermitRequest(profile.revisionId, identity))) {
+            val validator = permits
+            if (validator == null) {
+                // No validator is only allowed for the synthetic probe of a client built to permit it.
+                if (!(probe && allowSyntheticProbeWithoutPermit)) {
+                    throw ImageLlmException(
+                        ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED,
+                        "sending a page image off this machine needs the external dispatch permit of an admitted " +
+                            "rescan, and this build has no permit validator: the image was not sent",
+                    )
+                }
+            } else if (!validator.isPermitted(ExternalDispatchPermitRequest(profile.revisionId, identity))) {
                 throw ImageLlmException(
                     ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED,
                     "this page is not covered by an external dispatch permit for this profile revision, so " +
