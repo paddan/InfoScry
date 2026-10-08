@@ -70,11 +70,11 @@
         .filter((profile) => profile.sourceLlmProfileId === candidate.id)
         .map((profile) => [profile.id, candidate.id] as const)),
   );
-  $: selectable = profiles.filter((profile) => profile.enabled && !copyIds.has(profile.id));
-  $: transcriptionMissing = missingProfile(transcriptionProfileId, selectable, llmOffered);
-  $: reviewMissing = missingProfile(reviewProfileId, selectable, llmOffered);
-  $: nothingToChoose = profilesLoaded && candidatesLoaded && selectable.length === 0 && llmOffered.length === 0;
+  // The remap comes before the missing checks: they read the selection the remap may change, and a check that ran
+  // first would keep a copy's raw id, which no list offers any more, as "no longer available".
   $: if (profilesLoaded && candidatesLoaded && !remapped) remapStoredSelections();
+  $: selectable = profiles.filter((profile) => profile.enabled && !copyIds.has(profile.id));
+  $: nothingToChoose = profilesLoaded && candidatesLoaded && selectable.length === 0 && llmOffered.length === 0;
 
   function start(next: Collection): void {
     boundId = next.id;
@@ -217,7 +217,7 @@
       aria-describedby="collection-ocr-profile-note"
     >
       <option value="">None</option>
-      {#if transcriptionMissing}
+      {#if missingProfile(transcriptionProfileId, selectable, llmOffered)}
         <option value={transcriptionProfileId}>
           {profilesLoaded ? 'Selected profile (no longer available)' : 'Selected profile'}
         </option>
@@ -247,7 +247,7 @@
       aria-describedby="collection-ocr-profile-note"
     >
       <option value="">None</option>
-      {#if reviewMissing}
+      {#if missingProfile(reviewProfileId, selectable, llmOffered)}
         <option value={reviewProfileId}>
           {profilesLoaded ? 'Selected profile (no longer available)' : 'Selected profile'}
         </option>

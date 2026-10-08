@@ -392,6 +392,52 @@ async function openHistory(page) {
   await page.waitForSelector(`${PANEL} ol[aria-label="Text versions"]`, { timeout: 20_000 });
 }
 
+/* ---- Text history reading, OCR profile presets and catalog, and the LLM choice (local-testing-feedback 03 and 04) ---- */
+
+const OCR_TAB = '#admin-tab-ocr';
+const LLM_TAB = '#admin-tab-llm';
+const NO_PROFILES = 'No OCR profiles yet.';
+const CATALOG_PLACEHOLDER = 'Choose a model…';
+
+/** The provider presets a form offers, without its placeholder. */
+async function presetLabels(page, prefix) {
+  return page.$$eval(`#${prefix}-preset option`, (options) =>
+    options.map((option) => option.textContent.trim()).filter((text) => text !== 'Pick a preset…'));
+}
+
+async function optionTexts(page, selector) {
+  return page.$$eval(selector, (options) => options.map((option) => option.textContent.trim()));
+}
+
+/** Opens Admin → OCR profiles on its new-profile form, whether or not the form was still open. */
+async function openOcrForm(page) {
+  await page.click(OCR_TAB);
+  await page.waitForSelector('#admin-panel-ocr', { state: 'visible', timeout: 10_000 });
+  const newOcr = page.locator(`${OCR_PANEL} button`, { hasText: 'New profile' });
+  // The panel may still be settling after the tab change, so the button is asked for again rather than once.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (await page.locator('#ocr-preset').isVisible()) return;
+    if ((await newOcr.count()) > 0 && (await newOcr.isEnabled())) await newOcr.click();
+    try {
+      await page.waitForSelector('#ocr-preset', { state: 'visible', timeout: 3_000 });
+      return;
+    } catch {
+      // try again
+    }
+  }
+  fail('the OCR profile form did not open');
+}
+
+/** What the transcription select holds and what the profile list says, for a failure message. */
+async function describeTranscription(page) {
+  return page.evaluate(async () => {
+    const select = document.querySelector('#collection-ocr-transcription');
+    const options = select ? [...select.options].map((o) => `${o.value}|${o.textContent.trim()}|${o.selected}`) : [];
+    const profiles = await (await fetch('/api/ocr/profiles')).text();
+    return JSON.stringify({ options, profiles: profiles.slice(0, 1200) });
+  });
+}
+
 const scenarios = {
   async profiles(browser) {
     const { context, page } = await openAdmin(browser, 'ocr');
@@ -683,6 +729,145 @@ const scenarios = {
       squash(await versions(page).filter({ has: page.locator('.marker') }).textContent()).includes('Restored from'),
       'the version restored elsewhere is the active one',
     );
+    noUnexpectedErrors(page);
+  },
+
+  async 'history-import-reading'(browser) {
+    const { page } = await openAdmin(browser);
+    await selectCollection(page, 'Default');
+    await openDetails(page, FILENAME);
+    await openHistory(page);
+    equal(await versions(page).count(), 1, 'the picture has only its import');
+    const picture = squash(await versions(page).first().textContent());
+    for (const fragment of ['Tesseract (local)', 'Fill pages that have no text', 'language eng', 'Tool version: tesseract 5.5']) {
+      assert(picture.includes(fragment), `the import's history names "${fragment}", got ${picture}`);
+    }
+    assert(picture.includes('Engine and model Tesseract (local)'), `the engine is named under Engine and model, got ${picture}`);
+
+    // A text file is read directly, so no engine is named for it and its history says no page needed OCR.
+    await reloadAdmin(page);
+    await selectCollection(page, 'Default');
+    await openDetails(page, 'notes.txt');
+    await openHistory(page);
+    equal(await versions(page).count(), 1, 'the text file has only its import');
+    const notes = squash(await versions(page).first().textContent());
+    assert(notes.includes('No page needed OCR'), `a direct-text import says no page needed OCR, got ${notes}`);
+    assert(!notes.includes('Tesseract'), `no engine is named for a text file that OCR never read, got ${notes}`);
+    noUnexpectedErrors(page);
+  },
+
+  async 'ocr-profile-catalog'(browser) {
+    const { page } = await openAdmin(browser, 'ocr');
+    await page.waitForFunction((text) => (document.querySelector('#admin-panel-ocr')?.textContent ?? '').includes(text), NO_PROFILES, { timeout: 20_000 });
+    const providerUrl = FACTS.providerUrl ?? '';
+    assert(/^http:\/\/127\.0\.0\.1:\d+$/.test(providerUrl), `the catalog is asked of a loopback fake, got ${providerUrl}`);
+
+    // The OCR form offers the presets the LLM form offers.
+    await page.locator(`${OCR_PANEL} button`, { hasText: 'New profile' }).click();
+    await page.waitForFunction(() => document.querySelectorAll('#ocr-preset option').length > 1, null, { timeout: 20_000 });
+    const ocrPresets = await presetLabels(page, 'ocr');
+    await page.click(LLM_TAB);
+    await page.waitForSelector('#admin-panel-llm', { state: 'visible', timeout: 20_000 });
+    // With no LLM profile the panel opens its new-profile form itself (New is then disabled), so wait for the form.
+    const newLlm = page.locator('#admin-panel-llm button', { hasText: /^New$/ });
+    if (await newLlm.isEnabled()) await newLlm.click();
+    await page.waitForFunction(() => document.querySelectorAll('#pf-preset option').length > 1, null, { timeout: 20_000 });
+    const llmPresets = await presetLabels(page, 'pf');
+    equal(JSON.stringify(ocrPresets), JSON.stringify(llmPresets), 'the OCR form offers the same provider presets as the LLM form');
+    assert(ocrPresets.includes('OpenAI') && ocrPresets.includes('Custom OpenAI-compatible'), `the common presets are offered, got ${ocrPresets}`);
+
+    // A preset fills the connection; the endpoint is then pointed at the fake before any model list is asked for.
+    await openOcrForm(page);
+    await page.selectOption('#ocr-preset', { label: 'OpenAI' });
+    equal(await page.inputValue('#ocr-endpoint'), 'https://api.openai.com/v1', 'the OpenAI preset fills its endpoint');
+    equal(await page.inputValue('#ocr-key'), 'OPENAI_API_KEY', 'the OpenAI preset names its key variable, never a value');
+    await page.fill('#ocr-endpoint', providerUrl);
+    await page.fill('#ocr-key', '');
+    await page.locator(`${OCR_PANEL} button`, { hasText: 'Fetch models' }).click();
+    await page.waitForFunction(() => document.querySelectorAll('#ocr-catalog option').length > 1, null, { timeout: 20_000 });
+    const ocrModels = (await optionTexts(page, '#ocr-catalog option')).filter((text) => text !== CATALOG_PLACEHOLDER);
+    equal(
+      JSON.stringify(ocrModels),
+      JSON.stringify(['vendor/silent — image support unknown', 'vendor/vision']),
+      'the OCR form lists image-capable models and labels the unknown one, and never offers a text-only model',
+    );
+
+    // An unknown model is labelled as such when chosen; the image-capable one saves.
+    await page.selectOption('#ocr-catalog', 'vendor/silent');
+    await page.waitForFunction(() => (document.querySelector('#admin-panel-ocr')?.textContent ?? '').includes('Image support unknown for this model'), null, { timeout: 10_000 });
+    await page.selectOption('#ocr-catalog', 'vendor/vision');
+    equal(await page.inputValue('#ocr-model'), 'vendor/vision', 'choosing a catalog model fills the model field');
+    await page.fill('#ocr-name', 'Vision reader');
+    await page.locator(`${OCR_PANEL} button`, { hasText: 'Create profile' }).click();
+    await page.waitForFunction(() => (document.querySelector('#admin-panel-ocr .flash')?.textContent ?? '').includes("'Vision reader' saved."), null, { timeout: 20_000 });
+    assert(squash(await profileItem(page, 'Vision reader').textContent()).includes('vendor/vision'), 'the saved profile carries the chosen model');
+
+    // The LLM form is not limited the same way: the text-only model is still listed there.
+    await page.click(LLM_TAB);
+    await page.selectOption('#pf-preset', { label: 'Custom OpenAI-compatible' });
+    await page.fill('#pf-endpoint', providerUrl);
+    await page.locator('#admin-panel-llm button', { hasText: 'Fetch models' }).click();
+    await page.waitForFunction(() => document.querySelectorAll('#pf-catalog option').length > 1, null, { timeout: 20_000 });
+    assert((await optionTexts(page, '#pf-catalog option')).includes('vendor/text-only'), 'the LLM form still lists the text-only model');
+    noUnexpectedErrors(page);
+  },
+
+  async 'collection-llm-profiles'(browser) {
+    const { page } = await openAdmin(browser);
+    const transcription = '#collection-ocr-transcription';
+    const review = '#collection-ocr-review';
+    const visionValue = `llm:${FACTS.visionLlmId}`;
+    await selectCollection(page, 'Alpha');
+    await page.waitForFunction(() => document.querySelectorAll('#collection-ocr-transcription optgroup').length === 2, null, { timeout: 20_000 });
+
+    // Both selects show the same two labelled groups.
+    for (const select of [transcription, review]) {
+      const groups = await page.$$eval(`${select} optgroup`, (items) => items.map((item) => item.label));
+      equal(JSON.stringify(groups), JSON.stringify(['OCR profiles', 'LLM profiles with image input']), `${select} shows two labelled groups`);
+    }
+    const ocrChoices = await optionTexts(page, `${transcription} optgroup[label="OCR profiles"] option`);
+    assert(ocrChoices.some((text) => text.startsWith('Local reader (')), `the OCR group offers the OCR profile, got ${ocrChoices}`);
+    const llmChoices = await optionTexts(page, `${transcription} optgroup[label="LLM profiles with image input"] option`);
+    equal(llmChoices.length, 1, `only the image-capable LLM profile is offered, got ${llmChoices}`);
+    assert(llmChoices[0].startsWith('Vision LLM ('), `the offered LLM profile is the image-capable one, got ${llmChoices[0]}`);
+    assert(
+      squash(await page.locator('form[aria-label="OCR engine settings"]').textContent()).includes('1 LLM profile is not offered'),
+      'the text-only LLM profile is counted as not offered',
+    );
+    equal(await page.locator('#collection-ocr-empty-note').count(), 0, 'nothing to choose is not claimed while profiles exist');
+
+    // Choosing the image-capable LLM profile for transcription saves; the reader shows it after a reload.
+    await page.selectOption('#collection-ocr-engine', 'LLM');
+    await page.waitForFunction(() => !document.querySelector('#collection-ocr-transcription')?.disabled, null, { timeout: 10_000 });
+    await page.waitForFunction((value) => !!document.querySelector(`#collection-ocr-transcription option[value="${value}"]`), visionValue, { timeout: 10_000 });
+    await page.selectOption(transcription, visionValue);
+    await page.locator('button', { hasText: 'Save OCR engine settings' }).click();
+    await page.waitForFunction(() => (document.body.textContent ?? '').includes('OCR engine settings saved.'), null, { timeout: 20_000 });
+
+    await reloadAdmin(page);
+    await selectCollection(page, 'Alpha');
+    // The stored copy is shown as its LLM profile once the lists are read: wait for that, not for the option's presence.
+    try {
+      await page.waitForFunction(() => (document.querySelector('#collection-ocr-transcription option:checked')?.textContent ?? '').startsWith('Vision LLM ('), null, { timeout: 20_000 });
+    } catch {
+      fail(`after a reload the stored copy is not shown as its LLM profile: ${await describeTranscription(page)}`);
+    }
+    const chosen = squash(await page.locator(`${transcription} option:checked`).textContent());
+    assert(chosen.startsWith('Vision LLM ('), `the saved transcription choice is the LLM profile after a reload, got ${chosen}`);
+    noUnexpectedErrors(page);
+  },
+
+  async 'collection-empty-state'(browser) {
+    const { page } = await openAdmin(browser);
+    await selectCollection(page, 'Alpha');
+    await page.waitForSelector('#collection-ocr-empty-note', { timeout: 20_000 });
+    const note = squash(await page.textContent('#collection-ocr-empty-note'));
+    assert(note.includes('No OCR profile and no LLM profile with image input exists yet'), `the empty choice is explained, got ${note}`);
+    equal(JSON.stringify(await optionTexts(page, '#collection-ocr-transcription option')), JSON.stringify(['None']), 'the only transcription choice is None');
+    equal(JSON.stringify(await optionTexts(page, '#collection-ocr-review option')), JSON.stringify(['None']), 'the only review choice is None');
+
+    await page.locator('#collection-ocr-empty-note button', { hasText: 'Open Admin → OCR profiles' }).click();
+    await page.waitForSelector('#admin-panel-ocr', { state: 'visible', timeout: 20_000 });
     noUnexpectedErrors(page);
   },
 };

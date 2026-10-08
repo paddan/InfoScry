@@ -410,6 +410,43 @@ describe('collection OCR settings', () => {
       expect(ocrGroup.some((text) => text.includes('Reader (from LLM profile)'))).toBe(true);
     });
 
+    it('shows the stored copy as its LLM profile when the OCR list arrives before the LLM list', async () => {
+      let answerLlm: (value: OcrLlmCandidate[]) => void = () => {};
+      api.listOcrLlmCandidates.mockReturnValue(new Promise((resolve) => { answerLlm = resolve; }));
+      api.listOcrProfiles.mockResolvedValue([
+        ...PROFILES,
+        profile('copy-1', 'Vision LLM (from LLM profile)', { sourceLlmProfileId: 'l-vision' }),
+      ]);
+      render(CollectionOcrSettings, {
+        collection: collection('Nightfall', { ocrEngine: 'LLM', ocrTranscriptionProfileId: 'copy-1' }),
+        onChanged: vi.fn(),
+      });
+      await act(async () => {});
+      answerLlm(LLM);
+      await act(async () => {});
+
+      expect(select('Transcription profile').value).toBe('llm:l-vision');
+      expect(select('Transcription profile').selectedOptions[0].textContent).toContain('Reader');
+      expect(screen.queryByText(/no longer available/)).toBeNull();
+    });
+
+    it('shows the stored copy as its LLM profile when the LLM list arrives before the OCR list', async () => {
+      let answerProfiles: (value: OcrProfile[]) => void = () => {};
+      api.listOcrProfiles.mockReturnValue(new Promise((resolve) => { answerProfiles = resolve; }));
+      api.listOcrLlmCandidates.mockResolvedValue(LLM);
+      render(CollectionOcrSettings, {
+        collection: collection('Nightfall', { ocrEngine: 'LLM', ocrTranscriptionProfileId: 'copy-1' }),
+        onChanged: vi.fn(),
+      });
+      await act(async () => {});
+      answerProfiles([...PROFILES, profile('copy-1', 'Vision LLM (from LLM profile)', { sourceLlmProfileId: 'l-vision' })]);
+      await act(async () => {});
+
+      expect(select('Transcription profile').value).toBe('llm:l-vision');
+      expect(select('Transcription profile').selectedOptions[0].textContent).toContain('Reader');
+      expect(screen.queryByText(/no longer available/)).toBeNull();
+    });
+
     it('explains an empty list and links to Admin OCR profiles instead of showing an unexplained None', async () => {
       api.listOcrProfiles.mockResolvedValue([]);
       api.listOcrLlmCandidates.mockResolvedValue([candidate('l-text', 'Chatter', { imageInput: false })]);

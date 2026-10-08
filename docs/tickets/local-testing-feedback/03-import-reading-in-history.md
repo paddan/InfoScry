@@ -1,6 +1,6 @@
 # 03: Revision history names the OCR method an import used
 
-**Status:** Implemented; the text-history browser scenario is not done. Unchecked criteria are requirements, not evidence.
+**Status:** Implemented; browser scenario passes (fake provider).
 
 Design: the import's or retry's frozen OCR snapshot (from its job payload) is stored on the revision it publishes
 (`document_revisions.reading_snapshot`, set by `openCandidate` for a check-and-improve candidate and by
@@ -40,7 +40,7 @@ was read with, or says honestly that a page needed no OCR.
   the retry's settings; a direct-text-only document says no page needed OCR; no endpoint, key variable or path is
   exposed. (Written first; their red run was not captured, see the note above.)
 - [x] Implement from a durable record, never by reading today's collection settings.
-- [ ] Extend the text-history browser scenario. Not done in this change (Playwright item skipped by instruction).
+- [x] Extend the text-history browser scenario: `history-import-reading` in `OcrBrowserAcceptanceTest` (passes against the fake provider; the imported picture names engine, mode, language and tool version, and a text file says "No page needed OCR").
 
 ## Focused verification
 
