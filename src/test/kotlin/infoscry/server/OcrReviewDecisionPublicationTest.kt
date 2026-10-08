@@ -56,6 +56,9 @@ class OcrReviewDecisionPublicationTest {
                 picture,
                 engine = FakePageEngine(readings = listOf(CANDIDATE)),
                 reviewer = RecordingReviewer(),
+                // A review profile with an approved external scope: the page is a pilot proposal a person decides.
+                reviewRevisionId = seeded.reviewRevisionId,
+                externalPageLimit = 1,
             )
             operationId = attempt.operation.operationId
             candidateRevisionId = assertNotNull(attempt.operation.candidateRevisionId)

@@ -83,7 +83,14 @@ class RescanJobHandlerTest {
             val picture = harness.importPicture(text = "first reading")
             val engine = FakePageEngine(readings = listOf("second reading"))
 
-            val result = harness.rescan(picture, engine = engine, reviewer = fakeReviewer(NEW_BETTER))
+            // A review profile is configured and its external scope approved, so the reviewer really runs.
+            val result = harness.rescan(
+                picture = picture,
+                engine = engine,
+                reviewer = RecordingReviewer(NEW_BETTER),
+                reviewRevisionId = harness.reviewRevisionId,
+                externalPageLimit = 1,
+            )
 
             // The reading is staged as a proposal: pilot mode replaces nothing without a person, even when the
             // reviewer recommends the new text.
@@ -103,6 +110,26 @@ class RescanJobHandlerTest {
             assertEquals(1, result.indexedChunks)
             assertEquals(picture.baselineRevisionId, result.activeRevisionId)
             assertEquals(1, engine.calls)
+        }
+    }
+
+    @Test
+    fun `a rescan without a review profile approves a differing reading so the replacement publishes`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val engine = FakePageEngine(readings = listOf("second reading"))
+
+            // No review profile is configured, so no reviewer can ever approve the page. The new reading is
+            // approved automatically: nothing is left pending, and the replacement can be published.
+            val result = harness.rescan(picture, engine = engine, reviewer = null)
+
+            // Nothing is pending, so the attempt publishes the whole approved revision itself.
+            assertEquals(OcrOperationStage.COMPLETE, result.operation.stage)
+            assertNull(result.operation.errorCode, "the approved replacement was refused: ${result.operation.errorCode}")
+            assertEquals(0, result.operation.pendingReviewCount)
+            assertEquals(listOf(PageApproval.APPROVED), result.candidateApprovals)
+            assertEquals("second reading", result.publishedText)
+            assertNotEqualsId(picture.baselineRevisionId, assertNotNull(result.activeRevisionId))
         }
     }
 
@@ -261,7 +288,13 @@ class RescanJobHandlerTest {
         withHarness { harness ->
             val picture = harness.importPicture(text = "first reading")
             val engine = FakePageEngine(readings = listOf("second reading"))
-            val staged = harness.rescan(picture, engine = engine, reviewer = fakeReviewer(NEW_BETTER))
+            val staged = harness.rescan(
+                picture = picture,
+                engine = engine,
+                reviewer = RecordingReviewer(NEW_BETTER),
+                reviewRevisionId = harness.reviewRevisionId,
+                externalPageLimit = 1,
+            )
             val page = assertNotNull(staged.candidatePage)
 
             val decided = harness.decide(

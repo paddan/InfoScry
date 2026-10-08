@@ -82,13 +82,43 @@ internal class CandidateRevisionPhases(
      * - A page with **no** published text is never approved by an engine or a model. Whatever it proposes
      *   stays pending and outside retrieval until a person decides, which is what "an uncertain proposal
      *   outside search" means for a document that had no text there.
+     * - With **no** review profile configured ([reviewerConfigured] is false) there is no reviewer who could
+     *   ever approve a page, so the deterministic rule is the decision: a page whose reading is identical to
+     *   its published non-blank text keeps that text (approved), and every other page — with or without a
+     *   published text — is staged *approved* with the new reading. This is the product owner's decision for
+     *   a collection that runs without a reviewer; nothing is left pending that nobody could ever resolve.
+     *
+     * With a reviewer configured, the first three rules are the whole decision, and nothing changes for it.
      */
     fun acceptedPageOf(
         page: RescanPage,
         reading: OcrPageResult,
         review: PageReview?,
+        reviewerConfigured: Boolean,
     ): StagedCandidatePage {
         val baseline = page.baseline
+        if (!reviewerConfigured) {
+            val baselineText = baseline?.extractedText
+            return if (baseline != null && !baselineText.isNullOrBlank() && baselineText == reading.text) {
+                StagedCandidatePage(
+                    text = baseline.extractedText,
+                    approval = PageApproval.APPROVED,
+                    disposition = PublicationDisposition.KEEP,
+                    confidence = baseline.meanConfidence,
+                    artifactRelativePath = baseline.artifactRelativePath,
+                    artifactSha256 = baseline.artifactSha256,
+                )
+            } else {
+                StagedCandidatePage(
+                    text = reading.text,
+                    approval = PageApproval.APPROVED,
+                    disposition = PublicationDisposition.APPROVE,
+                    confidence = reading.meanConfidence,
+                    artifactRelativePath = reading.artifactRelativePath,
+                    artifactSha256 = reading.artifactSha256,
+                )
+            }
+        }
         val disposition = review?.disposition ?: deterministicDisposition(page, reading)
         return when {
             disposition == PublicationDisposition.KEEP && baseline != null -> StagedCandidatePage(
@@ -121,12 +151,12 @@ internal class CandidateRevisionPhases(
     }
 
     /**
-     * What the deterministic checks alone decide about a page with no reviewer configured.
+     * What the deterministic checks decide when a reviewer is configured but produced no decision for a page.
      *
      * An identical non-empty pair keeps the text: there is nothing to replace, and nobody has to confirm that
      * a page still says what it said. Everything else is a proposal, because replacing text without a person
-     * is what pilot mode does not do — and the acceptance question cannot be answered here at all, because
-     * there is no reviewer revision a measured acceptance could have been about.
+     * is what pilot mode does not do. A rescan with no reviewer configured never reaches this rule; see
+     * [acceptedPageOf].
      */
     private fun deterministicDisposition(page: RescanPage, reading: OcrPageResult): PublicationDisposition {
         val baselineText = page.baseline?.extractedText

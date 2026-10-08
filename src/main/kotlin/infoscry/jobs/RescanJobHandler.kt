@@ -311,7 +311,14 @@ class RescanJobHandler internal constructor(
                 pauseForApproval(job, operation, stage)
                 return
             }
-            val stagedPage = outcome.reading?.let { reading -> phases.acceptedPageOf(page, reading, review) }
+            val stagedPage = outcome.reading?.let { reading ->
+                phases.acceptedPageOf(
+                    page,
+                    reading,
+                    review,
+                    reviewerConfigured = snapshot.reviewProfileRevisionId != null,
+                )
+            }
             stage.run(STAGE_COMMIT) {
                 if (stagedPage != null) {
                     revisions.appendPage(
