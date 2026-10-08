@@ -622,4 +622,18 @@ describe('Investigate panel', () => {
     expect(alert.textContent).toContain('Check tool calling');
     expect(api.readInvestigationEvents).not.toHaveBeenCalled();
   });
+
+  it('leaves no empty answer bubble behind a refused or failed turn', async () => {
+    api.startInvestigation.mockRejectedValue(
+      new ApiError('TOOL_CALLING_UNSUPPORTED', "the profile 'local-cheap' has not been measured for tool calling"),
+    );
+
+    render(InvestigatePanel, { props: { ...props, conversationId: null } });
+    await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    await screen.findByRole('alert');
+    expect(document.querySelectorAll('li.assistant').length).toBe(0);
+    expect(screen.getByText('What happened?')).toBeTruthy();
+  });
 });
