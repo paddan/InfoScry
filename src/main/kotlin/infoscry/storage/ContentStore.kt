@@ -11,6 +11,7 @@ import infoscry.domain.SourceLocation
 import infoscry.domain.UnitKind
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
+import infoscry.ocr.OcrQualityScorer
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -707,6 +708,32 @@ class ContentStore(private val database: Database) {
                     ocrUnits = counted?.ocr.takeIf { knownMethods > 0 },
                     failedCodes = failedCodes[documentId to attempt.fingerprint].orEmpty(),
                 )
+            }
+        }
+    }
+
+    /**
+     * The extracted text of every live unit of each of [documentIds], in ordinal order, from one batched read.
+     *
+     * A document with no units is absent from the map. This is the text a document-level quality score is
+     * computed over, so it reads what a reader sees rather than any extraction attempt still in progress.
+     */
+    fun extractedTextsOf(documentIds: Collection<DocumentId>): Map<DocumentId, List<String>> {
+        if (documentIds.isEmpty()) return emptyMap()
+        val ids = documentIds.map { it.value }.distinct()
+        return database.read { connection ->
+            connection.readRows(
+                // Only the sample the quality score judges is read: a long unit's full text is never needed here.
+                "SELECT document_id, SUBSTR(extracted_text, 1, ${OcrQualityScorer.SAMPLE_CHARS}) AS extracted_text " +
+                    "FROM content_units WHERE document_id IN (%s) ORDER BY document_id, ordinal",
+                ids,
+            ) { rows ->
+                val texts = linkedMapOf<DocumentId, MutableList<String>>()
+                while (rows.next()) {
+                    texts.getOrPut(DocumentId(rows.getString("document_id"))) { mutableListOf() }
+                        .add(rows.getString("extracted_text"))
+                }
+                texts
             }
         }
     }

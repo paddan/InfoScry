@@ -7,6 +7,7 @@ import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.UnitKind
 import infoscry.jobs.ImportJobHandler
+import infoscry.ocr.OcrQualityScorer
 import infoscry.storage.DocumentListing
 import infoscry.storage.DocumentProgress
 import infoscry.storage.DocumentSort
@@ -16,6 +17,7 @@ import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 
 /**
@@ -44,6 +46,12 @@ data class DocumentListItem(
      * and a row of zeroes would be a claim rather than an absence.
      */
     val progress: DocumentProgressView? = null,
+    /**
+     * The document's quality score, 0 to 100, over the text of its live units. Absent unless the document is
+     * complete and has text that can be judged. A reading aid for the row, never a decision input.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val qualityScore: Double? = null,
 )
 
 /**
@@ -126,6 +134,9 @@ data class DocumentDetail(
      * [errorMessage].
      */
     val warnings: List<String> = emptyList(),
+    /** The same document-level quality score the row carries, absent unless the document is complete. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val qualityScore: Double? = null,
 )
 
 /**
@@ -176,10 +187,16 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                 val documents = context.documents.listListing(listing, minOf(limit, MAX_DOCUMENTS_PER_PAGE), offset)
                 // One batched read for the whole page: a progress cell per row must not be a query per row.
                 val progress = context.content.documentProgress(documents.map { it.id })
+                // Only complete documents are scored, so the text is read for those alone and in one batch too.
+                val texts = context.content.extractedTextsOf(
+                    documents.filter { it.status == DocumentStatus.COMPLETE }.map { it.id },
+                )
                 call.respondJson(
                     HttpStatusCode.OK,
                     DocumentsResponse(
-                        documents = documents.map { it.toListItem(progress[it.id]?.toView()) },
+                        documents = documents.map {
+                            it.toListItem(progress[it.id]?.toView(), it.qualityScoreFrom { texts[it.id] })
+                        },
                         total = context.documents.countListing(listing),
                     ),
                 )
@@ -217,11 +234,15 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                     ?: throw NoSuchElementException("no document with id $rawDocumentId exists in this collection")
                 val progress = context.content.documentProgress(listOf(document.id))[document.id]
                 val errorMessage = document.errorCode?.let { ImportJobHandler.messageFor(it) }
+                val qualityScore = document.qualityScoreFrom {
+                    context.content.extractedTextsOf(listOf(document.id))[document.id]
+                }
                 call.respondJson(
                     HttpStatusCode.OK,
                     DocumentDetail(
-                        document = document.toListItem(progress?.toView()),
+                        document = document.toListItem(progress?.toView(), qualityScore),
                         errorMessage = errorMessage,
+                        qualityScore = qualityScore,
                         sourceId = context.content.listUnits(document.id, afterOrdinal = -1, limit = 1)
                             .firstOrNull()?.id?.value,
                         progress = progress?.toView(),
@@ -409,7 +430,16 @@ private fun statusesOf(parameters: List<String>): Set<DocumentStatus> = paramete
         )
 }.toSet()
 
-private fun Document.toListItem(progress: DocumentProgressView? = null) = DocumentListItem(
+/**
+ * The document-level quality score, or null for any document that is not complete. The status gate comes first, so
+ * the unit texts are read only for a complete document; [unitTexts] is not called otherwise.
+ */
+private inline fun Document.qualityScoreFrom(unitTexts: () -> List<String>?): Double? {
+    if (status != DocumentStatus.COMPLETE) return null
+    return OcrQualityScorer.documentScoreOfTexts(unitTexts().orEmpty())
+}
+
+private fun Document.toListItem(progress: DocumentProgressView? = null, qualityScore: Double? = null) = DocumentListItem(
     id = id,
     collectionId = collectionId,
     mediaType = mediaType,
@@ -423,6 +453,7 @@ private fun Document.toListItem(progress: DocumentProgressView? = null) = Docume
     language = language,
     errorCode = errorCode,
     progress = progress,
+    qualityScore = qualityScore,
 )
 
 /** The stored counts as the wire shows them: the same fields, none of the failed codes. */

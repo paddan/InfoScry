@@ -17,6 +17,7 @@
     type InvestigationLimitsInput,
   } from '../lib/investigationLimits';
   import { profileOptionLabel, toolCallingRemedy, toolCallingState } from '../lib/toolCalling';
+  import { qualityLabel } from '../lib/ocrQuality';
   import {
     ApiError,
     deleteConversation,
@@ -1056,6 +1057,8 @@
       {:else if sourceError !== null && source === null}
         <p role="alert">{sourceError}</p>
       {:else if source !== null}
+        {@const quality = qualityLabel(source.qualityScore)}
+        {#if quality !== null}<p class="ocr-quality {quality.level}">{quality.text}</p>{/if}
         <pre class="source-text">{sourceText}</pre>
         {#if sourceError !== null}<p role="alert">{sourceError}</p>{/if}
         {#if source.truncated}
@@ -1147,6 +1150,10 @@
   .result :global(mark) { background: #6b5534; color: #fff4dc; border-radius: 0.12rem; padding: 0 0.08em; }
   .result-title { color: #e6e6e2; font-weight: 650; }
   .meta { color: #929997; font-size: 0.82rem; }
+  .ocr-quality { font-size: 0.82rem; margin: 0 0 0.6rem; }
+  .ocr-quality.good { color: #85ad87; }
+  .ocr-quality.fair { color: #c4a77d; }
+  .ocr-quality.poor { color: #d89a8a; }
   .source-backdrop { position: fixed; inset: 0 0 0 258px; background: rgba(16, 19, 21, 0.55); }
   .source-sheet { position: fixed; top: 0; right: 0; bottom: 0; width: var(--source-column-width); overflow-y: auto; border-left: 1px solid #303535; background: #191c1d; padding: 1.25rem 1.35rem; box-shadow: -1.2rem 0 2.5rem rgba(0, 0, 0, 0.4); }
   .source-heading-row { display: flex; align-items: center; justify-content: space-between; }

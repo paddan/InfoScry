@@ -39,6 +39,7 @@
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
   import { emptyChoice, retryChoice } from './ocrRescan';
+  import { qualityLabel } from './ocrQuality';
 
   export let collections: Collection[];
   export let selectedId: string;
@@ -1579,6 +1580,7 @@
               </thead>
               <tbody>
                 {#each documents as row (row.id)}
+                  {@const quality = qualityLabel(row.qualityScore)}
                   <tr>
                     <td class="select-cell">
                       <input
@@ -1593,7 +1595,10 @@
                     <td>{formatSize(row.sizeBytes)}</td>
                     <td>{formatDate(row.createdAt)}</td>
                     <td>{statusLabel(row.status)}</td>
-                    <td>{progressLabel(row.progress)}</td>
+                    <td>
+                      {progressLabel(row.progress)}
+                      {#if quality !== null}<span class="ocr-quality {quality.level}">{quality.text}</span>{/if}
+                    </td>
                     <td>
                       <button type="button" onclick={() => void openDetails(row.id)}>Details</button>
                     </td>
@@ -1981,6 +1986,10 @@
   .settings-form .actions { justify-content: start; }
   .settings-form textarea { font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0.5rem; resize: vertical; width: 100%; box-sizing: border-box; }
   .hint { color: #929997; font-size: 0.82rem; }
+  .ocr-quality { display: block; font-size: 0.82rem; }
+  .ocr-quality.good { color: #85ad87; }
+  .ocr-quality.fair { color: #c4a77d; }
+  .ocr-quality.poor { color: #d89a8a; }
   .eyebrow { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
   button.primary:hover:not(:disabled) { background: #d4ba94; }

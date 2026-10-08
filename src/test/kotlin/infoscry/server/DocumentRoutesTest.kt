@@ -19,6 +19,9 @@ import infoscry.extract.ExtractionSettings
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -32,6 +35,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -534,6 +538,49 @@ class DocumentRoutesTest {
         assertEquals(GpuRuntime.remedy(), detail.errorMessage, "the failure keeps the remedy, not the raw error")
         assertEquals(sourceId, detail.sourceId, "the text that was extracted is still readable without a GPU")
         assertEquals(1, assertNotNull(detail.progress).processedUnits)
+    }
+
+    @Test
+    fun `a complete document carries a document-level quality score in its row and its detail`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-quality")
+        harness.context.documents.insert(documentAt(id = documentId.value, collectionId = id, filename = "letter.txt"))
+        commitUnit(documentId, ordinal = 0, text = "Dear reader, the letter arrived on Monday.")
+        commitUnit(documentId, ordinal = 1, text = "We will answer before the end of the week.")
+
+        val listing = harness.get("/api/collections/${id.value}/documents")
+        assertEquals(HttpStatusCode.OK, listing.status, listing.bodyAsText())
+        assertContains(listing.bodyAsText(), "\"qualityScore\":")
+        val row = ApiJson.decodeFromString<DocumentsResponse>(listing.bodyAsText()).documents.single()
+        assertScoreInRange(row.qualityScore)
+
+        val detailResponse = harness.get("/api/collections/${id.value}/documents/${documentId.value}")
+        assertEquals(HttpStatusCode.OK, detailResponse.status, detailResponse.bodyAsText())
+        assertContains(detailResponse.bodyAsText(), "\"qualityScore\":")
+        val detail = ApiJson.decodeFromString<DocumentDetail>(detailResponse.bodyAsText())
+        assertScoreInRange(detail.qualityScore)
+        assertEquals(row.qualityScore, detail.qualityScore, "the row and the detail score the same text")
+    }
+
+    @Test
+    fun `only a complete document with judgeable text carries a quality score key`() = runBlocking {
+        val id = CollectionId(newCollection())
+        harness.context.documents.insert(documentAt(id = "doc-queued", collectionId = id, filename = "queued.txt", status = DocumentStatus.QUEUED))
+        commitUnit(DocumentId("doc-queued"), ordinal = 0, text = "Text that must not be scored yet.")
+        harness.context.documents.insert(documentAt(id = "doc-blank", collectionId = id, filename = "blank.txt"))
+        commitUnit(DocumentId("doc-blank"), ordinal = 0, text = "   \n  ")
+
+        val listing = harness.get("/api/collections/${id.value}/documents")
+        assertEquals(HttpStatusCode.OK, listing.status, listing.bodyAsText())
+        val rows = ApiJson.parseToJsonElement(listing.bodyAsText()).jsonObject["documents"]!!.jsonArray
+            .associateBy { it.jsonObject["originalFilename"]!!.jsonPrimitive.content }
+        assertFalse("qualityScore" in rows.getValue("queued.txt").jsonObject, "a queued row has no score key")
+        assertFalse("qualityScore" in rows.getValue("blank.txt").jsonObject, "an all-blank complete row has no score key")
+    }
+
+    private fun assertScoreInRange(score: Double?) {
+        assertNotNull(score, "a complete document with readable text has a quality score")
+        assertTrue(score in 0.0..100.0, "the quality score is 0 to 100, was $score")
     }
 
     private suspend fun newCollection(): String {

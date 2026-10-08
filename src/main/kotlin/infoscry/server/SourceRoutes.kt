@@ -1,5 +1,6 @@
 package infoscry.server
 
+import infoscry.ocr.OcrQualityScorer
 import infoscry.AppContext
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
@@ -37,6 +38,12 @@ data class SourceContentResponse(
      */
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val revisionId: String? = null,
+    /**
+     * A 0–100 heuristic for how clean the whole unit's text looks, absent when the unit holds no text. It
+     * is scored over the full unit, not the returned slice, so every slice of one page shows the same value.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val qualityScore: Double? = null,
 )
 
 /** Reader-only endpoints. Both identifiers are opaque IDs resolved inside the selected collection. */
@@ -119,6 +126,7 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                         totalChars = sourceText.length,
                         truncated = end < sourceText.length,
                         revisionId = revisionPage?.revisionId,
+                        qualityScore = OcrQualityScorer.score(sourceText),
                     ),
                 )
             }

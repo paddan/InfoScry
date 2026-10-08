@@ -328,6 +328,7 @@ class SearchRoutesTest {
             val liveAfter = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
             assertEquals(HttpStatusCode.OK, liveAfter.status, liveAfter.bodyAsText())
             assertContains(liveAfter.bodyAsText(), "the replacement wording")
+            assertContains(liveAfter.bodyAsText(), "\"qualityScore\":", message = "a source page carries its text-quality score")
             val pinnedAfter = harness.get("/api/collections/$collectionId/sources/${unitId.value}?revision=$base")
             assertEquals(HttpStatusCode.OK, pinnedAfter.status, pinnedAfter.bodyAsText())
             assertContains(pinnedAfter.bodyAsText(), "the original wording")

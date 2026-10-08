@@ -298,6 +298,8 @@ export type SourceContentResponse = {
   text: string;
   offset: number;
   totalChars: number;
+  /** OCR text quality, 0-100 (higher is cleaner); absent when unknown. */
+  qualityScore?: number;
   truncated: boolean;
   /** The revision the text was read from; absent when the live reading was served. */
   revisionId?: string;
@@ -384,6 +386,8 @@ export type DocumentApiRow = {
   errorCode?: string | null;
   /** Compact progress of the current attempt; absent while the document has no attempt recorded. */
   progress?: DocumentProgressView | null;
+  /** OCR text quality, 0-100 (higher is cleaner); absent when unknown. */
+  qualityScore?: number;
 };
 
 /** A page of one collection's documents plus the total the same criteria match. */
@@ -398,6 +402,8 @@ export type DocumentDetail = {
   sourceId?: string | null;
   /** The same counts the row shows, read for this one document. */
   progress?: DocumentProgressView | null;
+  /** OCR text quality, 0-100 (higher is cleaner); absent when unknown. */
+  qualityScore?: number;
   /**
    * Whether Retry is offered: the document's status has unfinished business, nothing is deleting it, and
    * its managed copy is still there. Admission can still refuse for a reason only it knows, which is why
