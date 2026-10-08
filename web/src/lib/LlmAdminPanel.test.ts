@@ -205,7 +205,10 @@ describe('LLM admin panel', () => {
     ]);
     api.fetchLlmCatalog.mockResolvedValue({
       live: true,
-      models: [model('gpt-4o'), model('gpt-4o-mini')],
+      models: [
+        model('gpt-4o', { inputPricePerMillion: 2.5, outputPricePerMillion: 10 }),
+        model('gpt-4o-mini'),
+      ],
     });
 
     render(LlmAdminPanel);
@@ -214,7 +217,8 @@ describe('LLM admin panel', () => {
     await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'OPENAI' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
 
-    expect(await screen.findByRole('option', { name: 'gpt-4o' })).toBeDefined();
+    expect(await screen.findByRole('option', { name: 'gpt-4o — $2.5 in / $10 out per 1M tokens' })).toBeDefined();
+    expect(screen.getByRole('option', { name: 'gpt-4o-mini — price unknown' })).toBeDefined();
     expect(api.fetchLlmCatalog).toHaveBeenCalledWith(
       'OPENAI_COMPATIBLE',
       'https://api.openai.com/v1',
@@ -305,7 +309,7 @@ describe('LLM admin panel', () => {
     await screen.findByLabelText('Name');
 
     await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
-    expect(await screen.findByRole('option', { name: 'gpt-4o' })).toBeDefined();
+    expect(await screen.findByRole('option', { name: 'gpt-4o — price unknown' })).toBeDefined();
 
     await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'ANTHROPIC' } });
 
@@ -329,7 +333,7 @@ describe('LLM admin panel', () => {
     await screen.findByLabelText('Name');
 
     await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
-    expect(await screen.findByRole('option', { name: 'gpt-4o' })).toBeDefined();
+    expect(await screen.findByRole('option', { name: 'gpt-4o — price unknown' })).toBeDefined();
 
     await fireEvent.input(screen.getByLabelText('Endpoint (base URL)'), {
       target: { value: 'https://other.example.test/v1' },

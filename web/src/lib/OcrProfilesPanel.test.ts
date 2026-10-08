@@ -514,7 +514,7 @@ describe('OCR profiles panel', () => {
       await screen.findByLabelText('Model catalog');
 
       expect(api.fetchLlmCatalog).toHaveBeenCalledWith('OPENAI_COMPATIBLE', 'https://api.openai.com/v1', 'OPENAI_API_KEY', true);
-      expect(screen.getByRole('option', { name: 'vision-model' })).toBeDefined();
+      expect(screen.getByRole('option', { name: 'vision-model — price unknown' })).toBeDefined();
       expect(screen.queryByRole('option', { name: /text-model/ })).toBeNull();
     });
 
@@ -529,8 +529,8 @@ describe('OCR profiles panel', () => {
       await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
       await screen.findByLabelText('Model catalog');
 
-      expect(screen.getByRole('option', { name: 'mystery-model — image support unknown' })).toBeDefined();
-      expect(screen.getByRole('option', { name: 'vision-model' })).toBeDefined();
+      expect(screen.getByRole('option', { name: 'mystery-model — price unknown — image support unknown' })).toBeDefined();
+      expect(screen.getByRole('option', { name: 'vision-model — price unknown' })).toBeDefined();
 
       await fireEvent.change(screen.getByLabelText('Model catalog'), { target: { value: 'mystery-model' } });
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fetchLlmCatalog, type LlmCatalogModel, type LlmPreset, type LlmProvider } from './api';
+  import { modelPriceLabel } from './modelPrice';
 
   /**
    * The provider, preset, model catalog, endpoint, key variable, limits and prices of a profile form.
@@ -127,7 +128,9 @@
   }
 
   function modelOptionLabel(model: LlmCatalogModel): string {
-    return imageOnly && model.imageInput === null ? `${model.id} — image support unknown` : model.id;
+    const parts = [model.id, modelPriceLabel(model)];
+    if (imageOnly && model.imageInput === null) parts.push('image support unknown');
+    return parts.join(' — ');
   }
 </script>
 
