@@ -12,32 +12,39 @@ application suites.
 | Area | Current behavior |
 |---|---|
 | Local runtime | Backend, CLI and static web reader; foreground loopback server |
-| Import | Managed copies, per-collection deduplication, extraction/OCR checkpoints and persistent jobs |
+| Import | Managed copies, per-collection deduplication, extraction/OCR checkpoints and persistent jobs; unsupported files are skipped and not shown; include/exclude extensions and per-collection ignore patterns |
 | Search | Keyword, semantic and hybrid retrieval, live as the reader types; advanced filters rerun the current query; validated retrieval refills stale or artifact-heavy results; inclusive import dates and safe excerpt highlighting; recoverable reindexing |
-| Collections | Creation, settings, paged document browsing, progress, durable import history, retries and recoverable deletion |
-| LLM profiles | CLI/Admin management, role defaults, provider presets and model catalog |
+| Collections | Creation, settings (including OCR defaults and ignore patterns), paged document browsing, progress, durable import history, retries (optionally with a chosen OCR method) and recoverable deletion |
+| LLM profiles | CLI/Admin management, role defaults, provider presets and model catalog; tool calling measured from Admin or the CLI |
 | Ask | Streaming answers with validated citations and saved answer history |
-| Investigate | Bounded research, retained-evidence follow-ups, one adopted answer per turn and saved conversations |
+| Investigate | Bounded research, retained-evidence follow-ups, one adopted answer per turn and saved conversations; an unmeasured profile is marked and refused with the remedy |
 | Sources | Bounded extracted-source viewer and managed-original link |
 
 ## OCR engines and document rescanning
 
 [Selectable OCR and document rescanning](specs/2026-09-30-ocr-rescanning.md) is
-implemented through the plan's rescan core. Tesseract, a local Surya engine and
+implemented through the manual product: Tesseract, a local Surya engine and
 image-capable LLM profiles can transcribe page images; documents carry immutable
 revisions with a recoverable publication boundary; a rescan compares its reading
-with the published text, a reviewer recommends and a person decides. Everything
-stays in pilot mode: no replacement happens without a manual decision, and
-"Scan again" is driven by the operations API rather than a UI panel. The manual UI and history/restore are unfinished. Retry wiring, non-image import compatibility, saved evidence and image provenance/lifetime still have open correctness gates. The [ticket plan](tickets/ocr-rescanning/STATUS.md) splits these repairs and the remaining UI/acceptance work into independently testable slices.
+with the published text, a reviewer recommends and a person decides in Admin.
+Admin has OCR profiles (with the LLM provider presets and image-capable models,
+or a copy of an image-capable LLM profile), collection OCR controls, Scan again,
+page review and a text history that names the OCR settings each revision was
+read with, with explicit restoration. Everything stays in pilot mode: no
+replacement happens without a manual decision. Fake-provider browser acceptance
+passes; real-runtime acceptance (ticket 10) and the measured pilot (ticket 11)
+are open. See the [ticket plan](tickets/ocr-rescanning/STATUS.md).
 
-## Planned fixes from local testing
+## Fixes from local testing
 
 The owner's first local test of the OCR work (2026-10-07) produced an
-[eight-ticket plan](plans/2026-10-07-local-testing-feedback.md): measuring tool
-calling from Admin, two history display gaps, OCR profiles with the LLM
-providers and image-capable models (own OCR profiles or existing LLM profiles), skipping files that cannot be imported,
-include/exclude extensions and per-collection ignore patterns for imports, and retrying a
-document with a chosen OCR method. None of it is implemented yet; see the
+[eight-ticket plan](plans/2026-10-07-local-testing-feedback.md). All eight are
+implemented and merged to `main` (2026-10-08), each with a fake-provider
+browser scenario: measuring tool calling from Admin, a finished import's stage,
+the OCR settings in text history, OCR profiles with the LLM providers and
+image-capable models, skipping unsupported files, include/exclude extensions,
+per-collection ignore patterns, and retrying a document with a chosen OCR
+method. Owner decisions still open are listed in the
 [ticket status](tickets/local-testing-feedback/STATUS.md).
 
 ## Planned compact document list
@@ -73,19 +80,36 @@ Chromium flow. The full normal suite took 12 minutes 55 seconds; its cancelled
 provider-stream fixtures deliberately hold a local HTTP response for 60 seconds.
 This run did not repeat real CoreML testing.
 
+On 2026-10-08 the merged local-testing fixes were run in a Linux cloud
+container as root (not the Mac): 1,589 JVM tests with 10 failures, all
+environmental (permission checks bypassed by root, process reaping without an
+init process, locale-dependent fixtures); 423 frontend Vitest tests and
+`npm run check` with no errors; `externalTest` 37 tests with all four browser
+classes passing (Collections 13, OCR 12, Investigate 8, Search 1) and 3
+failures because Tesseract and Surya are not installed there. `./gradlew check`,
+real OCR tools and CoreML were not run.
+
 ## What browser acceptance proves
 
-**Collections:** eight scenarios exercise empty start, creation, folder import
+**Collections:** thirteen scenarios exercise empty start, creation, folder import
 and duplicates, filtered/paged browsing, details and source reading, settings,
 single/bulk retry, single/bulk deletion, collection deletion during an import,
-restart recovery and the legacy `Default` collection. They use a fake extraction
+restart recovery, the legacy `Default` collection, a finished import's stage,
+skipped unsupported files, extension filters, ignore patterns and retry with a
+chosen OCR method. They use a fake extraction
 pipeline and deterministic fake embedder with redistributable fixtures.
 
-**Investigate:** seven scenarios exercise the first cited question,
+**Investigate:** eight scenarios exercise an unmeasured profile measured from
+Admin, the first cited question,
 retained-evidence follow-ups, source opening, reload/reopen, citation correction,
 HTTP rejection, empty evidence, research limits, repeated-call limits and
 cancellation recovery. They use a local fake provider. The Investigate report
 (removed from `docs/` once complete; see git history before commit `c9edfab`) records the details.
+
+**OCR:** twelve scenarios exercise OCR profiles and their provider catalog,
+collection OCR controls including image-capable LLM profiles, Scan again, page
+review decisions, text history with the import's OCR settings and restoration.
+They use fake engines and a local fake provider.
 
 **Search:** a Chromium scenario exercises live advanced filters, a delayed
 older response, inclusive date bounds, a single-digit query, mode changes and

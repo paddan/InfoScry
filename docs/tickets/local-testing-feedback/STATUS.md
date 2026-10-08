@@ -14,3 +14,28 @@
 | [08 — Read a document again with a chosen OCR method, including after a failed import](08-retry-with-chosen-ocr.md) | 04 | Implemented; browser scenario passes (fake provider) |
 
 A profile can be measured in Admin → LLM profiles ("Check tool calling") or with `infoscry llm test <profile name>`.
+
+## Merge and verification (2026-10-08)
+
+All eight tickets are merged to `main` ([PR #6](https://github.com/paddan/InfoScry/pull/6), `caaa0c2`). Run in a
+Linux cloud container as root, not on the Mac:
+
+- Backend `test`: 1,589 tests, 10 failures, all environmental (root bypasses permission checks, no init process
+  to reap children, locale-dependent fixtures).
+- Web: 423 Vitest tests; `npm run check` 0 errors, 0 warnings.
+- `externalTest`: 37 tests; Collections 13, OCR 12, Investigate 8 and Search 1 browser scenarios pass; 3 failures
+  need Tesseract or Surya, which are not installed there.
+- The browser scenarios found and fixed two UI bugs: a collection's copied LLM profile shown as "no longer
+  available" after a reload, and an empty answer bubble left by a refused Investigate turn.
+- Seen once each and passing on rerun, not investigated: `legacy-default` (Collections), `review-use-new` and
+  `review-keep-existing` (OCR), and `JobEventRoutesTest` under full-suite load.
+
+Not verified: `./gradlew check`, real providers, real Tesseract/Surya through these flows, CoreML.
+
+## Open owner decisions
+
+- 06: the extension filter also applies to individually chosen files, not only to files found in a folder.
+- 04: `deepseek-chat` and `deepseek-reasoner` are marked text-only in `providers.json` without a cited source.
+- 07: matching ignores case, `[abc]` classes are unsupported (brackets are literal), and an individually chosen
+  file is matched by its own name only, so a directory pattern such as `node_modules/` does not skip it.
+- 07: collections created before this change start with an empty ignore list rather than the defaults.
