@@ -374,6 +374,18 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
             }
         }
 
+        // Withdraws an undecided replacement and releases the document; the published text is untouched.
+        post("/operations/{operationId}/discard-pending") {
+            call.handle {
+                val operation = context.rescanService.discardPending(
+                    collectionId = call.collectionId(),
+                    documentId = call.documentId(),
+                    operationId = call.operationId(),
+                )
+                call.respondJson(HttpStatusCode.OK, operation)
+            }
+        }
+
         get("/reviews") {
             call.handle {
                 val collectionId = call.collectionId()
@@ -580,14 +592,7 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                 val jobId = call.jobId()
                 val job = context.jobs.get(jobId)
                     ?: throw NoSuchElementException("no job with id ${jobId.value}")
-                // An import's files and a retry's documents share one allowance each, so the scope is approved
-                // on the job whichever kind it is; the two payloads name the same snapshot.
-                val recorded = if (job.type == infoscry.domain.JobType.RETRY) {
-                    infoscry.jobs.RetryJobPayload.decode(job.payload).ocr
-                } else {
-                    infoscry.jobs.ImportJobPayload.decode(job.payload).ocr
-                }
-                val snapshot = recorded
+                val snapshot = job.recordedOcrSelection()
                     ?: throw BadRequestException(
                         "this job recorded no OCR selection, so it has no external page scope to approve",
                     )
@@ -643,6 +648,52 @@ data class ImportExternalApprovalResponse(
     val state: String? = null,
     val stage: String? = null,
 )
+
+/**
+ * What a person needs to approve a job that is waiting for external pages, carried on the job views only while
+ * the job waits: the snapshot the approval must name, what the scope has already sent, and what it may send.
+ */
+@Serializable
+data class ExternalApprovalView(
+    val snapshotHash: String,
+    val distinctPagesSent: Int,
+    val allowance: Int,
+    val calls: Int,
+)
+
+/**
+ * The OCR selection an import or retry job recorded when it was admitted, or null when it recorded none.
+ *
+ * The approval route and the job views both read the selection through here, so the snapshot a view offers for
+ * approval is always the one the route will accept.
+ */
+internal fun infoscry.domain.Job.recordedOcrSelection(): OcrSettingsSnapshot? =
+    if (type == infoscry.domain.JobType.RETRY) {
+        infoscry.jobs.RetryJobPayload.decode(payload).ocr
+    } else {
+        infoscry.jobs.ImportJobPayload.decode(payload).ocr
+    }
+
+/**
+ * The approval a job waiting for external pages needs, or null when the job is not waiting for one.
+ *
+ * Only an import or a retry can be approved through `POST /api/jobs/{id}/approve-external`, so only those are
+ * offered. A payload that cannot be read is not offered either: a job list must not fail because one row is
+ * unreadable, and the approval route refuses that job on its own terms.
+ */
+internal fun AppContext.externalApprovalOf(job: infoscry.domain.Job): ExternalApprovalView? {
+    if (job.stage != infoscry.storage.JobStore.AWAITING_APPROVAL_STAGE) return null
+    if (job.type != infoscry.domain.JobType.IMPORT && job.type != infoscry.domain.JobType.RETRY) return null
+    val snapshot = runCatching { job.recordedOcrSelection() }.getOrNull() ?: return null
+    val owner = OcrExternalOwner.job(job.id.value)
+    val snapshotHash = infoscry.storage.OcrOperationStore.snapshotHashOf(snapshot)
+    return ExternalApprovalView(
+        snapshotHash = snapshotHash,
+        distinctPagesSent = ocrOperations.distinctPageCount(owner),
+        allowance = ocrOperations.allowanceFor(owner, snapshot.externalPageLimit, snapshotHash).allowance,
+        calls = ocrOperations.callCount(owner),
+    )
+}
 
 /**
  * How the two external counters differ, in the words the API and the UI show beside them.

@@ -56,6 +56,7 @@ import java.nio.file.Path
 import java.time.Duration
 import kotlinx.coroutines.sync.Mutex
 import org.slf4j.LoggerFactory
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -148,6 +149,9 @@ data class JobApiView(
     val total: Int = 0,
     val errorCode: String? = null,
     val cancelRequested: Boolean = false,
+    /** The approval this job waits for, present only while it is paused for external pages. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val externalApproval: ExternalApprovalView? = null,
 )
 
 @Serializable
@@ -402,7 +406,7 @@ fun Application.configureRoutes(
                         )
                         call.respondJson(
                             HttpStatusCode.Accepted,
-                            ImportAcceptedResponse(accepted = true, job = job.toApiView()),
+                            ImportAcceptedResponse(accepted = true, job = job.toApiView(context)),
                         )
                     }
                 }
@@ -486,7 +490,7 @@ fun Application.configureRoutes(
                         parameter.toIntOrNull()?.takeIf { it >= 0 }
                             ?: throw BadRequestException("offset must be a whole number, zero or greater, was '$parameter'")
                     } ?: 0
-                    call.respondJson(HttpStatusCode.OK, JobsResponse(context.jobs.list(limit, offset).map(Job::toApiView)))
+                    call.respondJson(HttpStatusCode.OK, JobsResponse(context.jobs.list(limit, offset).map { it.toApiView(context) }))
                 }
             }
 
@@ -495,7 +499,7 @@ fun Application.configureRoutes(
                     val jobId = call.jobId()
                     val job = context.jobs.get(jobId)
                         ?: throw NoSuchElementException("no job with id ${jobId.value}")
-                    call.respondJson(HttpStatusCode.OK, JobResponse(job.toApiView()))
+                    call.respondJson(HttpStatusCode.OK, JobResponse(job.toApiView(context)))
                 }
             }
 
@@ -519,7 +523,7 @@ fun Application.configureRoutes(
             post("/{id}/cancel") {
                 call.handle {
                     val jobId = call.jobId()
-                    call.respondJson(HttpStatusCode.OK, JobResponse(context.cancelJob(jobId).toApiView()))
+                    call.respondJson(HttpStatusCode.OK, JobResponse(context.cancelJob(jobId).toApiView(context)))
                 }
             }
         }
@@ -747,7 +751,7 @@ fun ApplicationCall.collectionId(): CollectionId {
     return CollectionId(raw)
 }
 
-private fun Job.toApiView() = JobApiView(
+private fun Job.toApiView(context: AppContext) = JobApiView(
     id = id,
     type = type,
     state = state,
@@ -760,6 +764,7 @@ private fun Job.toApiView() = JobApiView(
     total = total,
     errorCode = errorCode,
     cancelRequested = cancelRequested,
+    externalApproval = context.externalApprovalOf(this),
 )
 
 private fun ImportItem.toApiView() = ImportItemApiView(

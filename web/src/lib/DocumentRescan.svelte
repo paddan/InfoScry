@@ -4,6 +4,7 @@
     admitRescan,
     approveRescanExternal,
     cancelRescan,
+    discardPendingRescan,
     getRescanOperation,
     listRescanOperations,
     previewRescan,
@@ -51,7 +52,8 @@
   let loadError: string | null = null;
   let latest: OcrOperation | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let controlBusy: 'cancel' | 'resume' | null = null;
+  let controlBusy: 'cancel' | 'resume' | 'discard' | null = null;
+  let discardAsked = false;
   let controlError: string | null = null;
   let cancelRequestedFor: string | null = null;
 
@@ -318,6 +320,27 @@
     }
   }
 
+  /** Drops the undecided new reading of a finished scan; the existing text stays and the document is released. */
+  async function discardPending(): Promise<void> {
+    const operation = latest;
+    if (operation === null || controlBusy !== null) return;
+    const mine = generation;
+    controlBusy = 'discard';
+    controlError = null;
+    try {
+      const answered = await discardPendingRescan(collectionId, documentId, operation.operationId);
+      if (mine !== generation) return;
+      discardAsked = false;
+      reviewOpen = false;
+      setLatest(answered);
+    } catch (failure) {
+      if (mine !== generation) return;
+      controlError = describe(failure);
+    } finally {
+      if (mine === generation) controlBusy = null;
+    }
+  }
+
   // ---- approving an external page scope ----
 
   function closeApprovalState(): void {
@@ -428,6 +451,12 @@
     setLatest(operation);
   }
 
+  /** A discard releases the document, so the review closes on the operation the server answered with. */
+  function reviewDiscarded(operation: OcrOperation): void {
+    reviewOpen = false;
+    setLatest(operation);
+  }
+
   function plural(count: number, noun: string): string {
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
   }
@@ -523,6 +552,7 @@
       operationId={latest.operationId}
       onclose={() => void closeReview()}
       onpublished={reviewPublished}
+      ondiscarded={reviewDiscarded}
     />
   {/if}
 
@@ -580,6 +610,23 @@
     <p class="hint">
       A scan of this document is in progress or has pages waiting for review, so another cannot start yet.
     </p>
+    {#if latest !== null && latest.stage === 'COMPLETE' && latest.pendingReviewCount > 0}
+      {#if discardAsked}
+        <p class="hint">The existing text stays; the new reading of these pages is dropped.</p>
+        <div class="actions">
+          <button type="button" onclick={() => void discardPending()} disabled={controlBusy !== null}>
+            Confirm discard
+          </button>
+          <button type="button" onclick={() => (discardAsked = false)} disabled={controlBusy !== null}>Keep them</button>
+        </div>
+      {:else}
+        <div class="actions">
+          <button type="button" onclick={() => (discardAsked = true)} disabled={controlBusy !== null}>
+            Discard pending pages
+          </button>
+        </div>
+      {/if}
+    {/if}
   {/if}
 
   {#if previewOpen}

@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   readSource: vi.fn(),
   readPendingCandidate: vi.fn(),
   decideReviews: vi.fn(),
+  discardPendingRescan: vi.fn(),
   publishReviewDecisions: vi.fn(),
 }));
 
@@ -29,6 +30,7 @@ vi.mock('./api', () => ({
   pendingImageUrl: (collection: string, document: string, operation: string, unit: string) =>
     `/api/collections/${collection}/documents/${document}/ocr/reviews/${unit}/image?operationId=${operation}`,
   decideReviews: api.decideReviews,
+  discardPendingRescan: api.discardPendingRescan,
   publishReviewDecisions: api.publishReviewDecisions,
 }));
 
@@ -438,6 +440,28 @@ describe('OcrReviewPanel', () => {
     it('does not offer Edit text for the whole document', async () => {
       await renderPanel();
       expect(screen.queryByRole('button', { name: /Edit text for the whole document/ })).toBeNull();
+    });
+  });
+
+  describe('discarding pending pages', () => {
+    it('offers the discard only when the operation still counts pending pages but the list is empty', async () => {
+      const ondiscarded = vi.fn();
+      api.listPendingReviews.mockResolvedValue(page([], 0, { pendingReviewCount: 2 }));
+      api.discardPendingRescan.mockResolvedValue(operation({ pendingReviewCount: 0 }));
+      await renderPanel({ ondiscarded });
+
+      await click('Discard pending pages');
+      expect(api.discardPendingRescan).not.toHaveBeenCalled();
+      await click('Confirm discard');
+
+      expect(api.discardPendingRescan).toHaveBeenCalledWith('nightfall', 'doc-1', 'op-1');
+      expect(ondiscarded).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not offer it when the list is empty and nothing is counted as pending', async () => {
+      api.listPendingReviews.mockResolvedValue(page([], 0, { pendingReviewCount: 0 }));
+      await renderPanel();
+      expect(screen.queryByRole('button', { name: 'Discard pending pages' })).toBeNull();
     });
   });
 

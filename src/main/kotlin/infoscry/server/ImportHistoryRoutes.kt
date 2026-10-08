@@ -9,6 +9,7 @@ import io.ktor.server.application.call
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
 import io.ktor.server.routing.route
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 
 /**
@@ -34,6 +35,9 @@ data class ImportHistoryEntry(
     val updatedAt: String,
     /** The persisted per-file outcomes of this import, on the existing job-items route. */
     val itemsUrl: String,
+    /** The approval this import waits for, present only while it is paused for external pages. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val externalApproval: ExternalApprovalView? = null,
 )
 
 /** A page of one collection's imports plus the total the same criteria match. */
@@ -74,7 +78,7 @@ fun Routing.configureImportHistoryRoutes(context: AppContext) {
                     ImportsResponse(
                         imports = context.jobs
                             .listImports(collection.id, minOf(limit, MAX_IMPORTS_PER_PAGE), offset)
-                            .map(Job::toImportHistoryEntry),
+                            .map { it.toImportHistoryEntry(context) },
                         total = context.jobs.countImports(collection.id),
                     ),
                 )
@@ -83,7 +87,7 @@ fun Routing.configureImportHistoryRoutes(context: AppContext) {
     }
 }
 
-private fun Job.toImportHistoryEntry() = ImportHistoryEntry(
+private fun Job.toImportHistoryEntry(context: AppContext) = ImportHistoryEntry(
     id = id,
     state = state,
     stage = stage,
@@ -94,6 +98,7 @@ private fun Job.toImportHistoryEntry() = ImportHistoryEntry(
     createdAt = createdAt,
     updatedAt = updatedAt,
     itemsUrl = "$JOB_ITEMS_PATH_PREFIX/${id.value}/items",
+    externalApproval = context.externalApprovalOf(this),
 )
 
 /** How many imports one page returns when the caller does not ask for a size. */

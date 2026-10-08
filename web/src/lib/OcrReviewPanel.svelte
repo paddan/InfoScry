@@ -2,6 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import {
     decideReviews,
+    discardPendingRescan,
     listDocumentRevisions,
     listPendingReviews,
     pendingImageUrl,
@@ -26,6 +27,8 @@
   export let onclose: () => void = () => {};
   /** Called once with the operation after a publication reported PUBLISHED. */
   export let onpublished: (operation: OcrOperation) => void = () => {};
+  /** Called with the operation after its undecided pages were discarded. */
+  export let ondiscarded: (operation: OcrOperation) => void = () => {};
 
   /** One page per request: a large document never loads more than one proposal and one baseline at once. */
   const PAGE_SIZE = 1;
@@ -84,6 +87,10 @@
   let activeRevisionId: string | null = null;
   let offset = 0;
   let total = 0;
+  /** What the operation says still waits for a decision, which can exceed the list when review rows are missing. */
+  let operationPending = 0;
+  let discardAsked = false;
+  let discarding = false;
   let accounting: string | null = null;
   let current: PendingReview | null = null;
   let baseline: Baseline = { state: 'none' };
@@ -119,6 +126,23 @@
   $: canPublish = total === 0 && !loading && problemKind !== 'load' && activeRevisionId !== null
     && publication?.published !== true;
 
+  async function discardPending(): Promise<void> {
+    if (discarding) return;
+    const mine = generation;
+    discarding = true;
+    try {
+      const answered = await discardPendingRescan(collectionId, documentId, operationId);
+      if (mine !== generation) return;
+      discardAsked = false;
+      ondiscarded(answered);
+    } catch (failure) {
+      if (mine !== generation) return;
+      fail(failure);
+    } finally {
+      if (mine === generation) discarding = false;
+    }
+  }
+
   function start(next: string): void {
     boundKey = next;
     generation += 1;
@@ -134,6 +158,8 @@
     activeRevisionId = null;
     offset = 0;
     total = 0;
+    operationPending = 0;
+    discardAsked = false;
     accounting = null;
     current = null;
     baseline = { state: 'none' };
@@ -195,6 +221,7 @@
         revisionKnown = true;
       }
       total = answer.total;
+      operationPending = answer.pendingReviewCount ?? 0;
       decided = decidedUnpublished(answer);
       accounting = answer.externalAccounting ?? null;
       // Decisions that were saved shrink the list: a position past its end steps back to the last page.
@@ -542,6 +569,23 @@
       {offset + 1} of {total} {total === 1 ? 'page' : 'pages'} waiting for review
     {/if}
   </p>
+  {#if total === 0 && !loading && operationPending > 0 && publication?.published !== true}
+    <p class="hint">
+      The scan still counts {operationPending} {operationPending === 1 ? 'page' : 'pages'} as waiting, but none can be
+      shown here. Discarding them keeps the existing text and lets the document be scanned again.
+    </p>
+    {#if discardAsked}
+      <p class="hint">The existing text stays; the new reading of these pages is dropped.</p>
+      <div class="actions">
+        <button type="button" onclick={() => void discardPending()} disabled={discarding}>Confirm discard</button>
+        <button type="button" onclick={() => (discardAsked = false)} disabled={discarding}>Keep them</button>
+      </div>
+    {:else}
+      <div class="actions">
+        <button type="button" onclick={() => (discardAsked = true)}>Discard pending pages</button>
+      </div>
+    {/if}
+  {/if}
   {#if accounting}<p class="hint">{accounting}</p>{/if}
   {#if decided > 0}
     <p class="decided">{decided === 1 ? '1 decided page is' : `${decided} decided pages are`} waiting to be published.</p>

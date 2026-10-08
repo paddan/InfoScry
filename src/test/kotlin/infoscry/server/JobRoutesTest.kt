@@ -1,7 +1,17 @@
 package infoscry.server
 
+import infoscry.domain.CollectionId
+import infoscry.domain.JobId
 import infoscry.domain.JobType
+import infoscry.extract.EXTRACTOR_SCHEMA_VERSION
+import infoscry.extract.ExtractionSettings
+import infoscry.jobs.ImportJobPayload
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.storage.ImportItemOutcome
+import infoscry.storage.JobStore
+import infoscry.storage.OcrOperationStore
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -17,6 +27,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** The browser-facing job routes expose an allowlist, not persisted job and import-item rows. */
 class JobRoutesTest {
@@ -167,6 +178,86 @@ class JobRoutesTest {
         }
         assertEquals(HttpStatusCode.OK, harness.get("/api/jobs?limit=1&offset=0").status)
     }
+
+    @Test
+    fun `a job paused for an external approval names the snapshot the approval route accepts`() = runBlocking {
+        val collectionId = harness.context.collectionService.requireActiveByNameOrId("Default").id
+        val snapshot = OcrSettingsSnapshot(
+            engine = OcrEngine.TESSERACT,
+            mode = OcrImportMode.FILL_MISSING,
+            language = "eng",
+            extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+            externalPageLimit = 1,
+        )
+        val waiting = pausedForApproval(
+            collectionId,
+            ImportJobPayload(
+                collectionId = "default",
+                sources = listOf("/private/evidence/scan.png"),
+                settings = ExtractionSettings(ocrLanguages = "eng"),
+                ocr = snapshot,
+            ).encode(),
+        )
+        // A job paused without a recorded selection has no scope to approve, so it carries no block.
+        val unscoped = pausedForApproval(
+            collectionId,
+            ImportJobPayload(
+                collectionId = "default",
+                sources = listOf("/private/evidence/other.png"),
+                settings = ExtractionSettings(ocrLanguages = "eng"),
+            ).encode(),
+        )
+        val queued = harness.context.jobs.enqueue(JobType.IMPORT, payload = """{"paths":["/x.png"]}""", total = 1)
+
+        val detail = jobObject(harness.get("/api/jobs/${waiting.value}").bodyAsText())
+        val approval = detail["externalApproval"]!!.jsonObject
+        val snapshotHash = approval["snapshotHash"]!!.jsonPrimitive.content
+        assertEquals(OcrOperationStore.snapshotHashOf(snapshot), snapshotHash)
+        assertEquals(0, approval["distinctPagesSent"]!!.jsonPrimitive.content.toInt())
+        assertEquals(1, approval["allowance"]!!.jsonPrimitive.content.toInt())
+        assertEquals(0, approval["calls"]!!.jsonPrimitive.content.toInt())
+
+        // The list answers the same block for the paused job, and never for a job that is not paused.
+        val listed = Json.parseToJsonElement(harness.get("/api/jobs").bodyAsText()).jsonObject["jobs"]!!.jsonArray
+            .associateBy { it.jsonObject["id"]!!.jsonPrimitive.content }
+        assertEquals(snapshotHash, listed.getValue(waiting.value).jsonObject["externalApproval"]!!.jsonObject["snapshotHash"]!!.jsonPrimitive.content)
+        assertFalse(listed.getValue(unscoped.value).jsonObject.containsKey("externalApproval"))
+        assertFalse(listed.getValue(queued.id.value).jsonObject.containsKey("externalApproval"))
+        assertFalse(jobObject(harness.get("/api/jobs/${unscoped.value}").bodyAsText()).containsKey("externalApproval"))
+
+        // The import history carries the same block for the paused import, and none for the unscoped one.
+        val history = Json.parseToJsonElement(harness.get("/api/collections/Default/imports").bodyAsText())
+            .jsonObject["imports"]!!.jsonArray
+            .associateBy { it.jsonObject["id"]!!.jsonPrimitive.content }
+        assertEquals(
+            snapshotHash,
+            history.getValue(waiting.value).jsonObject["externalApproval"]!!.jsonObject["snapshotHash"]!!.jsonPrimitive.content,
+        )
+        assertFalse(history.getValue(unscoped.value).jsonObject.containsKey("externalApproval"))
+
+        val approved = harness.request(
+            HttpMethod.Post,
+            "/api/jobs/${waiting.value}/approve-external",
+            """{"expectedSnapshotHash":"$snapshotHash","maxDistinctPages":2}""",
+            Credential.CSRF,
+        )
+        assertEquals(HttpStatusCode.Accepted, approved.status, approved.bodyAsText())
+
+        // The approval resumes the job, so it no longer waits and the block is gone with the stage.
+        val resumed = jobObject(harness.get("/api/jobs/${waiting.value}").bodyAsText())
+        assertFalse(resumed.containsKey("externalApproval"), "a resumed job is not awaiting approval")
+    }
+
+    /** Enqueues an import with [payload] and leaves it paused the way the import handler does. */
+    private fun pausedForApproval(collectionId: CollectionId, payload: String): JobId {
+        val job = harness.context.jobs.enqueue(JobType.IMPORT, collectionId = collectionId, payload = payload, total = 1)
+        harness.context.jobs.claim(job.id)
+        harness.context.jobs.progress(job.id, stage = JobStore.AWAITING_APPROVAL_STAGE)
+        harness.context.jobs.complete(job.id)
+        return job.id
+    }
+
+    private fun jobObject(body: String) = Json.parseToJsonElement(body).jsonObject["job"]!!.jsonObject
 
     private fun findJob(body: String) = Json.parseToJsonElement(body).jsonObject["job"]
         ?: Json.parseToJsonElement(body).jsonObject["jobs"]!!.jsonArray.first()

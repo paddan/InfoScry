@@ -36,6 +36,7 @@ import infoscry.ocr.OcrExternalOwner
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrOperation
 import infoscry.ocr.OcrOperationStage
+import infoscry.storage.OcrOperationConflictException
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrProfileRevision
 import infoscry.ocr.OcrSettingsSnapshot
@@ -110,6 +111,75 @@ class RescanJobHandlerTest {
             assertEquals(1, result.indexedChunks)
             assertEquals(picture.baselineRevisionId, result.activeRevisionId)
             assertEquals(1, engine.calls)
+        }
+    }
+
+    @Test
+    fun `discarding pending pages releases a document stuck with no review rows and leaves the text alone`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val stuck = harness.rescan(
+                picture = picture,
+                engine = FakePageEngine(readings = listOf("second reading")),
+                reviewer = RecordingReviewer(NEW_BETTER),
+                reviewRevisionId = harness.reviewRevisionId,
+                externalPageLimit = 1,
+            ).operation
+            // The older bug: the operation is complete with a pending page and no review row behind it.
+            harness.deleteAllReviewRows()
+            assertEquals(1, stuck.pendingReviewCount)
+            assertTrue(stuck.holdsDocument)
+            assertTrue(harness.admitRefusal(picture, "after-stuck") is OcrOperationConflictException)
+
+            val released = harness.discardPending(picture, stuck.operationId)
+
+            assertEquals(0, released.pendingReviewCount)
+            assertEquals(OcrOperationStage.COMPLETE, released.stage)
+            assertTrue(!released.holdsDocument)
+            assertEquals("first reading", harness.publishedTextOf(picture))
+            assertEquals(picture.baselineRevisionId, harness.activeRevisionOf(picture))
+            assertEquals(1, harness.indexedChunksOf(picture))
+            assertEquals(null, harness.admitRefusal(picture, "after-discard"), "the document is still held")
+        }
+    }
+
+    @Test
+    fun `discarding pending pages also clears the review rows of those pages`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val pending = harness.rescan(
+                picture = picture,
+                engine = FakePageEngine(readings = listOf("second reading")),
+                reviewer = RecordingReviewer(NEW_BETTER),
+                reviewRevisionId = harness.reviewRevisionId,
+                externalPageLimit = 1,
+            ).operation
+            harness.recordPendingReviewRow(picture, pending)
+            assertEquals(1, harness.pendingReviewRows(picture))
+
+            harness.discardPending(picture, pending.operationId)
+
+            assertEquals(0, harness.pendingReviewRows(picture))
+        }
+    }
+
+    @Test
+    fun `discarding is refused for an operation with nothing pending, a running one and another document's`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val other = harness.importAnotherPicture(text = "other reading")
+            val approved = harness.rescan(
+                picture = picture,
+                engine = FakePageEngine(readings = listOf("second reading")),
+                reviewer = null,
+            ).operation
+            assertEquals(0, approved.pendingReviewCount)
+            assertTrue(harness.discardRefusal(picture, approved.operationId) is IllegalStateException)
+
+            val running = harness.admitOnly(other, reviewRevisionId = harness.reviewRevisionId)
+            assertTrue(harness.discardRefusal(other, running.operationId) is IllegalStateException)
+            assertTrue(harness.discardRefusal(picture, running.operationId) is NoSuchElementException)
+            assertEquals("second reading", harness.publishedTextOf(picture))
         }
     }
 
@@ -981,6 +1051,78 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
                         previewId = previewId,
                         requestId = requestId,
                     )
+                }.exceptionOrNull()
+            }
+        }
+
+    /** Removes every stored review, which is the state the older no-reviewer bug left behind. */
+    fun deleteAllReviewRows() {
+        AppContext.open(harness.dataDir).use { context ->
+            context.database.transaction { connection ->
+                connection.prepareStatement("DELETE FROM page_reviews").use { it.executeUpdate() }
+            }
+        }
+    }
+
+    /** Stores the pending proposal row the production comparison service writes for the operation's candidate page. */
+    fun recordPendingReviewRow(picture: Picture, operation: OcrOperation) {
+        AppContext.open(harness.dataDir).use { context ->
+            val page = context.revisions.pages(assertNotNull(operation.candidateRevisionId)).single()
+            val candidateHash = page.textSha256 ?: infoscry.ocr.readingTextHash(page.extractedText)
+            val baselineHash = "b".repeat(64)
+            context.ocrReviews.record(
+                PageReview(
+                    fingerprint = infoscry.ocr.OcrReviewFingerprint.of(
+                        documentId = picture.documentId.value,
+                        unitId = page.unitId.value,
+                        ordinal = page.ordinal,
+                        baselineRevisionId = operation.baseRevisionId,
+                        baselineTextHash = baselineHash,
+                        candidateHash = candidateHash,
+                        reviewProfileRevisionId = "review-revision",
+                        reviewPromptVersion = 1,
+                        policyVersion = 1,
+                    ),
+                    documentId = picture.documentId,
+                    unitId = page.unitId.value,
+                    ordinal = page.ordinal,
+                    imageSha256 = "a".repeat(64),
+                    baselineRevisionId = operation.baseRevisionId,
+                    baselineTextHash = baselineHash,
+                    candidateHash = candidateHash,
+                    recommendation = ReviewerRecommendation.UNCERTAIN,
+                    disposition = PublicationDisposition.PROPOSE,
+                    confidence = null,
+                    reasons = emptyList(),
+                    reviewerRevisionId = "review-revision",
+                    reviewerModelVersion = null,
+                    reviewPromptVersion = 1,
+                    policyVersion = 1,
+                    outcomeCode = null,
+                    searchable = false,
+                ),
+            )
+        }
+    }
+
+    /** How many pending proposals the review store holds for the document. */
+    fun pendingReviewRows(picture: Picture): Int =
+        AppContext.open(harness.dataDir).use { context -> context.ocrReviews.pending(picture.documentId).size }
+
+    fun discardPending(picture: Picture, operationId: String): OcrOperation =
+        AppContext.open(harness.dataDir).use { context ->
+            runBlocking {
+                rescanServiceOf(context, FakePageEngine())
+                    .discardPending(CollectionId("default"), picture.documentId, operationId)
+            }
+        }
+
+    fun discardRefusal(picture: Picture, operationId: String): Throwable? =
+        AppContext.open(harness.dataDir).use { context ->
+            runBlocking {
+                runCatching {
+                    rescanServiceOf(context, FakePageEngine())
+                        .discardPending(CollectionId("default"), picture.documentId, operationId)
                 }.exceptionOrNull()
             }
         }

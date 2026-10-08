@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   approveRescanExternal: vi.fn(),
   cancelRescan: vi.fn(),
   resumeRescan: vi.fn(),
+  discardPendingRescan: vi.fn(),
   listPendingReviews: vi.fn(),
   listDocumentRevisions: vi.fn(),
   readSource: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock('./api', () => ({
   approveRescanExternal: api.approveRescanExternal,
   cancelRescan: api.cancelRescan,
   resumeRescan: api.resumeRescan,
+  discardPendingRescan: api.discardPendingRescan,
   listPendingReviews: api.listPendingReviews,
   listDocumentRevisions: api.listDocumentRevisions,
   readSource: api.readSource,
@@ -439,6 +441,31 @@ describe('document rescan', () => {
       await renderRescan();
       expect(screen.queryByRole('button', { name: 'Resume scan' })).toBeNull();
       expect((screen.getByRole('button', { name: 'Scan again' }) as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it('discards pending pages after a confirmation and enables Scan again', async () => {
+      api.listRescanOperations.mockResolvedValue([operation('COMPLETE', { pendingReviewCount: 3 })]);
+      api.discardPendingRescan.mockResolvedValue(operation('COMPLETE', { pendingReviewCount: 0 }));
+      await renderRescan();
+      expect((screen.getByRole('button', { name: 'Scan again' }) as HTMLButtonElement).disabled).toBe(true);
+
+      await fireEvent.click(screen.getByRole('button', { name: 'Discard pending pages' }));
+      expect(api.discardPendingRescan).not.toHaveBeenCalled();
+      expect(screen.getByText(/existing text stays; the new reading/)).toBeTruthy();
+      await fireEvent.click(screen.getByRole('button', { name: 'Confirm discard' }));
+      await act(async () => {});
+
+      expect(api.discardPendingRescan).toHaveBeenCalledTimes(1);
+      expect(api.discardPendingRescan).toHaveBeenCalledWith('nightfall', 'doc-1', 'op-1');
+      expect((screen.getByRole('button', { name: 'Scan again' }) as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.queryByRole('button', { name: 'Discard pending pages' })).toBeNull();
+    });
+
+    it('offers no discard when the scan holds the document without pending pages', async () => {
+      api.listRescanOperations.mockResolvedValue([operation('OCR')]);
+      api.getRescanOperation.mockResolvedValue(operation('OCR'));
+      await renderRescan();
+      expect(screen.queryByRole('button', { name: 'Discard pending pages' })).toBeNull();
     });
 
     it('keeps Scan again unavailable while a completed scan still has pages awaiting review', async () => {

@@ -237,6 +237,22 @@ class OcrReviewStore(private val database: Database) {
     }
 
     /**
+     * Removes one stored review, for a proposal whose candidate was withdrawn without a decision.
+     *
+     * Only the withdrawal of an undecided candidate calls this; a review is otherwise written once and kept.
+     */
+    fun delete(fingerprint: OcrReviewFingerprint, imageSha256: String) {
+        database.transaction { connection ->
+            connection.prepareStatement("DELETE FROM page_reviews WHERE review_fingerprint = ? AND image_sha256 = ?")
+                .use { statement ->
+                    statement.setString(1, fingerprint.value)
+                    statement.setString(2, imageSha256)
+                    statement.executeUpdate()
+                }
+        }
+    }
+
+    /**
      * One document's pending proposals, in reading order.
      *
      * These are the pages pilot mode must not replace on its own: the difference is established, a person has

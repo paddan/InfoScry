@@ -57,6 +57,19 @@ export type JobApiView = {
   total: number;
   errorCode?: string | null;
   cancelRequested: boolean;
+  /** Present only while the job waits for an external page approval; absent otherwise. */
+  externalApproval?: ExternalApproval;
+};
+
+/**
+ * What approving a job's external pages needs: the snapshot the approval must name, what the scope has already
+ * sent, what it may send, and how many provider calls that cost.
+ */
+export type ExternalApproval = {
+  snapshotHash: string;
+  distinctPagesSent: number;
+  allowance: number;
+  calls: number;
 };
 
 /**
@@ -943,6 +956,32 @@ export async function getJob(id: string): Promise<JobApiView> {
   return body.job;
 }
 
+/** What one approved job scope answers with, as the approval route returns it. */
+export type ImportExternalApprovalResponse = {
+  jobId: string;
+  approvalId: string;
+  authorizedDistinctPages: number;
+  distinctPagesSent: number;
+  calls: number;
+  state?: string | null;
+  stage?: string | null;
+};
+
+/**
+ * Approves up to `maxDistinctPages` external pages for the job's OCR selection, which the snapshot hash names,
+ * and resumes the job if it waited for that approval.
+ */
+export async function approveJobExternal(
+  jobId: string,
+  snapshotHash: string,
+  maxDistinctPages: number,
+): Promise<ImportExternalApprovalResponse> {
+  return (await mutate(`/api/jobs/${encodeURIComponent(jobId)}/approve-external`, 'POST', {
+    expectedSnapshotHash: snapshotHash,
+    maxDistinctPages,
+  })) as ImportExternalApprovalResponse;
+}
+
 /** The per-file results an import finished with. */
 export async function getImportItems(id: string): Promise<ImportItemApiView[]> {
   const body = (await readJson(await fetch(`/api/jobs/${encodeURIComponent(id)}/items`))) as {
@@ -971,6 +1010,8 @@ export type ImportHistoryEntry = {
   updatedAt: string;
   /** The persisted per-file outcomes of this import, on the existing job-items route. */
   itemsUrl: string;
+  /** Present only while the import waits for an external page approval; absent otherwise. */
+  externalApproval?: ExternalApproval;
 };
 
 /** A page of one collection's imports plus the total the same criteria match. */
@@ -1440,6 +1481,21 @@ export async function resumeRescan(
 ): Promise<OcrOperation> {
   return (await mutate(
     `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/resume`,
+    'POST',
+  )) as OcrOperation;
+}
+
+/**
+ * Drops a finished scan's undecided new reading and releases the document. The existing text stays published;
+ * only an operation that is complete with unpublished pages waiting for a decision accepts it.
+ */
+export async function discardPendingRescan(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+): Promise<OcrOperation> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/discard-pending`,
     'POST',
   )) as OcrOperation;
 }

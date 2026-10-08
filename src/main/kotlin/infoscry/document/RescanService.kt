@@ -49,6 +49,7 @@ import infoscry.storage.OcrOperationConflictException
 import infoscry.storage.OcrOperationStore
 import infoscry.storage.OcrReviewStore
 import infoscry.storage.PageApproval
+import infoscry.storage.RevisionState
 import infoscry.storage.RescanPreviewOverrides
 import infoscry.storage.RevisionPageText
 import infoscry.storage.StaleRescanPreviewException
@@ -101,6 +102,9 @@ class RescanRefusalException(val code: String, message: String) : IllegalStateEx
 
         /** The document's pages cannot be embedded, so a replacement could never be published. */
         const val NO_EMBEDDER: String = "RESCAN_EMBEDDING_UNAVAILABLE"
+
+        /** There is no unpublished, undecided candidate to discard. */
+        const val NOTHING_TO_DISCARD: String = "RESCAN_NOTHING_TO_DISCARD"
 
         /** The operation cannot be resumed against the snapshot it was admitted with. */
         const val SNAPSHOT_NOT_RESUMABLE: String = "RESCAN_SNAPSHOT_NOT_RESUMABLE"
@@ -714,6 +718,50 @@ class RescanService(
             )
         }
     }
+
+    /**
+     * Drops the replacement an operation staged but nobody decided, and releases the document it holds.
+     *
+     * A COMPLETE operation whose candidate still has pages awaiting a decision holds its document, and a
+     * cancellation does not touch a terminal operation, so this is the explicit way out: it withdraws the
+     * candidate through the revision store (the same state a failed stager leaves behind), removes the
+     * undecided pages' stored reviews, and sets the pending count to zero. The published revision, its text and
+     * its index rows are never touched, and no page is read or sent anywhere.
+     *
+     * @throws RescanRefusalException unless the operation is COMPLETE with an unpublished candidate that still
+     *   has undecided pages.
+     */
+    suspend fun discardPending(collectionId: CollectionId, documentId: DocumentId, operationId: String): OcrOperation =
+        mutations.withMutation {
+            val operation = requireScopedOperation(collectionId, documentId, operationId)
+            requireNotBeingDeleted(documentId)
+            val candidate = operation.candidateRevisionId
+            val unpublished = candidate != null && revisions.revision(candidate)?.state == RevisionState.CANDIDATE
+            val pending = if (candidate != null && unpublished) {
+                revisions.pages(candidate).filter { it.approval == PageApproval.PENDING }
+            } else {
+                emptyList()
+            }
+            if (operation.stage != OcrOperationStage.COMPLETE || candidate == null || pending.isEmpty()) {
+                throw RescanRefusalException(
+                    RescanRefusalException.NOTHING_TO_DISCARD,
+                    "this operation has no unpublished pages waiting for a decision, so there is nothing to discard",
+                )
+            }
+            reviews.pending(documentId).forEach { review ->
+                if (pending.any { page -> review.matchesPending(operation, page) }) {
+                    reviews.delete(review.fingerprint, review.imageSha256)
+                }
+            }
+            revisions.withdrawCandidate(candidate)
+            operations.recordProgress(operation.operationId, pendingReview = 0)
+            operations.finish(
+                operationId = operation.operationId,
+                stage = OcrOperationStage.COMPLETE,
+                errorCode = DISCARDED_CODE,
+                errorMessage = "the new reading was discarded without a decision; the existing text is unchanged",
+            )
+        }
 
     // ---- reviews and decisions ----
 
@@ -1610,6 +1658,9 @@ class RescanService(
         const val CANCELLED_CODE: String = "RESCAN_CANCELLED"
 
         const val AWAITING_REVIEW_CODE: String = "AWAITING_REVIEW"
+
+        /** The code an operation carries when its undecided replacement was discarded. */
+        const val DISCARDED_CODE: String = "REPLACEMENT_DISCARDED"
 
         private fun hexHash(fields: List<String>): String =
             HexFormat.of().formatHex(

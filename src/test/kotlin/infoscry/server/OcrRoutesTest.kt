@@ -144,6 +144,25 @@ class OcrRoutesTest {
     }
 
     @Test
+    fun `discarding pending pages of an operation with none is a conflict and needs the csrf credential`() = runBlocking {
+        val operationId = admittedOperationId()
+
+        val refused = harness.request(HttpMethod.Post, "$prefix/operations/$operationId/discard-pending", "{}", Credential.CSRF)
+        val unscoped = harness.request(
+            HttpMethod.Post,
+            "/api/collections/elsewhere/documents/${picture.documentId.value}/ocr/operations/$operationId/discard-pending",
+            "{}",
+            Credential.CSRF,
+        )
+        val noCsrf = harness.request(HttpMethod.Post, "$prefix/operations/$operationId/discard-pending", "{}", Credential.WRONG_CSRF)
+
+        assertEquals(HttpStatusCode.Conflict, refused.status, refused.bodyAsText())
+        assertContains(refused.bodyAsText(), "RESCAN_NOTHING_TO_DISCARD")
+        assertEquals(HttpStatusCode.NotFound, unscoped.status, unscoped.bodyAsText())
+        assertTrue(noCsrf.status.value in 400..403, "a wrong csrf token was answered ${noCsrf.status}")
+    }
+
+    @Test
     fun `an invalid shape is a bad request and an unknown document is not found`() = runBlocking {
         val missingRequestId = admit("""{"previewId":"${previewId()}"}""")
         val unknownDocument = harness.request(
