@@ -42,7 +42,7 @@ which may be an external service.
 ## Project status
 
 Implementation is in progress. The backend, CLI and web reader exist;
-Collections, Search and Investigate have browser acceptance against local test doubles.
+Collections, Search, Investigate and the OCR panels have browser acceptance against local test doubles.
 Ask browser acceptance and the format-specific source-viewer finish line remain
 open. See [implementation status](docs/implementation-status.md) for the
 verification boundaries.

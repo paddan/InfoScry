@@ -79,7 +79,7 @@ Use one leaf ticket as the implementation/review unit. Umbrellas 02b, 08, 09, 10
 | [09a — Revision restoration API](09a-restore-service.md) | 08e, 02d | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
 | [09b — Published history and restore controls](09b-history-ui.md) | 09a, 08f | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
 | [09c — Deletion removes revision-owned work safely](09c-revision-deletion-acceptance.md) | 03c, 07c, 08e, 09a | Implemented by tickets 08/09 on the merged branch, not accepted — see the ticket 08 and 09 records |
-| [10a — Complete manual OCR browser acceptance](10a-browser-acceptance.md) | 08f, 09b, 09c, 07f, 02d, 02e | Started — fake-provider browser acceptance for the OCR panels exists and passes (record below); multi-page review, external approval, restart, keyboard/narrow layout and the manual acceptance remain open |
+| [10a — Complete manual OCR browser acceptance](10a-browser-acceptance.md) | 08f, 09b, 09c, 07f, 02d, 02e | Started — fake-provider browser acceptance for the OCR panels exists and passes (record below; 12 scenarios after the [local-testing fixes](../local-testing-feedback/STATUS.md) added import reading in history and the OCR profile catalog on 2026-10-08); multi-page review, external approval, restart, keyboard/narrow layout and the manual acceptance remain open |
 | [10b — Separate real OCR and CoreML evidence](10b-real-runtime-gates.md) | 03c, 07d, 08e | Not started |
 | [10c — Reconcile docs and manual completion evidence](10c-manual-release-checkpoint.md) | 10a, 10b | Not started |
 | [11a — Local pilot manifest and scoring runner](11a-evaluation-harness.md) | 10c | Not started |
