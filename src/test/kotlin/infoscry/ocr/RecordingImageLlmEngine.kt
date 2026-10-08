@@ -32,6 +32,8 @@ internal class RecordedImageResponse(
     val statusCode: Int = 200,
     val body: String = "",
     val headers: Map<String, String> = emptyMap(),
+    /** A transport failure to throw instead of answering, as a socket or DNS error would surface. */
+    val failure: Throwable? = null,
 )
 
 /**
@@ -94,6 +96,7 @@ internal class RecordingImageLlmEngine(
             },
             body = bodyTextOf(data.body),
         )
+        scripted.failure?.let { throw it }
         val responseHeaders = buildList {
             add(ContentType.Application.Json.toString() to emptyList<String>())
             scripted.headers.forEach { (name, value) -> add(name to listOf(value)) }

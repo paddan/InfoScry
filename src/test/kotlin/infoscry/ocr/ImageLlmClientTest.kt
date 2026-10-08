@@ -7,6 +7,9 @@ import infoscry.llm.LlmProvider
 import infoscry.llm.RetryPolicy
 import java.awt.Color
 import java.awt.image.BufferedImage
+import java.io.IOException
+import java.net.ConnectException
+import java.net.UnknownHostException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Base64
@@ -1139,6 +1142,53 @@ class ImageLlmClientTest {
             renderDpi = 300,
             rotationDegrees = 0,
         )
+    }
+
+    // ---- a transport failure says what kind of failure it was, and never echoes the host ----
+
+    @Test
+    fun `an unresolvable host is named by its class and the host itself is never echoed`() = runBlocking {
+        val refused = failureOfTransport(UnknownHostException("secret-host.example"))
+
+        assertEquals(ImageLlmException.PROVIDER_UNAVAILABLE, refused.code)
+        assertContains(refused.message.orEmpty(), "host name could not be resolved")
+        assertFalse(refused.message.orEmpty().contains("secret-host.example"))
+        assertTrue(refused.dispatched)
+    }
+
+    @Test
+    fun `a refused connection is named as refused or timed out`() = runBlocking {
+        val refused = failureOfTransport(ConnectException("Connection refused to secret-host.example:443"))
+
+        assertEquals(ImageLlmException.PROVIDER_UNAVAILABLE, refused.code)
+        assertContains(refused.message.orEmpty(), "the connection was refused or timed out")
+        assertFalse(refused.message.orEmpty().contains("secret-host.example"))
+    }
+
+    @Test
+    fun `a generic transport failure is named as a connection closed before the answer`() = runBlocking {
+        val refused = failureOfTransport(IOException("reset by peer at secret-host.example"))
+
+        assertEquals(ImageLlmException.PROVIDER_UNAVAILABLE, refused.code)
+        assertContains(refused.message.orEmpty(), "the connection was closed before the answer arrived")
+        assertFalse(refused.message.orEmpty().contains("secret-host.example"))
+    }
+
+    private suspend fun failureOfTransport(cause: Throwable): ImageLlmException {
+        val page = page()
+        val engine = RecordingImageLlmEngine(script = listOf(RecordedImageResponse(failure = cause)))
+        val client = ImageLlmClient(
+            revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE),
+            lookup = { KEY_VALUE },
+            permits = ExternalDispatchPermitValidator { true },
+            engine = engine,
+        )
+        return try {
+            assertFailsWith<ImageLlmException> { client.transcribe(page) }
+        } finally {
+            client.close()
+            engine.close()
+        }
     }
 
     private fun writeImage(path: Path, width: Int, height: Int, text: String?) {

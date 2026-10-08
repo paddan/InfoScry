@@ -6,6 +6,7 @@ import infoscry.llm.RetryPolicy
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -21,12 +22,16 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.HexFormat
 import java.util.Locale
 import javax.imageio.ImageIO
+import javax.net.ssl.SSLException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CancellationException
@@ -676,13 +681,14 @@ class ImageLlmClient(
             } catch (unreachable: IOException) {
                 throw ImageLlmException(
                     ImageLlmException.PROVIDER_UNAVAILABLE,
-                    "the provider could not be reached, so this page's reading is unknown",
+                    "the provider could not be reached (${safeCauseOf(unreachable)}), so this page's reading is unknown",
                     dispatched = true,
                 )
             } catch (failure: Throwable) {
                 throw ImageLlmException(
                     ImageLlmException.PROVIDER_UNAVAILABLE,
-                    "the provider call failed before an answer arrived, so this page's reading is unknown",
+                    "the provider call failed before an answer arrived (${safeCauseOf(failure)}), so this page's " +
+                        "reading is unknown",
                     dispatched = true,
                 )
             }
@@ -1505,3 +1511,33 @@ internal data class OcrReviewReason(
 private val StrictAnswerJson: Json = Json {
     ignoreUnknownKeys = false
 }
+
+/**
+ * A short, fixed description of why a provider call failed, derived from the exception's type alone.
+ *
+ * The exception message is never used: a transport's message may carry the endpoint's host, a URL or a
+ * credential, and none of those may reach a log or an error. The causes are walked so a type wrapped by the
+ * HTTP stack is still named; anything unrecognised is named by its simple class name, which says nothing
+ * about the endpoint.
+ */
+internal fun safeCauseOf(failure: Throwable): String {
+    var current: Throwable? = failure
+    var depth = 0
+    while (current != null && depth < MAX_CAUSE_DEPTH) {
+        when (current) {
+            is UnknownHostException -> return "the host name could not be resolved"
+            is ConnectException, is ConnectTimeoutException, is SocketTimeoutException ->
+                return "the connection was refused or timed out"
+            is SSLException -> return "the TLS handshake failed"
+        }
+        current = current.cause
+        depth += 1
+    }
+    return if (failure is IOException) {
+        "the connection was closed before the answer arrived"
+    } else {
+        failure::class.simpleName ?: "unknown failure"
+    }
+}
+
+private const val MAX_CAUSE_DEPTH: Int = 8
