@@ -112,7 +112,7 @@ internal class CollectionsAcceptanceExtractor(
                         index = 0,
                         locator = SourceLocation.TextLines(start = 1, end = 1),
                         text = "Line 1 of $name.",
-                        method = ExtractionMethod.DIRECT_TEXT,
+                        method = readMethod(name),
                     )
                     error("the acceptance extractor refuses this file's first attempt after one unit")
                 }
@@ -122,7 +122,7 @@ internal class CollectionsAcceptanceExtractor(
                         index = index,
                         locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
                         text = "Line ${index + 1} of $name.",
-                        method = ExtractionMethod.DIRECT_TEXT,
+                        method = readMethod(name),
                     )
                 }
                 input.boundary.unit {
@@ -212,6 +212,10 @@ internal class CollectionsAcceptanceExtractor(
         }
     }
 
+    /** A picture is read by OCR, a text file directly: only a document that needed OCR has a method to name. */
+    private fun readMethod(name: String): ExtractionMethod =
+        if (name.endsWith(".png")) ExtractionMethod.OCR else ExtractionMethod.DIRECT_TEXT
+
     private fun refusesFirstAttempt(name: String): Boolean =
         attempts.computeIfAbsent(name) { AtomicInteger() }.incrementAndGet() == 1
 
@@ -286,6 +290,25 @@ internal object AcceptanceFixtures {
         writeText(sourcesDir.resolve("held").resolve("held-03.txt"), "Held fixture line three.\n")
         writeText(sourcesDir.resolve(FAIL_ONCE_PREFIX + "a.txt"), "A first attempt that fails, then a second that reads.\n")
         writeText(sourcesDir.resolve(FAIL_ONCE_PREFIX + "b.txt"), "Another first attempt that fails.\n")
+        // Ticket 05: two readable files and one binary blob no extractor claims.
+        writeText(sourcesDir.resolve("unsupported").resolve("real-a.txt"), "The first readable file beside an unsupported one.\n")
+        writeText(sourcesDir.resolve("unsupported").resolve("real-b.txt"), "The second readable file beside an unsupported one.\n")
+        Files.write(sourcesDir.resolve("unsupported").resolve("blob.bin"), ByteArray(256) { it.toByte() })
+        // Ticket 06: four readable files told apart only by their extension (case included).
+        writeText(sourcesDir.resolve("types").resolve("alpha.txt"), "Alpha text file.\n")
+        writeText(sourcesDir.resolve("types").resolve("beta.TXT"), "Beta text file with a capital extension.\n")
+        writeText(sourcesDir.resolve("types").resolve("gamma.log"), "Gamma log file.\n")
+        writeText(sourcesDir.resolve("types").resolve("delta.dat"), "Delta data file.\n")
+        // Ticket 07: system and temporary files beside the real documents. Each is readable text, so only
+        // an ignore pattern keeps it out.
+        writeText(sourcesDir.resolve("ignored").resolve(".DS_Store"), "Finder bookkeeping that is plain text here.\n")
+        writeText(sourcesDir.resolve("ignored").resolve("draft.tmp"), "A temporary draft.\n")
+        writeText(sourcesDir.resolve("ignored").resolve("scratch-1.txt"), "A scratch file the reader adds a pattern for.\n")
+        writeText(sourcesDir.resolve("ignored").resolve("real-a.txt"), "The first real document of the ignored folder.\n")
+        writeText(sourcesDir.resolve("ignored").resolve("real-b.txt"), "The second real document of the ignored folder.\n")
+        // Ticket 08: a document whose first attempt fails and is retried with a chosen method.
+        // A picture, because a chosen OCR method needs page images: a text file is refused as unsupported.
+        Files.write(sourcesDir.resolve(FAIL_ONCE_PREFIX + "scan.png"), PNG_MAGIC + ByteArray(32) { 7 })
         return sourcesDir
     }
 

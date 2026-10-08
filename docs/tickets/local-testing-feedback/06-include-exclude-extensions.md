@@ -1,6 +1,6 @@
 # 06: Include or exclude file extensions when importing a folder
 
-**Status:** Implemented on the worktree branch; the browser scenario is not done. Unchecked criteria are requirements, not evidence.
+**Status:** Implemented on the worktree branch; browser scenario `extension-filters` passes (fake extraction pipeline). Unchecked criteria are requirements, not evidence.
 **Blocked by:** 05.
 **Plan:** [Local testing feedback](../../plans/2026-10-07-local-testing-feedback.md).
 
@@ -57,8 +57,9 @@ extensions to exclude (everything else is imported), in Admin â†’ Collections â†
 - [x] Failing tests first: include imports only the listed types; exclude imports everything else; both is refused
   with nothing enqueued; case and leading dots are normalised; filters apply recursively; the queued payload keeps
   the filter so a resumed import applies the same one. Red evidence is recorded below.
-- [ ] Browser scenario: a folder imported with include and with exclude shows only the expected documents. **Not
-  done**: the browser (Playwright) item was excluded from this run.
+- [x] Browser scenario `extension-filters`: a folder imported with "Only these extensions" (`.TXT`) and another with
+  "All except these extensions" (`log`) shows only the expected documents and counts; Import stays disabled while the
+  list is empty.
 
 ### Evidence
 

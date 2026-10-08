@@ -1,6 +1,6 @@
 # 05: Files that cannot be imported are skipped and not shown
 
-**Status:** Implemented on the worktree branch; the browser scenario is not done. Unchecked criteria are requirements, not evidence.
+**Status:** Implemented on the worktree branch; browser scenario `unsupported-skipped` passes (fake extraction pipeline). Unchecked criteria are requirements, not evidence.
 **Blocked by:** None.
 **Plan:** [Local testing feedback](../../plans/2026-10-07-local-testing-feedback.md).
 
@@ -49,8 +49,9 @@ files (owner decision). This is the shared file-selection seam that tickets 06 a
   imported files; an import whose every file is skipped finishes with zero files rather than failing; a file that
   is supported but fails extraction still fails as today. Red evidence is recorded below.
 - [x] Decide detection by content (the existing detector) rather than by extension alone, and record the decision.
-- [ ] Extend the Collections browser scenario with an unsupported file in the imported folder. **Not done**: the
-  browser (Playwright) item was excluded from this run.
+- [x] Extend the Collections browser scenario with an unsupported file in the imported folder: `unsupported-skipped`
+  imports a folder with two text files and a binary blob; the blob is in no documents list, no failed filter, no
+  import-history count (`2 of 2 files`) and no per-file result.
 
 ## Focused verification
 

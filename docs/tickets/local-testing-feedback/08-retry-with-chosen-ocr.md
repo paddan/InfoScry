@@ -1,6 +1,6 @@
 # 08: Read a document again with a chosen OCR method, including after a failed import
 
-**Status:** Implemented and verified by the focused backend and frontend tests below; the browser scenario is not done. Unchecked criteria are requirements, not evidence.
+**Status:** Implemented and verified by the focused backend and frontend tests below; browser scenario `retry-with-chosen-ocr` passes with the fake extraction pipeline. Unchecked criteria are requirements, not evidence.
 **Blocked by:** 04 (for choosing an image-model profile).
 **Plan:** [Local testing feedback](../../plans/2026-10-07-local-testing-feedback.md).
 
@@ -49,7 +49,10 @@ copies of LLM profiles made in ticket 04), as Scan again does. The controls are 
   records it (ticket 03); an unavailable engine or unmeasured external profile is refused before anything is queued;
   external pages need approval as in a rescan; omitting the choice keeps today's behaviour; a document with a
   published text is directed to Scan again.
-- [ ] Browser scenario (not done): a failed document is retried with a chosen method and becomes searchable.
+- [x] Browser scenario `retry-with-chosen-ocr`: a failed PNG is retried with Tesseract and language `deu` from document
+  Details, becomes Complete, its text history names "Tesseract (local)" and "language deu", and keyword search finds
+  it. Not covered: the acceptance extractor stands in for the engine, so no real Tesseract/page image was read, and
+  an image-model profile, external-page approval and a refused choice are covered only by the route tests.
 
 ## Focused verification
 
