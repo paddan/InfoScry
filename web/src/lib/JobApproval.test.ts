@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import JobApproval from './JobApproval.svelte';
+import JobApproval, { DEFAULT_APPROVAL_STEP } from './JobApproval.svelte';
 import { ApiError } from './api';
 import type { ExternalApproval } from './api';
 
@@ -24,7 +24,7 @@ function approval(over: Partial<ExternalApproval> = {}): ExternalApproval {
 }
 
 function pagesInput(): HTMLInputElement {
-  return screen.getByLabelText('Distinct pages to approve') as HTMLInputElement;
+  return screen.getByLabelText('Pages that may leave this machine (in total)') as HTMLInputElement;
 }
 
 describe('job approval', () => {
@@ -34,22 +34,51 @@ describe('job approval', () => {
 
   afterEach(cleanup);
 
-  it('states what was sent and what approving allows, in a named section', () => {
-    render(JobApproval, { jobId: 'j1', approval: approval(), onapproved: vi.fn() });
+  it('explains a fresh import with nothing sent and nothing allowed yet', () => {
+    render(JobApproval, { jobId: 'j1', approval: approval({ distinctPagesSent: 0, allowance: 0, calls: 0 }), onapproved: vi.fn() });
 
     const section = screen.getByRole('region', { name: 'Approve external pages' });
     expect(section.textContent).toContain(
-      '2 of the allowed 3 external pages were sent. More pages are needed to finish this import; approving lets up to 4 distinct pages leave this machine.',
+      'This import sends pages to an external provider, and none are allowed yet. Approve how many pages may leave this machine; the import pauses again if it needs more.',
     );
   });
 
-  it('defaults to one page more than the allowance or one more than sent, whichever is larger', () => {
+  it('states what was sent and what is allowed, with the singular for one page', () => {
+    render(JobApproval, { jobId: 'j1', approval: approval({ distinctPagesSent: 1, allowance: 1, calls: 1 }), onapproved: vi.fn() });
+
+    const section = screen.getByRole('region', { name: 'Approve external pages' });
+    expect(section.textContent).toContain(
+      '1 external page sent so far, 1 allowed. Approve how many pages in total may leave this machine; the import pauses again if it needs more.',
+    );
+  });
+
+  it('states what was sent and what is allowed, with the plural for several pages', () => {
     render(JobApproval, { jobId: 'j1', approval: approval({ distinctPagesSent: 2, allowance: 3 }), onapproved: vi.fn() });
-    expect(pagesInput().value).toBe('4');
+
+    const section = screen.getByRole('region', { name: 'Approve external pages' });
+    expect(section.textContent).toContain(
+      '2 external pages sent so far, 3 allowed. Approve how many pages in total may leave this machine; the import pauses again if it needs more.',
+    );
+  });
+
+  it('labels the input as the total of pages that may leave this machine', () => {
+    render(JobApproval, { jobId: 'j1', approval: approval(), onapproved: vi.fn() });
+    expect(pagesInput().type).toBe('number');
+  });
+
+  it('defaults a fresh import to 50 pages, and otherwise to what was sent plus 50', () => {
+    expect(DEFAULT_APPROVAL_STEP).toBe(50);
+
+    render(JobApproval, { jobId: 'j1', approval: approval({ distinctPagesSent: 0, allowance: 0, calls: 0 }), onapproved: vi.fn() });
+    expect(pagesInput().value).toBe('50');
+    cleanup();
+
+    render(JobApproval, { jobId: 'j1', approval: approval({ distinctPagesSent: 2, allowance: 3 }), onapproved: vi.fn() });
+    expect(pagesInput().value).toBe('52');
     cleanup();
 
     render(JobApproval, { jobId: 'j1', approval: approval({ distinctPagesSent: 9, allowance: 3 }), onapproved: vi.fn() });
-    expect(pagesInput().value).toBe('10');
+    expect(pagesInput().value).toBe('59');
   });
 
   it('approves the typed page count against the snapshot hash, then reports the answer', async () => {

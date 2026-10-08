@@ -342,7 +342,7 @@ describe('import panel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
 
     await screen.findByRole('region', { name: 'Approve external pages' }, { timeout: 3000 });
-    await fireEvent.input(screen.getByLabelText('Distinct pages to approve'), { target: { value: '3' } });
+    await fireEvent.input(screen.getByLabelText('Pages that may leave this machine (in total)'), { target: { value: '3' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Approve external pages' }));
 
     expect(api.approveJobExternal).toHaveBeenCalledWith('j1', 'hash-1', 3);

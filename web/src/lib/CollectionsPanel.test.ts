@@ -1286,7 +1286,7 @@ describe('collections panel', () => {
       const area = screen.getByRole('region', { name: 'Import history for Nightfall' });
       expect(within(area).getByText('Awaiting approval')).toBeTruthy();
       const form = within(area).getByRole('region', { name: 'Approve external pages' });
-      expect(within(form).getByLabelText('Distinct pages to approve')).toBeTruthy();
+      expect(within(form).getByLabelText('Pages that may leave this machine (in total)')).toBeTruthy();
 
       // The import still waits, so the history is read again rather than left as it was when the row arrived.
       await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
@@ -1294,7 +1294,7 @@ describe('collections panel', () => {
       expect(within(area).getByRole('region', { name: 'Approve external pages' })).toBeTruthy();
 
       await act(async () => {
-        await fireEvent.input(within(area).getByLabelText('Distinct pages to approve'), { target: { value: '3' } });
+        await fireEvent.input(within(area).getByLabelText('Pages that may leave this machine (in total)'), { target: { value: '3' } });
         await fireEvent.click(within(area).getByRole('button', { name: 'Approve external pages' }));
       });
       expect(api.approveJobExternal).toHaveBeenCalledWith('job-1', 'hash-1', 3);

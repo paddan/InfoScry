@@ -1,3 +1,8 @@
+<script module lang="ts">
+  /** How many pages beyond what was already sent a default approval names. */
+  export const DEFAULT_APPROVAL_STEP = 50;
+</script>
+
 <script lang="ts">
   import { approveJobExternal, type ExternalApproval, type ImportExternalApprovalResponse } from './api';
 
@@ -8,8 +13,8 @@
   /** Called with the server's answer once the approval is recorded; the job then resumes on the server. */
   export let onapproved: (answer: ImportExternalApprovalResponse) => void;
 
-  /** The default is one page beyond the allowance, or beyond what was sent when that is larger. */
-  let pages = String(Math.max(approval.allowance + 1, approval.distinctPagesSent + 1));
+  /** The default names a batch of pages beyond what was already sent, so the import is unlikely to pause again. */
+  let pages = String(approval.distinctPagesSent + DEFAULT_APPROVAL_STEP);
   let approving = false;
   let error: string | null = null;
 
@@ -54,9 +59,13 @@
 
 <section class="job-approval" aria-label="Approve external pages">
   <h4>Approve external pages</h4>
-  <p>{approval.distinctPagesSent} of the allowed {approval.allowance} external {approval.allowance === 1 ? 'page' : 'pages'} {approval.distinctPagesSent === 1 ? 'was' : 'were'} sent. More pages are needed to finish this import; approving lets up to {typedCount ?? 'the number below'} distinct pages leave this machine.</p>
+  {#if approval.distinctPagesSent === 0 && approval.allowance === 0}
+    <p>This import sends pages to an external provider, and none are allowed yet. Approve how many pages may leave this machine; the import pauses again if it needs more.</p>
+  {:else}
+    <p>{approval.distinctPagesSent} external {approval.distinctPagesSent === 1 ? 'page' : 'pages'} sent so far, {approval.allowance} allowed. Approve how many pages in total may leave this machine; the import pauses again if it needs more.</p>
+  {/if}
   <div class="field">
-    <label for="job-approval-pages-{jobId}">Distinct pages to approve</label>
+    <label for="job-approval-pages-{jobId}">Pages that may leave this machine (in total)</label>
     <input
       id="job-approval-pages-{jobId}"
       type="number"
