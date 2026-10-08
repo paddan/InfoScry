@@ -303,6 +303,82 @@ describe('collection OCR settings', () => {
     expect(select('OCR engine').disabled).toBe(false);
   });
 
+  describe('external page allowance hint', () => {
+    const HINT = 'This collection sends pages to an external provider, but the allowance is 0, so imports and scans will pause until you approve pages or raise the allowance.';
+
+    it('shows the hint when a stored external review profile meets an allowance of 0', async () => {
+      await renderSettings(collection('Nightfall', { ocrReviewProfileId: 'p-cloud', ocrExternalPageLimit: 0 }));
+
+      expect(screen.getByText(HINT)).toBeTruthy();
+    });
+
+    it('shows the hint when an external transcription profile is chosen for the LLM engine', async () => {
+      await renderSettings(collection('Nightfall', {
+        ocrEngine: 'LLM',
+        ocrTranscriptionProfileId: 'p-cloud',
+        ocrExternalPageLimit: 0,
+      }));
+
+      expect(screen.getByText(HINT)).toBeTruthy();
+    });
+
+    it('shows the hint for an external LLM profile selected in the draft', async () => {
+      api.listOcrLlmCandidates.mockResolvedValue([
+        {
+          id: 'l-vision',
+          name: 'Reader',
+          provider: 'OPENAI_COMPATIBLE',
+          endpoint: 'https://example.test/v1',
+          scope: 'EXTERNAL',
+          model: 'a-model',
+          apiKeyEnvironmentVariable: 'LLM_KEY',
+          keyAvailable: true,
+          imageInput: true,
+        },
+      ]);
+      await renderSettings();
+
+      expect(screen.queryByText(HINT)).toBeNull();
+      await fireEvent.change(select('Review profile'), { target: { value: 'llm:l-vision' } });
+
+      expect(screen.getByText(HINT)).toBeTruthy();
+    });
+
+    it('hides the hint when the selected profiles are local', async () => {
+      await renderSettings(collection('Nightfall', {
+        ocrEngine: 'LLM',
+        ocrTranscriptionProfileId: 'p-local',
+        ocrReviewProfileId: 'p-local',
+        ocrExternalPageLimit: 0,
+      }));
+
+      expect(screen.queryByText(HINT)).toBeNull();
+    });
+
+    it('hides the hint when the external allowance is 3', async () => {
+      await renderSettings(collection('Nightfall', { ocrReviewProfileId: 'p-cloud', ocrExternalPageLimit: 3 }));
+
+      expect(screen.queryByText(HINT)).toBeNull();
+    });
+
+    it('follows the allowance the person is typing, not only the stored value', async () => {
+      await renderSettings(collection('Nightfall', { ocrReviewProfileId: 'p-cloud', ocrExternalPageLimit: 0 }));
+
+      await fireEvent.input(screen.getByLabelText('External page allowance'), { target: { value: '2' } });
+      expect(screen.queryByText(HINT)).toBeNull();
+    });
+
+    it('explains the allowance in help text that the field refers to', async () => {
+      await renderSettings();
+
+      const field = screen.getByLabelText('External page allowance');
+      const note = document.getElementById(field.getAttribute('aria-describedby') ?? '');
+      expect(note?.textContent).toContain(
+        'Pages that may be sent to an external provider per import or scan, counted once each. 0 means every external page needs your approval.',
+      );
+    });
+  });
+
   describe('LLM profiles with image input', () => {
     const LLM: OcrLlmCandidate[] = [
       candidate('l-vision', 'Reader', { imageInput: true }),

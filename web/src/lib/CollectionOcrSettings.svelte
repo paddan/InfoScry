@@ -6,6 +6,7 @@
     listOcrProfiles,
     updateCollectionOcrSettings,
     type Collection,
+    type OcrEndpointScope,
     type OcrEngine,
     type OcrImportMode,
     type OcrLlmCandidate,
@@ -75,6 +76,12 @@
   $: if (profilesLoaded && candidatesLoaded && !remapped) remapStoredSelections();
   $: selectable = profiles.filter((profile) => profile.enabled && !copyIds.has(profile.id));
   $: nothingToChoose = profilesLoaded && candidatesLoaded && selectable.length === 0 && llmOffered.length === 0;
+  // The transcription profile is used only by the LLM engine, so it counts only then; the review profile always counts.
+  $: externalSelected =
+    (engine === 'LLM' && scopeOf(transcriptionProfileId, profiles, candidates) === 'EXTERNAL') ||
+    scopeOf(reviewProfileId, profiles, candidates) === 'EXTERNAL';
+  $: allowanceIsZero = /^\d+$/.test(allowanceText.trim()) && Number(allowanceText.trim()) < 1;
+  $: showAllowanceHint = externalSelected && allowanceIsZero;
 
   function start(next: Collection): void {
     boundId = next.id;
@@ -100,6 +107,18 @@
     remapped = true;
     transcriptionProfileId = remapStored(transcriptionProfileId);
     reviewProfileId = remapStored(reviewProfileId);
+  }
+
+  /**
+   * Where the selected profile sends page images, from the lists already loaded. Null when nothing is selected,
+   * or when the selection is no longer available (it has no scope to show).
+   */
+  function scopeOf(id: string, available: OcrProfile[], llm: OcrLlmCandidate[]): OcrEndpointScope | null {
+    if (id === '') return null;
+    if (id.startsWith(LLM_PREFIX)) {
+      return llm.find((candidate) => `${LLM_PREFIX}${candidate.id}` === id)?.scope ?? null;
+    }
+    return available.find((profile) => profile.id === id)?.scope ?? null;
   }
 
   /** A stored selection that can no longer be chosen stays visible rather than being silently dropped. */
@@ -276,8 +295,19 @@
       bind:value={allowanceText}
       oninput={touched}
       aria-invalid={error !== null}
-      aria-describedby="collection-ocr-allowance-note"
+      aria-describedby={showAllowanceHint
+        ? 'collection-ocr-allowance-note collection-ocr-allowance-warning'
+        : 'collection-ocr-allowance-note'}
     />
+    <p class="hint" id="collection-ocr-allowance-note">
+      Pages that may be sent to an external provider per import or scan, counted once each. 0 means every external page needs your approval.
+    </p>
+    {#if showAllowanceHint}
+      <p class="hint" id="collection-ocr-allowance-warning">
+        This collection sends pages to an external provider, but the allowance is 0, so imports and scans will pause
+        until you approve pages or raise the allowance.
+      </p>
+    {/if}
   </div>
   <div class="actions">
     <button type="submit" class="primary" disabled={saving}>
@@ -310,10 +340,6 @@
     against the existing text. Choosing an LLM profile copies its current settings into an OCR profile when you
     save; editing the LLM profile later does not change a scan that was already started. An external profile sends page images off this Mac. The environment variable that
     holds a key is shown by presence only; its value is never displayed.
-  </p>
-  <p class="hint" id="collection-ocr-allowance-note">
-    The most distinct pages one import or scan may send to an external provider before it waits for your
-    approval. Zero sends none.
   </p>
 </form>
 
