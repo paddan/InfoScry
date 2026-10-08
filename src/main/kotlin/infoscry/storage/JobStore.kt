@@ -193,9 +193,27 @@ open class JobStore(private val database: Database) {
         readIn(connection, id)
     }
 
+    /**
+     * Ends a running attempt as complete.
+     *
+     * The stage the attempt last entered is cleared, because it described work that has stopped: a finished
+     * import must not read as still queued or copying. The one stage kept is [AWAITING_APPROVAL_STAGE], which
+     * is why the attempt ended and what the approval route resumes from.
+     */
     fun complete(id: JobId): Job = database.transaction { connection ->
-        requireRunning(connection, id, "only a RUNNING attempt can complete")
-        moveIn(connection, id, JobState.RUNNING, JobState.COMPLETE)
+        val job = requireRunning(connection, id, "only a RUNNING attempt can complete")
+        check(isLegalTransition(JobState.RUNNING, JobState.COMPLETE)) {
+            "the transition table must allow RUNNING to COMPLETE"
+        }
+        updateIn(
+            connection,
+            "UPDATE jobs SET state = ?, stage = ?, updated_at = ? WHERE id = ? AND state = ?",
+            JobState.COMPLETE.name,
+            job.stage?.takeIf { it == AWAITING_APPROVAL_STAGE },
+            Instants.now(),
+            id.value,
+            JobState.RUNNING.name,
+        )
         readIn(connection, id)
     }
 
@@ -245,8 +263,8 @@ open class JobStore(private val database: Database) {
         requireRunning(connection, id, "only a RUNNING attempt can fail")
         updateIn(
             connection,
-            "UPDATE jobs SET state = ?, error_code = ?, error_message = ?, updated_at = ? " +
-                "WHERE id = ? AND state = ?",
+            "UPDATE jobs SET state = ?, stage = NULL, error_code = ?, error_message = ?, " +
+                "updated_at = ? WHERE id = ? AND state = ?",
             JobState.FAILED.name,
             code,
             message,
@@ -274,8 +292,8 @@ open class JobStore(private val database: Database) {
                 }
                 updateIn(
                     connection,
-                    "UPDATE jobs SET state = ?, cancel_requested = 1, updated_at = ? " +
-                        "WHERE id = ? AND state = ?",
+                    "UPDATE jobs SET state = ?, stage = NULL, cancel_requested = 1, " +
+                        "updated_at = ? WHERE id = ? AND state = ?",
                     JobState.CANCELLED.name,
                     Instants.now(),
                     id.value,
@@ -304,7 +322,8 @@ open class JobStore(private val database: Database) {
         }
         updateIn(
             connection,
-            "UPDATE jobs SET state = ?, cancel_requested = 1, updated_at = ? WHERE id = ? AND state = ?",
+            "UPDATE jobs SET state = ?, stage = NULL, cancel_requested = 1, " +
+                "updated_at = ? WHERE id = ? AND state = ?",
             JobState.CANCELLED.name,
             Instants.now(),
             id.value,
@@ -372,26 +391,14 @@ open class JobStore(private val database: Database) {
     private fun finishCancelledIn(connection: Connection, id: JobId): Job {
         updateIn(
             connection,
-            "UPDATE jobs SET state = ?, cancel_requested = 1, updated_at = ? WHERE id = ? AND state = ?",
+            "UPDATE jobs SET state = ?, stage = NULL, cancel_requested = 1, " +
+                "updated_at = ? WHERE id = ? AND state = ?",
             JobState.CANCELLED.name,
             Instants.now(),
             id.value,
             JobState.RUNNING.name,
         )
         return readIn(connection, id)
-    }
-
-    /** The state change a job is allowed to make. A `WHERE` that matches no row is the SQL half. */
-    private fun moveIn(connection: Connection, id: JobId, from: JobState, to: JobState) {
-        check(isLegalTransition(from, to)) { "the transition table must allow $from to $to" }
-        updateIn(
-            connection,
-            "UPDATE jobs SET state = ?, updated_at = ? WHERE id = ? AND state = ?",
-            to.name,
-            Instants.now(),
-            id.value,
-            from.name,
-        )
     }
 
     private fun requireRunning(connection: Connection, id: JobId, requirement: String): Job {
@@ -436,22 +443,25 @@ open class JobStore(private val database: Database) {
 
     private fun ResultSet.readAll(): List<Job> = buildList { while (next()) add(toJob()) }
 
-    private fun ResultSet.toJob(): Job = Job(
-        id = JobId(getString("id")),
-        type = JobType.valueOf(getString("type")),
-        state = JobState.valueOf(getString("state")),
-        collectionId = getString("collection_id")?.let(::CollectionId),
-        stage = getString("stage"),
-        currentItem = getString("current_item"),
-        completed = getInt("completed"),
-        total = getInt("total"),
-        payload = getString("payload"),
-        errorCode = getString("error_code"),
-        errorMessage = getString("error_message"),
-        cancelRequested = getInt("cancel_requested") == 1,
-        createdAt = getString("created_at"),
-        updatedAt = getString("updated_at"),
-    )
+    private fun ResultSet.toJob(): Job {
+        val state = JobState.valueOf(getString("state"))
+        return Job(
+            id = JobId(getString("id")),
+            type = JobType.valueOf(getString("type")),
+            state = state,
+            collectionId = getString("collection_id")?.let(::CollectionId),
+            stage = visibleStage(state, getString("stage")),
+            currentItem = getString("current_item"),
+            completed = getInt("completed"),
+            total = getInt("total"),
+            payload = getString("payload"),
+            errorCode = getString("error_code"),
+            errorMessage = getString("error_message"),
+            cancelRequested = getInt("cancel_requested") == 1,
+            createdAt = getString("created_at"),
+            updatedAt = getString("updated_at"),
+        )
+    }
 
     private fun collectionExists(connection: Connection, id: CollectionId): Boolean =
         connection.prepareStatement("SELECT 1 FROM collections WHERE id = ?").use { statement ->
@@ -485,6 +495,20 @@ open class JobStore(private val database: Database) {
         )
 
         fun isLegalTransition(from: JobState, to: JobState): Boolean = to in LEGAL_TRANSITIONS.getValue(from)
+
+        /**
+         * The stage a job reports to a reader, given the stage its row holds.
+         *
+         * A finished job reports no stage except the approval wait: the stage an ended attempt last entered is
+         * not a fact about the job any more. The row is cleared when a job ends, and this read applies the same
+         * rule to rows written before that, so no surface (history, job API, CLI) can show a stale stage.
+         */
+        fun visibleStage(state: JobState, storedStage: String?): String? = when {
+            state in TERMINAL_STATES && storedStage != AWAITING_APPROVAL_STAGE -> null
+            else -> storedStage
+        }
+
+        private val TERMINAL_STATES: Set<JobState> = setOf(JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED)
 
         private const val SELECT_JOBS =
             "SELECT id, collection_id, type, state, stage, current_item, completed, total, payload, " +

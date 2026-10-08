@@ -4,6 +4,7 @@ import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.jobs.IgnorePatterns
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.requireOcrLanguages
 import infoscry.ocr.OcrEngine
@@ -292,6 +293,31 @@ class CollectionService(
                 ocrProfiles.requireSelectable(profileId, OcrProfileRole.REVIEW)
             }
             collections.updateOcrSettings(id, settings)
+        }
+
+    /**
+     * The collection's saved ignore patterns. A read like the others here: it takes no permit, and it answers
+     * only for a usable collection.
+     */
+    fun ignorePatterns(id: CollectionId): IgnorePatterns {
+        requireActive(id)
+        return IgnorePatterns(collections.ignorePatterns(id))
+    }
+
+    /**
+     * Replaces the collection's ignore patterns with [lines].
+     *
+     * The list is validated here, when it is saved, so an invalid pattern is refused with the collection untouched
+     * and is never first met by an import. It changes future imports only: a queued import carries the list it was
+     * admitted with.
+     */
+    suspend fun updateIgnorePatterns(id: CollectionId, lines: List<String>): IgnorePatterns =
+        coordinator.withMutation {
+            requireMutationsAllowed()
+            requireActive(id)
+            val validated = IgnorePatterns.of(lines)
+            collections.replaceIgnorePatterns(id, validated.patterns)
+            validated
         }
 
     // ---- Deletion reads ----

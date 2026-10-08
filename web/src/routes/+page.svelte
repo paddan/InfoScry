@@ -16,12 +16,14 @@
     type InvestigationLimitKey,
     type InvestigationLimitsInput,
   } from '../lib/investigationLimits';
+  import { profileOptionLabel, toolCallingRemedy, toolCallingState } from '../lib/toolCalling';
   import {
     ApiError,
     deleteConversation,
     listAsks,
     listCollections,
     listInvestigations,
+    listLlmProfilePrices,
     readSource,
     retryDocuments,
     searchCollection,
@@ -34,6 +36,7 @@
     type LlmProfilePrice,
     type RetryAdmission,
     type RetryAttempt,
+    type RetryOcrChoice,
     type SearchHit,
     type SearchFilters,
     type SearchMode,
@@ -529,8 +532,21 @@
 
   function selectMode(modeName: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN'): void {
     if (activeMode !== modeName) closeSourceSheetWithoutFocus();
+    // Admin may have measured a profile's tool calling; the Investigate select must show that, not the start-up read.
+    if (modeName === 'INVESTIGATE' && activeMode === 'ADMIN') void refreshInvestigateProfiles();
     activeMode = modeName;
   }
+
+  async function refreshInvestigateProfiles(): Promise<void> {
+    try {
+      investigateProfiles = await listLlmProfilePrices();
+    } catch {
+      // The list already on screen stays; a refused read must not clear the select.
+    }
+  }
+
+  $: selectedInvestigateProfile = investigateProfiles.find((profile) => profile.name === investigateProfile) ?? null;
+  $: investigateRemedy = selectedInvestigateProfile === null ? null : toolCallingRemedy(toolCallingState(selectedInvestigateProfile));
 
   function handleTabKeydown(event: KeyboardEvent): void {
     const tabs: ('SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN')[] = ['SEARCH', 'ASK', 'INVESTIGATE', 'ADMIN'];
@@ -698,8 +714,11 @@
    * show. The server decides per document, so a refusal is a normal answer with its own sentence rather than
    * a failed request, and the retry keeps the document's identity either way.
    */
-  async function retryManagedDocument(documentId: string): Promise<RetryAttempt> {
-    const admission = await retryDocuments(managedCollectionId, { documentIds: [documentId] });
+  async function retryManagedDocument(documentId: string, ocr?: RetryOcrChoice): Promise<RetryAttempt> {
+    const admission = await retryDocuments(
+      managedCollectionId,
+      ocr === undefined ? { documentIds: [documentId] } : { documentIds: [documentId], ocr },
+    );
     const jobId = admission.acceptedJobIds[0];
     if (jobId !== undefined) return { accepted: true, jobId };
     return {
@@ -716,8 +735,8 @@
    * documents it refused. The panel shows that answer; the work itself belongs to the server, so a navigation,
    * a disconnect or a restart does not lose it.
    */
-  async function retryAllManagedDocuments(): Promise<RetryAdmission> {
-    return retryDocuments(managedCollectionId, { allEligible: true });
+  async function retryAllManagedDocuments(ocr?: RetryOcrChoice): Promise<RetryAdmission> {
+    return retryDocuments(managedCollectionId, ocr === undefined ? { allEligible: true } : { allEligible: true, ocr });
   }
 
   /**
@@ -846,9 +865,10 @@
           {:else}
             <select id="llm-profile" bind:value={investigateProfile} disabled={investigateProfiles.length === 0}>
               {#if investigateProfiles.length === 0}<option value="">{investigateProfileStatus}</option>{/if}
-              {#each investigateProfiles as profile (profile.name)}<option value={profile.name}>{profile.name}</option>{/each}
+              {#each investigateProfiles as profile (profile.name)}<option value={profile.name}>{profileOptionLabel(profile.name, toolCallingState(profile))}</option>{/each}
             </select>
             {#if investigateProfiles.length === 0}<p>{investigateProfileStatus}</p>{/if}
+            {#if investigateRemedy !== null}<p class="profile-remedy" role="note">{investigateRemedy}</p>{/if}
             <p>Investigate can search the selected collection as needed. Search filters apply to Search only.</p>
             <fieldset class="limit-settings">
               <legend>Question limits</legend>
@@ -974,6 +994,7 @@
                 onDocumentDeleted={handleManagedDocumentDeleted}
                 onRetryDocument={retryManagedDocument}
                 onRetryAllDocuments={retryAllManagedDocuments}
+                onOpenOcrProfiles={() => (adminTab = 'OCR')}
               />
             {/if}
           </div>

@@ -102,7 +102,281 @@ import kotlinx.serialization.json.putJsonObject
 class ImportJobHandlerTest {
 
     @Test
-    fun `a good document is imported while an unreadable one fails without aborting the job`() {
+    fun `a folder with supported and unsupported files imports only the supported ones`() {
+        withHarness { harness ->
+            val good = harness.writeText("good.txt", "Alpha\nBeta\n")
+            val blob = harness.writeBinary("blob.bin")
+
+            val run = harness.importDurably(listOf(good, blob), RecordingUnits(units = 2))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            // The skipped file is not an item, not a document and not a count: the import has one file.
+            assertEquals(listOf("good.txt"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+            assertEquals(1, run.documents.size)
+            assertEquals(DocumentStatus.COMPLETE, run.documents.values.single().status)
+            assertEquals(1, run.job.total, "a skipped file is counted among the import's files")
+            assertEquals(1, run.job.completed)
+            // Nothing durable was made for the skipped file: the managed library holds one document only.
+            assertEquals(1, managedDocumentCount(harness))
+        }
+    }
+
+    @Test
+    fun `an import whose every file is unsupported finishes with zero files rather than failing`() {
+        withHarness { harness ->
+            val first = harness.writeBinary("first.bin")
+            val second = harness.writeBinary("second.bin")
+
+            val run = harness.import(listOf(first, second), harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(null, run.job.errorCode)
+            assertEquals(0, run.job.total)
+            assertEquals(0, run.job.completed)
+            assertTrue(run.items.isEmpty())
+            assertTrue(run.documents.isEmpty())
+            assertEquals(0, managedDocumentCount(harness))
+        }
+    }
+
+    @Test
+    fun `an include list imports only the listed types and skips the rest uncounted`() {
+        withHarness { harness ->
+            val notes = harness.writeText("notes.txt", "Alpha\n")
+            val log = harness.writeText("run.log", "Gamma\n")
+            val bare = harness.writeText("README", "Delta\n")
+
+            // The list is written as a person types it: upper case and with the leading dot.
+            val run = harness.importDurably(
+                listOf(notes, log, bare),
+                RecordingUnits(units = 1),
+                extensions = ExtensionFilter.of(include = listOf(".TXT"), exclude = emptyList()),
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(listOf("notes.txt"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+            assertEquals(1, run.job.total, "a file the filter removes is not among the import's files")
+            assertEquals(1, managedDocumentCount(harness))
+        }
+    }
+
+    @Test
+    fun `an exclude list imports everything else, including a file with no extension`() {
+        withHarness { harness ->
+            val notes = harness.writeText("notes.txt", "Alpha\n")
+            val log = harness.writeText("run.LOG", "Gamma\n")
+            val bare = harness.writeText("README", "Delta\n")
+
+            val run = harness.importDurably(
+                listOf(notes, log, bare),
+                RecordingUnits(units = 1),
+                extensions = ExtensionFilter.of(include = emptyList(), exclude = listOf("log")),
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(
+                listOf("README", "notes.txt"),
+                run.items.map { Path.of(it.sourcePath).fileName.toString() }.sorted(),
+            )
+            assertEquals(2, run.job.total)
+        }
+    }
+
+    @Test
+    fun `an extension filter applies to the files of a recursive directory walk`() {
+        withHarness { harness ->
+            harness.writeText("tree/top.txt", "Top\n")
+            harness.writeText("tree/nested/deep.txt", "Deep\n")
+            harness.writeText("tree/nested/deep.log", "Deeper\n")
+
+            val run = harness.import(
+                listOf(harness.sourcesDir.resolve("tree")),
+                harness.pipeline(RecordingUnits(units = 1)),
+                recursive = true,
+                extensions = ExtensionFilter.of(include = listOf("txt"), exclude = emptyList()),
+            )
+
+            assertEquals(
+                listOf("deep.txt", "top.txt"),
+                run.items.map { Path.of(it.sourcePath).fileName.toString() }.sorted(),
+            )
+        }
+    }
+
+    @Test
+    fun `a queued import keeps its extension filter so a resumed attempt applies the same one`() {
+        withHarness { harness ->
+            val notes = harness.writeText("notes.txt", "Alpha\n")
+            val log = harness.writeText("run.log", "Gamma\n")
+            // The job waits in the queue with no worker attached: the process that queued it is gone.
+            val jobId = harness.enqueueQueuedImport(
+                listOf(notes, log),
+                ExtensionFilter.of(include = emptyList(), exclude = listOf("log")),
+            )
+
+            val run = harness.resume(jobId, harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(listOf("notes.txt"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+        }
+    }
+
+    @Test
+    fun `the default ignore patterns keep system files, temp files and tool folders out of a folder import`() {
+        withHarness { harness ->
+            harness.writeText("tree/keep.txt", "Keep\n")
+            harness.writeText("tree/sub/also.txt", "Also\n")
+            harness.writeText("tree/.DS_Store", "junk\n")
+            harness.writeText("tree/sub/._also.txt", "junk\n")
+            harness.writeText("tree/scratch.tmp", "junk\n")
+            harness.writeText("tree/.git/notes.txt", "junk\n")
+            harness.writeText("tree/pkg/node_modules/dep/readme.txt", "junk\n")
+
+            val run = harness.import(
+                listOf(harness.sourcesDir.resolve("tree")),
+                harness.pipeline(RecordingUnits(units = 1)),
+                recursive = true,
+                ignore = IgnorePatterns.of(IgnorePatterns.DEFAULTS),
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(
+                listOf("also.txt", "keep.txt"),
+                run.items.map { Path.of(it.sourcePath).fileName.toString() }.sorted(),
+            )
+            assertEquals(2, run.job.total, "an ignored file is not among the import's files")
+            assertEquals(0, run.items.count { it.outcome != ImportItemOutcome.IMPORTED })
+        }
+    }
+
+    @Test
+    fun `an ignored directory is not walked`() {
+        withHarness { harness ->
+            harness.writeText("tree/keep.txt", "Keep\n")
+            harness.writeText("tree/.git/objects/pack/p.txt", "junk\n")
+            harness.writeText("tree/sub/node_modules/x.txt", "junk\n")
+
+            val entered = mutableListOf<String>()
+            val selection = ImportSelection(MediaTypeDetector(), ExtractorRegistry(emptyList(), TextualFallbackExtractor()))
+            val found = selection.walk(
+                harness.sourcesDir.resolve("tree"),
+                recursive = true,
+                ignore = IgnorePatterns.of(listOf(".git/", "node_modules/")),
+                entered = { entered.add(it) },
+            )
+
+            assertEquals(listOf("keep.txt"), found.map { it.relativePath })
+            assertEquals(listOf("sub"), entered, "only the directory that is not ignored was entered")
+        }
+    }
+
+    @Test
+    fun `a pattern matches the path relative to the imported folder`() {
+        withHarness { harness ->
+            harness.writeText("tree/docs/draft.txt", "Draft\n")
+            harness.writeText("tree/other/docs/draft.txt", "Kept\n")
+            harness.writeText("tree/final.txt", "Final\n")
+
+            val run = harness.import(
+                listOf(harness.sourcesDir.resolve("tree")),
+                harness.pipeline(RecordingUnits(units = 1)),
+                recursive = true,
+                ignore = IgnorePatterns.of(listOf("/docs/")),
+            )
+
+            assertEquals(
+                listOf("final.txt", "other/docs/draft.txt"),
+                run.items.map { Path.of(it.sourcePath).toString().substringAfter("tree/") }.sorted(),
+            )
+        }
+    }
+
+    @Test
+    fun `an explicitly chosen file that matches a pattern is skipped, and a directory pattern does not apply to it`() {
+        withHarness { harness ->
+            val junk = harness.writeText("junk.tmp", "junk\n")
+            val store = harness.writeText("node_modules/real.txt", "A real document\n")
+            val ok = harness.writeText("ok.txt", "Fine\n")
+
+            val run = harness.import(
+                listOf(junk, store, ok),
+                harness.pipeline(RecordingUnits(units = 1)),
+                ignore = IgnorePatterns.of(IgnorePatterns.DEFAULTS),
+            )
+
+            assertEquals(
+                listOf("ok.txt", "real.txt"),
+                run.items.map { Path.of(it.sourcePath).fileName.toString() }.sorted(),
+                "the file named directly is judged by its own name; the folders above it are outside the import",
+            )
+        }
+    }
+
+    @Test
+    fun `a queued import keeps the ignore list it was admitted with when the collection's list changes`() {
+        withHarness { harness ->
+            val notes = harness.writeText("notes.txt", "Alpha\n")
+            val backup = harness.writeText("notes.bak", "Beta\n")
+            val jobId = harness.enqueueQueuedImport(listOf(notes, backup), ignore = IgnorePatterns.of(listOf("*.bak")))
+            // After admission the owner empties the list; the resumed attempt must still apply the saved snapshot.
+            harness.editCollectionIgnoreList(emptyList())
+
+            val run = harness.resume(jobId, harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(listOf("notes.txt"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+        }
+    }
+
+    @Test
+    fun `a payload written before ignore patterns existed reads as no patterns`() {
+        val legacy = """{"collectionId":"default","sources":["/tmp/a.txt"],"settings":{"ocrLanguages":"eng"}}"""
+
+        assertEquals(IgnorePatterns.NONE, ImportJobPayload.decode(legacy).ignore)
+    }
+
+    @Test
+    fun `a file is skipped by what its content is, not by its name`() {
+        withHarness { harness ->
+            // Binary bytes under a text name are skipped, and text bytes under a binary-looking name are read.
+            val binaryText = harness.writeBinary("notes.txt")
+            val textBinary = harness.writeText("data.bin", "Ordinary text\n")
+
+            val run = harness.import(listOf(binaryText, textBinary), harness.pipeline(RecordingUnits(units = 1)))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(listOf("data.bin"), run.items.map { Path.of(it.sourcePath).fileName.toString() })
+            assertEquals(1, run.job.total)
+        }
+    }
+
+    @Test
+    fun `a supported file that fails extraction still fails its own item`() {
+        withHarness { harness ->
+            val good = harness.writeText("good.txt", "Alpha\nBeta\n")
+            val broken = harness.writeText("broken.txt", "Gamma\nDelta\n")
+
+            // The extractor dies on the first unit of every file, so both are supported and both fail. The durable
+            // pipeline is used because a sink that stores nothing never runs extraction at all.
+            val run = harness.importDurably(
+                listOf(good, broken),
+                RecordingUnits(units = 2, failProducingUnit = 0),
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            assertEquals(2, run.items.size, "a supported file must not be skipped because its extraction failed")
+            assertEquals(
+                listOf(ImportItemOutcome.FAILED, ImportItemOutcome.FAILED),
+                run.items.map { it.outcome },
+            )
+            assertTrue(run.items.none { it.errorCode == "UNSUPPORTED_MEDIA_TYPE" }, run.items.map { it.errorCode }.toString())
+            assertEquals(2, run.documents.size)
+        }
+    }
+
+    @Test
+    fun `an import that finishes carries no stage of the work it did last`() {
         withHarness { harness ->
             val good = harness.writeText("good.txt", "Alpha\nBeta\n")
             val blob = harness.writeBinary("blob.bin")
@@ -110,18 +384,7 @@ class ImportJobHandlerTest {
             val run = harness.import(listOf(good, blob), harness.pipeline(RecordingUnits(units = 2)))
 
             assertEquals(JobState.COMPLETE, run.job.state)
-            val byName = run.items.associateBy { Path.of(it.sourcePath).fileName.toString() }
-            assertEquals(ImportItemOutcome.IMPORTED, byName.getValue("good.txt").outcome)
-            assertEquals(ImportItemOutcome.FAILED, byName.getValue("blob.bin").outcome)
-            assertEquals("UNSUPPORTED_MEDIA_TYPE", byName.getValue("blob.bin").errorCode)
-            assertEquals(2, run.items.size)
-
-            // The unreadable document is stored and marked with the reason, rather than pretending to be
-            // usable or disappearing from the collection.
-            val failedId = byName.getValue("blob.bin").documentId!!
-            assertEquals(DocumentStatus.FAILED, run.documents.getValue(failedId).status)
-            assertEquals("UNSUPPORTED_MEDIA_TYPE", run.documents.getValue(failedId).errorCode)
-            assertTrue(Files.exists(harness.managedOriginal(failedId)))
+            assertNull(run.job.stage, "a finished import must not report the stage it last worked in")
         }
     }
 
@@ -2000,6 +2263,115 @@ class ImportJobHandlerTest {
         }
     }
 
+    /** Each revision the document's history lists, as the history reads it back. */
+    private fun historyOf(harness: Harness, documentId: DocumentId): List<infoscry.document.RevisionHistoryEntry> =
+        AppContext.open(harness.dataDir).use { context ->
+            context.revisionHistory.history(CollectionId("default"), documentId)
+        }
+
+    private fun ocrSnapshot(
+        language: String,
+        toolVersion: String? = null,
+        mode: OcrImportMode = OcrImportMode.FILL_MISSING,
+    ): OcrSettingsSnapshot = OcrSettingsSnapshot(
+        engine = OcrEngine.TESSERACT,
+        mode = mode,
+        language = language,
+        extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+        toolVersion = toolVersion,
+    )
+
+    @Test
+    fun `an imported document's history names the OCR engine, mode, language and tool it was read with`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("scan.txt")
+            Files.writeString(source, "a scanned page")
+            val run = harness.importDurably(
+                listOf(source),
+                ModeRecordingUnits(),
+                settings = ExtractionSettings(ocrLanguages = "swe"),
+                ocr = ocrSnapshot(language = "swe", toolVersion = "tesseract 5.5"),
+            )
+            val entry = historyOf(harness, run.documents.keys.single()).single()
+
+            assertEquals(listOf("OCR"), entry.extractionMethods)
+            val reading = assertNotNull(entry.reading, "an import that read by OCR names no reading")
+            assertEquals("TESSERACT", reading.engine)
+            assertEquals("FILL_MISSING", reading.mode)
+            assertEquals("swe", reading.language)
+            assertEquals("tesseract 5.5", reading.toolVersion)
+            assertFalse(entry.noOcrNeeded, "a page was read by OCR, so no page needed no OCR")
+        }
+    }
+
+    @Test
+    fun `a retry's revision names the settings the retry was read with, not the import's`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("scan.txt")
+            Files.writeString(source, "a scanned page")
+            val imported = harness.importDurably(
+                listOf(source),
+                ModeRecordingUnits(),
+                settings = ExtractionSettings(ocrLanguages = "eng"),
+                ocr = ocrSnapshot(language = "eng", toolVersion = "tesseract 5.4"),
+            )
+            val documentId = imported.documents.keys.single()
+
+            harness.retry(
+                listOf(documentId),
+                ModeRecordingUnits(),
+                settings = ExtractionSettings(ocrLanguages = "swe"),
+                ocr = ocrSnapshot(language = "swe", toolVersion = "tesseract 5.5"),
+            )
+            val readings = historyOf(harness, documentId).map {
+                assertNotNull(it.reading, "a revision produced by OCR names no reading")
+            }
+
+            assertEquals(listOf("tesseract 5.4", "tesseract 5.5"), readings.map { it.toolVersion })
+            assertEquals(listOf("eng", "swe"), readings.map { it.language })
+            assertEquals(listOf("TESSERACT", "TESSERACT"), readings.map { it.engine })
+        }
+    }
+
+    @Test
+    fun `a document that needed no OCR says so instead of naming an engine`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("ledger.txt")
+            Files.writeString(source, "text the file already holds")
+            val run = harness.importDurably(
+                listOf(source),
+                RecordingUnits(units = 1),
+                ocr = ocrSnapshot(language = "eng", toolVersion = "tesseract 5.5"),
+            )
+            val entry = historyOf(harness, run.documents.keys.single()).single()
+
+            assertEquals(listOf("DIRECT_TEXT"), entry.extractionMethods)
+            assertNull(entry.reading, "no page was read by OCR, so no engine is named for this revision")
+            assertTrue(entry.noOcrNeeded, "the history must say that no page needed OCR")
+        }
+    }
+
+    @Test
+    fun `an import with no recorded OCR settings says the reading was not recorded and invents none`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("scan.txt")
+            Files.writeString(source, "a scanned page")
+            val run = harness.importDurably(listOf(source), ModeRecordingUnits())
+            val entry = historyOf(harness, run.documents.keys.single()).single()
+
+            assertEquals(listOf("OCR"), entry.extractionMethods)
+            assertNull(entry.reading, "a legacy import recorded no settings, so none may be named")
+            assertFalse(entry.noOcrNeeded)
+        }
+    }
+
+    /** How many managed document directories the default collection holds: each stored file is one. */
+    private fun managedDocumentCount(harness: Harness): Int {
+        val library = harness.dataDir.resolve("library/default")
+        if (!Files.isDirectory(library)) return 0
+        return Files.list(library).use { entries -> entries.count().toInt() }
+    }
+
     private fun withHarness(block: (Harness) -> Unit) {
         val directory = Files.createTempDirectory("infoscry-import")
         try {
@@ -2118,8 +2490,11 @@ internal class Harness(val directory: Path) : AutoCloseable {
         embedder: DocumentEmbedder = TestDocumentEmbedder(),
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
         recursive: Boolean = false,
+        ocr: OcrSettingsSnapshot? = null,
+        extensions: ExtensionFilter = ExtensionFilter.NONE,
+        ignore: IgnorePatterns = IgnorePatterns.NONE,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId, recursive)
+        val job = enqueue(context, sources, settings, collectionId, recursive, ocr, extensions, ignore)
         attach(context, storedPipeline(context, extractor), embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -2142,11 +2517,12 @@ internal class Harness(val directory: Path) : AutoCloseable {
             detector = MediaTypeDetector(),
             registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
             sink = committed,
-            candidateSinkFor = { documentId ->
+            candidateSinkFor = { documentId, reading ->
                 CandidateRevisionSink(
                     revisions = context.revisions,
                     documentId = documentId,
                     provenance = ImportPipeline.PROVENANCE_CHECK_AND_IMPROVE,
+                    readingSnapshot = reading,
                 ).also(onCandidate)
             },
         )
@@ -2168,9 +2544,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
             detector = MediaTypeDetector(),
             registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
             sink = StoredUnitsSink(context.paths, context.documents, context.content),
-            candidateSinkFor = { documentId ->
+            candidateSinkFor = { documentId, reading ->
                 ParkAfterStaging(
-                    base.sinkFor(documentId, OcrImportMode.CHECK_AND_IMPROVE, extractor.pageImageSupport),
+                    base.sinkFor(documentId, OcrImportMode.CHECK_AND_IMPROVE, extractor.pageImageSupport, reading),
                     staged,
                 )
             },
@@ -2199,8 +2575,10 @@ internal class Harness(val directory: Path) : AutoCloseable {
         embedder: DocumentEmbedder = TestDocumentEmbedder(),
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
         recursive: Boolean = false,
+        extensions: ExtensionFilter = ExtensionFilter.NONE,
+        ignore: IgnorePatterns = IgnorePatterns.NONE,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId, recursive)
+        val job = enqueue(context, sources, settings, collectionId, recursive, extensions = extensions, ignore = ignore)
         attach(context, pipeline, embedder = embedder, maxChunksPerDocument = maxChunksPerDocument)
         finish(context, job.id, collectionId)
     }
@@ -2243,6 +2621,29 @@ internal class Harness(val directory: Path) : AutoCloseable {
         attach(context, pipeline)
         runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { extractionParked.await() } }
         job.id
+    }
+
+    /**
+     * Queues an import with [extensions] and attaches no worker, so the job waits in the queue the way it does
+     * after a restart. The filter has to survive that wait inside the payload.
+     */
+    fun enqueueQueuedImport(
+        sources: List<Path>,
+        extensions: ExtensionFilter = ExtensionFilter.NONE,
+        ignore: IgnorePatterns = IgnorePatterns.NONE,
+    ): JobId =
+        AppContext.open(dataDir).use { context ->
+            enqueue(
+                context, sources, ExtractionSettings(ocrLanguages = "eng"), CollectionId("default"),
+                extensions = extensions, ignore = ignore,
+            ).id
+        }
+
+    /** Replaces the saved ignore list of the default collection, the way an edit made after admission would. */
+    fun editCollectionIgnoreList(patterns: List<String>) {
+        AppContext.open(dataDir).use { context ->
+            context.collections.replaceIgnorePatterns(CollectionId("default"), patterns)
+        }
     }
 
     /** Runs an already queued job to its end in a fresh process, as the next start would after a kill. */
@@ -2501,6 +2902,8 @@ internal class Harness(val directory: Path) : AutoCloseable {
         collectionId: CollectionId,
         recursive: Boolean = false,
         ocr: OcrSettingsSnapshot? = null,
+        extensions: ExtensionFilter = ExtensionFilter.NONE,
+        ignore: IgnorePatterns = IgnorePatterns.NONE,
     ): Job {
         val payload = ImportJobPayload(
             collectionId = collectionId.value,
@@ -2508,6 +2911,8 @@ internal class Harness(val directory: Path) : AutoCloseable {
             settings = settings,
             ocr = ocr,
             recursive = recursive,
+            extensions = extensions,
+            ignore = ignore,
         )
         return context.jobs.enqueue(
             type = JobType.IMPORT,

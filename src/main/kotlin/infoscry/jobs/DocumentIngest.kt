@@ -21,6 +21,7 @@ import infoscry.extract.UnitBoundary
 import infoscry.extract.UnsupportedMediaTypeException
 import infoscry.ocr.CandidateRevisionPhases
 import infoscry.ocr.OcrComparisonException
+import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.StagedPageReview
 import infoscry.search.DocumentRow
 import infoscry.search.LuceneIndex
@@ -150,6 +151,11 @@ internal class DocumentIngest(
          * [infoscry.ocr.StagedPageReview].
          */
         review: infoscry.ocr.StagedPageReview? = null,
+        /**
+         * The OCR selection this attempt was admitted with, recorded on the revision the reading becomes so
+         * the history can say how it was read. Null for an attempt that recorded none.
+         */
+        reading: OcrSettingsSnapshot? = null,
     ): IngestResult {
         // The bytes are classified under the boundary that refuses a document the deletion removed. The
         // deletion parks the managed copy of a document it owns, and it can do that between this file's attach
@@ -175,7 +181,7 @@ internal class DocumentIngest(
         // selected for this document's format as well as from the mode: a format that reports no page images
         // has nothing check-and-improve could read again, so its units commit as the ordinary published text
         // they have always been rather than as a proposal nobody could act on.
-        val sink = pipeline.sinkFor(document.id, settings.ocrMode, extractor.pageImageSupport)
+        val sink = pipeline.sinkFor(document.id, settings.ocrMode, extractor.pageImageSupport, reading)
 
         if (!sink.storesUnits) {
             // No durable unit store exists, so the extraction phase is an explicit no-op: extraction is not
@@ -288,7 +294,7 @@ internal class DocumentIngest(
         }
 
         chunkContent(document, stage)
-        if (!embedAndIndex(collection, document, sink, stage, onFailure)) return IngestResult.Failed
+        if (!embedAndIndex(collection, document, sink, stage, onFailure, reading)) return IngestResult.Failed
         return IngestResult.Complete
     }
 
@@ -398,6 +404,7 @@ internal class DocumentIngest(
         sink: ExtractionSink,
         stage: JobStage,
         onFailure: suspend (String, String) -> Unit,
+        reading: OcrSettingsSnapshot?,
     ): Boolean {
         val embedder = documentEmbedder()
         if (embedder == null) {
@@ -474,7 +481,7 @@ internal class DocumentIngest(
                     throw CollectionNotActiveException(collection.id)
                 }
                 index().replaceDocument(rows)
-                revisions.recordPublishedContent(document.id, PROVENANCE_IMPORT)
+                revisions.recordPublishedContent(document.id, PROVENANCE_IMPORT, reading)
             }
             stage.run(STAGE_RECORD) {
                 val failedUnits = content.extractionMarker(document.id)?.failedUnits ?: 0

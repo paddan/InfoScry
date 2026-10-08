@@ -7,11 +7,13 @@
     deleteDocuments,
     getCollectionDocument,
     getDeletion,
+    getCollectionIgnorePatterns,
     getImportItems,
     listCollectionDocuments,
     listCollectionImports,
     listUnfinishedDeletions,
     renameCollection,
+    updateCollectionIgnorePatterns,
     updateCollectionOcrLanguages,
     type Collection,
     type DeletionOperation,
@@ -25,15 +27,18 @@
     type JobState,
     type RetryAdmission,
     type RetryAttempt,
+    type RetryOcrChoice,
     type RetryRejection,
     type UnitKindName,
   } from './api';
   import CollectionOcrSettings from './CollectionOcrSettings.svelte';
   import DocumentRescan from './DocumentRescan.svelte';
+  import OcrChoiceFields from './OcrChoiceFields.svelte';
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
-  import { fileCountLabel, stageLabel } from './importProgress';
+  import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
+  import { emptyChoice, retryChoice } from './ocrRescan';
 
   export let collections: Collection[];
   export let selectedId: string;
@@ -41,6 +46,8 @@
   export let error: string | null;
   export let onSelect: (id: string) => void;
   export let onCollectionsChanged: (selectedId?: string) => Promise<void> | void;
+  /** Opens Admin → OCR profiles, so an empty profile list can point at where to create one. */
+  export let onOpenOcrProfiles: (() => void) | undefined = undefined;
   /**
    * Opens one managed document in the page's source viewer at the unit its detail named. The page owns
    * the viewer, so this forwards the two ids and keeps no viewer state of its own.
@@ -62,13 +69,13 @@
    * request and hands back what to show: the attempt it queued, or the server's own sentence for a refusal.
    * The panel never touches the viewer, so nothing about the page's source state moves for a retry.
    */
-  export let onRetryDocument: (documentId: string) => Promise<RetryAttempt>;
+  export let onRetryDocument: (documentId: string, ocr?: RetryOcrChoice) => Promise<RetryAttempt>;
   /**
    * Asks for every eligible document of the managed collection to be read again, across all pages. It names
    * no documents and carries no filter or page, because the collection-wide set is the server's to pick; the
    * page answers with what the server admitted and refused.
    */
-  export let onRetryAllDocuments: () => Promise<RetryAdmission>;
+  export let onRetryAllDocuments: (ocr?: RetryOcrChoice) => Promise<RetryAdmission>;
 
   /** The rows one page asks for; the server's own maximum stays 200. */
   const PAGE_SIZE = 50;
@@ -156,6 +163,13 @@
   let renameError: string | null = null;
   let renameSaved = false;
   let ocrLanguages = '';
+  // The ignore patterns draft: one pattern per line. `ignoreLoaded` is false until the saved list has been read, so a
+  // save can never replace a list the reader has not seen.
+  let ignoreText = '';
+  let ignoreLoaded = false;
+  let ignoreSaving = false;
+  let ignoreError: string | null = null;
+  let ignoreSaved = false;
   let ocrSaving = false;
   let ocrError: string | null = null;
   let ocrSaved = false;
@@ -195,6 +209,12 @@
   let retrySubmitting = false;
   let retryMessage: string | null = null;
   let retryError: string | null = null;
+  /**
+   * Whether this retry reads with a method chosen here instead of the collection's settings, and the choice.
+   * Closed by default, and an open form that names nothing is the same request as a closed one.
+   */
+  let retryChoiceOpen = false;
+  let retryChoiceValue = emptyChoice();
 
   /**
    * The collection-wide retry: one submission at a time, what the server answered, and the documents it
@@ -205,6 +225,8 @@
   let retryAllMessage: string | null = null;
   let retryAllRejected: RetryRejection[] = [];
   let retryAllError: string | null = null;
+  let retryAllChoiceOpen = false;
+  let retryAllChoiceValue = emptyChoice();
 
   let imports: ImportHistoryEntry[] = [];
   let importsTotal = 0;
@@ -353,6 +375,8 @@
     retryAllMessage = null;
     retryAllRejected = [];
     retryAllError = null;
+    retryAllChoiceOpen = false;
+    retryAllChoiceValue = emptyChoice();
     startImports();
     void loadDocuments();
   }
@@ -369,6 +393,50 @@
     ocrSaving = false;
     ocrError = null;
     ocrSaved = false;
+    ignoreText = '';
+    ignoreLoaded = false;
+    ignoreSaving = false;
+    ignoreError = null;
+    ignoreSaved = false;
+    void loadIgnorePatterns(collectionId, settingsGeneration);
+  }
+
+  /** Reads the saved ignore list into the draft; an answer for a collection no longer managed is dropped. */
+  async function loadIgnorePatterns(collectionId: string, generation: number): Promise<void> {
+    try {
+      const patterns = await getCollectionIgnorePatterns(collectionId);
+      if (generation !== settingsGeneration) return;
+      ignoreText = patterns.join('\n');
+      ignoreLoaded = true;
+    } catch (failure) {
+      if (generation !== settingsGeneration) return;
+      ignoreError = describe(failure);
+    }
+  }
+
+  /**
+   * Saves the ignore list. The server refuses an invalid pattern, and the draft is kept so it can be fixed. Only
+   * future imports use the new list: an import already queued or running keeps the list it was admitted with.
+   */
+  async function saveIgnorePatterns(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const collection = selected;
+    if (collection === null || ignoreSaving || !ignoreLoaded) return;
+    const generation = settingsGeneration;
+    ignoreSaving = true;
+    ignoreError = null;
+    ignoreSaved = false;
+    try {
+      const saved = await updateCollectionIgnorePatterns(collection.id, ignoreText.split('\n'));
+      if (generation !== settingsGeneration) return;
+      ignoreText = saved.join('\n');
+      ignoreSaved = true;
+    } catch (failure) {
+      if (generation !== settingsGeneration) return;
+      ignoreError = describe(failure);
+    } finally {
+      if (generation === settingsGeneration) ignoreSaving = false;
+    }
   }
 
   /**
@@ -560,6 +628,8 @@
     retrySubmitting = false;
     retryMessage = null;
     retryError = null;
+    retryChoiceOpen = false;
+    retryChoiceValue = emptyChoice();
   }
 
   /**
@@ -576,7 +646,8 @@
     retryMessage = null;
     retryError = null;
     try {
-      const attempt = await onRetryDocument(documentId);
+      const ocr = retryChoiceOpen ? retryChoice(retryChoiceValue) : undefined;
+      const attempt = ocr === undefined ? await onRetryDocument(documentId) : await onRetryDocument(documentId, ocr);
       if (!attempt.accepted) {
         retryError = attempt.reason;
         return;
@@ -607,7 +678,8 @@
     retryAllRejected = [];
     retryAllError = null;
     try {
-      const admission = await onRetryAllDocuments();
+      const ocr = retryAllChoiceOpen ? retryChoice(retryAllChoiceValue) : undefined;
+      const admission = ocr === undefined ? await onRetryAllDocuments() : await onRetryAllDocuments(ocr);
       retryAllRejected = admission.rejected;
       retryAllMessage = retryAllSummary(admission);
       await loadDocuments();
@@ -779,12 +851,13 @@
 
   /**
    * What the Stage column says: the stage in a reader's words, and — while the import is unfinished — the
-   * file it is reading now, e.g. `Extracting · report.pdf`. A finished import has nothing being read, so
-   * its row keeps the stage alone, and a stage the server never reported is an em dash.
+   * file it is reading now, e.g. `Extracting · report.pdf`. A finished import is in no stage and has nothing
+   * being read, so its row is empty, except for the wait for an approval; a stage the server never reported
+   * is an em dash.
    */
   function stageCell(entry: ImportHistoryEntry): string {
     const current = TERMINAL_JOB_STATES.includes(entry.state) ? null : entry.currentItem;
-    const parts = [stageLabel(entry.stage), current ?? ''].filter((part) => part !== '');
+    const parts = [stageLabel(stageForReader(entry.state, entry.stage)), current ?? ''].filter((part) => part !== '');
     return parts.length === 0 ? '\u2014' : parts.join(' · ');
   }
 
@@ -1348,7 +1421,37 @@
             </p>
           </form>
 
-          <CollectionOcrSettings collection={selected} onChanged={() => onCollectionsChanged()} />
+          <form class="settings-form" onsubmit={saveIgnorePatterns}>
+            <div class="field">
+              <label for="collection-settings-ignore">Ignored files</label>
+              <textarea
+                id="collection-settings-ignore"
+                rows="8"
+                spellcheck="false"
+                autocapitalize="off"
+                bind:value={ignoreText}
+                oninput={() => (ignoreSaved = false)}
+                disabled={!ignoreLoaded}
+                aria-invalid={ignoreError !== null && ignoreLoaded}
+                aria-describedby="collection-settings-ignore-note"
+              ></textarea>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" disabled={ignoreSaving || !ignoreLoaded}>
+                {ignoreSaving ? 'Saving ignored files…' : 'Save ignored files'}
+              </button>
+            </div>
+            {#if ignoreError !== null}<p role="alert">{ignoreError}</p>{/if}
+            {#if ignoreSaved}<p role="status">Ignored files saved.</p>{/if}
+            <p class="hint" id="collection-settings-ignore-note">
+              One pattern per line, like a .gitignore file: * and ? match within a name, ** matches across folders, a
+              trailing / matches a folder (its contents are never read), ! re-includes, and # starts a comment. Every
+              import into this collection skips matching files before anything else. A change applies to imports
+              started afterwards, not to one already queued or running.
+            </p>
+          </form>
+
+          <CollectionOcrSettings collection={selected} onChanged={() => onCollectionsChanged()} {onOpenOcrProfiles} />
         </section>
 
         <section class="collection-deletion" aria-label={`Delete ${selected.name}`}>
@@ -1408,6 +1511,17 @@
             filter, sort order and current page do not restrict which documents it selects. Completed
             documents, and documents that only have warnings, are left alone.
           </p>
+          <label class="choice-toggle">
+            <input type="checkbox" bind:checked={retryAllChoiceOpen} />
+            Choose the OCR method for this retry
+          </label>
+          {#if retryAllChoiceOpen}
+            <p class="hint">
+              A choice left on the collection default uses the collection's settings. The collection itself is not
+              changed, and documents that already have a published text are left to Scan again.
+            </p>
+            <OcrChoiceFields idPrefix="retry-all" purpose="retry" showLanguage bind:choice={retryAllChoiceValue} />
+          {/if}
           <div class="actions">
             <button
               type="button"
@@ -1599,6 +1713,18 @@
                 </div>
               {/if}
               {#if detail.retryEligible}
+                <label class="choice-toggle">
+                  <input type="checkbox" bind:checked={retryChoiceOpen} />
+                  Choose the OCR method for this retry
+                </label>
+                {#if retryChoiceOpen}
+                  <p class="hint">
+                    A choice left on the collection default uses the collection's settings. A document that already
+                    has a published text is read again with Scan again instead, which shows the new reading before
+                    it replaces the old one.
+                  </p>
+                  <OcrChoiceFields idPrefix="retry" purpose="retry" showLanguage bind:choice={retryChoiceValue} />
+                {/if}
                 <div class="actions">
                   <button type="button" onclick={() => void retryDocument(detail)} disabled={retrySubmitting}>
                     {retrySubmitting ? 'Retrying…' : 'Retry'}
@@ -1853,6 +1979,7 @@
   .collection-settings { display: grid; gap: 0.9rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .settings-form { display: grid; gap: 0.6rem; }
   .settings-form .actions { justify-content: start; }
+  .settings-form textarea { font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0.5rem; resize: vertical; width: 100%; box-sizing: border-box; }
   .hint { color: #929997; font-size: 0.82rem; }
   .eyebrow { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
@@ -1860,6 +1987,7 @@
   .document-controls { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 0.75rem; align-items: end; padding-top: 0.35rem; }
   .collection-retry { display: grid; justify-items: start; gap: 0.6rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .collection-retry p { margin: 0; }
+  .choice-toggle { display: flex; align-items: center; gap: 0.5rem; color: #b8bcbb; font-size: 0.85rem; }
   .retry-refusals { margin: 0; padding-left: 1.1rem; max-height: 8rem; overflow-y: auto; color: #d8c9a8; font-size: 0.82rem; }
   .document-search { display: flex; gap: 0.55rem; align-items: end; }
   .document-search .field { flex: 1 1 auto; }

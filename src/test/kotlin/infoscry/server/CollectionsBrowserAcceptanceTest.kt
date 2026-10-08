@@ -329,6 +329,82 @@ class CollectionsBrowserAcceptanceTest {
         assertNull(findDocument("Notes", "held-01.txt"))
     }
 
+    /** Ticket 02: a finished import's history row carries no stage, in particular not "Queued". */
+    @Test
+    fun `a finished import's history row shows no stale stage`() {
+        startServer("Notes")
+        picker.folder = AcceptanceFixtures.folder(sourcesDir, "single")
+        runScenario("history-final-stage")
+
+        val job = context().jobs.listImports(collectionId("Notes"), limit = 1).single()
+        assertEquals(JobState.COMPLETE, job.state)
+        assertEquals(4, documentCount("Notes"))
+    }
+
+    /** Ticket 05: an unsupported file is neither a document nor an import item nor part of the counts. */
+    @Test
+    fun `a folder with an unsupported file imports only the supported files`() {
+        startServer("Notes")
+        picker.folder = AcceptanceFixtures.folder(sourcesDir, "unsupported")
+        runScenario("unsupported-skipped")
+
+        assertEquals(2, documentCount("Notes"))
+        assertNull(findDocument("Notes", "blob.bin"), "the unsupported file must leave no document row")
+        val job = context().jobs.listImports(collectionId("Notes"), limit = 1).single()
+        val items = context().importItems.listForJob(job.id)
+        assertEquals(2, items.size, "the unsupported file must leave no import item")
+        assertTrue(items.none { it.sourcePath?.contains("blob.bin") == true })
+        assertTrue(Files.exists(sourcesDir.resolve("unsupported").resolve("blob.bin")), "the external original is untouched")
+    }
+
+    /** Ticket 06: "Only these extensions" in one collection and "All except these extensions" in another. */
+    @Test
+    fun `include and exclude extension filters import only the expected files`() {
+        startServer("Notes", "Archive")
+        picker.folder = AcceptanceFixtures.folder(sourcesDir, "types")
+        runScenario("extension-filters")
+
+        assertEquals(listOf("alpha.txt", "beta.TXT"), documentNames("Notes"), "include txt keeps both, whatever the case")
+        assertEquals(
+            listOf("alpha.txt", "beta.TXT", "delta.dat"),
+            documentNames("Archive"),
+            "exclude log keeps everything else",
+        )
+    }
+
+    /** Ticket 07: the collection's own ignore list, edited in SETTINGS, applies to the next import. */
+    @Test
+    fun `edited ignore patterns keep system and temporary files out of an import`() {
+        startServer("Notes")
+        picker.folder = AcceptanceFixtures.folder(sourcesDir, "ignored")
+        runScenario("ignore-patterns")
+
+        assertEquals(listOf("real-a.txt", "real-b.txt"), documentNames("Notes"))
+        val saved = context().collections.ignorePatterns(collectionId("Notes"))
+        assertTrue("scratch-*" in saved, "the pattern the reader added is the collection's own now: $saved")
+        assertTrue(".DS_Store" in saved && "*.tmp" in saved, "the defaults stay in the list: $saved")
+        for (name in listOf(".DS_Store", "draft.tmp", "scratch-1.txt")) {
+            assertTrue(Files.exists(sourcesDir.resolve("ignored").resolve(name)), "$name must be untouched outside InfoScry")
+        }
+    }
+
+    /** Ticket 08: a failed document is retried with a chosen OCR method and becomes searchable. */
+    @Test
+    fun `a failed document retried with a chosen OCR method becomes searchable`() {
+        startServer("Notes")
+        picker.files = AcceptanceFixtures.files(sourcesDir, "fail-once-scan.png")
+        runScenario("retry-with-chosen-ocr")
+
+        assertEquals(DocumentStatus.COMPLETE, findDocument("Notes", "fail-once-scan.png")!!.status)
+        val retry = context().jobs.list(limit = 50).single { it.type == JobType.RETRY }
+        assertEquals(JobState.COMPLETE, retry.state)
+        assertEquals(
+            listOf("unit-0", "unit-0", "unit-1"),
+            extractorRun.produced("fail-once-scan.png"),
+            "the chosen language changes the reading, so the first attempt's unit is read again",
+        )
+    }
+
     // ---- Server ----
 
     private fun startServer(vararg collections: String) = startServerOver(tempDir.resolve("data"), *collections)
@@ -349,6 +425,8 @@ class CollectionsBrowserAcceptanceTest {
                 harness!!.context.index().deleteCollection(collectionId)
             },
             picker = picker::choose,
+            // A chosen engine is admitted like a rescan, which needs an embedder this archive has no model for.
+            rescanEmbedder = { true },
             // A retry asks this machine what it can do. The acceptance archive has no pinned model and the
             // extractor needs no tool, so the answer is stated rather than probed.
             retryPrerequisites = { collection ->
@@ -430,6 +508,11 @@ class CollectionsBrowserAcceptanceTest {
     // ---- Archive facts ----
 
     private fun collectionNames(): List<String> = context().collections.list().map { it.name }
+
+    private fun documentNames(name: String): List<String> = context().documents.listListing(
+        DocumentListing(collectionId = collectionId(name)),
+        limit = 200,
+    ).map { it.originalFilename }.sorted()
 
     private fun collectionId(name: String): CollectionId =
         context().collectionService.requireActiveByNameOrId(name).id

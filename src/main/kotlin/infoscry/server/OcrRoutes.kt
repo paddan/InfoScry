@@ -218,10 +218,15 @@ data class RevisionView(
     val publishedAt: String? = null,
     /** The historical revision this one is an explicit restore of. */
     val restoredFromRevisionId: String? = null,
-    /** The engine and settings of the rescan that produced it; absent for an import or a restore. */
+    /**
+     * The OCR engine, mode, language and versions the revision was read with; absent when no page was read by
+     * OCR or the attempt recorded no settings.
+     */
     val reading: RevisionReadingView? = null,
     val extractionMethods: List<String> = emptyList(),
     val pageChanges: PageChangesView,
+    /** True when every published page was read without OCR, so the history says no page needed OCR. */
+    val noOcrNeeded: Boolean = false,
 )
 
 /** A page of a document's published history, with the revision that is active now. */
@@ -575,7 +580,14 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                 val jobId = call.jobId()
                 val job = context.jobs.get(jobId)
                     ?: throw NoSuchElementException("no job with id ${jobId.value}")
-                val snapshot = infoscry.jobs.ImportJobPayload.decode(job.payload).ocr
+                // An import's files and a retry's documents share one allowance each, so the scope is approved
+                // on the job whichever kind it is; the two payloads name the same snapshot.
+                val recorded = if (job.type == infoscry.domain.JobType.RETRY) {
+                    infoscry.jobs.RetryJobPayload.decode(job.payload).ocr
+                } else {
+                    infoscry.jobs.ImportJobPayload.decode(job.payload).ocr
+                }
+                val snapshot = recorded
                     ?: throw BadRequestException(
                         "this job recorded no OCR selection, so it has no external page scope to approve",
                     )
@@ -676,6 +688,7 @@ private fun RevisionHistoryEntry.toApiView(): RevisionView = RevisionView(
         restored = pageChanges.restored,
         notPublished = pageChanges.notPublished,
     ),
+    noOcrNeeded = noOcrNeeded,
 )
 
 private fun RevisionRestoreRecord.toApiView(): RestoreOperationView = RestoreOperationView(

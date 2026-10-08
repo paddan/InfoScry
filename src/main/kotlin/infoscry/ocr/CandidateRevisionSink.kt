@@ -43,6 +43,8 @@ class CandidateRevisionSink(
     private val documentId: DocumentId,
     private val provenance: String,
     private val baselineRevisionId: String? = revisions.activeRevisionId(documentId),
+    /** The OCR selection of the import or retry this reading belongs to, recorded on the candidate it opens. */
+    private val readingSnapshot: OcrSettingsSnapshot? = null,
 ) : ExtractionSink {
 
     /** The pages the reading being replaced holds, by ordinal: what a staged page may inherit from. */
@@ -123,7 +125,13 @@ class CandidateRevisionSink(
         }
         if (event !is ExtractionEvent.UnitReady) return
         val revision = candidate
-            ?: revisions.openCandidate(documentId, baselineRevisionId, provenance, fingerprint.value).also { opened ->
+            ?: revisions.openCandidate(
+                documentId,
+                baselineRevisionId,
+                provenance,
+                fingerprint.value,
+                readingSnapshot,
+            ).also { opened ->
                 candidate = opened
             }
         revisions.appendPage(revision, pageFor(event, approval ?: PageApproval.PENDING))

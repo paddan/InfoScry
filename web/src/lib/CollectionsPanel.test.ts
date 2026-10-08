@@ -26,12 +26,16 @@ const api = vi.hoisted(() => ({
   getCollectionDocument: vi.fn(),
   renameCollection: vi.fn(),
   updateCollectionOcrLanguages: vi.fn(),
+  getCollectionIgnorePatterns: vi.fn(),
+  updateCollectionIgnorePatterns: vi.fn(),
   deleteCollection: vi.fn(),
   deleteDocuments: vi.fn(),
   getDeletion: vi.fn(),
   listUnfinishedDeletions: vi.fn(),
   updateCollectionOcrSettings: vi.fn(),
   listOcrProfiles: vi.fn(),
+  listOcrLlmCandidates: vi.fn(),
+  copyLlmProfileToOcr: vi.fn(),
   previewRescan: vi.fn(),
   admitRescan: vi.fn(),
   getRescanOperation: vi.fn(),
@@ -53,6 +57,8 @@ vi.mock('./api', () => ({
   },
   updateCollectionOcrSettings: api.updateCollectionOcrSettings,
   listOcrProfiles: api.listOcrProfiles,
+  listOcrLlmCandidates: api.listOcrLlmCandidates,
+  copyLlmProfileToOcr: api.copyLlmProfileToOcr,
   previewRescan: api.previewRescan,
   admitRescan: api.admitRescan,
   getRescanOperation: api.getRescanOperation,
@@ -70,6 +76,8 @@ vi.mock('./api', () => ({
   getCollectionDocument: api.getCollectionDocument,
   renameCollection: api.renameCollection,
   updateCollectionOcrLanguages: api.updateCollectionOcrLanguages,
+  getCollectionIgnorePatterns: api.getCollectionIgnorePatterns,
+  updateCollectionIgnorePatterns: api.updateCollectionIgnorePatterns,
   deleteCollection: api.deleteCollection,
   deleteDocuments: api.deleteDocuments,
   getDeletion: api.getDeletion,
@@ -179,12 +187,14 @@ describe('collections panel', () => {
     vi.resetAllMocks();
     api.listCollectionDocuments.mockResolvedValue(page([]));
     api.listCollectionImports.mockResolvedValue(history([]));
+    api.getCollectionIgnorePatterns.mockResolvedValue(['.DS_Store', '*.tmp']);
     // Nothing is being deleted unless a test says so, and a followed operation stays unfinished by
     // default so a late poll cannot turn into a phantom completion.
     api.listUnfinishedDeletions.mockResolvedValue([]);
     api.getDeletion.mockResolvedValue(deletion());
     // No OCR profiles and no earlier scans unless a test says so.
     api.listOcrProfiles.mockResolvedValue([]);
+    api.listOcrLlmCandidates.mockResolvedValue([]);
     api.listRescanOperations.mockResolvedValue([]);
   });
 
@@ -722,6 +732,79 @@ describe('collections panel', () => {
     expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2);
   });
 
+  it('retries one document with a chosen OCR method, and leaves the choice out when nothing was chosen', async () => {
+    const onRetryDocument = vi.fn(async () => ({ accepted: true as const, jobId: 'job-9' }));
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
+    api.getCollectionDocument.mockResolvedValue({
+      document: documentRow('doc-1', { status: 'FAILED', errorCode: 'EXTRACTION_FAILED' }),
+      errorMessage: 'the extractor stopped',
+      sourceId: 'unit-1',
+      retryEligible: true,
+    });
+    api.listOcrProfiles.mockResolvedValue([]);
+
+    render(CollectionsPanel, props({
+      collections: [collection('Nightfall', 1)],
+      selectedId: 'nightfall',
+      onRetryDocument,
+    }));
+    await screen.findByRole('table');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const details = await screen.findByRole('region', { name: 'Document details' });
+
+    // An open form that names nothing is the plain Retry.
+    await fireEvent.click(within(details).getByLabelText('Choose the OCR method for this retry'));
+    await fireEvent.click(within(details).getByRole('button', { name: 'Retry' }));
+    expect(onRetryDocument).toHaveBeenLastCalledWith('doc-1');
+
+    // The same engine, mode and language controls Scan again uses.
+    await fireEvent.change(within(details).getByLabelText('Engine for this retry'), { target: { value: 'TESSERACT' } });
+    await fireEvent.change(within(details).getByLabelText('Import mode for this retry'), {
+      target: { value: 'CHECK_AND_IMPROVE' },
+    });
+    await fireEvent.input(within(details).getByLabelText('OCR languages for this retry'), {
+      target: { value: ' swe+eng ' },
+    });
+    await fireEvent.click(within(details).getByRole('button', { name: 'Retry' }));
+
+    expect(onRetryDocument).toHaveBeenLastCalledWith('doc-1', {
+      engine: 'TESSERACT',
+      importMode: 'CHECK_AND_IMPROVE',
+      language: 'swe+eng',
+    });
+    expect(api.listOcrProfiles).toHaveBeenCalled();
+  });
+
+  it('retries every eligible document with a chosen OCR method', async () => {
+    const onRetryAllDocuments = vi.fn(async () => ({
+      collectionId: 'nightfall',
+      acceptedJobIds: ['job-1'],
+      rejected: [
+        {
+          documentId: 'doc-2',
+          code: 'RETRY_USE_SCAN_AGAIN',
+          reason: 'this document already has a published text, so use Scan again',
+        },
+      ],
+    }));
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
+
+    render(CollectionsPanel, props({
+      collections: [collection('Nightfall', 1)],
+      selectedId: 'nightfall',
+      onRetryAllDocuments,
+    }));
+    await screen.findByRole('table');
+    const section = screen.getByRole('region', { name: 'Retry documents in Nightfall' });
+
+    await fireEvent.click(within(section).getByLabelText('Choose the OCR method for this retry'));
+    await fireEvent.change(within(section).getByLabelText('Engine for this retry'), { target: { value: 'SURYA' } });
+    await fireEvent.click(within(section).getByRole('button', { name: 'Retry all eligible documents' }));
+
+    expect(onRetryAllDocuments).toHaveBeenCalledWith({ engine: 'SURYA' });
+    expect(await within(section).findByText(/use Scan again/)).toBeTruthy();
+  });
+
   it('shows the server sentence for a refused retry and claims nothing was queued', async () => {
     const refusal = 'the OCR tool (Tesseract) is not installed, so this document cannot be read again: install it with brew';
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'NEEDS_TOOL' })]));
@@ -992,7 +1075,8 @@ describe('collections panel', () => {
     expect(within(running).getByText('Copying · report.pdf')).toBeTruthy();
     expect(within(running).getByText('1 of 4 files')).toBeTruthy();
     const finished = within(area).getByRole('row', { name: /Complete/ });
-    expect(within(finished).getByText('Indexing')).toBeTruthy();
+    // A finished import reports no stage: the stage it last ran in is not what it is doing now.
+    expect(within(finished).queryByText('Indexing')).toBeNull();
     expect(within(finished).queryByText(/done\.pdf/)).toBeNull();
     expect(within(area).getByText('3 of 3 files')).toBeTruthy();
     expect(within(area).getByText('Showing 1–2 of 2 imports')).toBeTruthy();
@@ -1005,6 +1089,27 @@ describe('collections panel', () => {
     expect(await screen.findByRole('region', { name: 'Import history for Nightfall' })).toBeTruthy();
     expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
     expect(await screen.findByText('1 of 4 files')).toBeTruthy();
+  });
+
+  it('never reads a finished import as still queued, and keeps the wait for an approval', async () => {
+    api.listCollectionImports.mockResolvedValue(history([
+      importEntry('job-waiting', { state: 'COMPLETE', stage: 'awaiting-approval', filesCompleted: 1, filesTotal: 3 }),
+      // The stage an import last entered before it finished: the row reads its outcome, not that stage.
+      importEntry('job-done', { state: 'COMPLETE', stage: 'queue', filesCompleted: 2, filesTotal: 2 }),
+      importEntry('job-failed', { state: 'FAILED', stage: 'queue', errorCode: 'IMPORT_FAILED' }),
+    ]));
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
+
+    const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
+    await screen.findByText('2 of 2 files');
+    expect(within(area).queryByText('Queued')).toBeNull();
+    // Newest first: the waiting import is listed before the one that finished with a stale stage.
+    const [waiting, done] = within(area).getAllByRole('row', { name: /Complete/ });
+    expect(within(waiting).getByText('Awaiting approval')).toBeTruthy();
+    expect(within(done).queryByText(/Queued|Awaiting/)).toBeNull();
+    const failed = within(area).getByRole('row', { name: /Failed/ });
+    expect(within(failed).queryByText('Queued')).toBeNull();
   });
 
   it('shows no imports yet for a collection that never imported anything', async () => {
@@ -1335,6 +1440,90 @@ describe('collections panel', () => {
 
     expect((screen.getByLabelText('OCR languages') as HTMLInputElement).value).toBe('swe');
     expect(screen.queryByText('OCR languages saved.')).toBeNull();
+  });
+
+  it('shows the collection saved ignore patterns, one per line, in the settings', async () => {
+    api.getCollectionIgnorePatterns.mockResolvedValue(['.DS_Store', '# mine', '*.tmp']);
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+
+    const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.value).toBe('.DS_Store\n# mine\n*.tmp'));
+    expect(api.getCollectionIgnorePatterns).toHaveBeenCalledWith('nightfall');
+  });
+
+  it('saves the ignore patterns as lines and shows the list the server kept', async () => {
+    api.updateCollectionIgnorePatterns.mockResolvedValue(['*.bak', '!keep.bak']);
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+
+    const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.disabled).toBe(false));
+    await fireEvent.input(field, { target: { value: '*.bak\n\n!keep.bak' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save ignored files' }));
+
+    expect(api.updateCollectionIgnorePatterns).toHaveBeenCalledWith('nightfall', ['*.bak', '', '!keep.bak']);
+    expect(await screen.findByText('Ignored files saved.')).toBeTruthy();
+    expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).toBe('*.bak\n!keep.bak');
+  });
+
+  it('keeps the draft and shows the reason when the server refuses a pattern', async () => {
+    api.updateCollectionIgnorePatterns.mockRejectedValue(
+      new ApiError('INVALID_REQUEST', "ignore pattern '!': names nothing"),
+    );
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+
+    const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.disabled).toBe(false));
+    await fireEvent.input(field, { target: { value: '*.bak\n!' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save ignored files' }));
+
+    const settings = screen.getByRole('region', { name: 'Settings for Nightfall' });
+    expect((await within(settings).findByRole('alert')).textContent).toContain('names nothing');
+    expect(within(settings).queryByText('Ignored files saved.')).toBeNull();
+    expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).toBe('*.bak\n!');
+  });
+
+  it('cannot save before the saved list has been read', async () => {
+    api.getCollectionIgnorePatterns.mockImplementation(() => new Promise<string[]>(() => {}));
+
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+
+    const save = (await screen.findByRole('button', { name: 'Save ignored files' })) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).disabled).toBe(true);
+  });
+
+  it('ignores a list read or save answer that arrives after another collection was selected', async () => {
+    let finishFirstRead!: (patterns: string[]) => void;
+    api.getCollectionIgnorePatterns
+      .mockImplementationOnce(() => new Promise<string[]>((resolve) => { finishFirstRead = resolve; }))
+      .mockResolvedValue(['*.nightfall']);
+    let finishSave!: (patterns: string[]) => void;
+    api.updateCollectionIgnorePatterns.mockImplementation(
+      () => new Promise<string[]>((resolve) => { finishSave = resolve; }),
+    );
+
+    const { rerender } = render(CollectionsPanel, props({
+      collections: [collection('Default'), collection('Nightfall')],
+      selectedId: 'default',
+    }));
+
+    // The first read for Default is still on its way when the reader manages Nightfall.
+    await rerender({ selectedId: 'nightfall' });
+    const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.value).toBe('*.nightfall'));
+    await act(async () => { finishFirstRead(['*.default']); });
+    expect(field.value).toBe('*.nightfall');
+
+    // A save of Nightfall that completes after Default is selected again must not touch Default's draft.
+    await fireEvent.click(screen.getByRole('button', { name: 'Save ignored files' }));
+    await rerender({ selectedId: 'default' });
+    await waitFor(() => expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).toBe('*.nightfall'));
+    await act(async () => { finishSave(['saved-for-nightfall']); });
+    expect(screen.queryByText('Ignored files saved.')).toBeNull();
+    expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).not.toBe('saved-for-nightfall');
   });
 
   it('ignores a history response that a newly selected collection already replaced', async () => {

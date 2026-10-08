@@ -30,6 +30,25 @@ const STAGE_LABELS: Record<string, string> = {
 const TERMINAL_JOB_STATES: JobState[] = ['COMPLETE', 'FAILED', 'CANCELLED'];
 
 /**
+ * The one stage a finished job keeps: the wait for a person's approval, which is why its attempt ended.
+ * The server clears every other stage when a job ends; `JobStore.AWAITING_APPROVAL_STAGE` is its spelling.
+ */
+const AWAITING_APPROVAL_STAGE = 'awaiting-approval';
+
+/**
+ * The stage a reader is shown for a job, or `null` when the stage says nothing about the job now.
+ *
+ * A finished job is in no stage: the stage its last attempt entered (`queue`, `index`, ...) described work
+ * that has stopped, so it is not shown. The approval wait is the exception, because it is why the attempt
+ * ended. Rows written before the server cleared stages may still carry a stale one; this hides it.
+ */
+export function stageForReader(state: JobState, stage: string | null | undefined): string | null {
+  if (stage === null || stage === undefined || stage.trim() === '') return null;
+  if (TERMINAL_JOB_STATES.includes(state) && stage !== AWAITING_APPROVAL_STAGE) return null;
+  return stage;
+}
+
+/**
  * The readable words for the stage a job reported: `extract` reads as `Extracting`.
  *
  * A token nobody wrote a label for is humanised rather than shown raw — `needs_tool` reads as
@@ -74,7 +93,7 @@ export type ImportProgress = {
 export function importProgressText(importing: ImportProgress): string {
   const current = TERMINAL_JOB_STATES.includes(importing.state) ? null : importing.currentItem;
   const headline = current ? `Importing ${current}` : 'Importing…';
-  const parts = [stageLabel(importing.stage)];
+  const parts = [stageLabel(stageForReader(importing.state, importing.stage))];
   if (importing.filesTotal > 0) parts.push(fileCountLabel(importing.filesCompleted, importing.filesTotal));
   const detail = parts.filter((part) => part !== '').join(' · ');
   return detail === '' ? headline : `${headline} — ${detail}`;

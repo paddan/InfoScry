@@ -113,4 +113,37 @@ class LlmCatalogRoutesTest {
         assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
         assertFalse(response.bodyAsText().contains(secret), "a credential in a URL is never echoed back")
     }
+
+    @Test fun `the image input filter drops models the catalog marks text-only and keeps unknown ones`() = runBlocking {
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(
+                    statusCode = 200,
+                    body = """{"data":[
+                        {"id":"vendor/vision","architecture":{"input_modalities":["text","image"]}},
+                        {"id":"vendor/text-only","architecture":{"input_modalities":["text"]}},
+                        {"id":"vendor/silent"}]}""",
+                ),
+                FakeOpenAiResponse(
+                    statusCode = 200,
+                    body = """{"data":[
+                        {"id":"vendor/vision","architecture":{"input_modalities":["text","image"]}},
+                        {"id":"vendor/text-only","architecture":{"input_modalities":["text"]}},
+                        {"id":"vendor/silent"}]}""",
+                ),
+            ),
+        ).use { fake ->
+            val base = "/api/llm/catalog?provider=OPENAI_COMPATIBLE&endpoint=${fake.url}"
+            val unfiltered = harness.request(HttpMethod.Get, base, credential = Credential.CSRF).bodyAsText()
+            assertContains(unfiltered, "vendor/text-only")
+
+            val filtered = harness.request(HttpMethod.Get, "$base&imageInput=true", credential = Credential.CSRF)
+            assertEquals(HttpStatusCode.OK, filtered.status, filtered.bodyAsText())
+            val body = filtered.bodyAsText()
+            assertContains(body, "\"id\":\"vendor/vision\"")
+            assertContains(body, "\"imageInput\":true")
+            assertContains(body, "\"id\":\"vendor/silent\"", message = "unknown support is listed, not hidden")
+            assertFalse(body.contains("vendor/text-only"), "a model the catalog marks text-only is not offered")
+        }
+    }
 }

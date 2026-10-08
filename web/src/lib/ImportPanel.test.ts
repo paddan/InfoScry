@@ -94,7 +94,74 @@ describe('import panel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
 
     expect(await screen.findByText('Import complete. 0 files.')).toBeTruthy();
-    expect(api.enqueueImport).toHaveBeenCalledWith('c1', ['/home/example/docs'], true);
+    expect(api.enqueueImport).toHaveBeenCalledWith('c1', ['/home/example/docs'], true, { include: [], exclude: [] });
+  });
+
+  it('sends an include list written with upper case and leading dots, normalised', async () => {
+    api.pickPaths.mockResolvedValue(['/home/example/docs']);
+    api.enqueueImport.mockResolvedValue({ accepted: true, job: job('j1', 'COMPLETE') });
+    api.getImportItems.mockResolvedValue([]);
+
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose folder…' }));
+    await screen.findByText('/home/example/docs');
+    await fireEvent.click(screen.getByLabelText('Only these extensions'));
+    await fireEvent.input(screen.getByLabelText('Extensions'), { target: { value: '.PDF, docx' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+
+    expect(await screen.findByText('Import complete. 0 files.')).toBeTruthy();
+    expect(api.enqueueImport).toHaveBeenCalledWith('c1', ['/home/example/docs'], false, {
+      include: ['pdf', 'docx'],
+      exclude: [],
+    });
+  });
+
+  it('sends an exclude list and leaves the include list empty', async () => {
+    api.pickPaths.mockResolvedValue(['/home/example/docs']);
+    api.enqueueImport.mockResolvedValue({ accepted: true, job: job('j1', 'COMPLETE') });
+    api.getImportItems.mockResolvedValue([]);
+
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose folder…' }));
+    await screen.findByText('/home/example/docs');
+    await fireEvent.click(screen.getByLabelText('All except these extensions'));
+    await fireEvent.input(screen.getByLabelText('Extensions'), { target: { value: 'tmp log' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+
+    expect(await screen.findByText('Import complete. 0 files.')).toBeTruthy();
+    expect(api.enqueueImport).toHaveBeenCalledWith('c1', ['/home/example/docs'], false, {
+      include: [],
+      exclude: ['tmp', 'log'],
+    });
+  });
+
+  it('does not import with an extension list that names nothing', async () => {
+    api.pickPaths.mockResolvedValue(['/home/example/docs']);
+
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose folder…' }));
+    await screen.findByText('/home/example/docs');
+    await fireEvent.click(screen.getByLabelText('Only these extensions'));
+    await fireEvent.input(screen.getByLabelText('Extensions'), { target: { value: ' , . ' } });
+
+    expect(screen.getByText('Enter at least one extension.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.enqueueImport).not.toHaveBeenCalled();
+  });
+
+  it('sends no extension filter when every file type is imported', async () => {
+    api.pickPaths.mockResolvedValue(['/home/example/docs']);
+    api.enqueueImport.mockResolvedValue({ accepted: true, job: job('j1', 'COMPLETE') });
+    api.getImportItems.mockResolvedValue([]);
+
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose folder…' }));
+    await screen.findByText('/home/example/docs');
+    expect(screen.queryByLabelText('Extensions')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+
+    expect(await screen.findByText('Import complete. 0 files.')).toBeTruthy();
+    expect(api.enqueueImport).toHaveBeenCalledWith('c1', ['/home/example/docs'], false, { include: [], exclude: [] });
   });
 
   it('shows the manual path fallback on PICK_UNAVAILABLE and imports the entered path', async () => {
@@ -113,7 +180,7 @@ describe('import panel', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     expect(await screen.findByText('Import complete. 0 files.')).toBeTruthy();
-    expect(api.enqueueImport).toHaveBeenCalledWith('c1', ['/home/example/manual.pdf'], false);
+    expect(api.enqueueImport).toHaveBeenCalledWith('c1', ['/home/example/manual.pdf'], false, { include: [], exclude: [] });
   });
 
   it('does not treat a cancelled pick as an error', async () => {

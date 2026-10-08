@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fileCountLabel, importProgressText, stageLabel } from './importProgress';
+import { fileCountLabel, importProgressText, stageForReader, stageLabel } from './importProgress';
 
 /**
  * The words one import is described in. The stage tokens are the ones the handlers write
@@ -32,6 +32,39 @@ describe('stageLabel', () => {
     expect(stageLabel(null)).toBe('');
     expect(stageLabel(undefined)).toBe('');
     expect(stageLabel('  ')).toBe('');
+  });
+});
+
+describe('stageForReader', () => {
+  it('shows the stage of a job that is still going', () => {
+    expect(stageForReader('QUEUED', 'queue')).toBe('queue');
+    expect(stageForReader('RUNNING', 'extract')).toBe('extract');
+  });
+
+  it('shows no stage for a finished job, except the wait for an approval that ended the attempt', () => {
+    expect(stageForReader('COMPLETE', 'queue')).toBeNull();
+    expect(stageForReader('COMPLETE', 'index')).toBeNull();
+    expect(stageForReader('FAILED', 'record')).toBeNull();
+    expect(stageForReader('CANCELLED', 'copy')).toBeNull();
+    expect(stageForReader('COMPLETE', 'awaiting-approval')).toBe('awaiting-approval');
+  });
+
+  it('says nothing for a job that never reported a stage', () => {
+    expect(stageForReader('RUNNING', null)).toBeNull();
+    expect(stageForReader('COMPLETE', undefined)).toBeNull();
+  });
+});
+
+describe('importProgressText', () => {
+  it('does not describe a finished import as queued', () => {
+    const text = importProgressText({
+      state: 'COMPLETE',
+      stage: 'queue',
+      currentItem: null,
+      filesCompleted: 2,
+      filesTotal: 2,
+    });
+    expect(text).toBe('Importing… — 2 of 2 files');
   });
 });
 
@@ -93,7 +126,7 @@ describe('importProgressText', () => {
       filesCompleted: 12,
       filesTotal: 12,
     });
-    expect(finished).toBe('Importing… — Indexing · 12 of 12 files');
+    expect(finished).toBe('Importing… — 12 of 12 files');
     expect(finished).not.toContain('done.pdf');
   });
 });

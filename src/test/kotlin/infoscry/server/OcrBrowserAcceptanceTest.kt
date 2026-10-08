@@ -32,12 +32,19 @@ import infoscry.document.ReviewChoice
 import infoscry.domain.CollectionId
 import infoscry.domain.JobType
 import infoscry.embedding.TestDocumentEmbedder
+import infoscry.extract.EXTRACTOR_SCHEMA_VERSION
 import infoscry.jobs.DispatchingJobHandler
 import infoscry.jobs.FakePageEngine
+import infoscry.jobs.Harness
 import infoscry.jobs.JobRunner
+import infoscry.jobs.PictureUnits
 import infoscry.jobs.RecordingReviewer
+import infoscry.jobs.RecordingUnits
 import infoscry.jobs.RescanHarness
 import infoscry.jobs.RescanJobHandler
+import infoscry.llm.FakeOpenAiResponse
+import infoscry.llm.FakeOpenAiServer
+import infoscry.llm.LlmProfile
 import infoscry.llm.LlmProvider
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrEngine
@@ -54,15 +61,19 @@ import infoscry.ocr.ReviewerRecommendation
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import javax.imageio.ImageIO
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -236,6 +247,108 @@ class OcrBrowserAcceptanceTest {
         val history = revisionsOf(picture)
         assertEquals(3, history.size, "the stale restore added nothing")
         assertEquals(FIRST_READING, publishedText(picture))
+    }
+
+    // ---- Text history reading (local-testing-feedback 03) and OCR profile and LLM choice (04) ----
+
+    @Test
+    fun `the text history names the OCR engine, mode and language an import was made with, and says no page needed OCR for direct text`() {
+        Harness(tempDir).use { importer ->
+            // A picture read with the engine the import was admitted with, and a text file that needs no reading.
+            val picture = importer.sourcesDir.resolve(PICTURE_NAME)
+            writePicture(picture)
+            importer.importDurably(listOf(picture), PictureUnits(FIRST_READING), ocr = TESSERACT_IMPORT)
+            val notes = importer.writeText("notes.txt", "Ordinary notes about the meeting\n")
+            importer.importDurably(listOf(notes), RecordingUnits(units = 1), ocr = TESSERACT_IMPORT)
+        }
+        startServer(tempDir.resolve("data"))
+        runScenario("history-import-reading")
+    }
+
+    @Test
+    fun `the OCR profile form offers the LLM presets and lists only models that may carry images, labelling unknown support`() {
+        startServer(tempDir.resolve("data"))
+        // The server asks the provider for its model list: a loopback fake lists a text-only, an unknown and an image model.
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(
+                    statusCode = 200,
+                    body = """{"data":[
+                        {"id":"vendor/vision","architecture":{"input_modalities":["text","image"]}},
+                        {"id":"vendor/text-only","architecture":{"input_modalities":["text"]}},
+                        {"id":"vendor/silent"}]}""",
+                ),
+            ),
+        ).use { provider ->
+            facts = buildJsonObject { put("providerUrl", provider.url) }
+            runScenario("ocr-profile-catalog")
+            assertTrue(provider.handledRequests >= 2, "the OCR form and the LLM form each asked the fake provider")
+        }
+        val profile = context().ocrProfiles.list().single { it.name == "Vision reader" }
+        assertEquals("vendor/vision", profile.revision.model, "the image-capable model is the one the profile saved")
+        assertNull(profile.revision.apiKeyEnvironmentVariable, "no key variable was typed")
+    }
+
+    @Test
+    fun `a collection offers OCR profiles and image-capable LLM profiles in two groups, and saving an LLM profile copies it`() {
+        val data = tempDir.resolve("data")
+        val vision: LlmProfile
+        val textOnly: LlmProfile
+        AppContext.open(data).use { context ->
+            context.collections.create("Alpha")
+            localProfile(context, "Local reader")
+            vision = llmProfile(context, "Vision LLM", model = "gpt-4o")
+            textOnly = llmProfile(context, "Text LLM", model = "deepseek-chat")
+        }
+        startServer(data)
+        facts = buildJsonObject { put("visionLlmId", vision.id) }
+        runScenario("collection-llm-profiles")
+
+        val settings = collectionNamed("Alpha").ocrSettings()
+        val copy = context().ocrProfiles.list().single { it.sourceLlmProfileId == vision.id }
+        assertEquals("Vision LLM (from LLM profile)", copy.name, "the copy is named for the LLM profile it came from")
+        assertEquals("gpt-4o", copy.revision.model)
+        assertEquals(copy.id, settings.transcriptionProfileId, "the collection stores the copy, which an attempt pins")
+        assertEquals(OcrEngine.LLM, settings.engine)
+        assertNull(
+            context().ocrProfiles.list().firstOrNull { it.sourceLlmProfileId == textOnly.id },
+            "a model the catalog states is text-only is never copied",
+        )
+    }
+
+    @Test
+    fun `a collection with no OCR or image-capable LLM profile explains the empty choice and opens Admin OCR profiles`() {
+        val data = tempDir.resolve("data")
+        AppContext.open(data).use { context -> context.collections.create("Alpha") }
+        startServer(data)
+        runScenario("collection-empty-state")
+
+        assertTrue(context().ocrProfiles.list().isEmpty(), "the browser created no profile")
+    }
+
+    private fun llmProfile(context: AppContext, name: String, model: String): LlmProfile = context.llm.create(
+        LlmProfile(
+            id = UUID.randomUUID().toString(),
+            name = name,
+            provider = LlmProvider.OPENAI_COMPATIBLE,
+            model = model,
+            contextWindow = 64_000,
+            maxOutputTokens = 2_048,
+            inputPricePerMillion = 1.0,
+            outputPricePerMillion = 2.0,
+            cacheReadPricePerMillion = 0.5,
+            enabled = true,
+            endpoint = "http://127.0.0.1:9/v1",
+        ),
+    )
+
+    /** An 8x8 white picture: the stand-in extractor reads it, so no engine or GPU is involved. */
+    private fun writePicture(file: Path) {
+        val image = BufferedImage(8, 8, BufferedImage.TYPE_INT_RGB)
+        for (x in 0 until 8) {
+            for (y in 0 until 8) image.setRGB(x, y, 0xFFFFFF)
+        }
+        ImageIO.write(image, "png", file.toFile())
     }
 
     // ---- Seeding ----
@@ -492,6 +605,7 @@ class OcrBrowserAcceptanceTest {
         const val MARK_POLL_MILLIS = 100L
         const val SCENARIO_TIMEOUT_NANOS = 240_000_000_000L
         const val PROFILE_NAME = "Vision reader"
+        const val PICTURE_NAME = "page.png"
         const val HTML_PROFILE_NAME = "<b>Bold</b> <img src=x onerror=\"window.__ocrXss=true\">"
 
         /** A variable every process has, so the profile list can say "present" without the test setting any. */
@@ -499,6 +613,15 @@ class OcrBrowserAcceptanceTest {
         const val FIRST_READING = "first reading"
         const val SECOND_READING = "second reading"
         const val EDITED_READING = "hand edited reading"
+
+        /** The OCR selection an import was admitted with: what the text history must name for its revision. */
+        val TESSERACT_IMPORT = OcrSettingsSnapshot(
+            engine = OcrEngine.TESSERACT,
+            mode = OcrImportMode.FILL_MISSING,
+            language = "eng",
+            extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+            toolVersion = "tesseract 5.5",
+        )
 
         /** Markup on purpose: OCR output is untrusted data and must reach the screen as text. */
         const val MARKUP_READING =

@@ -116,7 +116,7 @@ class RootCommand(
 class CollectionCommand : CliktCommand(name = "collection") {
 
     init {
-        subcommands(ListCollectionsCommand(), CreateCollectionCommand())
+        subcommands(ListCollectionsCommand(), CreateCollectionCommand(), IgnoreCommand())
     }
 
     override fun run() {

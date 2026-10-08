@@ -1,10 +1,12 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CollectionOcrSettings from './CollectionOcrSettings.svelte';
-import type { Collection, OcrProfile } from './api';
+import type { Collection, OcrLlmCandidate, OcrProfile } from './api';
 
 const api = vi.hoisted(() => ({
   listOcrProfiles: vi.fn(),
+  listOcrLlmCandidates: vi.fn(),
+  copyLlmProfileToOcr: vi.fn(),
   updateCollectionOcrSettings: vi.fn(),
 }));
 
@@ -19,6 +21,8 @@ vi.mock('./api', () => ({
     }
   },
   listOcrProfiles: api.listOcrProfiles,
+  listOcrLlmCandidates: api.listOcrLlmCandidates,
+  copyLlmProfileToOcr: api.copyLlmProfileToOcr,
   updateCollectionOcrSettings: api.updateCollectionOcrSettings,
 }));
 
@@ -86,6 +90,7 @@ describe('collection OCR settings', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     api.listOcrProfiles.mockResolvedValue(PROFILES);
+    api.listOcrLlmCandidates.mockResolvedValue([]);
   });
 
   afterEach(cleanup);
@@ -296,5 +301,166 @@ describe('collection OCR settings', () => {
 
     expect(screen.getByRole('alert').textContent).toContain('profiles unavailable');
     expect(select('OCR engine').disabled).toBe(false);
+  });
+
+  describe('LLM profiles with image input', () => {
+    const LLM: OcrLlmCandidate[] = [
+      candidate('l-vision', 'Reader', { imageInput: true }),
+      candidate('l-unknown', 'Mystery', { imageInput: null, scope: 'LOCAL', apiKeyEnvironmentVariable: null, keyAvailable: false }),
+      candidate('l-text', 'Chatter', { imageInput: false }),
+    ];
+
+    function candidate(id: string, name: string, over: Partial<OcrLlmCandidate> = {}): OcrLlmCandidate {
+      return {
+        id,
+        name,
+        provider: 'OPENAI_COMPATIBLE',
+        endpoint: 'https://example.test/v1',
+        scope: 'EXTERNAL',
+        model: 'a-model',
+        apiKeyEnvironmentVariable: 'LLM_KEY',
+        keyAvailable: true,
+        imageInput: null,
+        ...over,
+      };
+    }
+
+    function optionTexts(label: string, group: string): string[] {
+      const groupElement = Array.from(select(label).querySelectorAll('optgroup'))
+        .find((element) => element.label === group);
+      return groupElement === undefined
+        ? []
+        : Array.from(groupElement.querySelectorAll('option')).map((option) => option.textContent ?? '');
+    }
+
+    it('lists OCR profiles and image-capable LLM profiles in two labelled groups, without text-only ones', async () => {
+      api.listOcrLlmCandidates.mockResolvedValue(LLM);
+      await renderSettings();
+
+      for (const label of ['Transcription profile', 'Review profile']) {
+        expect(optionTexts(label, 'OCR profiles').some((text) => text.includes('Local vision'))).toBe(true);
+        const llm = optionTexts(label, 'LLM profiles with image input');
+        expect(llm.some((text) => text.includes('Reader') && text.includes('key present'))).toBe(true);
+        expect(llm.some((text) => text.includes('Mystery') && text.includes('image support unknown'))).toBe(true);
+        expect(llm.some((text) => text.includes('Chatter'))).toBe(false);
+      }
+    });
+
+    it('never calls an unstated model image capable and shows keys by presence only', async () => {
+      api.listOcrLlmCandidates.mockResolvedValue(LLM);
+      await renderSettings();
+
+      const llm = optionTexts('Transcription profile', 'LLM profiles with image input');
+      const reader = llm.find((text) => text.includes('Reader')) ?? '';
+      const mystery = llm.find((text) => text.includes('Mystery')) ?? '';
+      expect(reader).not.toContain('unknown');
+      expect(mystery).toContain('image support unknown');
+      expect(mystery).toContain('no key needed');
+      expect(document.body.textContent).not.toContain('LLM_KEY=');
+    });
+
+    it('copies a chosen LLM profile into an OCR profile on save and selects that profile', async () => {
+      api.listOcrLlmCandidates.mockResolvedValue(LLM);
+      api.copyLlmProfileToOcr.mockResolvedValue(profile('copy-1', 'Reader (from LLM profile)'));
+      api.updateCollectionOcrSettings.mockResolvedValue(collection('Nightfall'));
+      await renderSettings();
+
+      await fireEvent.change(select('OCR engine'), { target: { value: 'LLM' } });
+      await fireEvent.change(select('Transcription profile'), { target: { value: 'llm:l-vision' } });
+      await fireEvent.change(select('Review profile'), { target: { value: 'llm:l-vision' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Save OCR engine settings' }));
+      await act(async () => {});
+
+      expect(api.copyLlmProfileToOcr).toHaveBeenCalledTimes(1);
+      expect(api.copyLlmProfileToOcr).toHaveBeenCalledWith('l-vision');
+      expect(api.updateCollectionOcrSettings.mock.calls[0][1]).toMatchObject({
+        ocrTranscriptionProfileId: 'copy-1',
+        ocrReviewProfileId: 'copy-1',
+      });
+    });
+
+    it('saves nothing and says why when the server refuses a text-only LLM profile', async () => {
+      api.listOcrLlmCandidates.mockResolvedValue(LLM);
+      api.copyLlmProfileToOcr.mockRejectedValue(
+        await apiError('LLM_PROFILE_TEXT_ONLY', 'the model of that LLM profile does not accept image input', 409),
+      );
+      await renderSettings();
+
+      await fireEvent.change(select('OCR engine'), { target: { value: 'LLM' } });
+      await fireEvent.change(select('Transcription profile'), { target: { value: 'llm:l-unknown' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Save OCR engine settings' }));
+      await act(async () => {});
+
+      expect(api.updateCollectionOcrSettings).not.toHaveBeenCalled();
+      expect(screen.getByRole('alert').textContent).toContain('does not accept image input');
+    });
+
+    it('shows a profile that is a copy of an LLM profile as that LLM profile, found by id and not by name', async () => {
+      api.listOcrLlmCandidates.mockResolvedValue(LLM);
+      api.listOcrProfiles.mockResolvedValue([
+        ...PROFILES,
+        profile('copy-1', 'Renamed long ago', { sourceLlmProfileId: 'l-vision' }),
+        profile('same-name', 'Reader (from LLM profile)'),
+      ]);
+      await renderSettings(collection('Nightfall', { ocrEngine: 'LLM', ocrTranscriptionProfileId: 'copy-1' }));
+
+      expect(select('Transcription profile').value).toBe('llm:l-vision');
+      const ocrGroup = optionTexts('Transcription profile', 'OCR profiles');
+      expect(ocrGroup.some((text) => text.includes('Renamed long ago'))).toBe(false);
+      expect(ocrGroup.some((text) => text.includes('Reader (from LLM profile)'))).toBe(true);
+    });
+
+    it('shows the stored copy as its LLM profile when the OCR list arrives before the LLM list', async () => {
+      let answerLlm: (value: OcrLlmCandidate[]) => void = () => {};
+      api.listOcrLlmCandidates.mockReturnValue(new Promise((resolve) => { answerLlm = resolve; }));
+      api.listOcrProfiles.mockResolvedValue([
+        ...PROFILES,
+        profile('copy-1', 'Vision LLM (from LLM profile)', { sourceLlmProfileId: 'l-vision' }),
+      ]);
+      render(CollectionOcrSettings, {
+        collection: collection('Nightfall', { ocrEngine: 'LLM', ocrTranscriptionProfileId: 'copy-1' }),
+        onChanged: vi.fn(),
+      });
+      await act(async () => {});
+      answerLlm(LLM);
+      await act(async () => {});
+
+      expect(select('Transcription profile').value).toBe('llm:l-vision');
+      expect(select('Transcription profile').selectedOptions[0].textContent).toContain('Reader');
+      expect(screen.queryByText(/no longer available/)).toBeNull();
+    });
+
+    it('shows the stored copy as its LLM profile when the LLM list arrives before the OCR list', async () => {
+      let answerProfiles: (value: OcrProfile[]) => void = () => {};
+      api.listOcrProfiles.mockReturnValue(new Promise((resolve) => { answerProfiles = resolve; }));
+      api.listOcrLlmCandidates.mockResolvedValue(LLM);
+      render(CollectionOcrSettings, {
+        collection: collection('Nightfall', { ocrEngine: 'LLM', ocrTranscriptionProfileId: 'copy-1' }),
+        onChanged: vi.fn(),
+      });
+      await act(async () => {});
+      answerProfiles([...PROFILES, profile('copy-1', 'Vision LLM (from LLM profile)', { sourceLlmProfileId: 'l-vision' })]);
+      await act(async () => {});
+
+      expect(select('Transcription profile').value).toBe('llm:l-vision');
+      expect(select('Transcription profile').selectedOptions[0].textContent).toContain('Reader');
+      expect(screen.queryByText(/no longer available/)).toBeNull();
+    });
+
+    it('explains an empty list and links to Admin OCR profiles instead of showing an unexplained None', async () => {
+      api.listOcrProfiles.mockResolvedValue([]);
+      api.listOcrLlmCandidates.mockResolvedValue([candidate('l-text', 'Chatter', { imageInput: false })]);
+      const open = vi.fn();
+      const view = render(CollectionOcrSettings, {
+        collection: collection('Nightfall'),
+        onChanged: vi.fn(),
+        onOpenOcrProfiles: open,
+      });
+      await act(async () => {});
+
+      expect(view.container.textContent).toContain('No OCR profile and no LLM profile with image input exists yet');
+      await fireEvent.click(screen.getByRole('button', { name: 'Open Admin → OCR profiles' }));
+      expect(open).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -148,4 +148,60 @@ class CollectionStoreTest {
         assertNull(store.get(alpha.id))
         assertFalse(store.delete(alpha.id, "Alpha"))
     }
+
+    @Test
+    fun `a new collection starts with the default ignore patterns, in order`() {
+        val created = store.create("Alpha")
+
+        assertEquals(
+            listOf(".DS_Store", "._*", "Thumbs.db", "desktop.ini", "~$*", "*.tmp", ".git/", "node_modules/"),
+            store.ignorePatterns(created.id),
+        )
+    }
+
+    @Test
+    fun `one collection's ignore list does not affect another's`() {
+        val alpha = store.create("Alpha")
+        val beta = store.create("Beta")
+
+        store.replaceIgnorePatterns(alpha.id, listOf("*.bak", "# note"))
+
+        assertEquals(listOf("*.bak", "# note"), store.ignorePatterns(alpha.id))
+        assertEquals(infoscry.jobs.IgnorePatterns.DEFAULTS, store.ignorePatterns(beta.id))
+    }
+
+    @Test
+    fun `replacing the ignore list replaces it whole, and an empty list is kept empty`() {
+        val alpha = store.create("Alpha")
+
+        store.replaceIgnorePatterns(alpha.id, listOf("a", "b", "c"))
+        store.replaceIgnorePatterns(alpha.id, listOf("c", "a"))
+        assertEquals(listOf("c", "a"), store.ignorePatterns(alpha.id))
+
+        store.replaceIgnorePatterns(alpha.id, emptyList())
+        assertEquals(emptyList(), store.ignorePatterns(alpha.id), "an emptied list must not fall back to the defaults")
+    }
+
+    @Test
+    fun `deleting a collection deletes its ignore patterns`() {
+        val alpha = store.create("Alpha")
+        val beta = store.create("Beta")
+
+        assertTrue(store.delete(alpha.id, "Alpha"))
+
+        fun rows(id: CollectionId): Int = database.read { connection ->
+            connection.prepareStatement("SELECT COUNT(*) FROM collection_ignore_patterns WHERE collection_id = ?").use {
+                it.setString(1, id.value)
+                it.executeQuery().use { rs -> rs.next(); rs.getInt(1) }
+            }
+        }
+        assertEquals(0, rows(alpha.id))
+        assertEquals(infoscry.jobs.IgnorePatterns.DEFAULTS.size, rows(beta.id))
+    }
+
+    @Test
+    fun `an unknown collection has no ignore list and cannot be given one`() {
+        assertEquals(emptyList(), store.ignorePatterns(CollectionId("missing")))
+        assertFailsWith<NoSuchElementException> { store.replaceIgnorePatterns(CollectionId("missing"), listOf("a")) }
+    }
 }

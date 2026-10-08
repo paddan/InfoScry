@@ -32,8 +32,44 @@ infoscry collection create Notes --description "Meeting notes"
 infoscry collection create Notes --json
 ```
 
-Subcommands: `list` (shows name, id, OCR languages, description) and
-`create <name>` with `--description`. Options: `--json`, `--data-dir`.
+Subcommands: `list` (shows name, id, OCR languages, description),
+`create <name>` with `--description`, and `ignore <collection> list|set`.
+Options: `--json`, `--data-dir`.
+
+### collection ignore
+
+Each collection has a list of ignore patterns, written like a `.gitignore`
+file, that every import into it applies before anything else (before
+`--include` and `--exclude`). A matching file is skipped silently, as an
+unsupported file is, and a matching folder is not read at all. A new collection
+starts with `.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`, `~$*`, `*.tmp`,
+`.git/` and `node_modules/`. The list can also be edited in Admin, under the
+collection's settings.
+
+```bash
+infoscry collection ignore Notes list
+infoscry collection ignore Notes list --json
+infoscry collection ignore Notes set '*.bak' '!keep.bak' 'drafts/'
+infoscry collection ignore Notes set --file patterns.txt
+infoscry collection ignore Notes set --clear
+```
+
+`set` replaces the whole list with the patterns named as arguments and/or read
+from `--file` (one per line). Naming nothing is refused; use `--clear` to ignore
+nothing. An invalid pattern is refused when saved, and the list is unchanged.
+
+Syntax: `*` and `?` match within one name and never across a `/`; `**` as a
+whole path segment matches any number of folders; a trailing `/` matches folders
+only, and nothing inside an ignored folder is read or can be re-included; a
+leading `!` re-includes what an earlier pattern ignored (the last match wins); a
+line starting with `#` is a comment; `\#` and `\!` name a literal `#` or `!`. A
+pattern with a `/` at the start or in the middle is matched against the path
+below the imported folder; any other pattern matches a name at any depth. A file
+named directly on the command line is matched by its own name only. Matching
+ignores letter case, and `[abc]` classes are not supported.
+
+An import uses the list as it was when the import was queued: editing the list
+afterwards does not change an import that is queued, running or resumed.
 
 ## import
 
@@ -45,15 +81,24 @@ its top level only; pass `--recursive` to descend into its subdirectories. With
 document (and exits nonzero if any failed). Without a running server, the
 import runs in this process regardless of `--wait`.
 
+`--include` imports only files with the listed extensions, and `--exclude`
+imports every file except those with the listed extensions. Both take a
+comma-separated list (`--include=pdf,docx`); extensions match without regard to
+case and with or without the leading dot. The two cannot be given together, and
+a refused list exits nonzero before anything is queued. A file the filter
+removes is skipped silently: it is not an item and not counted among the files.
+
 ```bash
 infoscry collection create Notes
 infoscry import --collection Notes /path/to/document.pdf
 infoscry import --collection Notes --recursive /path/to/dir
 infoscry import --collection Notes --wait /path/to/dir /path/to/another.pdf
 infoscry import --collection Notes --wait --json /path/to/document.pdf
+infoscry import --collection Notes --recursive --include=pdf,docx /path/to/dir
+infoscry import --collection Notes --recursive --exclude=tmp,log /path/to/dir
 ```
 
-Options: `--collection`, `--recursive`, `--wait`, `--json`, `--data-dir`.
+Options: `--collection`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`, `--data-dir`.
 
 ## search
 
@@ -137,6 +182,10 @@ infoscry llm test my-profile        # makes real probe requests to the endpoint
 infoscry llm set-default --ask my-profile
 infoscry llm set-default --investigate my-profile
 ```
+
+`test <name>` records whether the profile supports tool calling, which Investigate
+requires. The Admin → LLM profiles "Check tool calling" action runs the same check through the
+same service. A switched-off profile is refused before any request is sent.
 
 Subcommands: `list`, `add`, `set-default`, `test <name>`. `add` options:
 `--name`, `--provider` (`openai-compatible` or `anthropic`), `--model`,

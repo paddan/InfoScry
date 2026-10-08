@@ -211,6 +211,64 @@ describe('text history', () => {
       }
     });
 
+    it('names the engine, mode, language and tool version an import was read with', async () => {
+      api.listDocumentRevisions.mockResolvedValue(
+        history({
+          revisions: [
+            revision('rev-1111111111', {
+              provenance: 'IMPORT',
+              active: true,
+              extractionMethods: ['OCR'],
+              reading: {
+                engine: 'TESSERACT',
+                mode: 'FILL_MISSING',
+                language: 'swe',
+                toolVersion: 'tesseract 5.5',
+                modelVersion: null,
+                transcriptionModel: null,
+                reviewModel: null,
+              },
+            }),
+          ],
+          total: 1,
+          activeRevisionId: 'rev-1111111111',
+        }),
+      );
+      await renderPanel();
+      await openHistory();
+
+      const [imported] = versions();
+      expect(imported.textContent).toContain('Import');
+      expect(imported.textContent).toMatch(/engine and model\s*Tesseract/i);
+      expect(imported.textContent).toContain('language swe');
+      expect(imported.textContent).toContain('Tool version: tesseract 5.5');
+      expect(imported.textContent).not.toContain('Not recorded');
+    });
+
+    it('says no page needed OCR when a version was read without OCR, and names no engine', async () => {
+      api.listDocumentRevisions.mockResolvedValue(
+        history({
+          revisions: [
+            revision('rev-1111111111', {
+              provenance: 'IMPORT',
+              active: true,
+              extractionMethods: ['DIRECT_TEXT'],
+              noOcrNeeded: true,
+            }),
+          ],
+          total: 1,
+          activeRevisionId: 'rev-1111111111',
+        }),
+      );
+      await renderPanel();
+      await openHistory();
+
+      const [imported] = versions();
+      expect(imported.textContent).toMatch(/engine and model\s*no page needed OCR/i);
+      expect(imported.textContent).not.toContain('Tesseract');
+      expect(imported.textContent).not.toContain('Not recorded');
+    });
+
     it('shows created and published times and the page count', async () => {
       await renderPanel();
       await openHistory();

@@ -202,6 +202,32 @@ class InvestigateBrowserAcceptanceTest {
         }
     }
 
+    @Test
+    fun `an unmeasured profile is refused with the remedy, measured from Admin, then a question runs`() {
+        val unitId = addEvidenceUnit("Mira signed the note.")
+        FakeOpenAiServer(
+            listOf(
+                // The Admin check sends the text request first, then the forced ping tool call.
+                answerStream("ok"),
+                pingStream(),
+                researchStream(unitId),
+                answerStream("Mira signed the note [S1]."),
+                FakeOpenAiResponse(body = titleCompletion("Measured note")),
+            ),
+        ).use { fake ->
+            createInvestigatorProfile(fake.url, measured = false)
+            setDefaultInvestigatorProfile()
+            runScenario("unmeasuredProfile")
+            // The refused question sends nothing to the provider, so the script above is consumed exactly by
+            // the two probe requests and the question's research, answer and title.
+            assertEquals(5, fake.handledRequests, "two probe requests, then research, one answer and one title")
+            assertTrue(
+                harness.context.llm.findByName("investigator")!!.toolCallingSupported,
+                "the Admin check must persist the measured tool-calling state",
+            )
+        }
+    }
+
     // ---- Harness ----
 
     private fun runScenario(name: String) {
@@ -229,7 +255,7 @@ class InvestigateBrowserAcceptanceTest {
         check(process.exitValue() == 0) { "browser scenario '$name' failed:\n$output" }
     }
 
-    private fun createInvestigatorProfile(endpoint: String) {
+    private fun createInvestigatorProfile(endpoint: String, measured: Boolean = true) {
         harness.context.llm.create(
             LlmProfile(
                 id = UUID.randomUUID().toString(),
@@ -245,11 +271,23 @@ class InvestigateBrowserAcceptanceTest {
                 endpoint = endpoint,
             ),
         )
-        harness.context.llm.recordCapability(
-            "investigator",
-            LlmCapabilityProbe(toolCallingSupported = true, checkedAt = "2026-09-21T10:00:00Z"),
-        )
+        if (measured) {
+            harness.context.llm.recordCapability(
+                "investigator",
+                LlmCapabilityProbe(toolCallingSupported = true, checkedAt = "2026-09-21T10:00:00Z"),
+            )
+        }
     }
+
+    /** A forced tool call to `ping`, the shape the capability probe's second request accepts. */
+    private fun pingStream(): FakeOpenAiResponse = FakeOpenAiResponse(
+        stream = true,
+        body = sse(
+            listOf(
+                """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"ping-1","function":{"name":"ping","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}""",
+            ),
+        ),
+    )
 
     private fun setDefaultInvestigatorProfile() {
         check(harness.context.llm.setDefault(LlmPromptRole.INVESTIGATE, "investigator")) {

@@ -865,6 +865,235 @@ const scenarios = {
     assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
   },
 
+  /** Ticket 02: a finished import's row in the history carries no stage, and never the stale "Queued". */
+  async 'history-final-stage'(browser) {
+    const { page, consoleErrors } = await openAdmin(browser);
+    await selectCollection(page, 'Notes');
+    await chooseAndImport(page, 'folder');
+    const finished = await waitForImportFinished(page);
+    assert(/Import complete/.test(finished), `the import must finish, panel said ${JSON.stringify(finished)}`);
+    assert(!finished.includes('Queued'), `the add form must not name a stale stage, got ${JSON.stringify(finished)}`);
+
+    // The row is read again from the server after a reload, so it is the stored stage that is checked.
+    await reloadAndSelect(page, 'Notes');
+    await waitForRow(page, 'one.txt');
+    const history = await importHistory(page);
+    assert(history.length === 1, `one import must be listed, got ${history.length}`);
+    assert(history[0].state === 'Complete', `the import must read Complete, got ${history[0].state}`);
+    assert(history[0].stage === '' || history[0].stage === '—', `a finished import is in no stage, got ${JSON.stringify(history[0].stage)}`);
+    assert(history[0].files === '4 of 4 files', `file counters are files, got ${history[0].files}`);
+    const historyText = (await page.textContent(`${PANEL} .import-history`)) ?? '';
+    assert(!historyText.includes('Queued'), `the history must not say Queued for a finished import, got ${JSON.stringify(historyText)}`);
+
+    const relevantErrors = consoleErrors.filter((text) => !text.includes('Failed to load resource'));
+    assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
+  },
+
+  /** Ticket 05: a file nothing can read is skipped, and appears in no list or count. */
+  async 'unsupported-skipped'(browser) {
+    const { page, consoleErrors } = await openAdmin(browser);
+    await selectCollection(page, 'Notes');
+    await chooseAndImport(page, 'folder');
+    const finished = await waitForImportFinished(page);
+    assert(/Import complete/.test(finished), `the import must finish, panel said ${JSON.stringify(finished)}`);
+    const results = await importResults(page);
+    assert(results.length === 2, `only the two readable files may be reported, got ${JSON.stringify(results)}`);
+    assert(results.every((item) => item.outcome === 'Imported'), `both must be imported, got ${JSON.stringify(results)}`);
+    assert(!finished.includes('blob.bin'), 'the add form must not mention the unsupported file');
+
+    await reloadAndSelect(page, 'Notes');
+    await waitForRow(page, 'real-a.txt');
+    await waitForRow(page, 'real-b.txt');
+    await refreshRows(page);
+    const names = (await rows(page)).map((row) => row.filename).sort();
+    assert(JSON.stringify(names) === JSON.stringify(['real-a.txt', 'real-b.txt']), `only the readable files are documents, got ${JSON.stringify(names)}`);
+    assert((await panelText(page)).includes('blob.bin') === false, 'the unsupported file must appear nowhere in the collection panel');
+    assert((await pagingText(page)).includes('of 2 documents'), 'the document count must not include the unsupported file');
+    await page.selectOption('#document-status', 'FAILED');
+    await page.waitForTimeout(200);
+    assert((await panelText(page)).includes('No documents match this search.'), 'the unsupported file must not be a failed document either');
+    await page.selectOption('#document-status', '');
+    await page.waitForTimeout(200);
+
+    const history = await importHistory(page);
+    assert(history.length === 1 && history[0].state === 'Complete', `one complete import must be listed, got ${JSON.stringify(history)}`);
+    assert(history[0].files === '2 of 2 files', `the skipped file is not counted among the files, got ${history[0].files}`);
+    const perFile = await showFiles(page, 0);
+    assert(perFile.length === 2, `the per-file results must list two files, got ${JSON.stringify(perFile)}`);
+    assert(perFile.every((item) => !item.file.includes('blob.bin')), 'the per-file results must not name the unsupported file');
+    assert(perFile.every((item) => item.outcome === 'Imported'), `both files are imported, got ${JSON.stringify(perFile)}`);
+
+    const relevantErrors = consoleErrors.filter((text) => !text.includes('Failed to load resource'));
+    assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
+  },
+
+  /** Ticket 06: "Only these extensions" into one collection, "All except these extensions" into another. */
+  async 'extension-filters'(browser) {
+    const { page, consoleErrors } = await openAdmin(browser);
+
+    await selectCollection(page, 'Notes');
+    await page.locator(`${PANEL} button`, { hasText: 'Add documents' }).first().click();
+    await page.waitForSelector('.import-panel', { timeout: 20_000 });
+    await page.check('.import-panel input[name="file-types"][value="include"]');
+    await page.locator('.import-panel button', { hasText: 'Choose folder' }).first().click();
+    await page.waitForSelector('.import-panel .paths li', { timeout: 20_000 });
+    // An empty list never silently means "no filter": the import is not offered until one is named.
+    assert(
+      await page.locator('.import-panel button.primary', { hasText: 'Import' }).isDisabled(),
+      'an include filter with no extension must keep Import disabled',
+    );
+    await page.fill('#extension-list', '.TXT');
+    await page.locator('.import-panel button.primary', { hasText: 'Import' }).click();
+    const includeFinished = await waitForImportFinished(page);
+    assert(/Import complete/.test(includeFinished), `the include import must finish, panel said ${JSON.stringify(includeFinished)}`);
+    const includeResults = await importResults(page);
+    assert(includeResults.length === 2, `only the two .txt files may be reported, got ${JSON.stringify(includeResults)}`);
+
+    await reloadAndSelect(page, 'Notes');
+    await waitForRow(page, 'alpha.txt');
+    await waitForRow(page, 'beta.TXT');
+    const includeNames = (await rows(page)).map((row) => row.filename).sort();
+    assert(JSON.stringify(includeNames) === JSON.stringify(['alpha.txt', 'beta.TXT']), `include txt must keep both spellings and nothing else, got ${JSON.stringify(includeNames)}`);
+    const includeHistory = await importHistory(page);
+    assert(includeHistory[0].files === '2 of 2 files', `the filtered-out files are not counted, got ${includeHistory[0].files}`);
+
+    await selectCollection(page, 'Archive');
+    await page.locator(`${PANEL} button`, { hasText: 'Add documents' }).first().click();
+    await page.waitForSelector('.import-panel', { timeout: 20_000 });
+    await page.check('.import-panel input[name="file-types"][value="exclude"]');
+    await page.fill('#extension-list', 'log');
+    await page.locator('.import-panel button', { hasText: 'Choose folder' }).first().click();
+    await page.waitForSelector('.import-panel .paths li', { timeout: 20_000 });
+    await page.locator('.import-panel button.primary', { hasText: 'Import' }).click();
+    const excludeFinished = await waitForImportFinished(page);
+    assert(/Import complete/.test(excludeFinished), `the exclude import must finish, panel said ${JSON.stringify(excludeFinished)}`);
+
+    await reloadAndSelect(page, 'Archive');
+    await waitForRow(page, 'delta.dat');
+    const excludeNames = (await rows(page)).map((row) => row.filename).sort();
+    assert(
+      JSON.stringify(excludeNames) === JSON.stringify(['alpha.txt', 'beta.TXT', 'delta.dat']),
+      `exclude log must import everything else, got ${JSON.stringify(excludeNames)}`,
+    );
+    assert(!(await panelText(page)).includes('gamma.log'), 'the excluded file must appear nowhere');
+    const excludeHistory = await importHistory(page);
+    assert(excludeHistory[0].files === '3 of 3 files', `the excluded file is not counted, got ${excludeHistory[0].files}`);
+
+    const relevantErrors = consoleErrors.filter((text) => !text.includes('Failed to load resource'));
+    assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
+  },
+
+  /** Ticket 07: the collection's ignore list is edited in SETTINGS and applies to the next import. */
+  async 'ignore-patterns'(browser) {
+    const { page, consoleErrors } = await openAdmin(browser);
+    await selectCollection(page, 'Notes');
+
+    // A new collection starts with the defaults, read from the server once the settings open.
+    await page.waitForFunction(
+      () => !document.querySelector('#collection-settings-ignore')?.disabled,
+      null,
+      { timeout: 20_000 },
+    );
+    const defaults = (await page.inputValue('#collection-settings-ignore')).split('\n');
+    for (const pattern of ['.DS_Store', '._*', 'Thumbs.db', 'desktop.ini', '~$*', '*.tmp', '.git/', 'node_modules/']) {
+      assert(defaults.includes(pattern), `the defaults must include ${pattern}, got ${JSON.stringify(defaults)}`);
+    }
+
+    // An invalid pattern is refused when it is saved, and the draft is kept.
+    await page.fill('#collection-settings-ignore', `${defaults.join('\n')}\n!`);
+    await page.locator(`${PANEL} .settings-form button`, { hasText: 'Save ignored files' }).click();
+    await page.waitForFunction(
+      () => (document.querySelector('#collection-settings-ignore')?.closest('form')?.querySelector('[role="alert"]')?.textContent ?? '').trim() !== '',
+      null,
+      { timeout: 20_000 },
+    );
+    assert((await page.inputValue('#collection-settings-ignore')).endsWith('\n!'), 'a refused list must leave the draft to be fixed');
+
+    await page.fill('#collection-settings-ignore', `${defaults.filter((line) => line !== '').join('\n')}\n# scratch files\nscratch-*\n`);
+    await page.locator(`${PANEL} .settings-form button`, { hasText: 'Save ignored files' }).click();
+    await page.waitForFunction(
+      () => (document.querySelector('#admin-panel-collections')?.textContent ?? '').includes('Ignored files saved.'),
+      null,
+      { timeout: 20_000 },
+    );
+
+    // The list is the collection's own and is read back from the server.
+    await reloadAndSelect(page, 'Notes');
+    await page.waitForFunction(
+      () => !document.querySelector('#collection-settings-ignore')?.disabled,
+      null,
+      { timeout: 20_000 },
+    );
+    const reloaded = await page.inputValue('#collection-settings-ignore');
+    assert(reloaded.includes('scratch-*') && reloaded.includes('.DS_Store'), `the saved list must come back after a reload, got ${JSON.stringify(reloaded)}`);
+
+    await chooseAndImport(page, 'folder');
+    const finished = await waitForImportFinished(page);
+    assert(/Import complete/.test(finished), `the import must finish, panel said ${JSON.stringify(finished)}`);
+    const results = await importResults(page);
+    assert(results.length === 2, `only the two real documents may be reported, got ${JSON.stringify(results)}`);
+
+    await reloadAndSelect(page, 'Notes');
+    await waitForRow(page, 'real-a.txt');
+    await waitForRow(page, 'real-b.txt');
+    const names = (await rows(page)).map((row) => row.filename).sort();
+    assert(JSON.stringify(names) === JSON.stringify(['real-a.txt', 'real-b.txt']), `only the real documents are listed, got ${JSON.stringify(names)}`);
+    const text = await panelText(page);
+    for (const ignored of ['.DS_Store', 'draft.tmp', 'scratch-1.txt']) {
+      // The settings textarea holds the patterns themselves, so the panel's rows and history are what is read.
+      const shown = (await page.textContent(`${PANEL} table.documents`)) ?? '';
+      assert(!shown.includes(ignored), `${ignored} must appear nowhere in the document table`);
+    }
+    assert(text.length > 0, 'the panel must still be readable');
+    const history = await importHistory(page);
+    assert(history[0].files === '2 of 2 files', `ignored files are not counted, got ${history[0].files}`);
+
+    const relevantErrors = consoleErrors.filter((text) => !text.includes('Failed to load resource'));
+    assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
+  },
+
+  /** Ticket 08: a failed document is read again with a chosen method, names it in its history, and is found. */
+  async 'retry-with-chosen-ocr'(browser) {
+    const { page, consoleErrors } = await openAdmin(browser);
+    await selectCollection(page, 'Notes');
+    await chooseAndImport(page, 'files');
+    await waitForImportFinished(page);
+    await reloadAndSelect(page, 'Notes');
+    await waitForStatus(page, 'fail-once-scan.png', 'Failed');
+
+    await openDetails(page, 'fail-once-scan.png');
+    await page.locator(`${PANEL} .document-details`).getByLabel('Choose the OCR method for this retry').check();
+    await page.selectOption('#retry-engine', 'TESSERACT');
+    await page.fill('#retry-language', 'deu');
+    await page.locator(`${PANEL} .document-details button`, { hasText: /^Retry$/ }).click();
+    // The server admits the chosen method (the row leaves Failed) or refuses it in words, which keeps it Failed.
+    await waitForStatus(page, 'fail-once-scan.png', 'Complete');
+
+    // The revision the retry published names the method that was chosen.
+    await reloadAndSelect(page, 'Notes');
+    await openDetails(page, 'fail-once-scan.png');
+    await page.locator(`${PANEL} .history button`, { hasText: 'Text history' }).click();
+    await page.waitForSelector(`${PANEL} .history ol.versions li`, { timeout: 20_000 });
+    const versions = (await page.textContent(`${PANEL} .history ol.versions`)) ?? '';
+    assert(versions.includes('Tesseract (local)'), `the revision must name the chosen engine, got ${JSON.stringify(versions)}`);
+    assert(versions.includes('language deu'), `the revision must name the chosen language, got ${JSON.stringify(versions)}`);
+
+    // Searchable: the text the retry published is found by keyword search.
+    await page.click('#tab-search');
+    await page.waitForFunction(() => document.querySelector('#collection option[value]') !== null, null, { timeout: 20_000 });
+    await page.selectOption('#collection', { label: 'Notes' });
+    await page.selectOption('#mode', 'KEYWORD');
+    await page.fill('#query', 'Line 2');
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll('.result-title')).some((node) => node.textContent.trim() === 'fail-once-scan.png'),
+      null,
+      { timeout: 30_000 },
+    );
+
+    const relevantErrors = consoleErrors.filter((text) => !text.includes('Failed to load resource'));
+    assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
+  },
+
   /** The same archive after the server is restarted: everything durable is still there. */
   async 'after-restart'(browser) {
     const { page, consoleErrors } = await openAdmin(browser);

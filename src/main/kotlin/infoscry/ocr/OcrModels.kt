@@ -203,6 +203,8 @@ data class OcrProfile(
     val name: String,
     val enabled: Boolean,
     val revision: OcrProfileRevision,
+    /** The LLM profile this profile was copied from, or null. Not a foreign key: deleting that LLM profile leaves the copy and a dangling id. */
+    val sourceLlmProfileId: String? = null,
 ) {
     init {
         require(id.isNotBlank()) { "OcrProfile.id must not be blank" }

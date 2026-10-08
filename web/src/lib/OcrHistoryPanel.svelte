@@ -376,6 +376,8 @@
                     {#if revision.reading.reviewModel}<br />Review model: {revision.reading.reviewModel}{/if}
                     {#if revision.reading.toolVersion}<br />Tool version: {revision.reading.toolVersion}{/if}
                     {#if revision.reading.modelVersion}<br />Model version: {revision.reading.modelVersion}{/if}
+                  {:else if revision.noOcrNeeded}
+                    No page needed OCR
                   {:else}
                     Not recorded
                   {/if}

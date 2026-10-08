@@ -19,6 +19,9 @@
 
   let selectedPaths: string[] = [];
   let recursive = false;
+  /** Which files of a folder are imported: every type, only the listed extensions, or all but the listed ones. */
+  let fileTypes: 'all' | 'include' | 'exclude' = 'all';
+  let extensionText = '';
   let picking = false;
   let pickerUnavailable = false;
   let manualPath = '';
@@ -35,6 +38,20 @@
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
   const TERMINAL_STATES: JobState[] = ['COMPLETE', 'FAILED', 'CANCELLED'];
+
+  /** The extensions as typed, normalised: lower case, no leading dots, no repeats. Commas and spaces both separate. */
+  function parseExtensions(text: string): string[] {
+    const found = new Set<string>();
+    for (const raw of text.split(/[\s,]+/)) {
+      const extension = raw.replace(/^\.+/, '').toLowerCase();
+      if (extension !== '') found.add(extension);
+    }
+    return [...found];
+  }
+
+  $: listedExtensions = fileTypes === 'all' ? [] : parseExtensions(extensionText);
+  // A list that is chosen but names nothing would import everything, so the import waits for a real entry.
+  $: extensionListEmpty = fileTypes !== 'all' && listedExtensions.length === 0;
 
   function isTerminal(state: JobState): boolean {
     return TERMINAL_STATES.includes(state);
@@ -97,14 +114,18 @@
   }
 
   async function startImport(): Promise<void> {
-    if (collectionId === '' || selectedPaths.length === 0 || importing) return;
+    if (collectionId === '' || selectedPaths.length === 0 || extensionListEmpty || importing) return;
     const generation = ++importGeneration;
     error = null;
     items = [];
     job = null;
     importing = true;
     try {
-      const enqueued = await enqueueImport(collectionId, selectedPaths, recursive);
+      const extensions = {
+        include: fileTypes === 'include' ? listedExtensions : [],
+        exclude: fileTypes === 'exclude' ? listedExtensions : [],
+      };
+      const enqueued = await enqueueImport(collectionId, selectedPaths, recursive, extensions);
       if (generation !== importGeneration) return;
       job = enqueued.job;
       let current = enqueued.job;
@@ -195,6 +216,20 @@
     <label class="check-label"><input type="checkbox" bind:checked={recursive} /> Include subfolders</label>
   </div>
 
+  <fieldset class="file-types">
+    <legend>File types</legend>
+    <label class="check-label"><input type="radio" name="file-types" value="all" bind:group={fileTypes} /> All file types</label>
+    <label class="check-label"><input type="radio" name="file-types" value="include" bind:group={fileTypes} /> Only these extensions</label>
+    <label class="check-label"><input type="radio" name="file-types" value="exclude" bind:group={fileTypes} /> All except these extensions</label>
+    {#if fileTypes !== 'all'}
+      <div class="extension-row">
+        <label for="extension-list">Extensions</label>
+        <input id="extension-list" bind:value={extensionText} placeholder="pdf, docx" />
+      </div>
+      <p class="hint">Separate extensions with commas or spaces. A leading dot is optional.</p>
+    {/if}
+  </fieldset>
+
   {#if pickerUnavailable}
     <div class="manual-fallback">
       <p>This machine cannot open the pick dialog, so enter each path to import by hand.</p>
@@ -223,11 +258,12 @@
   </div>
 
   <div class="import-row">
-    <button type="button" class="primary" onclick={startImport} disabled={importing || collectionId === '' || selectedPaths.length === 0}>
+    <button type="button" class="primary" onclick={startImport} disabled={importing || collectionId === '' || selectedPaths.length === 0 || extensionListEmpty}>
       {importing ? 'Importing…' : 'Import'}
     </button>
     {#if collectionId === ''}<p class="hint">Select a collection to import into.</p>{/if}
     {#if !importing && collectionId !== '' && selectedPaths.length === 0}<p class="hint">Choose files or a folder to import.</p>{/if}
+    {#if extensionListEmpty}<p class="hint">Enter at least one extension.</p>{/if}
   </div>
 
   {#if items.length > 0}
@@ -260,6 +296,10 @@
   .picker-row { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
   .check-label { display: flex; align-items: center; gap: 0.5rem; }
   .check-label input { accent-color: #c4a77d; }
+  .file-types { display: grid; gap: 0.5rem; margin: 0; padding: 0; border: 0; }
+  .file-types legend { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; padding: 0; margin-bottom: 0.35rem; }
+  .file-types .hint { margin: 0; color: #929997; font-size: 0.8rem; }
+  .extension-row { display: flex; align-items: center; gap: 0.55rem; }
   .manual-fallback { display: grid; gap: 0.5rem; padding: 0.85rem; border: 1px solid #6e5a33; border-radius: 0.55rem; background: #1d1c1a; }
   .manual-fallback p { margin: 0; color: #d8c9a8; font-size: 0.85rem; }
   .manual-row { display: flex; gap: 0.55rem; }
@@ -271,7 +311,7 @@
   .paths li button { padding: 0.15rem 0.55rem; line-height: 1.2; }
   .eyebrow { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; }
   label { color: #b8bcbb; font-size: 0.82rem; }
-  input:not([type='checkbox']) {
+  input:not([type='checkbox']):not([type='radio']) {
     min-width: 0;
     border: 1px solid #383d3e;
     border-radius: 0.48rem;

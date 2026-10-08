@@ -679,6 +679,24 @@ class CollectionRoutesTest {
     }
 
     @Test
+    fun `an import naming both an include and an exclude list is refused before any job is created`() = runBlocking {
+        val source = dataDir.resolve("both-lists.txt")
+        Files.writeString(source, "A report.")
+        harness.createCollection("Default", Credential.BEARER)
+
+        val refused = harness.request(
+            HttpMethod.Post,
+            "/api/imports",
+            body = """{"collection":"Default","paths":["$source"],"include":["pdf"],"exclude":["log"]}""",
+            credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.BadRequest, refused.status, refused.bodyAsText())
+        assertContains(refused.bodyAsText(), "INVALID_REQUEST")
+        assertEquals(0, harness.context.jobs.list(100, 0).size, "a refused request must not create a job row")
+    }
+
+    @Test
     @Tag(FRONTEND_TAG)
     fun `the compiled web application is served and client-side routes fall back to it`() = runBlocking {
         val root = harness.get("/")

@@ -45,6 +45,17 @@ CREATE TABLE collections (
 -- index is the authority; the store translates its violation into a typed error.
 CREATE UNIQUE INDEX collections_name_unique ON collections (name COLLATE NOCASE);
 
+-- A collection's ignore patterns (ticket 07 of the local-testing feedback): one row per line of the list, in order.
+-- `position` is the line's place, because the last matching pattern wins. The rows belong to the collection and
+-- go with it, so a collection deletion, including its recovery, needs no step of its own for them. Comments are
+-- rows too, so a saved list reads back as written. An import copies the list into its job payload at admission.
+CREATE TABLE collection_ignore_patterns (
+    collection_id TEXT NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    pattern TEXT NOT NULL CHECK (length(pattern) > 0),
+    PRIMARY KEY (collection_id, position)
+) WITHOUT ROWID;
+
 -- One immutable imported original. sha256 identifies the bytes; the unique constraint is per
 -- collection, so the same bytes may exist in two collections as two documents.
 --
@@ -581,11 +592,18 @@ CREATE TABLE ocr_profiles (
     current_revision_id TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
     updated_at          TEXT    NOT NULL,
+    -- The LLM profile this profile was copied from, when it was offered for OCR. Deliberately not a foreign
+    -- key: deleting the LLM profile leaves the copy (and every attempt that pinned it) and a dangling id.
+    source_llm_profile_id TEXT,
     FOREIGN KEY (current_revision_id) REFERENCES ocr_profile_revisions (revision_id)
         DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE INDEX ocr_profile_revisions_profile ON ocr_profile_revisions (profile_id);
+
+-- At most one copy per LLM profile.
+CREATE UNIQUE INDEX ocr_profiles_source_llm ON ocr_profiles (source_llm_profile_id)
+    WHERE source_llm_profile_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------------------------
 -- Document revisions and recoverable publication
@@ -615,7 +633,11 @@ CREATE TABLE document_revisions (
     -- The extraction fingerprint of the reading that opened a staged candidate, so an interrupted import
     -- continues into the same candidate instead of opening a second one. Null for published and rescan
     -- revisions, which are never resumed by key.
-    attempt_fingerprint TEXT
+    attempt_fingerprint TEXT,
+    -- The OCR settings an import or a retry was admitted with and read this revision under, as the attempt's
+    -- own frozen snapshot (never today's collection settings), so the history can name the engine, mode,
+    -- language and versions after the fact. Null for every revision no import or retry produced.
+    reading_snapshot   TEXT
 );
 
 -- At most one resumable candidate per document and attempt: two racing resumes adopt the same row.

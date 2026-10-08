@@ -11,6 +11,7 @@ import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.domain.JobType
 import infoscry.jobs.ImportJobHandler
+import infoscry.jobs.ExtensionFilter
 import infoscry.jobs.ImportJobPayload
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
@@ -47,6 +48,7 @@ import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.patch
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.server.http.content.staticResources
@@ -113,6 +115,10 @@ data class UpdateOcrLanguagesRequest(
         externalPageLimit = ocrExternalPageLimit,
     )
 }
+
+/** A collection's ignore patterns, as read and as saved: one entry per line, in order. */
+@Serializable
+data class IgnorePatternsBody(val patterns: List<String>)
 
 @Serializable
 data class DeleteCollectionRequest(val confirmName: String)
@@ -182,6 +188,9 @@ data class ImportRequest(
     // false on purpose: a directory import no longer descends into subdirectories unless recursion is
     // asked for, so a request that says nothing gets exactly that non-recursive behavior.
     val recursive: Boolean = false,
+    // Extension lists for a folder import; both default to empty, which means no filter.
+    val include: List<String> = emptyList(),
+    val exclude: List<String> = emptyList(),
 )
 
 /** What the picker is asked to choose: files (any number of them) or one folder. */
@@ -305,6 +314,30 @@ fun Application.configureRoutes(
                 }
             }
 
+            // The collection's ignore patterns: read, and replaced whole. A save is a mutation like the OCR settings
+            // save beside it (CSRF, the mutation gate, the collection's own lifecycle), and an invalid pattern is
+            // refused here with a 400 rather than discovered by a later import.
+            get("/ignore-patterns") {
+                call.handle {
+                    val id = call.collectionId()
+                    call.respondJson(
+                        HttpStatusCode.OK,
+                        IgnorePatternsBody(context.collectionService.ignorePatterns(id).patterns),
+                    )
+                }
+            }
+
+            put("/ignore-patterns") {
+                call.handle {
+                    val id = call.collectionId()
+                    val request = call.receiveJson<IgnorePatternsBody>()
+                    call.respondJson(
+                        HttpStatusCode.OK,
+                        IgnorePatternsBody(context.collectionService.updateIgnorePatterns(id, request.patterns).patterns),
+                    )
+                }
+            }
+
             patch("/ocr-languages") {
                 call.handle {
                     val id = call.collectionId()
@@ -320,12 +353,15 @@ fun Application.configureRoutes(
         route("/api/imports") {
             post {
                 call.handle {
+                    // A request that names both an include and an exclude list is refused here, before the mutation
+                    // gate and before any job or copy exists.
+                    val request = call.receiveJson<ImportRequest>()
+                    val extensions = ExtensionFilter.of(request.include, request.exclude)
                     context.mutations.withMutation {
                         // The same gate every other mutating command passes: while an unsafe deletion state is
                         // unresolved, admitting an import would add work to an archive an operator has to
                         // repair first.
                         context.collectionService.requireMutationsAllowed()
-                        val request = call.receiveJson<ImportRequest>()
                         val collection = context.collectionService.requireActiveByNameOrId(request.collection)
                         // The job records the tool version it will run with, so its checkpoints are keyed by
                         // what actually produced them. That is why the probe happens once per job creation.
@@ -353,6 +389,10 @@ fun Application.configureRoutes(
                             settings = settings,
                             recursive = request.recursive,
                             ocr = snapshot,
+                            extensions = extensions,
+                            // Snapshotted here, with the OCR settings: a later edit of the list changes future
+                            // imports only.
+                            ignore = context.collectionService.ignorePatterns(collection.id),
                         )
                         val job = context.jobs.enqueue(
                             type = JobType.IMPORT,
@@ -488,6 +528,7 @@ fun Application.configureRoutes(
         configureSourceRoutes(context)
         configureLlmProfileRoutes(context)
         configureOcrProfileRoutes(context)
+        configureOcrLlmCandidateRoutes(context)
         configureOcrRescanRoutes(context)
         configureLlmCatalogRoutes(credentials)
         configureAskRoutes(context)

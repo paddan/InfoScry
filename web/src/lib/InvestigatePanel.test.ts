@@ -606,4 +606,34 @@ describe('Investigate panel', () => {
     release();
     await waitFor(() => expect(onConversationFinished).toHaveBeenCalledTimes(1));
   });
+
+  it('explains a refused unmeasured profile and where to measure it instead of doing nothing', async () => {
+    api.startInvestigation.mockRejectedValue(
+      new ApiError('TOOL_CALLING_UNSUPPORTED', "the profile 'local-cheap' has not been measured for tool calling"),
+    );
+
+    render(InvestigatePanel, { props: { ...props, conversationId: null } });
+    await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain("the profile 'local-cheap' has not been measured for tool calling");
+    expect(alert.textContent).toContain('Admin');
+    expect(alert.textContent).toContain('Check tool calling');
+    expect(api.readInvestigationEvents).not.toHaveBeenCalled();
+  });
+
+  it('leaves no empty answer bubble behind a refused or failed turn', async () => {
+    api.startInvestigation.mockRejectedValue(
+      new ApiError('TOOL_CALLING_UNSUPPORTED', "the profile 'local-cheap' has not been measured for tool calling"),
+    );
+
+    render(InvestigatePanel, { props: { ...props, conversationId: null } });
+    await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+
+    await screen.findByRole('alert');
+    expect(document.querySelectorAll('li.assistant').length).toBe(0);
+    expect(screen.getByText('What happened?')).toBeTruthy();
+  });
 });

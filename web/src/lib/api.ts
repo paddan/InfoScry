@@ -180,6 +180,9 @@ export type LlmProfilePrice = {
   name: string;
   inputPricePerMillion: number;
   outputPricePerMillion: number;
+  /** The recorded measurement; absent or null means the profile was never measured for tool calling. */
+  toolCallingMeasured?: boolean | null;
+  capabilityCheckedAt?: string | null;
 };
 
 export type LlmProvider = 'OPENAI_COMPATIBLE' | 'ANTHROPIC';
@@ -232,6 +235,8 @@ export type OcrProfile = {
   /** null: never measured; the measurement is a synthetic-image check, not a declaration. */
   imageCapabilityMeasured: boolean | null;
   imageCapabilityCheckedAt: string | null;
+  /** The LLM profile this profile was copied from; absent or null for an OCR profile made directly. */
+  sourceLlmProfileId?: string | null;
 };
 
 /** The complete next state of a profile; an edit is a new revision, so there is no sparse update. */
@@ -279,6 +284,8 @@ export type LlmCatalogModel = {
   outputPricePerMillion: number | null;
   cacheReadPricePerMillion: number | null;
   priceKnown: boolean;
+  /** Whether the model accepts image input; null when the catalog does not say, which is not "no". */
+  imageInput: boolean | null;
 };
 
 export type LlmCatalog = { live: boolean; models: LlmCatalogModel[] };
@@ -515,8 +522,11 @@ export async function fetchLlmCatalog(
   provider: LlmProvider,
   endpoint: string,
   apiKeyEnvironmentVariable: string | null,
+  imageInputOnly = false,
 ): Promise<LlmCatalog> {
   const parameters = new URLSearchParams({ provider, endpoint });
+  // The server drops a model the catalog states is text-only and keeps one it does not state.
+  if (imageInputOnly) parameters.append('imageInput', 'true');
   if (apiKeyEnvironmentVariable !== null) {
     parameters.append('apiKeyEnvironmentVariable', apiKeyEnvironmentVariable);
   }
@@ -534,7 +544,9 @@ export async function fetchLlmCatalog(
       response = await send();
     }
   }
-  return (await readJson(response)) as LlmCatalog;
+  const catalog = (await readJson(response)) as LlmCatalog;
+  // The server leaves an unknown field out, and the form tells "unknown" from "no" by comparing with null.
+  return { ...catalog, models: catalog.models.map((model) => ({ ...model, imageInput: model.imageInput ?? null })) };
 }
 
 export async function createLlmProfile(profile: LlmProfileInput): Promise<LlmProfile> {
@@ -549,6 +561,18 @@ export async function updateLlmProfile(id: string, profile: LlmProfileInput): Pr
 
 export async function deleteLlmProfile(id: string): Promise<void> {
   await mutate(`/api/llm/profiles/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+/** What one tool-calling check measured, with the saved profile as it now stands. */
+export type LlmProfileProbe = {
+  profile: LlmProfile;
+  textRequestSupported: boolean;
+  toolCallingSupported: boolean;
+};
+
+/** Measures tool calling for a saved profile: the same two requests as `infoscry llm test`. */
+export async function probeLlmProfile(id: string): Promise<LlmProfileProbe> {
+  return (await mutate(`/api/llm/profiles/${encodeURIComponent(id)}/probe`, 'POST')) as LlmProfileProbe;
 }
 
 /**
@@ -590,6 +614,42 @@ export async function updateOcrProfile(
     'PATCH',
     expectedRevisionId === undefined ? profile : { ...profile, expectedRevisionId },
   )) as { profile: OcrProfile };
+  return normaliseOcrProfile(body.profile);
+}
+
+/**
+ * One LLM profile as a collection's OCR selects see it. `imageInput` is what the catalog states about the
+ * model; null means it does not say. `keyAvailable` is presence only; no key value is ever returned.
+ */
+export type OcrLlmCandidate = {
+  id: string;
+  name: string;
+  provider: LlmProvider;
+  endpoint: string;
+  scope: OcrEndpointScope;
+  model: string;
+  apiKeyEnvironmentVariable: string | null;
+  keyAvailable: boolean;
+  imageInput: boolean | null;
+};
+
+/** The enabled LLM profiles, with what the catalog states about each model's image input. */
+export async function listOcrLlmCandidates(): Promise<OcrLlmCandidate[]> {
+  const body = (await readJson(await fetch('/api/ocr/llm-profiles'))) as { profiles: OcrLlmCandidate[] };
+  return body.profiles.map((candidate) => ({
+    ...candidate,
+    apiKeyEnvironmentVariable: candidate.apiKeyEnvironmentVariable ?? null,
+    imageInput: candidate.imageInput ?? null,
+  }));
+}
+
+/**
+ * Offer an LLM profile for transcription or review: the server copies it into an OCR profile (or brings its
+ * existing copy up to date) and answers with that profile, which is what a collection selects and an attempt
+ * pins. A model the catalog states is text-only is refused with 409 `LLM_PROFILE_TEXT_ONLY`.
+ */
+export async function copyLlmProfileToOcr(llmProfileId: string): Promise<OcrProfile> {
+  const body = (await mutate('/api/ocr/profiles/from-llm', 'POST', { llmProfileId })) as { profile: OcrProfile };
   return normaliseOcrProfile(body.profile);
 }
 
@@ -842,13 +902,30 @@ export async function pickPaths(directory: boolean): Promise<string[]> {
   return body.paths;
 }
 
+/**
+ * The extensions a folder import keeps. `include` keeps only those extensions; `exclude` keeps everything else.
+ * Both empty means every file. The server refuses a request that gives both.
+ */
+export interface ExtensionFilterRequest {
+  include: string[];
+  exclude: string[];
+}
+
 /** Queue an import of the selected paths into a collection; the job runs in the background. */
 export async function enqueueImport(
   collection: string,
   paths: string[],
   recursive: boolean,
+  extensions: ExtensionFilterRequest = { include: [], exclude: [] },
 ): Promise<{ accepted: boolean; job: JobApiView }> {
-  return (await mutate('/api/imports', 'POST', { collection, paths, recursive })) as {
+  const body = {
+    collection,
+    paths,
+    recursive,
+    include: extensions.include,
+    exclude: extensions.exclude,
+  };
+  return (await mutate('/api/imports', 'POST', body)) as {
     accepted: boolean;
     job: JobApiView;
   };
@@ -947,6 +1024,27 @@ export async function updateCollectionOcrLanguages(collectionId: string, ocrLang
   return body.collection;
 }
 
+/** A collection's ignore patterns: files and folders that no import into it attempts. One entry per line. */
+export async function getCollectionIgnorePatterns(collectionId: string): Promise<string[]> {
+  const body = (await readJson(
+    await fetch(`/api/collections/${encodeURIComponent(collectionId)}/ignore-patterns`),
+  )) as { patterns: string[] };
+  return body.patterns;
+}
+
+/**
+ * Replaces a collection's ignore patterns. The server validates every line and refuses an invalid one with
+ * `INVALID_REQUEST`; it answers with the list as saved (trimmed, blank lines dropped).
+ */
+export async function updateCollectionIgnorePatterns(collectionId: string, patterns: string[]): Promise<string[]> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/ignore-patterns`,
+    'PUT',
+    { patterns },
+  )) as { patterns: string[] };
+  return body.patterns;
+}
+
 /**
  * One collection OCR-settings edit. Every field is optional and absent keeps what the collection has; a
  * profile id sent as an empty string clears that profile.
@@ -1035,7 +1133,13 @@ export async function deleteDocuments(
 }
 
 /** One document a retry refused, and InfoScry's own sentence for the reason. */
-export type RetryRejection = { documentId: string; reason: string };
+export type RetryRejection = { documentId: string; reason: string; code?: string | null };
+
+/**
+ * The OCR method a retry reads with instead of the collection's. Every field is optional and an absent one
+ * means the collection's value; the server validates and admits it as it does a Scan again preview.
+ */
+export type RetryOcrChoice = RescanPreviewOverrides & { language?: string };
 
 /**
  * What a retry asks for: the documents to read again, or every eligible one in the collection.
@@ -1043,7 +1147,9 @@ export type RetryRejection = { documentId: string; reason: string };
  * The two are mutually exclusive because they are different requests — one may explain a document the user
  * named, and the other picks the set itself.
  */
-export type RetryRequest = { documentIds: string[] } | { allEligible: true };
+export type RetryRequest =
+  | { documentIds: string[]; ocr?: RetryOcrChoice }
+  | { allEligible: true; ocr?: RetryOcrChoice };
 
 /** What an admitted retry answers with: the attempts it queued and the documents it refused. */
 export type RetryAdmission = {
@@ -1458,6 +1564,7 @@ export type RevisionView = {
   reading?: RevisionReading | null;
   extractionMethods?: string[];
   pageChanges?: PageChanges;
+  noOcrNeeded?: boolean;
 };
 
 export type RevisionsResponse = {

@@ -177,4 +177,73 @@ class LlmModelCatalogTest {
             fake.close()
         }
     }
+
+    private fun entries(json: String): List<JsonObject> =
+        Json.parseToJsonElement(json).jsonObject["data"]!!.jsonArray.mapNotNull { it as? JsonObject }
+
+    @Test
+    fun `a live catalog that lists image among the input modalities marks the model as image capable`() {
+        val models = catalog.normalize(
+            LlmProvider.OPENAI_COMPATIBLE, "https://openrouter.ai/api/v1",
+            entries(
+                """{"data":[
+                  {"id":"vendor/vision","architecture":{"input_modalities":["text","image"]}},
+                  {"id":"vendor/text-only","architecture":{"input_modalities":["text"]}},
+                  {"id":"vendor/legacy-text","architecture":{"modality":"text->text"}},
+                  {"id":"vendor/legacy-vision","architecture":{"modality":"text+image->text"}},
+                  {"id":"vendor/silent"}]}""",
+            ),
+        ).associateBy { it.id }
+        assertEquals(true, models.getValue("vendor/vision").imageInput)
+        assertEquals(false, models.getValue("vendor/text-only").imageInput)
+        assertEquals(false, models.getValue("vendor/legacy-text").imageInput)
+        assertEquals(true, models.getValue("vendor/legacy-vision").imageInput)
+        assertEquals(null, models.getValue("vendor/silent").imageInput, "silence is unknown, never a guess")
+    }
+
+    @Test
+    fun `curated image support fills a catalog that does not state it and live data wins over it`() {
+        val data = ProviderCatalogData(
+            presets = emptyList(),
+            knownModels = mapOf(
+                "curated-vision" to KnownModel(provider = LlmProvider.OPENAI_COMPATIBLE, imageInput = true),
+                "curated-text" to KnownModel(provider = LlmProvider.OPENAI_COMPATIBLE, imageInput = false),
+            ),
+        )
+        val service = LlmModelCatalog(catalog = data)
+        val models = service.normalize(
+            LlmProvider.OPENAI_COMPATIBLE, "https://api.example.com/v1",
+            entries(
+                """{"data":[{"id":"curated-vision"},{"id":"curated-text"},
+                  {"id":"curated-text","architecture":{"input_modalities":["text","image"]}}]}""",
+            ),
+        )
+        // normalize sorts by id: the curated text-only entry, the same id with live image modalities, then the vision one.
+        assertEquals(listOf(false, true, true), models.map { it.imageInput })
+        assertEquals(true, service.fallback(LlmProvider.OPENAI_COMPATIBLE, "https://api.example.com/v1")
+            .first { it.id == "curated-vision" }.imageInput)
+    }
+
+    @Test
+    fun `the shipped catalog states image input for its curated models and leaves other ids unknown`() {
+        assertEquals(
+            true,
+            catalog.normalize(
+                LlmProvider.OPENAI_COMPATIBLE, "https://api.openai.com/v1", entries("""{"data":[{"id":"gpt-4o"}]}"""),
+            ).single().imageInput,
+        )
+        assertEquals(
+            false,
+            catalog.normalize(
+                LlmProvider.OPENAI_COMPATIBLE, "https://api.deepseek.com/v1",
+                entries("""{"data":[{"id":"deepseek-chat"}]}"""),
+            ).single().imageInput,
+        )
+        assertEquals(
+            null,
+            catalog.normalize(
+                LlmProvider.OPENAI_COMPATIBLE, "http://localhost:11434/v1", entries("""{"data":[{"id":"gemma3:12b"}]}"""),
+            ).single().imageInput,
+        )
+    }
 }

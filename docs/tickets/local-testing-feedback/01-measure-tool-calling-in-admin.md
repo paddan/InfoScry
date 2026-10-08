@@ -1,6 +1,6 @@
 # 01: Measure tool calling from Admin and explain an unmeasured profile in Investigate
 
-**Status:** Not started. Unchecked criteria are requirements, not evidence.
+**Status:** Implemented; browser scenario passes (fake provider). Unchecked criteria are requirements, not evidence.
 **Blocked by:** None.
 **Plan:** [Local testing feedback](../../plans/2026-10-07-local-testing-feedback.md).
 
@@ -26,13 +26,13 @@ profile cannot be used and what to do.
 
 ## Test-first implementation
 
-- [ ] Failing tests first: the probe route measures and persists through a fake provider, refuses a switched-off
+- [x] Failing tests first: the probe route measures and persists through a fake provider, refuses a switched-off
   profile, never echoes a key or provider body; the CLI and the route share one implementation; the Admin action
   dispatches once on repeated clicks and shows the result; Investigate shows the `TOOL_CALLING_UNSUPPORTED` message
   and the remedy instead of doing nothing.
-- [ ] Implement; keep the route thin over the shared service.
-- [ ] Browser scenario: an unmeasured profile is refused with the explanation, measured from Admin, then a
-  question runs (fake provider).
+- [x] Implement; keep the route thin over the shared service.
+- [x] Browser scenario: an unmeasured profile is refused with the explanation, measured from Admin, then a
+  question runs (fake provider). `InvestigateBrowserAcceptanceTest` scenario `unmeasuredProfile` passes.
 
 ## Focused verification
 
