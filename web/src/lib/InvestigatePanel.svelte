@@ -219,6 +219,12 @@
     } finally {
       activeControllers.delete(signalController);
       if (turn === generation) {
+        // A turn that ended with no answer text (refused, failed or cancelled) leaves no empty bubble; the
+        // alert or status beside the form is the outcome the reader sees.
+        const placeholder = messages[answerIndex];
+        if (messages.length === answerIndex + 1 && placeholder?.role === 'assistant' && placeholder.text === '') {
+          messages = messages.slice(0, answerIndex);
+        }
         working = false;
         controller = null;
         onWorkingChanged?.(false);

@@ -231,6 +231,52 @@ const scenarios = {
     await submit(page, 'After cancelling?', { answer: 'Recovered after cancel' });
     assert((await answerTexts(page)).some((text) => text.includes('Recovered after cancel')), 'a question after cancellation must succeed');
   },
+
+  /**
+   * An unmeasured profile is marked in the select and refused with the explanation and the remedy; Admin
+   * measures it with "Check tool calling" against the fake provider; the reader then runs a question.
+   */
+  async unmeasuredProfile(browser) {
+    const { page, consoleErrors } = await openReader(browser);
+    const selectedLabel = await page.$eval('#llm-profile', (select) => select.selectedOptions[0]?.textContent ?? '');
+    assert(selectedLabel.includes('tool calling not measured'), `the select must mark an unmeasured profile: ${JSON.stringify(selectedLabel)}`);
+    const remedy = (await page.textContent('.profile-remedy')) ?? '';
+    assert(remedy.includes('Check tool calling'), `the sidebar must name the remedy before any question: ${JSON.stringify(remedy)}`);
+
+    await submit(page, 'Who signed the note?', { alert: true });
+    const alert = (await page.textContent('#panel-investigate [role="alert"]')) ?? '';
+    assert(
+      alert.includes("the profile 'investigator' has not been measured for tool calling"),
+      `the refusal must explain the profile state: ${JSON.stringify(alert)}`,
+    );
+    assert(alert.includes('Check tool calling'), `the refusal must name the remedy: ${JSON.stringify(alert)}`);
+
+    await page.click('#tab-admin');
+    await page.click('#admin-tab-llm');
+    await page.waitForSelector('select[aria-label="Profile"]', { timeout: 20_000 });
+    await page.click('button:has-text("Check tool calling")');
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll('[role="status"]')).some((node) => (node.textContent ?? '').includes('Tool calling: supported')),
+      null,
+      { timeout: 30_000 },
+    );
+
+    await page.click('#tab-investigate');
+    await page.waitForFunction(
+      () => {
+        const select = document.querySelector('#llm-profile');
+        const option = select?.selectedOptions?.[0];
+        return !!option && option.textContent.trim() === 'investigator';
+      },
+      null,
+      { timeout: 20_000 },
+    );
+    await submit(page, 'Who signed the note?', { answer: 'Mira signed the note' });
+    await waitForHistoryTitle(page, 'Measured note');
+    assert((await answerTexts(page)).length === 1, 'the question after measuring must add exactly one answer');
+    const relevantErrors = consoleErrors.filter((text) => !text.includes('Failed to load resource'));
+    assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
+  },
 };
 
 const scenario = scenarios[SCENARIO];
