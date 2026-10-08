@@ -549,7 +549,7 @@ class RescanService(
             // repointed, whose engine, mode, language or allowance was edited, or whose reviewer was
             // deselected between being shown and being admitted is a different reading, and admitting it would
             // dispatch a scope and a text nobody looked at.
-            requireSnapshotStillResolvable(preview.snapshot, collection)
+            requireSnapshotStillResolvable(preview.snapshot)
             requirePreviewStillCurrent(preview, collection)
             requireRescanable(document, preview.snapshot)
             operations.activeOperation(documentId)?.let { running ->
@@ -663,8 +663,10 @@ class RescanService(
 
                 else -> Unit
             }
-            val collection = requireActiveCollection(collectionId)
-            requireSnapshotStillResolvable(operation.snapshot, collection)
+            // The operation keeps the snapshot it was admitted with: a collection default edited since then does
+            // not change a reading that is already running or waiting, so only its profile revisions are checked.
+            requireActiveCollection(collectionId)
+            requireSnapshotStillResolvable(operation.snapshot)
             val document = requireDocument(collectionId, documentId)
             requireNotBeingDeleted(documentId)
             requireSnapshotResumable(document)
@@ -1362,14 +1364,19 @@ class RescanService(
     }
 
     /**
-     * Re-resolves the snapshot's profile revisions as they stand now, and refuses a snapshot whose scope has
-     * moved.
+     * Re-resolves the snapshot's profile revisions as they stand now, and refuses a snapshot whose profile
+     * revision has moved.
      *
      * This is the check that makes "editing a default must not change a running job" hold in both directions:
      * a job already admitted keeps its revisions, and a job that has not been admitted yet may not be admitted
      * against a preview whose scope an edit changed.
+     *
+     * It deliberately does not compare the snapshot's engine with the collection's. A snapshot may carry an
+     * engine chosen for one scan, which is not a collection default and so is not a collection change; the
+     * collection's drift for a preview is decided by [requirePreviewStillCurrent], which re-applies the
+     * preview's own overrides first.
      */
-    private fun requireSnapshotStillResolvable(snapshot: OcrSettingsSnapshot, collection: Collection) {
+    private fun requireSnapshotStillResolvable(snapshot: OcrSettingsSnapshot) {
         listOfNotNull(snapshot.transcriptionProfileRevisionId, snapshot.reviewProfileRevisionId).forEach { id ->
             val revision = profileRevisionOf(id)
                 ?: throw StaleRescanPreviewException(
@@ -1383,13 +1390,6 @@ class RescanService(
                         "previewed",
                 )
             }
-        }
-        val scope = collection.ocrSettings()
-        if (scope.engine != snapshot.engine && snapshot.engine == infoscry.ocr.OcrEngine.LLM) {
-            throw StaleRescanPreviewException(
-                "collection",
-                "the collection's engine is ${scope.engine} now, not ${snapshot.engine}",
-            )
         }
     }
 

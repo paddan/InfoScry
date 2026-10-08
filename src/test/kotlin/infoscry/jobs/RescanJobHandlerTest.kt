@@ -247,6 +247,47 @@ class RescanJobHandlerTest {
     }
 
     @Test
+    fun `a preview that chooses the LLM engine for one scan is admitted while the collection engine is unchanged`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val previewId = harness.previewFor(
+                picture,
+                overrides = RescanOverrides(
+                    engine = OcrEngine.LLM,
+                    transcriptionProfileId = harness.reviewProfileId,
+                ),
+            )
+
+            assertNull(
+                harness.admitRefusal(picture, previewId, requestId = "chosen-llm"),
+                "a per-scan engine choice was treated as the collection's engine having changed",
+            )
+        }
+    }
+
+    @Test
+    fun `a preview with a chosen engine is still refused when a setting it did not choose has changed`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val previewId = harness.previewFor(
+                picture,
+                overrides = RescanOverrides(
+                    engine = OcrEngine.LLM,
+                    transcriptionProfileId = harness.reviewProfileId,
+                ),
+            )
+            harness.updateSelection { settings -> settings.copy(importMode = OcrImportMode.FILL_MISSING) }
+
+            val refusal = harness.admitRefusal(picture, previewId, requestId = "drift-mode")
+
+            assertTrue(
+                refusal is StaleRescanPreviewException,
+                "a change of the import mode the preview did not choose was admitted: $refusal",
+            )
+        }
+    }
+
+    @Test
     fun `two admissions of one document with different request ids do not both own it`() {
         withHarness { harness ->
             val picture = harness.importPicture(text = "first reading")
