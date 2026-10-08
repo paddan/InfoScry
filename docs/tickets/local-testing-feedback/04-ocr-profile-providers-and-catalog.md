@@ -1,6 +1,6 @@
 # 04: OCR profiles offer the LLM providers and only image-capable models
 
-**Status:** Implemented and verified by the focused backend and frontend tests below; the browser scenario is not done. Unchecked criteria are requirements, not evidence.
+**Status:** Implemented; browser scenario passes (fake provider).
 **Blocked by:** None.
 **Plan:** [Local testing feedback](../../plans/2026-10-07-local-testing-feedback.md).
 
@@ -61,7 +61,7 @@ and Anthropic models, false for `deepseek-chat` and `deepseek-reasoner`). Everyt
   admission does not change the admitted attempt; the collection selects explain an empty list; keys are shown by
   presence only.
 - [x] Implement with a shared form component (`ProviderModelFields.svelte`, used by both the LLM and OCR forms); no duplicated provider logic.
-- [ ] Extend the OCR profiles browser scenario. Not done: the Playwright `externalTest` was not run or extended.
+- [x] Extend the OCR profiles browser scenario: `ocr-profile-catalog`, `collection-llm-profiles` and `collection-empty-state` in `OcrBrowserAcceptanceTest` (passes against a loopback fake catalog; no real provider is contacted).
 
 ## Focused verification
 
