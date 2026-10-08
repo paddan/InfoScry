@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ImportPanel from './ImportPanel.svelte';
 import { ApiError } from './api';
@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   enqueueImport: vi.fn(),
   getJob: vi.fn(),
   getImportItems: vi.fn(),
+  approveJobExternal: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -23,7 +24,17 @@ vi.mock('./api', () => ({
   enqueueImport: api.enqueueImport,
   getJob: api.getJob,
   getImportItems: api.getImportItems,
+  approveJobExternal: api.approveJobExternal,
 }));
+
+/** A job the server holds at the external-page approval: COMPLETE in the record, waiting in its stage. */
+function awaitingJob(id: string): JobApiView {
+  return {
+    ...job(id, 'COMPLETE', 1, 3),
+    stage: 'awaiting-approval',
+    externalApproval: { snapshotHash: 'hash-1', distinctPagesSent: 1, allowance: 1, calls: 1 },
+  };
+}
 
 function job(id: string, state: JobApiView['state'], completed = 0, total = 1): JobApiView {
   return {
@@ -295,5 +306,51 @@ describe('import panel', () => {
 
     // The terminal sentence keeps its own wording and names no file: nothing is being read any more.
     expect(await screen.findByText('Import complete. 0 files.', undefined, { timeout: 5000 })).toBeTruthy();
+  });
+
+  it('waits for approval instead of reporting a completed import when the job pauses for external pages', async () => {
+    api.pickPaths.mockResolvedValue(['/home/example/a.pdf']);
+    api.enqueueImport.mockResolvedValue({ accepted: true, job: job('j1', 'RUNNING', 0, 3) });
+    api.getJob.mockResolvedValue(awaitingJob('j1'));
+
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await screen.findByText('/home/example/a.pdf');
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+
+    expect(await screen.findByText('Waiting for your approval.', undefined, { timeout: 3000 })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Approve external pages' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Approve external pages' })).toBeTruthy();
+    expect(screen.queryByText(/Import complete/)).toBeNull();
+    expect(api.getImportItems).not.toHaveBeenCalled();
+  });
+
+  it('approves the typed page count for the snapshot hash, then resumes polling until the import completes', async () => {
+    let server: JobApiView = awaitingJob('j1');
+    api.pickPaths.mockResolvedValue(['/home/example/a.pdf']);
+    api.enqueueImport.mockResolvedValue({ accepted: true, job: job('j1', 'RUNNING', 0, 3) });
+    api.getJob.mockImplementation(async () => server);
+    api.approveJobExternal.mockImplementation(async () => {
+      server = { ...job('j1', 'RUNNING', 1, 3), stage: 'extract' };
+      return { jobId: 'j1', approvalId: 'a1', authorizedDistinctPages: 3, distinctPagesSent: 1, calls: 2, state: 'RUNNING', stage: 'extract' };
+    });
+    api.getImportItems.mockResolvedValue([item('i1', 'IMPORTED', { sourceName: 'a.pdf', documentId: 'd1' })]);
+
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await screen.findByText('/home/example/a.pdf');
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+
+    await screen.findByRole('region', { name: 'Approve external pages' }, { timeout: 3000 });
+    await fireEvent.input(screen.getByLabelText('Distinct pages to approve'), { target: { value: '3' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Approve external pages' }));
+
+    expect(api.approveJobExternal).toHaveBeenCalledWith('j1', 'hash-1', 3);
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Approve external pages' })).toBeNull());
+    // The loop was still polling, so the job's new state shows as it runs and then the terminal result.
+    expect(await screen.findByText('Importing… — Extracting · 1 of 3 files', undefined, { timeout: 3000 })).toBeTruthy();
+    server = job('j1', 'COMPLETE', 3, 3);
+    expect(await screen.findByText('Import complete. 1 file.', undefined, { timeout: 5000 })).toBeTruthy();
+    expect(screen.getByText('Imported')).toBeTruthy();
   });
 });

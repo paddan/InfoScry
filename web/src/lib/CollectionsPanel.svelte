@@ -38,6 +38,7 @@
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
+  import JobApproval from './JobApproval.svelte';
   import { emptyChoice, retryChoice } from './ocrRescan';
   import { qualityLabel } from './ocrQuality';
 
@@ -795,11 +796,19 @@
    * schedules nothing: polling ends as soon as there is nothing left to watch.
    */
   function scheduleImportRefresh(): void {
-    if (refreshTimer !== null || !imports.some((entry) => !TERMINAL_JOB_STATES.includes(entry.state))) return;
+    if (refreshTimer !== null || !imports.some(isWatchedImport)) return;
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
       void loadImports();
     }, IMPORT_REFRESH_MILLIS);
+  }
+
+  /**
+   * An import the history must keep reading: one not yet finished, or one that finished into the wait for
+   * an external-page approval, which the approval moves on from.
+   */
+  function isWatchedImport(entry: ImportHistoryEntry): boolean {
+    return !TERMINAL_JOB_STATES.includes(entry.state) || entry.externalApproval !== undefined;
   }
 
   function changeImportsPage(delta: number): void {
@@ -1803,6 +1812,13 @@
                         </button>
                       </td>
                     </tr>
+                    {#if entry.externalApproval}
+                      <tr class="approval-row">
+                        <td colspan="5">
+                          <JobApproval jobId={entry.id} approval={entry.externalApproval} onapproved={() => void loadImports()} />
+                        </td>
+                      </tr>
+                    {/if}
                   {/each}
                 </tbody>
               </table>

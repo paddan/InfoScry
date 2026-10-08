@@ -6,10 +6,12 @@
     getImportItems,
     getJob,
     pickPaths,
+    type ImportExternalApprovalResponse,
     type ImportItemApiView,
     type JobApiView,
     type JobState,
   } from './api';
+  import JobApproval from './JobApproval.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { importProgressText } from './importProgress';
 
@@ -55,6 +57,14 @@
 
   function isTerminal(state: JobState): boolean {
     return TERMINAL_STATES.includes(state);
+  }
+
+  /**
+   * A job paused for external pages is COMPLETE in its record, so its state alone reads as finished. The
+   * stage and the approval the server attaches say it is still waiting on a person.
+   */
+  function awaitingApproval(current: JobApiView): boolean {
+    return current.state === 'COMPLETE' && current.stage === 'awaiting-approval' && Boolean(current.externalApproval);
   }
 
   function addPaths(paths: string[]): void {
@@ -129,7 +139,7 @@
       if (generation !== importGeneration) return;
       job = enqueued.job;
       let current = enqueued.job;
-      while (!isTerminal(current.state)) {
+      while (!isTerminal(current.state) || awaitingApproval(current)) {
         await sleep(1000);
         if (generation !== importGeneration) return;
         current = await getJob(current.id);
@@ -157,25 +167,42 @@
     return item.errorCode ?? '';
   }
 
-  function jobStatus(): string {
-    if (importing && job !== null) {
+  /**
+   * The server recorded the approval and the job resumes, so the form leaves. The polling loop is still
+   * running and reads the job's new state on its next poll; the state given here only bridges that gap.
+   */
+  function approved(answer: ImportExternalApprovalResponse): void {
+    if (job === null) return;
+    const state: JobState = answer.state === 'QUEUED' ? 'QUEUED' : 'RUNNING';
+    job = { ...job, state, stage: answer.stage ?? null, externalApproval: undefined };
+  }
+
+  /**
+   * The status line for the job as it is now. It takes its inputs as arguments so the reactive statement
+   * below re-runs whenever the job, the run state or the results change.
+   */
+  function jobStatus(current: JobApiView | null, active: boolean, results: ImportItemApiView[]): string {
+    if (active && current !== null && awaitingApproval(current)) return 'Waiting for your approval.';
+    if (active && current !== null) {
       // The line names the file being imported and the stage a reader can act on: `Importing report.pdf
       // — Copying · 3 of 12 files`. The stage and the file's name are the server's; the words are ours.
       return importProgressText({
-        state: job.state,
-        stage: job.stage,
-        currentItem: job.currentItem,
-        filesCompleted: job.completed,
-        filesTotal: job.total,
+        state: current.state,
+        stage: current.stage,
+        currentItem: current.currentItem,
+        filesCompleted: current.completed,
+        filesTotal: current.total,
       });
     }
-    if (job !== null && TERMINAL_STATES.includes(job.state)) {
-      if (job.state === 'COMPLETE') return `Import complete. ${items.length} file${items.length === 1 ? '' : 's'}.`;
-      if (job.state === 'CANCELLED') return 'Import cancelled.';
-      return `Import failed${job.errorCode ? ` (${job.errorCode})` : ''}.`;
+    if (current !== null && TERMINAL_STATES.includes(current.state)) {
+      if (current.state === 'COMPLETE') return `Import complete. ${results.length} file${results.length === 1 ? '' : 's'}.`;
+      if (current.state === 'CANCELLED') return 'Import cancelled.';
+      return `Import failed${current.errorCode ? ` (${current.errorCode})` : ''}.`;
     }
     return '';
   }
+
+  $: status = jobStatus(job, importing, items);
 
   function describe(failure: unknown): string {
     if (failure instanceof ApiError) return failure.message;
@@ -199,11 +226,14 @@
       {:else}
         <progress aria-label="Import progress"></progress>
       {/if}
-      <p role="status">{jobStatus()}</p>
+      <p role="status">{status}</p>
     </div>
   {/if}
+  {#if importing && job !== null && job.externalApproval && awaitingApproval(job)}
+    <JobApproval jobId={job.id} approval={job.externalApproval} onapproved={approved} />
+  {/if}
   {#if !importing && job !== null && isTerminal(job.state)}
-    <p role={job.state === 'FAILED' ? 'alert' : 'status'}>{jobStatus()}</p>
+    <p role={job.state === 'FAILED' ? 'alert' : 'status'}>{status}</p>
   {/if}
 
   <div class="picker-row">

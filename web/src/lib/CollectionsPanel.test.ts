@@ -43,6 +43,7 @@ const api = vi.hoisted(() => ({
   approveRescanExternal: vi.fn(),
   cancelRescan: vi.fn(),
   resumeRescan: vi.fn(),
+  approveJobExternal: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -66,6 +67,7 @@ vi.mock('./api', () => ({
   approveRescanExternal: api.approveRescanExternal,
   cancelRescan: api.cancelRescan,
   resumeRescan: api.resumeRescan,
+  approveJobExternal: api.approveJobExternal,
   createCollection: api.createCollection,
   pickPaths: api.pickPaths,
   enqueueImport: api.enqueueImport,
@@ -1257,6 +1259,49 @@ describe('collections panel', () => {
 
       await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
       expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows the approval form under a waiting import, keeps polling while it waits, and refreshes once approved', async () => {
+    vi.useFakeTimers();
+    try {
+      const waiting = importEntry('job-1', {
+        state: 'COMPLETE',
+        stage: 'awaiting-approval',
+        filesCompleted: 1,
+        filesTotal: 3,
+        externalApproval: { snapshotHash: 'hash-1', distinctPagesSent: 1, allowance: 1, calls: 1 },
+      });
+      api.listCollectionImports
+        .mockResolvedValueOnce(history([waiting]))
+        .mockResolvedValueOnce(history([waiting]))
+        .mockResolvedValue(history([importEntry('job-1', { state: 'RUNNING', stage: 'extract', currentItem: 'b.pdf', filesCompleted: 1, filesTotal: 3 })]));
+      api.approveJobExternal.mockResolvedValue({ jobId: 'job-1', approvalId: 'a1', authorizedDistinctPages: 3, distinctPagesSent: 1, calls: 2 });
+
+      render(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
+      await act(async () => {});
+
+      const area = screen.getByRole('region', { name: 'Import history for Nightfall' });
+      expect(within(area).getByText('Awaiting approval')).toBeTruthy();
+      const form = within(area).getByRole('region', { name: 'Approve external pages' });
+      expect(within(form).getByLabelText('Distinct pages to approve')).toBeTruthy();
+
+      // The import still waits, so the history is read again rather than left as it was when the row arrived.
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
+      expect(within(area).getByRole('region', { name: 'Approve external pages' })).toBeTruthy();
+
+      await act(async () => {
+        await fireEvent.input(within(area).getByLabelText('Distinct pages to approve'), { target: { value: '3' } });
+        await fireEvent.click(within(area).getByRole('button', { name: 'Approve external pages' }));
+      });
+      expect(api.approveJobExternal).toHaveBeenCalledWith('job-1', 'hash-1', 3);
+      await act(async () => {});
+      expect(api.listCollectionImports).toHaveBeenCalledTimes(3);
+      expect(within(area).queryByRole('region', { name: 'Approve external pages' })).toBeNull();
+      expect(within(area).getByText('Extracting · b.pdf')).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
