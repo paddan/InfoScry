@@ -1,8 +1,8 @@
 # 02: Import history shows the final stage of a finished import
 
 **Status:** Implemented on this branch; focused backend and web tests pass (the one POSIX-permission failure in
-`ImportJobHandlerTest` is the known root-container case). The `externalTest` browser scenario for import history is
-not extended here. Unchecked criteria are requirements, not evidence.
+`ImportJobHandlerTest` is the known root-container case). The `externalTest` browser scenario `history-final-stage`
+(fake extraction pipeline) passes: a finished import's history row shows no stage and no "Queued". Unchecked criteria are requirements, not evidence.
 
 ## Decision
 

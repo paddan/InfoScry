@@ -1,6 +1,6 @@
 # 07: Per-collection ignore patterns for files that are never imported
 
-**Status:** Implemented on the worktree branch; the browser scenario is not done. Unchecked criteria are requirements, not evidence.
+**Status:** Implemented on the worktree branch; browser scenario `ignore-patterns` passes (fake extraction pipeline). Unchecked criteria are requirements, not evidence.
 **Blocked by:** 05.
 **Plan:** [Local testing feedback](../../plans/2026-10-07-local-testing-feedback.md).
 
@@ -72,8 +72,9 @@ with sensible defaults.
   the list is deleted with its collection; each syntax element (`*`, `?`, `**`, directory `/`,
   `!`, comments); an ignored directory is not walked; invalid patterns refused on save; the payload snapshot
   protects a running import; the order collection ignore list → include/exclude → unsupported holds.
-- [ ] Browser scenario **Not done**: the browser (Playwright) item was excluded from this run: edit the list in the collection's settings, import a folder containing `.DS_Store` and a matching temp file,
-  see only the real documents.
+- [x] Browser scenario `ignore-patterns`: the defaults are shown in SETTINGS, an invalid line is refused, a `scratch-*`
+  pattern is saved and read back after a reload, and an import of a folder containing `.DS_Store`, `draft.tmp` and
+  `scratch-1.txt` shows only the two real documents (`2 of 2 files`).
 
 Tests: `IgnorePatternsTest` (each syntax element, defaults, validation), `ImportSelectionTest` (order),
 `CollectionStoreTest` (defaults, independence, emptied list, cascade), `CollectionDeletionRecoveryTest` (no pattern rows
