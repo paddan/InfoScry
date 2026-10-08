@@ -4,6 +4,7 @@ import infoscry.AppContext
 import infoscry.chunk.Chunker
 import infoscry.chunk.WhitespaceTokenCounter
 import infoscry.document.PageReviewer
+import infoscry.document.RescanOverrides
 import infoscry.document.RescanRefusalException
 import infoscry.document.RescanService
 import infoscry.domain.CollectionId
@@ -199,6 +200,22 @@ class RescanJobHandlerTest {
             // The same preview, admitted against the settings it was taken with, is still admitted.
             val previewId = harness.previewFor(picture, reviewRevisionId = harness.reviewRevisionId)
             assertNull(harness.admitRefusal(picture, previewId, requestId = "unchanged"))
+        }
+    }
+
+    @Test
+    fun `a preview taken with a chosen import mode is admitted while the collection default is unchanged`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val previewId = harness.previewFor(
+                picture,
+                overrides = RescanOverrides(importMode = OcrImportMode.FILL_MISSING),
+            )
+
+            assertNull(
+                harness.admitRefusal(picture, previewId, requestId = "chosen-mode"),
+                "a choice made for this scan was treated as the collection having changed",
+            )
         }
     }
 
@@ -827,11 +844,17 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
     }
 
     /** One preview of [picture], against the selection [reviewRevisionId] implies. */
-    fun previewFor(picture: Picture, reviewRevisionId: String? = null, externalPageLimit: Int = 0): String =
+    fun previewFor(
+        picture: Picture,
+        reviewRevisionId: String? = null,
+        externalPageLimit: Int = 0,
+        overrides: RescanOverrides = RescanOverrides(),
+    ): String =
         AppContext.open(harness.dataDir).use { context ->
             writeSelection(context, reviewRevisionId, externalPageLimit)
             runBlocking {
-                rescanServiceOf(context, FakePageEngine()).preview(CollectionId("default"), picture.documentId)
+                rescanServiceOf(context, FakePageEngine())
+                    .preview(CollectionId("default"), picture.documentId, overrides)
             }.previewId
         }
 

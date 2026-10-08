@@ -462,7 +462,12 @@ class RescanService(
             externalAllowance = snapshot.externalPageLimit,
             expiresAt = clock().plus(PREVIEW_LIFETIME).toString(),
         ).also { preview ->
-            operations.recordPreview(collectionId.value, documentId, preview)
+            operations.recordPreview(
+                collectionId.value,
+                documentId,
+                preview,
+                overridesJson = overrides.asPreviewOverridesJson(),
+            )
         }
     }
 
@@ -1686,6 +1691,21 @@ private fun RescanPreviewOverrides?.asOverrides(): RescanOverrides = RescanOverr
     transcriptionProfileId = this?.transcriptionProfileId,
     reviewProfileId = this?.reviewProfileId,
 )
+
+/**
+ * The choices a preview request made, as the row stores them, or null when it made none. Without this the
+ * admission re-resolves against the collection alone and calls a per-scan choice a collection change.
+ */
+private fun RescanOverrides.asPreviewOverridesJson(): String? {
+    val chosen = RescanPreviewOverrides(
+        engine = engine,
+        importMode = importMode,
+        transcriptionProfileId = transcriptionProfileId,
+        reviewProfileId = reviewProfileId,
+    )
+    if (chosen == RescanPreviewOverrides()) return null
+    return kotlinx.serialization.json.Json.encodeToString(RescanPreviewOverrides.serializer(), chosen)
+}
 
 /** The collection's OCR settings with a caller's overrides applied. */
 private fun CollectionOcrSettings.withOverrides(overrides: RescanOverrides): CollectionOcrSettings =
