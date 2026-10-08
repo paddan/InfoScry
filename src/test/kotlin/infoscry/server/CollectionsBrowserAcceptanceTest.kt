@@ -316,7 +316,7 @@ class CollectionsBrowserAcceptanceTest {
         val items = context().importItems.listForJob(job.id)
         assertEquals(
             ImportItemOutcome.CANCELLED,
-            items.single { it.sourcePath?.contains("held-01.txt") == true }.outcome,
+            items.single { it.sourcePath.contains("held-01.txt") == true }.outcome,
             "the removed file keeps its own disposition instead of reading as imported",
         )
         assertEquals(2, items.count { it.outcome == ImportItemOutcome.IMPORTED }, "the other two files were imported")
@@ -353,7 +353,7 @@ class CollectionsBrowserAcceptanceTest {
         val job = context().jobs.listImports(collectionId("Notes"), limit = 1).single()
         val items = context().importItems.listForJob(job.id)
         assertEquals(2, items.size, "the unsupported file must leave no import item")
-        assertTrue(items.none { it.sourcePath?.contains("blob.bin") == true })
+        assertTrue(items.none { it.sourcePath.contains("blob.bin") == true })
         assertTrue(Files.exists(sourcesDir.resolve("unsupported").resolve("blob.bin")), "the external original is untouched")
     }
 

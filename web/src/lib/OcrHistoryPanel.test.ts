@@ -541,10 +541,11 @@ describe('text history', () => {
 
       await confirm();
       expect(screen.getByRole('status').textContent).toMatch(/indexing|in progress|restoring/i);
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)); });
+      await vi.waitFor(() => {
+        expect(screen.getByRole('status').textContent).toMatch(/restored/i);
+      });
 
       expect(api.getRestoreOperation).toHaveBeenCalledWith('nightfall', 'doc-1', 'restore-1');
-      expect(screen.getByRole('status').textContent).toMatch(/restored/i);
     });
 
     it('reports a restore recorded as failed, with the current text still active', async () => {

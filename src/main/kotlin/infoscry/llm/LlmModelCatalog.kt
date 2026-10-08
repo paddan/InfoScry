@@ -148,7 +148,7 @@ class LlmModelCatalog(
                 inputPricePerMillion = 0.0.takeIf { loopback } ?: known?.inputPricePerMillion,
                 outputPricePerMillion = 0.0.takeIf { loopback } ?: known?.outputPricePerMillion,
                 cacheReadPricePerMillion = 0.0.takeIf { loopback } ?: known?.cacheReadPricePerMillion,
-                priceKnown = loopback || (known?.inputPricePerMillion != null && known?.outputPricePerMillion != null),
+                priceKnown = loopback || (known?.inputPricePerMillion != null && known.outputPricePerMillion != null),
                 imageInput = known?.imageInput,
             )
         }

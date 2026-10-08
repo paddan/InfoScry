@@ -1891,7 +1891,7 @@ class ImportJobHandlerTest {
             // because pages were delivered to the sink
             if (candidate == null) {
                 // The sink was created but no pages were delivered to it, or it's not a CandidateRevisionSink
-                assertTrue(sinkReceived is CandidateRevisionSink, "sink should be a CandidateRevisionSink but is ${sinkReceived?.javaClass?.simpleName}")
+                assertTrue(sinkReceived is CandidateRevisionSink, "sink should be a CandidateRevisionSink but is ${sinkReceived.javaClass.simpleName}")
                 error("CandidateRevisionSink was created but never received any pages, so candidateRevisionId is null")
             }
             assertNotNull(candidate, "a check-and-improve import creates a candidate")
@@ -1901,7 +1901,7 @@ class ImportJobHandlerTest {
 
             // Verify the candidate is properly stored and retrievable
             AppContext.open(harness.dataDir).use { context ->
-                val pages = context.revisions.pages(candidate!!)
+                val pages = context.revisions.pages(candidate)
                 assertEquals(listOf(0, 1), pages.map { it.ordinal })
                 assertTrue(pages.all { it.approval == PageApproval.PENDING })
             }

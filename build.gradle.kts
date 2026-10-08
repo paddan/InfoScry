@@ -33,6 +33,7 @@ kotlin {
     jvmToolchain(25)
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_25)
+        optIn.add("kotlinx.serialization.ExperimentalSerializationApi")
     }
 }
 
@@ -108,6 +109,9 @@ tasks.test {
         if (skipFrontend) excludeTags(FRONTEND_TAG)
     }
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // Point the Surya runtime at nothing so a machine that has it installed behaves like one that does not;
+    // the tests that need the real runtime are `external` and run under `externalTest`.
+    environment("INFOSCRY_SURYA_PYTHON", layout.buildDirectory.file("no-surya-python").get().asFile.path)
     // A test result depends on the machine (locale, user, installed tools), which the build cache key does
     // not include, so a pass restored from the cache could belong to another environment.
     outputs.cacheIf { false }

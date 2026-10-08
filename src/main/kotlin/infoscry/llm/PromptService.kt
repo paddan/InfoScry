@@ -54,7 +54,6 @@ class PromptService(private val store: LlmStore) {
         compose(INVESTIGATE, collectionInstructions)
 
     private fun compose(role: LlmPromptRole, collectionInstructions: String?): String {
-        require(role != null) { "a prompt role is required" }
         val layers = mutableListOf(CORE_RULES, store.effectiveBody(role))
         if (!collectionInstructions.isNullOrBlank()) {
             layers.add("Collection instructions:\n$collectionInstructions")

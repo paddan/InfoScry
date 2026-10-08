@@ -412,7 +412,7 @@ class ImportCommand(
             val owner = OcrExternalOwner.job(jobId.value)
             val account = context.ocrOperations.allowanceFor(
                 owner = owner,
-                configuredAllowance = snapshot!!.externalPageLimit,
+                configuredAllowance = snapshot.externalPageLimit,
                 snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
             )
             echo(

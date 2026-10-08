@@ -1120,7 +1120,7 @@ class DocumentDeletionRecoveryTest {
                             deleteRecursively(context.paths.documentDir(collectionId, raced.id))
                             swept = raced.id
                             // The parked-directory cleanup comes after the sweep, and it cannot run now.
-                            Files.setPosixFilePermissions(trash!!, PosixFilePermissions.fromString("r-x------"))
+                            Files.setPosixFilePermissions(trash, PosixFilePermissions.fromString("r-x------"))
                         }
                     }
                 }

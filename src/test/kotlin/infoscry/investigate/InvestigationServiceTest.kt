@@ -901,7 +901,7 @@ class InvestigationServiceTest {
         val followUp = provider.streamRequests[1]
         val callMessage = followUp.messages.firstOrNull { it.toolCalls.isNotEmpty() }
         assertTrue(callMessage != null, "expected an assistant tool-call message in the follow-up request")
-        val seenRole = callMessage!!.role
+        val seenRole = callMessage.role
         assertEquals("assistant", seenRole)
         val toolResult = followUp.messages.firstOrNull { it.role == "tool" && it.toolCallId == callMessage.toolCalls[0].id }
         assertTrue(toolResult != null, "expected a tool result message matching the tool call id")

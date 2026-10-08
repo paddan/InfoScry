@@ -52,7 +52,7 @@ class RetryPolicyTest {
             val base = RetryPolicy.BASE_DELAY_MILLIS[attempt - 1]
             val delay = policy.delayBeforeRetry(attempt)
             assertTrue(delay != null && delay >= base * 0.8)
-            assertTrue(delay != null && delay <= base * 1.2)
+            assertTrue(delay <= base * 1.2)
         }
     }
 

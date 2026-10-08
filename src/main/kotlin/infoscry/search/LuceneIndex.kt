@@ -662,7 +662,7 @@ class LuceneIndex private constructor(
 
     /** A query that matches every row a candidate count should consider: the scope, or every row. */
     private fun scopeWithCandidates(scope: Query?, revisionScope: RevisionScope): Query {
-        val candidates = scope ?: MatchAllDocsQuery()
+        val candidates = scope ?: MatchAllDocsQuery.INSTANCE
         return hiddenByRevision(candidates, revisionScope)
     }
 
