@@ -81,6 +81,16 @@ its top level only; pass `--recursive` to descend into its subdirectories. With
 document (and exits nonzero if any failed). Without a running server, the
 import runs in this process regardless of `--wait`.
 
+`--method tesseract|surya|llm:<profileId>` selects the reading method; without it
+the collection default is used. The command prints pages and destination before
+starting. An external method asks for confirmation; `--yes` confirms the shown
+pages without a prompt. EOF or a negative answer aborts before a job is queued.
+Repeating the same command returns its active or completed job. After `FAILED`
+or `CANCELLED`, it starts a fresh attempt from the confirmed files. Changing
+the method, files or preview inputs creates a different request. When an external
+page total is unknown, confirmation covers all pages in the listed unchanged
+files and no exact total cost is shown.
+
 `--include` imports only files with the listed extensions, and `--exclude`
 imports every file except those with the listed extensions. Both take a
 comma-separated list (`--include=pdf,docx`); extensions match without regard to
@@ -93,7 +103,8 @@ infoscry collection create Notes
 infoscry import --collection Notes /path/to/document.pdf
 infoscry import --collection Notes --recursive /path/to/dir
 infoscry import --collection Notes --wait /path/to/dir /path/to/another.pdf
-infoscry import --collection Notes --wait --json /path/to/document.pdf
+infoscry import --collection Notes --method tesseract --wait --json /path/to/document.pdf
+infoscry import --collection Notes --method llm:profile-id --yes /path/to/document.pdf
 infoscry import --collection Notes --recursive --include=pdf,docx /path/to/dir
 infoscry import --collection Notes --recursive --exclude=tmp,log /path/to/dir
 ```

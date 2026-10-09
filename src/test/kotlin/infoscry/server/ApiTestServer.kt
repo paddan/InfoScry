@@ -21,6 +21,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
+import java.util.UUID
 import java.nio.file.Path
 import infoscry.server.DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS
 import kotlinx.coroutines.delay
@@ -156,6 +157,39 @@ internal class ApiTestServer(
         body = """{"name":"$name"}""",
         credential = credential,
     )
+
+    /** Imports selected files through the same preview and confirmed-start contract as the web and CLI. */
+    suspend fun previewAndStartImport(
+        collection: String,
+        paths: List<String>,
+        credential: Credential = Credential.BEARER,
+        method: String = "tesseract",
+    ): HttpResponse {
+        val previewRequest = ImportPreviewRouteRequest(collection = collection, paths = paths, method = method)
+        val previewResponse = request(
+            HttpMethod.Post,
+            "/api/imports/preview",
+            ApiJson.encodeToString(previewRequest),
+            credential,
+        )
+        check(previewResponse.status == HttpStatusCode.OK) {
+            "previewing an import should succeed, was ${previewResponse.status}: ${previewResponse.bodyAsText()}"
+        }
+        val preview = ApiJson.decodeFromString<infoscry.jobs.ImportPreview>(previewResponse.bodyAsText())
+        val startRequest = ImportRequest(
+            collection = collection,
+            paths = paths,
+            method = method,
+            previewHash = preview.previewHash,
+            requestId = "test-import-${UUID.randomUUID()}",
+        )
+        return request(
+            HttpMethod.Post,
+            "/api/imports",
+            ApiJson.encodeToString(startRequest),
+            credential,
+        )
+    }
 
     /**
      * Confirms one collection's deletion and returns the operation the server admitted.

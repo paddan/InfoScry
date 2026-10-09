@@ -144,12 +144,22 @@ async function deletionLines(page) {
 
 /* ---- Adding documents ---- */
 
+async function confirmReading(page) {
+  const dialog = page.getByTestId('start-reading-dialog');
+  await dialog.waitFor({ state: 'visible', timeout: 20_000 });
+  const button = dialog.getByRole('button', { name: /^(Read|Send) (at least )?\d+ pages?/ });
+  await button.waitFor({ state: 'visible', timeout: 20_000 });
+  await button.click();
+  await dialog.waitFor({ state: 'detached', timeout: 20_000 });
+}
+
 async function chooseAndImport(page, kind) {
   await page.locator(`${PANEL} button`, { hasText: 'Add documents' }).first().click();
   await page.waitForSelector('.import-panel', { timeout: 20_000 });
   await page.locator('.import-panel button', { hasText: kind === 'folder' ? 'Choose folder' : 'Choose files' }).first().click();
   await page.waitForSelector('.import-panel .paths li', { timeout: 20_000 });
   await page.locator('.import-panel button', { hasText: 'Import' }).first().click();
+  await confirmReading(page);
 }
 
 async function waitForImportFinished(page, timeout = 60_000) {
@@ -246,7 +256,7 @@ async function waitForStatus(page, filename, status, timeout = 90_000) {
   while (Date.now() < deadline) {
     await refreshRows(page);
     last = await rowOf(page, filename);
-    if (last !== null && last.status === status) return last;
+    if (last !== null && (last.status === status || last.status.startsWith(`${status}:`))) return last;
     await page.waitForTimeout(500);
   }
   fail(`${filename} never reached ${status}; last row was ${JSON.stringify(last)}`);
@@ -345,6 +355,23 @@ async function waitForDeleteOperation(operationId, timeout = 20_000) {
 /* ---- Scenarios ---- */
 
 const scenarios = {
+  async 'external-import-dialog'(browser) {
+    const { page, consoleErrors } = await openAdmin(browser);
+    await selectCollection(page, 'Notes');
+    await page.locator(`${PANEL} button`, { hasText: 'Add documents' }).first().click();
+    await page.locator('.import-panel button', { hasText: 'Choose files' }).click();
+    await page.locator('.import-panel button', { hasText: 'Import' }).first().click();
+    const dialog = page.getByTestId('start-reading-dialog');
+    await dialog.waitFor({ timeout: 20_000 });
+    const confirm = dialog.getByRole('button', { name: /^Send 1 pages? to example\.invalid/ });
+    await confirm.waitFor({ timeout: 20_000 });
+    assert((await dialog.textContent()).includes('External reader'), 'the selected method names its profile');
+    await confirm.dblclick();
+    await dialog.waitFor({ state: 'detached' });
+    await waitForImportFinished(page);
+    assert(consoleErrors.filter(text => !text.includes('Failed to load resource')).length === 0, 'no unexpected browser errors');
+  },
+
   /** An empty archive, creation inside Admin, and a layout/keyboard pass over the same panel. */
   async 'collection-creation'(browser) {
     const { page, consoleErrors } = await openAdmin(browser);
@@ -573,8 +600,8 @@ const scenarios = {
 
     const mixed = await rowOf(page, 'mixed-pages.png');
     assert(mixed !== null, 'the mixed fixture must be listed');
-    assert(mixed.progress === '3/3 pages', `an announced page total is a page count, got ${JSON.stringify(mixed.progress)}`);
-    assert(mixed.status === 'Complete', `the mixed fixture must complete, got ${mixed.status}`);
+    assert(mixed.progress.startsWith('3/3 pages'), `an announced page total is a page count, got ${JSON.stringify(mixed.progress)}`);
+    assert(mixed.status === 'Done', `the mixed fixture must complete, got ${mixed.status}`);
 
     await openDetails(page, 'mixed-pages.png');
     const mixedFacts = await detailFacts(page);
@@ -618,7 +645,7 @@ const scenarios = {
 
     await reloadAndSelect(page, 'Notes');
     await waitForRow(page, 'mixed-pages.png');
-    assert((await rowOf(page, 'mixed-pages.png')).progress === '3/3 pages', 'progress must survive a reload');
+    assert((await rowOf(page, 'mixed-pages.png')).progress.startsWith('3/3 pages'), 'progress must survive a reload');
 
     const relevantErrors = consoleErrors.filter((text) => !text.includes('Failed to load resource'));
     assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
@@ -637,14 +664,15 @@ const scenarios = {
     // One document, read again from the copy InfoScry holds: its first attempt failed, its second reads.
     await openDetails(page, 'fail-once-a.txt');
     const failedFacts = await detailFacts(page);
-    assert(failedFacts.Status === 'Failed', `the detail must show the failed status, got ${JSON.stringify(failedFacts.Status)}`);
+    const failedStatus = await page.locator(`${PANEL} [aria-label="Document reading status"]`).textContent();
+    assert(failedStatus.trim().startsWith('Failed'), `the detail must show the failed status, got ${JSON.stringify(failedStatus)}`);
     const failedText = await page.textContent(`${PANEL} .document-details`);
     assert(/[Ss]omething|fail|could not|refused/.test(failedText), 'a failed document must explain itself in words');
     await page.locator(`${PANEL} .document-details button`, { hasText: 'Retry' }).click();
     // The queued sentence belongs to the eligible-document block, so it goes away with the retry
     // itself; the attempt the server queued is what stays visible, in the row's own status.
-    await waitForStatus(page, 'fail-once-a.txt', 'Complete');
-    assert((await rowOf(page, 'fail-once-b.txt')).status === 'Failed', 'retrying one document must leave the other alone');
+    await waitForStatus(page, 'fail-once-a.txt', 'Done');
+    assert((await rowOf(page, 'fail-once-b.txt')).status.startsWith('Failed'), 'retrying one document must leave the other alone');
 
     // Renaming and the OCR languages are the collection's own settings, and they survive a reload.
     await page.fill('#collection-settings-name', 'Notes renamed');
@@ -670,28 +698,26 @@ const scenarios = {
     assert(renameAlert.includes('Archive') && renameAlert.includes('already exists'), `the refusal must be readable, got ${JSON.stringify(renameAlert)}`);
     assert((await collectionNames(page)).includes('Notes renamed'), 'a refused rename must leave the collection as it was');
 
-    await page.fill('#collection-settings-ocr-languages', 'eng+deu');
-    await page.locator(`${PANEL} .settings-form button`, { hasText: 'Save OCR languages' }).click();
+    await page.fill('#collection-ocr-language', 'eng+deu');
+    await page.locator(`${PANEL} .settings-form button`, { hasText: 'Save OCR settings' }).click();
     await page.waitForFunction(
-      () => (document.querySelector('#admin-panel-collections')?.textContent ?? '').includes('OCR languages saved.'),
+      () => (document.querySelector('#admin-panel-collections')?.textContent ?? '').includes('OCR settings saved.'),
       null,
       { timeout: 20_000 },
     );
     await reloadAndSelect(page, 'Notes renamed');
     assert(await page.inputValue('#collection-settings-name') === 'Notes renamed', 'the saved name must come back after a reload');
-    assert(await page.inputValue('#collection-settings-ocr-languages') === 'eng+deu', 'the saved OCR languages must come back after a reload');
+    assert(await page.inputValue('#collection-ocr-language') === 'eng+deu', 'the saved OCR languages must come back after a reload');
 
 
-    // Every eligible document, wherever it is listed. The OCR languages changed since this document's
-    // first attempt, so its reading is repeated rather than reused; the panel says that such a retry may
-    // have to repeat extraction, and the acceptance extractor records which attempt read what.
+    // Retry all keeps each failed run's frozen settings even after the collection default changes.
     await page.locator(`${PANEL} button`, { hasText: 'Retry all eligible documents' }).click();
     await page.waitForFunction(
       () => (document.querySelector('#admin-panel-collections')?.textContent ?? '').includes('Retry queued for every eligible document'),
       null,
       { timeout: 20_000 },
     );
-    await waitForStatus(page, 'fail-once-b.txt', 'Complete');
+    await waitForStatus(page, 'fail-once-b.txt', 'Done');
 
     // With nothing eligible the collection-wide action says so instead of counting a success.
     await page.locator(`${PANEL} button`, { hasText: 'Retry all eligible documents' }).click();
@@ -780,7 +806,7 @@ const scenarios = {
     await reloadAndSelect(page, 'Notes');
     await waitForRow(page, 'held-01.txt');
     const heldAfterReload = await rowOf(page, 'held-01.txt');
-    assert(heldAfterReload.status === 'Extracting text', `the held document must read as extracting, got ${heldAfterReload.status}`);
+    assert(/^Reading \d+/.test(heldAfterReload.status), `the held document must read as extracting, got ${heldAfterReload.status}`);
     assert(heldAfterReload.progress === '1 line processed', `an unannounced total must stay a count, got ${JSON.stringify(heldAfterReload.progress)}`);
     const historyWhileRunning = await importHistory(page);
     assert(historyWhileRunning.some((entry) => entry.state === 'Running'), `a reload must show the running import, got ${JSON.stringify(historyWhileRunning)}`);
@@ -831,7 +857,7 @@ const scenarios = {
     await reloadAndSelect(page, 'Notes');
     await waitForRow(page, 'held-01.txt');
     const held = await rowOf(page, 'held-01.txt');
-    assert(held.status === 'Extracting text', `the held document must read as extracting, got ${held.status}`);
+    assert(/^Reading \d+/.test(held.status), `the held document must read as extracting, got ${held.status}`);
 
     await deleteDocument(page, 'held-01.txt');
     await waitForRowGone(page, 'held-01.txt');
@@ -852,8 +878,8 @@ const scenarios = {
       const history = await importHistory(page);
       fail(`the multi-file import did not finish: ${JSON.stringify(history)}`);
     });
-    await waitForStatus(page, 'held-02.txt', 'Complete');
-    await waitForStatus(page, 'held-03.txt', 'Complete');
+    await waitForStatus(page, 'held-02.txt', 'Done');
+    await waitForStatus(page, 'held-03.txt', 'Done');
     await waitForRowGone(page, 'held-01.txt');
     const perFile = await showFiles(page, 0);
     const deleted = perFile.find((item) => item.file.includes('held-01.txt'));
@@ -944,6 +970,7 @@ const scenarios = {
     );
     await page.fill('#extension-list', '.TXT');
     await page.locator('.import-panel button.primary', { hasText: 'Import' }).click();
+  await confirmReading(page);
     const includeFinished = await waitForImportFinished(page);
     assert(/Import complete/.test(includeFinished), `the include import must finish, panel said ${JSON.stringify(includeFinished)}`);
     const includeResults = await importResults(page);
@@ -965,6 +992,7 @@ const scenarios = {
     await page.locator('.import-panel button', { hasText: 'Choose folder' }).first().click();
     await page.waitForSelector('.import-panel .paths li', { timeout: 20_000 });
     await page.locator('.import-panel button.primary', { hasText: 'Import' }).click();
+  await confirmReading(page);
     const excludeFinished = await waitForImportFinished(page);
     assert(/Import complete/.test(excludeFinished), `the exclude import must finish, panel said ${JSON.stringify(excludeFinished)}`);
 
@@ -1052,7 +1080,7 @@ const scenarios = {
     assert(relevantErrors.length === 0, `unexpected console errors: ${relevantErrors.join(' | ')}`);
   },
 
-  /** Ticket 08: a failed document is read again with a chosen method, names it in its history, and is found. */
+  /** Ticket 08: a failed document resumes its frozen method, names it in history, and is found. */
   async 'retry-with-chosen-ocr'(browser) {
     const { page, consoleErrors } = await openAdmin(browser);
     await selectCollection(page, 'Notes');
@@ -1062,12 +1090,9 @@ const scenarios = {
     await waitForStatus(page, 'fail-once-scan.png', 'Failed');
 
     await openDetails(page, 'fail-once-scan.png');
-    await page.locator(`${PANEL} .document-details`).getByLabel('Choose the OCR method for this retry').check();
-    await page.selectOption('#retry-engine', 'TESSERACT');
-    await page.fill('#retry-language', 'deu');
     await page.locator(`${PANEL} .document-details button`, { hasText: /^Retry$/ }).click();
     // The server admits the chosen method (the row leaves Failed) or refuses it in words, which keeps it Failed.
-    await waitForStatus(page, 'fail-once-scan.png', 'Complete');
+    await waitForStatus(page, 'fail-once-scan.png', 'Done');
 
     // The revision the retry published names the method that was chosen.
     await reloadAndSelect(page, 'Notes');
@@ -1076,7 +1101,7 @@ const scenarios = {
     await page.waitForSelector(`${PANEL} .history ol.versions li`, { timeout: 20_000 });
     const versions = (await page.textContent(`${PANEL} .history ol.versions`)) ?? '';
     assert(versions.includes('Tesseract (local)'), `the revision must name the chosen engine, got ${JSON.stringify(versions)}`);
-    assert(versions.includes('language deu'), `the revision must name the chosen language, got ${JSON.stringify(versions)}`);
+    assert(versions.includes('language eng'), `the revision must name the frozen language, got ${JSON.stringify(versions)}`);
 
     // Searchable: the text the retry published is found by keyword search.
     await page.click('#tab-search');
@@ -1100,7 +1125,7 @@ const scenarios = {
     assert((await collectionNames(page)).includes('Notes'), 'the collection must survive a restart');
     await selectCollection(page, 'Notes');
     for (const name of ['held-02.txt', 'held-03.txt']) await waitForRow(page, name);
-    assert((await rowOf(page, 'held-02.txt')).status === 'Complete', 'a completed document must stay complete across a restart');
+    assert((await rowOf(page, 'held-02.txt')).status === 'Done', 'a completed document must stay complete across a restart');
     assert((await rowOf(page, 'held-01.txt')) === null, 'a deleted document must not come back after a restart');
     const history = await importHistory(page);
     assert(history.length >= 1, 'the import history must survive a restart');

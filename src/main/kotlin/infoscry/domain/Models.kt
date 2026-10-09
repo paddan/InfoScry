@@ -286,11 +286,14 @@ data class Collection(
      */
     fun ocrSettings(): CollectionOcrSettings = CollectionOcrSettings(
         language = ocrLanguages,
-        engine = ocrEngine,
-        importMode = ocrImportMode,
-        transcriptionProfileId = ocrTranscriptionProfileId,
-        reviewProfileId = ocrReviewProfileId,
-        externalPageLimit = ocrExternalPageLimit,
+        defaultMethod = when (ocrEngine) {
+            infoscry.ocr.OcrEngine.TESSERACT -> infoscry.ocr.ReadingMethod.Tesseract
+            infoscry.ocr.OcrEngine.SURYA -> infoscry.ocr.ReadingMethod.Surya
+            infoscry.ocr.OcrEngine.LLM -> ocrTranscriptionProfileId
+                ?.takeIf(String::isNotBlank)
+                ?.let(infoscry.ocr.ReadingMethod::Llm)
+                ?: infoscry.ocr.ReadingMethod.Tesseract
+        },
     )
 }
 

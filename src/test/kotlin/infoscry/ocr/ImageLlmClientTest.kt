@@ -951,7 +951,7 @@ class ImageLlmClientTest {
     }
 
     @Test
-    fun `the exception does not open transcription or review on an external destination without a validator`() =
+    fun `the exception does not open transcription on an external destination without a validator`() =
         runBlocking {
             val page = page()
             val external = revision(EXTERNAL_ENDPOINT, keyVariable = KEY_VARIABLE)
@@ -966,12 +966,6 @@ class ImageLlmClientTest {
                 val transcribeRefused = assertFailsWith<ImageLlmException> { client.transcribe(page) }
                 assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, transcribeRefused.code)
                 assertFalse(transcribeRefused.dispatched)
-
-                val reviewRefused = assertFailsWith<ImageLlmException> {
-                    client.review(page, readingA = "the first reading", readingB = "the second reading")
-                }
-                assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, reviewRefused.code)
-                assertFalse(reviewRefused.dispatched)
 
                 assertEquals(0, recorder.requestCount, "a page image never reaches the transport without a permit")
             } finally {
@@ -989,35 +983,6 @@ class ImageLlmClientTest {
         }
         assertEquals(ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED, refused.code)
         assertFalse(refused.dispatched)
-    }
-
-    // ---- the shared entry point the review call will use ----
-
-    @Test
-    fun `another call through the shared entry point gets the same validation`() = runBlocking {
-        val page = page()
-        withServer(
-            script = listOf(
-                FakeOpenAiResponse(
-                    body = openAiAnswer(
-                        buildJsonObject {
-                            put("unitId", page.unitId)
-                            put("ordinal", page.ordinal)
-                            put("recommendation", "NEW_BETTER")
-                        }.toString(),
-                    ),
-                ),
-            ),
-        ) { _, client ->
-            val answer = client.requestOn(
-                page,
-                instructions = "compare the two readings",
-                decode = { text -> Json.parseToJsonElement(text).jsonObject.getValue("recommendation").jsonPrimitive.content },
-            )
-
-            assertEquals("NEW_BETTER", answer.value)
-            assertEquals(RESOLVED_MODEL, answer.modelVersion)
-        }
     }
 
     // ---- helpers ----

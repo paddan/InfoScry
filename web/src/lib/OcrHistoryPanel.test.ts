@@ -70,7 +70,6 @@ function history(over: Partial<RevisionsResponse> = {}): RevisionsResponse {
           mode: 'CHECK_AND_IMPROVE',
           language: 'eng',
           transcriptionModel: 'vision-model',
-          reviewModel: 'review-model',
           toolVersion: null,
           modelVersion: null,
         },
@@ -195,7 +194,6 @@ describe('text history', () => {
       const rescan = versions()[1];
       expect(rescan.textContent).toContain('Image model profile');
       expect(rescan.textContent).toContain('vision-model');
-      expect(rescan.textContent).toContain('review-model');
       expect(rescan.textContent).toContain('Check and improve existing text');
       expect(rescan.textContent).toContain('eng');
     });
@@ -226,7 +224,6 @@ describe('text history', () => {
                 toolVersion: 'tesseract 5.5',
                 modelVersion: null,
                 transcriptionModel: null,
-                reviewModel: null,
               },
             }),
           ],
@@ -291,7 +288,7 @@ describe('text history', () => {
       expect(versions()[0].textContent).toMatch(/published\s*not recorded/i);
     });
 
-    it('summarises page changes honestly and says manual and automatic are inferred', async () => {
+    it('summarises the page changes recorded for each version', async () => {
       await renderPanel();
       await openHistory();
 
@@ -301,7 +298,7 @@ describe('text history', () => {
       expect(rescan.textContent).toContain('1 unknown');
       expect(rescan.textContent).toContain('6 unchanged');
       expect(versions()[0].textContent).toContain('5 restored');
-      expect(screen.getByText(/inferred from the reviews that were recorded/i)).toBeTruthy();
+      expect(screen.queryByText(/review/i)).toBeNull();
     });
 
     it('renders every server string as text, never as markup', async () => {
@@ -316,7 +313,7 @@ describe('text history', () => {
               mode: hostile,
               language: hostile,
               transcriptionModel: hostile,
-              reviewModel: '<b>bold</b>',
+              toolVersion: '<b>bold</b>',
             },
           }),
         ],
@@ -593,7 +590,7 @@ describe('text history', () => {
     it.each([
       ['COLLECTION_NOT_ACTIVE', 409, /collection is being deleted/i],
       ['DOCUMENT_BEING_DELETED', 409, /document is being deleted/i],
-      ['OCR_ALREADY_RUNNING', 409, /scan of this document is in progress/i],
+      ['OCR_ALREADY_RUNNING', 409, /scan of this document is still in progress/i],
       ['RESTORE_ALREADY_ACTIVE', 409, /already the active version/i],
       ['RESTORE_NOTHING_PUBLISHED', 409, /published no text/i],
       ['RESTORE_IN_PROGRESS', 409, /another restore.*has not finished/i],

@@ -192,7 +192,7 @@
         return `This document is being deleted, so nothing can be restored. ${NOTHING_CHANGED}`;
       case 'OCR_ALREADY_RUNNING':
       case 'OCR_ATTEMPT_IN_PROGRESS':
-        return `A scan of this document is in progress or has pages waiting for review, so it cannot be restored yet. ${NOTHING_CHANGED}`;
+        return `A scan of this document is still in progress, so the text version cannot be restored yet. ${NOTHING_CHANGED}`;
       case 'RESTORE_ALREADY_ACTIVE':
         return `That version is already the active version, so there is nothing to restore. ${NOTHING_CHANGED}`;
       case 'RESTORE_NOTHING_PUBLISHED':
@@ -355,11 +355,7 @@
       {#if revisions.length === 0}
         <p class="hint">This document has no published text versions.</p>
       {:else}
-        <p class="hint">
-          Every published text version, newest first. Search always uses the active version. Automatic and
-          manual page changes are inferred from the reviews that were recorded; a change with no recorded
-          review is shown as unknown.
-        </p>
+        <p class="hint">Every published text version, newest first. Search always uses the active version.</p>
         <ol class="versions" aria-label="Text versions">
           {#each revisions as revision (revision.revisionId)}
             <li class:active={revision.active}>
@@ -373,7 +369,6 @@
                   {#if revision.reading}
                     {label(ENGINE_LABELS, revision.reading.engine)} · {label(IMPORT_MODE_LABELS, revision.reading.mode)} · language {revision.reading.language}
                     {#if revision.reading.transcriptionModel}<br />Transcription model: {revision.reading.transcriptionModel}{/if}
-                    {#if revision.reading.reviewModel}<br />Review model: {revision.reading.reviewModel}{/if}
                     {#if revision.reading.toolVersion}<br />Tool version: {revision.reading.toolVersion}{/if}
                     {#if revision.reading.modelVersion}<br />Model version: {revision.reading.modelVersion}{/if}
                   {:else if revision.noOcrNeeded}

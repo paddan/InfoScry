@@ -1,5 +1,5 @@
 /*
- * Browser acceptance for the OCR panels: profiles, collection settings, Scan again, page review, text
+ * Browser acceptance for the OCR panels: profiles, collection settings, Scan again, automatic publication, text
  * history and restore.
  *
  * The real built reader in Chromium is driven by `web/e2e/ocr-browser-acceptance.mjs` against a real
@@ -9,15 +9,13 @@
  *
  * Substitutions, and what they mean for what this test may claim:
  *
- * - the page-reading engine is a deterministic fake that answers with a text the test dictates, and the
- *   reviewer is the project's recording reviewer (its answer is fixed) whose proposal is made durable the way
- *   the production comparison service makes it durable. The rescan worker is therefore the production
- *   `RescanJobHandler` with those two seams replaced; no Tesseract, Surya, image-model provider or network is
- *   involved, so nothing here proves OCR quality or that a real engine is installed;
+ * - the page-reading engine is a deterministic fake that answers with text the test dictates.
+ *   The production RescanJobHandler handles staging and publication; no real OCR tool or provider
+ *   is involved, so nothing here proves OCR quality or that a real engine is installed;
  * - the document embedder is `TestDocumentEmbedder`, because a temporary archive has no pinned model and no
  *   accelerator. Nothing here proves CoreML;
  * - the documents are generated 8x8 pictures imported through the real import path, so a "page" is one
- *   picture. A multi-page PDF review is not covered here.
+ *   picture. A multi-page PDF reading is not covered here.
  *
  * Tagged `external` because it needs Node and Chromium: the default suite stays runnable everywhere.
  */
@@ -27,8 +25,6 @@ import infoscry.AppContext
 import infoscry.EXTERNAL_TAG
 import infoscry.chunk.Chunker
 import infoscry.chunk.WhitespaceTokenCounter
-import infoscry.document.PageReviewer
-import infoscry.document.ReviewChoice
 import infoscry.domain.CollectionId
 import infoscry.domain.JobType
 import infoscry.embedding.TestDocumentEmbedder
@@ -38,7 +34,6 @@ import infoscry.jobs.FakePageEngine
 import infoscry.jobs.Harness
 import infoscry.jobs.JobRunner
 import infoscry.jobs.PictureUnits
-import infoscry.jobs.RecordingReviewer
 import infoscry.jobs.RecordingUnits
 import infoscry.jobs.RescanHarness
 import infoscry.jobs.RescanJobHandler
@@ -52,12 +47,8 @@ import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrProfileRevisionDraft
 import infoscry.ocr.OcrSettingsSnapshot
-import infoscry.ocr.PageComparisonInput
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageOcrEngine
-import infoscry.ocr.PageReview
-import infoscry.ocr.PublicationDisposition
-import infoscry.ocr.ReviewerRecommendation
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -72,7 +63,6 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -143,29 +133,13 @@ class OcrBrowserAcceptanceTest {
         val alpha = collectionNamed("Alpha")
         val beta = collectionNamed("Beta")
         val local = context().ocrProfiles.list().single { it.name == "Local reader" }
-        val vision = context().ocrProfiles.list().single { it.name == "Vision reviewer" }
-        assertEquals(
-            CollectionOcrSettings(
-                language = alpha.ocrLanguages,
-                engine = OcrEngine.LLM,
-                importMode = OcrImportMode.CHECK_AND_IMPROVE,
-                transcriptionProfileId = local.id,
-                reviewProfileId = vision.id,
-                externalPageLimit = 3,
-            ),
-            alpha.ocrSettings(),
-            "Alpha stores what the browser saved",
-        )
-        assertEquals(
-            CollectionOcrSettings(language = beta.ocrLanguages),
-            beta.ocrSettings(),
-            "Beta keeps its defaults: nothing Alpha showed or saved leaked into it",
-        )
+        assertEquals(CollectionOcrSettings(alpha.ocrLanguages, infoscry.ocr.ReadingMethod.Llm(local.id)), alpha.ocrSettings())
+        assertEquals(CollectionOcrSettings(beta.ocrLanguages), beta.ocrSettings())
     }
 
     @Test
     fun `Scan again previews, starts one operation however often Start is pressed, and resumes after a reload`() {
-        val picture = seedPicture(review = false)
+        val picture = seedPicture()
         engine = BrowserFakeEngine(listOf(FIRST_READING), gate)
         startRescanServer(picture)
         runScenario("scan-again") { mark ->
@@ -181,34 +155,56 @@ class OcrBrowserAcceptanceTest {
     }
 
     @Test
-    fun `a proposed page is reviewed, decided, kept across a reload, published, and shown as literal text`() {
-        val picture = seedPicture(review = true)
+    fun `a completed scan publishes differing text automatically and keeps the previous version`() {
+        val picture = seedPicture()
         engine = BrowserFakeEngine(listOf(MARKUP_READING), null)
         startRescanServer(picture)
-        runScenario("review-use-new")
-
-        assertEquals(MARKUP_READING, publishedText(picture), "the decided reading is the published text only after the publication")
-        assertEquals(1, rescanJobCount())
+        runScenario("publish-on-completion")
+        assertEquals(MARKUP_READING, publishedText(picture))
+        assertEquals(2, revisionsOf(picture).size)
+        assertEquals(0, operationsOf(picture).single().getValue("pendingReviewCount").jsonPrimitive.content.toInt())
     }
 
     @Test
-    fun `an edited page publishes the reader's own text`() {
-        val picture = seedPicture(review = true)
-        engine = BrowserFakeEngine(listOf(MARKUP_READING), null)
+    fun `a failed scan is immediately restartable from the dialog`() {
+        val picture = seedPicture()
+        engine = BrowserFakeEngine(listOf(SECOND_READING), null, failFirst = true)
         startRescanServer(picture)
-        runScenario("review-edit-text")
-
-        assertEquals(EDITED_READING, publishedText(picture), "Edit text publishes exactly what the reader wrote")
+        runScenario("retry-failed")
+        assertEquals(2, rescanJobCount())
+        assertEquals(SECOND_READING, publishedText(picture))
     }
 
     @Test
-    fun `keeping the existing text publishes the old reading and leaves search as it was`() {
-        val picture = seedPicture(review = true)
-        engine = BrowserFakeEngine(listOf(MARKUP_READING), null)
+    fun `cancel and start again leaves old text intact until the successful scan finishes`() {
+        val picture = seedPicture()
+        engine = BrowserFakeEngine(listOf(SECOND_READING), gate)
         startRescanServer(picture)
-        runScenario("review-keep-existing")
+        runScenario("cancel-start") { mark ->
+            if (mark == "cancelled-old-text") {
+                assertEquals(FIRST_READING, publishedText(picture))
+                gate.release()
+            }
+        }
+        assertEquals(SECOND_READING, publishedText(picture))
+        assertEquals(2, rescanJobCount())
+    }
 
-        assertEquals(FIRST_READING, publishedText(picture), "Keep existing leaves the published text alone")
+    @Test
+    fun `stopping the server mid scan preserves old text and allows a fresh scan after restart`() {
+        val picture = seedPicture()
+        engine = BrowserFakeEngine(listOf(SECOND_READING), gate)
+        startRescanServer(picture)
+        runScenario("restart-held")
+        assertEquals(FIRST_READING, publishedText(picture))
+        harness!!.close()
+        harness = null
+        engine = BrowserFakeEngine(listOf(SECOND_READING), null)
+        startRescanServer(picture)
+        assertEquals(FIRST_READING, publishedText(picture))
+        runScenario("restart-start")
+        assertEquals(SECOND_READING, publishedText(picture))
+        assertEquals(2, rescanJobCount())
     }
 
     @Test
@@ -254,7 +250,7 @@ class OcrBrowserAcceptanceTest {
     @Test
     fun `the text history names the OCR engine, mode and language an import was made with, and says no page needed OCR for direct text`() {
         Harness(tempDir).use { importer ->
-            // A picture read with the engine the import was admitted with, and a text file that needs no reading.
+            // A picture read with its frozen import engine, and a text file that needs no reading.
             val picture = importer.sourcesDir.resolve(PICTURE_NAME)
             writePicture(picture)
             importer.importDurably(listOf(picture), PictureUnits(FIRST_READING), ocr = TESSERACT_IMPORT)
@@ -289,43 +285,6 @@ class OcrBrowserAcceptanceTest {
         assertNull(profile.revision.apiKeyEnvironmentVariable, "no key variable was typed")
     }
 
-    @Test
-    fun `a collection offers OCR profiles and image-capable LLM profiles in two groups, and saving an LLM profile copies it`() {
-        val data = tempDir.resolve("data")
-        val vision: LlmProfile
-        val textOnly: LlmProfile
-        AppContext.open(data).use { context ->
-            context.collections.create("Alpha")
-            localProfile(context, "Local reader")
-            vision = llmProfile(context, "Vision LLM", model = "gpt-4o")
-            textOnly = llmProfile(context, "Text LLM", model = "deepseek-chat")
-        }
-        startServer(data)
-        facts = buildJsonObject { put("visionLlmId", vision.id) }
-        runScenario("collection-llm-profiles")
-
-        val settings = collectionNamed("Alpha").ocrSettings()
-        val copy = context().ocrProfiles.list().single { it.sourceLlmProfileId == vision.id }
-        assertEquals("Vision LLM (from LLM profile)", copy.name, "the copy is named for the LLM profile it came from")
-        assertEquals("gpt-4o", copy.revision.model)
-        assertEquals(copy.id, settings.transcriptionProfileId, "the collection stores the copy, which an attempt pins")
-        assertEquals(OcrEngine.LLM, settings.engine)
-        assertNull(
-            context().ocrProfiles.list().firstOrNull { it.sourceLlmProfileId == textOnly.id },
-            "a model the catalog states is text-only is never copied",
-        )
-    }
-
-    @Test
-    fun `a collection with no OCR or image-capable LLM profile explains the empty choice and opens Admin OCR profiles`() {
-        val data = tempDir.resolve("data")
-        AppContext.open(data).use { context -> context.collections.create("Alpha") }
-        startServer(data)
-        runScenario("collection-empty-state")
-
-        assertTrue(context().ocrProfiles.list().isEmpty(), "the browser created no profile")
-    }
-
     private fun llmProfile(context: AppContext, name: String, model: String): LlmProfile = context.llm.create(
         LlmProfile(
             id = UUID.randomUUID().toString(),
@@ -339,6 +298,7 @@ class OcrBrowserAcceptanceTest {
             cacheReadPricePerMillion = 0.5,
             enabled = true,
             endpoint = "http://127.0.0.1:9/v1",
+            apiKeyEnvironmentVariable = PRESENT_KEY_VARIABLE,
         ),
     )
 
@@ -357,7 +317,6 @@ class OcrBrowserAcceptanceTest {
     private class Seeded(
         val archive: Path,
         val picture: RescanHarness.Picture,
-        val reviewProfileId: String,
     )
 
     private lateinit var seeded: Seeded
@@ -371,57 +330,35 @@ class OcrBrowserAcceptanceTest {
      * engine this machine can use; its transcription profile is a loopback one, and the job worker below
      * replaces what actually reads the page.
      */
-    private fun seedPicture(review: Boolean): RescanHarness.Picture {
+    private fun seedPicture(): RescanHarness.Picture {
         lateinit var picture: RescanHarness.Picture
         lateinit var archive: Path
-        var reviewProfileId = ""
         RescanHarness(tempDir).use { rescan ->
             picture = rescan.importPicture(FIRST_READING)
             archive = rescan.archiveDir
-            reviewProfileId = rescan.reviewProfileId
         }
         AppContext.open(archive).use { context ->
             val reader = localProfile(context, "Local reader")
             context.collections.updateOcrSettings(
                 CollectionId("default"),
-                CollectionOcrSettings(
-                    language = "eng",
-                    engine = OcrEngine.LLM,
-                    importMode = OcrImportMode.CHECK_AND_IMPROVE,
-                    transcriptionProfileId = reader.id,
-                    reviewProfileId = if (review) reviewProfileId else null,
-                    externalPageLimit = if (review) 1 else 0,
-                ),
+                CollectionOcrSettings(language = "eng", defaultMethod = infoscry.ocr.ReadingMethod.Llm(reader.id)),
             )
         }
-        seeded = Seeded(archive, picture, reviewProfileId)
+        seeded = Seeded(archive, picture)
         return picture
     }
 
-    /** An archive whose document has two published versions: the import and one reviewed rescan. */
+    /** An archive whose document has two published versions: the import and one automatically published rescan. */
     private fun seedPublishedRescan(): RescanHarness.Picture {
         lateinit var picture: RescanHarness.Picture
         lateinit var archive: Path
         RescanHarness(tempDir).use { rescan ->
             picture = rescan.importPicture(FIRST_READING)
             archive = rescan.archiveDir
-            val staged = rescan.rescan(
-                picture,
-                engine = FakePageEngine(readings = listOf(SECOND_READING)),
-                reviewer = RecordingReviewer(),
-                reviewRevisionId = rescan.reviewRevisionId,
-                externalPageLimit = 1,
-            )
-            val decided = rescan.decide(
-                picture,
-                staged.operation,
-                assertNotNull(staged.candidatePage),
-                ReviewChoice.USE_NEW,
-            )
-            rescan.publish(picture, decided.operation)
+            rescan.rescan(picture, engine = FakePageEngine(readings = listOf(SECOND_READING)))
             assertEquals(SECOND_READING, rescan.publishedTextOf(picture), "the seeded rescan is published")
         }
-        seeded = Seeded(archive, picture, "")
+        seeded = Seeded(archive, picture)
         return picture
     }
 
@@ -433,9 +370,10 @@ class OcrBrowserAcceptanceTest {
             contextWindow = 32_000,
             maxOutputTokens = 2_048,
             endpoint = "http://127.0.0.1:9/v1",
+            apiKeyEnvironmentVariable = PRESENT_KEY_VARIABLE,
         ),
         enabled = true,
-    )
+    ).also { context.ocrProfiles.recordImageCapability(it.revision.revisionId, true, infoscry.storage.Instants.now()) }
 
     private fun externalProfile(context: AppContext, name: String) = context.ocrProfiles.create(
         name = name,
@@ -445,9 +383,10 @@ class OcrBrowserAcceptanceTest {
             contextWindow = 32_000,
             maxOutputTokens = 2_048,
             endpoint = "https://example.invalid/v1",
+            apiKeyEnvironmentVariable = PRESENT_KEY_VARIABLE,
         ),
         enabled = true,
-    )
+    ).also { context.ocrProfiles.recordImageCapability(it.revision.revisionId, true, infoscry.storage.Instants.now()) }
 
     // ---- Server ----
 
@@ -462,7 +401,7 @@ class OcrBrowserAcceptanceTest {
         harness!!.context.attachChunker(Chunker(WhitespaceTokenCounter(prefixTokens = 2, specialTokens = 1)))
     }
 
-    /** A server whose job worker runs the production rescan handler over the fake engine and reviewer. */
+    /** A server whose job worker runs the production rescan handler over a fake engine. */
     private fun startRescanServer(picture: RescanHarness.Picture) {
         startServer(seeded.archive)
         attachRescanWorker(context(), checkNotNull(engine))
@@ -484,7 +423,6 @@ class OcrBrowserAcceptanceTest {
     }
 
     private fun attachRescanWorker(context: AppContext, fake: BrowserFakeEngine) {
-        val recording = RecordingReviewer(ReviewerRecommendation.NEW_BETTER)
         val handler = RescanJobHandler(
             paths = context.paths,
             collections = context.collections,
@@ -494,15 +432,10 @@ class OcrBrowserAcceptanceTest {
             jobs = context.jobs,
             revisions = context.revisions,
             operations = context.ocrOperations,
-            reviews = context.ocrReviews,
             publication = context.revisionPublication,
             chunker = Chunker(WhitespaceTokenCounter(prefixTokens = 2, specialTokens = 1)),
             documentEmbedder = { TestDocumentEmbedder() },
             engineFor = { _, _, _ -> fake },
-            reviewerFor = { _, dispatch ->
-                recording.dispatchingThrough(dispatch)
-                DurableReviewer(context, recording)
-            },
             profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
         )
         val runner = JobRunner(
@@ -640,6 +573,7 @@ class OcrBrowserAcceptanceTest {
 private class BrowserFakeEngine(
     private val readings: List<String>,
     private val hold: AcceptanceGate?,
+    private val failFirst: Boolean = false,
 ) : PageOcrEngine {
 
     override val engine: OcrEngine = OcrEngine.LLM
@@ -648,6 +582,7 @@ private class BrowserFakeEngine(
 
     override suspend fun transcribe(page: PageImage, settings: OcrSettingsSnapshot): OcrPageResult {
         val index = calls.getAndIncrement()
+        if (failFirst && index == 0) throw IllegalStateException("fake provider unavailable")
         hold?.await()
         return OcrPageResult(
             text = readings[index.coerceAtMost(readings.size - 1)],
@@ -655,23 +590,5 @@ private class BrowserFakeEngine(
             imageSha256 = page.sha256,
             modelVersion = "fake-browser-1",
         )
-    }
-}
-
-/**
- * The project's recording reviewer, with its proposal made durable the way the comparison service does it.
- *
- * A page the reviewer does not keep is recorded, so the review surface lists it as waiting; the recording
- * reviewer on its own answers without persisting.
- */
-private class DurableReviewer(
-    private val context: AppContext,
-    private val inner: RecordingReviewer,
-) : PageReviewer {
-
-    override suspend fun compare(input: PageComparisonInput): PageReview {
-        val review = inner.compare(input)
-        if (review.disposition != PublicationDisposition.KEEP) context.ocrReviews.record(review)
-        return review
     }
 }

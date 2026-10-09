@@ -142,7 +142,7 @@ class JobStoreTest {
     }
 
     @Test
-    fun `a finished job carries no stage of the attempt that ended, only a deliberate approval wait`() {
+    fun `a finished job carries no stage of the attempt that ended`() {
         val completed = jobs.enqueue(JobType.IMPORT, collectionId)
         jobs.claim(completed.id)
         jobs.progress(completed.id, stage = "queue", completed = 1, total = 1)
@@ -159,12 +159,6 @@ class JobStoreTest {
         jobs.cancel(cancelled.id)
         assertNull(jobs.finishCancelled(cancelled.id).stage)
 
-        val waiting = jobs.enqueue(JobType.IMPORT, collectionId)
-        jobs.claim(waiting.id)
-        jobs.progress(waiting.id, stage = JobStore.AWAITING_APPROVAL_STAGE)
-        val paused = jobs.complete(waiting.id)
-        assertEquals(JobStore.AWAITING_APPROVAL_STAGE, paused.stage, "the wait for a person is what the job is")
-        assertEquals(JobStore.AWAITING_APPROVAL_STAGE, jobs.get(waiting.id)!!.stage)
     }
 
     @Test

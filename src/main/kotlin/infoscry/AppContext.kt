@@ -26,9 +26,16 @@ import infoscry.embedding.ModelManager
 import infoscry.embedding.ModelManifest
 import infoscry.embedding.QueryEmbedder
 import infoscry.jobs.JobRunner
+import infoscry.jobs.ImportPipeline
+import infoscry.jobs.ImportPreviewService
+import infoscry.jobs.ImportSelection
+import infoscry.jobs.ImportStartService
+import infoscry.jobs.enumerateImportSources
 import infoscry.library.ManagedLibrary
 import infoscry.logging.LoggingBootstrap
 import infoscry.ocr.OcrProfileService
+import infoscry.ocr.OcrReadingMethodCatalog
+import infoscry.ocr.StaleOcrStateCleanup
 import infoscry.search.IndexIdentity
 import infoscry.search.LuceneIndex
 import infoscry.search.LuceneSchema
@@ -48,7 +55,9 @@ import infoscry.storage.OcrOperationStore
 import infoscry.storage.OcrProfileStore
 import infoscry.storage.OcrReviewStore
 import infoscry.storage.SchemaMigrator
+import infoscry.storage.StartRequestStore
 import java.nio.file.Path
+import infoscry.extract.DefaultPageCounter
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -180,6 +189,43 @@ class AppContext private constructor(
         engineFor = rescanEngineFactory(ocrProfiles),
     )
 
+    /** The methods that the current machine and OCR profiles can run for a collection. */
+    val readingMethodCatalog: OcrReadingMethodCatalog = OcrReadingMethodCatalog(ocr)
+
+    /** Durable request ids shared by import starts and document retries. */
+    val startRequests: StartRequestStore by lazy { StartRequestStore(database) }
+
+    /** Preview uses the same detector, extractor registry, directory walker and file selection as import. */
+    val importPreviewService: ImportPreviewService by lazy {
+        val pipeline = ImportPipeline.production(this)
+        val selection = ImportSelection(pipeline.detector, pipeline.registry)
+        ImportPreviewService(
+            collections = collections,
+            catalog = readingMethodCatalog,
+            profiles = ocr,
+            pageCounter = DefaultPageCounter(),
+            selection = selection,
+            enumerate = { sources, recursive, ignore ->
+                enumerateImportSources(sources, recursive, ignore, selection)
+            },
+            ignorePatterns = { collectionId -> collectionService.ignorePatterns(collectionId) },
+        )
+    }
+
+    /** Shared method/hash/idempotency admission used by HTTP imports and the standalone CLI import. */
+    val importStartService: ImportStartService by lazy {
+        ImportStartService(
+            previews = importPreviewService,
+            catalog = readingMethodCatalog,
+            ocr = ocr,
+            jobs = jobs,
+            requests = startRequests,
+            mutations = mutations,
+            collectionService = collectionService,
+            ignorePatterns = { collectionId -> collectionService.ignorePatterns(collectionId) },
+        )
+    }
+
     /**
      * The durable rescan operations, with their previews, their external-page admission and their approvals.
      */
@@ -215,23 +261,19 @@ class AppContext private constructor(
         documents = documents,
         revisions = revisions,
         jobs = jobs,
+        cancelAttempt = { id -> cancelJob(id) },
         operations = ocrOperations,
-        reviews = ocrReviews,
         mutations = mutations,
         blockers = blockers,
         publication = revisionPublication,
-        index = { index() },
         profileOf = { profileId -> ocrProfiles.findById(profileId) },
         profileRevisionOf = { revisionId -> ocrProfiles.findRevision(revisionId) },
+        methodCatalog = readingMethodCatalog,
         engines = rescanEngineFactory(ocrProfiles),
         // The cheap installation check rather than a session: admission asks whether a replacement could ever
         // be published, not whether the accelerator is reachable this second.
         embedderAvailable = injectedRescanEmbedder
             ?: { ModelManager.production().isInstalled(paths.modelsDir) },
-        // A person's Keep existing and Edit text decisions are chunked and embedded with the same chunker and
-        // embedder an import uses, resolved when a publication needs them.
-        chunker = { attachedChunker ?: productionChunker },
-        embedder = { currentDocumentEmbedder() },
     )
 
     /**
@@ -246,7 +288,7 @@ class AppContext private constructor(
         Chunker(E5Embedder.productionCounter(paths.modelsDir, paths.embeddingProfileDir))
     }
 
-    /** The embedder a restore or a review publication embeds with: the injected one, the attached one, or the pinned model's. */
+    /** The embedder a restored revision uses: the injected one, the attached one, or the pinned model's. */
     private fun currentDocumentEmbedder(): DocumentEmbedder? =
         (injectedRestoreEmbedder ?: attachedDocumentEmbedder ?: productionDocumentEmbedder).invoke()
 
@@ -265,13 +307,12 @@ class AppContext private constructor(
     }
 
     /**
-     * The chunker this process's job worker chunks with, so a person's review decision is chunked by the same
-     * exact tokenizer an import measures with. Null until a composition root attaches one.
+     * The chunker this process's worker uses, shared by restored revisions and imports. Null until a composition root attaches one.
      */
     @Volatile
     private var attachedChunker: Chunker? = null
 
-    /** Records the chunker this process's worker chunks with, so [rescanService] publishes decisions with it. */
+    /** Records the chunker this process's worker chunks with, so [revisionRestore] uses the same tokenizer. */
     fun attachChunker(chunker: Chunker) {
         attachedChunker = chunker
     }
@@ -355,11 +396,12 @@ class AppContext private constructor(
         blockers = blockers,
         // A retry with a chosen OCR method is admitted through the rescan service's own validation and frozen
         // as its snapshot, so the two can never disagree about what an engine or profile may be used for.
+        pageCountOf = { document -> infoscry.extract.DefaultPageCounter().pageCount(library.managedPathOf(document)) },
         choices = object : infoscry.document.RetryReadingChoices {
             override suspend fun resolve(
                 collection: Collection,
-                choice: infoscry.document.RetryOcrChoice,
-            ) = rescanService.resolveChosenReading(collection, choice.toOverrides())
+                choice: infoscry.ocr.ReadingMethod,
+            ) = rescanService.resolveChosenReading(collection, choice)
 
             override fun pageImagesRefusal(document: infoscry.domain.Document) =
                 rescanService.pageImagesRefusal(document)
@@ -371,18 +413,7 @@ class AppContext private constructor(
             RetryPrerequisites.probe(
                 collection = collection,
                 modelsDir = paths.modelsDir,
-                // A retry records the attempt it will run with, exactly as an import does: another engine or a
-                // mode that reads images a page already has is a different reading of the same bytes, and a
-                // checkpoint committed under one is not evidence about the other.
-                ocrSnapshot = { settings ->
-                    ocr.withProbedRuntime(
-                        ocr.snapshotFor(
-                            settings = settings,
-                            extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
-                            renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
-                        ),
-                    )
-                },
+
             )
         },
     )
@@ -604,6 +635,17 @@ class AppContext private constructor(
                                 .addKeyValue(SWEPT_GENERATIONS_FIELD, swept.joinToString(", "))
                                 .log("removed unreferenced search index generations")
                         }
+                        // No worker is attached until AppContext.open has returned, so a persisted RUNNING
+                        // owner belongs to the process that stopped; clean its operation before jobs are
+                        // requeued below. Running this before resetInterrupted preserves the job's recovery
+                        // decision while ensuring no operation can remain a stale document hold.
+                        StaleOcrStateCleanup(
+                            jobs,
+                            context.ocrOperations,
+                            revisions,
+                            documents,
+                            hasLiveAttempt = { false },
+                        ).run()
                         // After deletions are finished, because finishing one cascades its jobs away: an
                         // attempt that a previous process was inside is queued again, and a cancellation
                         // request that previous process recorded is honoured rather than re-run.

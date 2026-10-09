@@ -25,7 +25,6 @@ const api = vi.hoisted(() => ({
   listCollectionImports: vi.fn(),
   getCollectionDocument: vi.fn(),
   renameCollection: vi.fn(),
-  updateCollectionOcrLanguages: vi.fn(),
   getCollectionIgnorePatterns: vi.fn(),
   updateCollectionIgnorePatterns: vi.fn(),
   deleteCollection: vi.fn(),
@@ -40,14 +39,15 @@ const api = vi.hoisted(() => ({
   admitRescan: vi.fn(),
   getRescanOperation: vi.fn(),
   listRescanOperations: vi.fn(),
-  approveRescanExternal: vi.fn(),
+  listReadingMethods: vi.fn(),
+  previewImport: vi.fn(),
+  startImport: vi.fn(),
+  startRescan: vi.fn(),
   cancelRescan: vi.fn(),
-  resumeRescan: vi.fn(),
-  approveJobExternal: vi.fn(),
-  cancelJob: vi.fn(),
 }));
 
-vi.mock('./api', () => ({
+vi.mock('./api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./api')>()),
   ApiError: class ApiError extends Error {
     code: string;
     status: number | null;
@@ -65,11 +65,7 @@ vi.mock('./api', () => ({
   admitRescan: api.admitRescan,
   getRescanOperation: api.getRescanOperation,
   listRescanOperations: api.listRescanOperations,
-  approveRescanExternal: api.approveRescanExternal,
   cancelRescan: api.cancelRescan,
-  resumeRescan: api.resumeRescan,
-  approveJobExternal: api.approveJobExternal,
-  cancelJob: api.cancelJob,
   createCollection: api.createCollection,
   pickPaths: api.pickPaths,
   enqueueImport: api.enqueueImport,
@@ -79,23 +75,24 @@ vi.mock('./api', () => ({
   listCollectionImports: api.listCollectionImports,
   getCollectionDocument: api.getCollectionDocument,
   renameCollection: api.renameCollection,
-  updateCollectionOcrLanguages: api.updateCollectionOcrLanguages,
   getCollectionIgnorePatterns: api.getCollectionIgnorePatterns,
   updateCollectionIgnorePatterns: api.updateCollectionIgnorePatterns,
   deleteCollection: api.deleteCollection,
   deleteDocuments: api.deleteDocuments,
   getDeletion: api.getDeletion,
   listUnfinishedDeletions: api.listUnfinishedDeletions,
+  listReadingMethods: api.listReadingMethods,
+  previewImport: api.previewImport,
+  startImport: api.startImport,
+  startRescan: api.startRescan,
 }));
 
 function collection(name: string, documentCount = 0): Collection {
   return {
     id: name.toLowerCase(),
     name,
-    ocrLanguages: 'eng',
-    ocrEngine: 'TESSERACT',
-    ocrImportMode: 'FILL_MISSING',
-    ocrExternalPageLimit: 0,
+    language: 'eng',
+    defaultMethod: 'tesseract',
     createdAt: '2026-09-21T07:00:00Z',
     updatedAt: '2026-09-21T07:00:00Z',
     lifecycle: 'ACTIVE',
@@ -200,6 +197,12 @@ describe('collections panel', () => {
     api.listOcrProfiles.mockResolvedValue([]);
     api.listOcrLlmCandidates.mockResolvedValue([]);
     api.listRescanOperations.mockResolvedValue([]);
+    api.listReadingMethods.mockResolvedValue({ default: 'tesseract', methods: [
+      { method: 'tesseract', label: 'Tesseract', destination: 'this machine', available: true, unavailableReason: null, external: false },
+    ] });
+    api.previewImport.mockResolvedValue({ previewId: 'preview-1', totalFiles: 1, totalPages: 1, method: 'tesseract', files: [], external: false, destination: 'this machine', estimatedCostUsd: null, costBasis: null, previewHash: 'hash' });
+    api.startImport.mockResolvedValue({ jobId: 'job-1' });
+    api.startRescan.mockResolvedValue({ operationId: 'op-2' });
   });
 
   afterEach(cleanup);
@@ -385,8 +388,8 @@ describe('collections panel', () => {
     expect(within(quarterly).getByText('application/pdf')).toBeTruthy();
     expect(within(quarterly).getByText('2 KB')).toBeTruthy();
     expect(within(quarterly).getByText('2026-09-21')).toBeTruthy();
-    expect(within(quarterly).getByText('Complete with warnings')).toBeTruthy();
-    expect(within(screen.getByRole('row', { name: /notes\.txt/ })).getByText('Needs a tool')).toBeTruthy();
+    expect(within(quarterly).getByTestId('document-reading-status').textContent).toBe('Done');
+    expect(within(screen.getByRole('row', { name: /notes\.txt/ })).getByTestId('document-reading-status').textContent).toMatch(/^Failed:/);
     expect(screen.getByText('Showing 1–2 of 2 documents')).toBeTruthy();
     expect(api.listCollectionDocuments).toHaveBeenCalledWith('nightfall', {
       q: '',
@@ -445,7 +448,7 @@ describe('collections panel', () => {
 
     render(CollectionsPanel, props({ collections: [collection('Nightfall', 0)], selectedId: 'nightfall' }));
 
-    expect(screen.getByRole('status').textContent).toContain('Loading documents…');
+    expect(screen.getByText('Loading documents…')).toBeTruthy();
     await act(async () => { finish(page([])); });
 
     expect(await screen.findByText('No documents yet')).toBeTruthy();
@@ -536,7 +539,7 @@ describe('collections panel', () => {
     const details = await screen.findByRole('region', { name: 'Document details' });
     expect(api.getCollectionDocument).toHaveBeenCalledWith('nightfall', 'doc-1');
     expect(within(details).getByText('the pipeline has no extractor for this kind of file')).toBeTruthy();
-    expect(within(details).getByText('Failed')).toBeTruthy();
+    expect(within(details).getByTestId('document-reading-status').textContent).toContain('Failed:');
 
     await fireEvent.click(within(details).getByRole('button', { name: 'Open document' }));
     expect(onOpenDocument).toHaveBeenCalledWith('doc-1', 'unit-7');
@@ -544,18 +547,18 @@ describe('collections panel', () => {
 
   it('reads every processing stage a document can be in, including the ones that stop for a tool', async () => {
     const stages = [
-      ['QUEUED', 'Queued'],
-      ['COPYING', 'Copying'],
-      ['EXTRACTING', 'Extracting text'],
-      ['OCR', 'Reading with OCR'],
-      ['CHUNKING', 'Building passages'],
-      ['EMBEDDING', 'Embedding'],
-      ['INDEXING', 'Indexing'],
-      ['COMPLETE', 'Complete'],
-      ['COMPLETE_WITH_WARNINGS', 'Complete with warnings'],
-      ['FAILED', 'Failed'],
+      ['QUEUED', 'Reading 0'],
+      ['COPYING', 'Reading 0'],
+      ['EXTRACTING', 'Reading 0'],
+      ['OCR', 'Reading 0'],
+      ['CHUNKING', 'Reading 0'],
+      ['EMBEDDING', 'Reading 0'],
+      ['INDEXING', 'Reading 0'],
+      ['COMPLETE', 'Done'],
+      ['COMPLETE_WITH_WARNINGS', 'Done'],
+      ['FAILED', 'Failed: The reading attempt failed.'],
       ['CANCELLED', 'Cancelled'],
-      ['NEEDS_TOOL', 'Needs a tool'],
+      ['NEEDS_TOOL', 'Failed: The reading attempt failed.'],
     ] as const;
     api.listCollectionDocuments.mockResolvedValue(page(
       stages.map(([status], index) => documentRow(`doc-${index}`, { status })),
@@ -566,7 +569,7 @@ describe('collections panel', () => {
 
     stages.forEach(([status, label], index) => {
       const row = screen.getByRole('row', { name: new RegExp(`doc-${index}\\.pdf`) });
-      expect(within(row).getByText(label), status).toBeTruthy();
+      expect(within(row).getByTestId('document-reading-status').textContent, status).toContain(label);
     });
   });
 
@@ -704,7 +707,7 @@ describe('collections panel', () => {
     expect(onOpenDocument).not.toHaveBeenCalled();
   });
 
-  it('offers Retry for a document whose attempt stopped, and shows the attempt it queued', async () => {
+  it('offers Retry for a document whose attempt stopped and refreshes the document after admission', async () => {
     const onRetryDocument = vi.fn(async () => ({ accepted: true as const, jobId: 'job-9' }));
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
     api.getCollectionDocument.mockResolvedValue({
@@ -712,6 +715,10 @@ describe('collections panel', () => {
       errorMessage: 'the extractor stopped before it delivered every unit of this document',
       sourceId: 'unit-1',
       retryEligible: true,
+    });
+    api.getJob.mockResolvedValue({
+      id: 'job-9', type: 'RETRY', state: 'RUNNING', createdAt: '', updatedAt: '',
+      completed: 0, total: 1, cancelRequested: false,
     });
 
     render(CollectionsPanel, props({
@@ -725,18 +732,17 @@ describe('collections panel', () => {
     const details = await screen.findByRole('region', { name: 'Document details' });
     // The action explains what it does, including the one thing it cannot promise: changed OCR languages
     // can mean the extraction has to run again.
-    expect(within(details).getByText(/OCR languages changed/)).toBeTruthy();
+    expect(within(details).getByText(/using the settings of its failed/)).toBeTruthy();
 
     await fireEvent.click(within(details).getByRole('button', { name: 'Retry' }));
 
-    expect(onRetryDocument).toHaveBeenCalledWith('doc-1');
-    expect(await within(details).findByRole('status')).toBeTruthy();
+    expect(onRetryDocument).toHaveBeenCalledWith('doc-1', { requestId: expect.any(String) });
     // The document's own state is the record, so the detail and the row are read again rather than assumed.
-    expect(api.getCollectionDocument).toHaveBeenCalledTimes(2);
-    expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(api.getCollectionDocument).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2));
   });
 
-  it('retries one document with a chosen OCR method, and leaves the choice out when nothing was chosen', async () => {
+  it('offers one retry action without exposing legacy method override fields', async () => {
     const onRetryDocument = vi.fn(async () => ({ accepted: true as const, jobId: 'job-9' }));
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
     api.getCollectionDocument.mockResolvedValue({
@@ -744,6 +750,10 @@ describe('collections panel', () => {
       errorMessage: 'the extractor stopped',
       sourceId: 'unit-1',
       retryEligible: true,
+    });
+    api.getJob.mockResolvedValue({
+      id: 'job-9', type: 'RETRY', state: 'RUNNING', createdAt: '', updatedAt: '',
+      completed: 0, total: 1, cancelRequested: false,
     });
     api.listOcrProfiles.mockResolvedValue([]);
 
@@ -756,30 +766,44 @@ describe('collections panel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
     const details = await screen.findByRole('region', { name: 'Document details' });
 
-    // An open form that names nothing is the plain Retry.
-    await fireEvent.click(within(details).getByLabelText('Choose the OCR method for this retry'));
     await fireEvent.click(within(details).getByRole('button', { name: 'Retry' }));
-    expect(onRetryDocument).toHaveBeenLastCalledWith('doc-1');
-
-    // The same engine, mode and language controls Scan again uses.
-    await fireEvent.change(within(details).getByLabelText('Engine for this retry'), { target: { value: 'TESSERACT' } });
-    await fireEvent.change(within(details).getByLabelText('Import mode for this retry'), {
-      target: { value: 'CHECK_AND_IMPROVE' },
-    });
-    await fireEvent.input(within(details).getByLabelText('OCR languages for this retry'), {
-      target: { value: ' swe+eng ' },
-    });
-    await fireEvent.click(within(details).getByRole('button', { name: 'Retry' }));
-
-    expect(onRetryDocument).toHaveBeenLastCalledWith('doc-1', {
-      engine: 'TESSERACT',
-      importMode: 'CHECK_AND_IMPROVE',
-      language: 'swe+eng',
-    });
-    expect(api.listOcrProfiles).toHaveBeenCalled();
+    expect(onRetryDocument).toHaveBeenLastCalledWith('doc-1', { requestId: expect.any(String) });
+    expect(within(details).queryByLabelText(/engine|mode|language for this retry/i)).toBeNull();
   });
 
-  it('retries every eligible document with a chosen OCR method', async () => {
+  it('shows only the document rescan Retry action for a failed rescan and follows its job', async () => {
+    const onRetryDocument = vi.fn(async () => ({ accepted: true as const, jobId: 'retry-job' }));
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
+    api.getCollectionDocument.mockResolvedValue({
+      document: documentRow('doc-1', { status: 'FAILED', errorCode: 'OCR_PROVIDER_UNAVAILABLE' }),
+      errorMessage: 'the OCR provider stopped',
+      sourceId: 'unit-1',
+      retryEligible: true,
+    });
+    api.listRescanOperations.mockResolvedValue([{
+      operationId: 'op-1', collectionId: 'nightfall', documentId: 'doc-1', snapshot: {} as never,
+      stage: 'FAILED', pageTotal: 1, pagesCommitted: 0, pagesFailed: 1,
+      external: { distinctPages: 0, calls: 0, allowance: 0 }, requestId: 'request-1', createdAt: '', updatedAt: '',
+    }]);
+    api.getJob.mockResolvedValue({
+      id: 'retry-job', type: 'RETRY', state: 'RUNNING', createdAt: '', updatedAt: '',
+      completed: 0, total: 1, cancelRequested: false,
+    });
+    render(CollectionsPanel, props({
+      collections: [collection('Nightfall', 1)], selectedId: 'nightfall', onRetryDocument,
+    }));
+    await screen.findByRole('table');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const details = await screen.findByRole('region', { name: 'Document details' });
+    const retryButtons = within(details).getAllByRole('button', { name: 'Retry' });
+    expect(retryButtons).toHaveLength(1);
+
+    await fireEvent.click(retryButtons[0]);
+    await waitFor(() => expect(onRetryDocument).toHaveBeenCalledWith('doc-1', { requestId: expect.any(String) }));
+    await waitFor(() => expect(api.getJob).toHaveBeenCalledWith('retry-job'));
+  });
+
+  it('retries every eligible document without exposing method override fields', async () => {
     const onRetryAllDocuments = vi.fn(async () => ({
       collectionId: 'nightfall',
       acceptedJobIds: ['job-1'],
@@ -801,11 +825,10 @@ describe('collections panel', () => {
     await screen.findByRole('table');
     const section = screen.getByRole('region', { name: 'Retry documents in Nightfall' });
 
-    await fireEvent.click(within(section).getByLabelText('Choose the OCR method for this retry'));
-    await fireEvent.change(within(section).getByLabelText('Engine for this retry'), { target: { value: 'SURYA' } });
     await fireEvent.click(within(section).getByRole('button', { name: 'Retry all eligible documents' }));
 
-    expect(onRetryAllDocuments).toHaveBeenCalledWith({ engine: 'SURYA' });
+    expect(onRetryAllDocuments).toHaveBeenCalledWith();
+    expect(within(section).queryByLabelText(/engine|mode|language for this retry/i)).toBeNull();
     expect(await within(section).findByText(/use Scan again/)).toBeTruthy();
   });
 
@@ -1009,17 +1032,17 @@ describe('collections panel', () => {
 
     render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     const row = await screen.findByRole('row', { name: /doc-1\.pdf/ });
-    expect(within(row).getByText('Failed')).toBeTruthy();
+    expect(within(row).getByTestId('document-reading-status').textContent).toMatch(/^Failed:/);
 
     await fireEvent.click(screen.getByRole('button', { name: 'Retry all eligible documents' }));
     await waitFor(() => {
-      expect(within(screen.getByRole('row', { name: /doc-1\.pdf/ })).getByText('Queued')).toBeTruthy();
+      expect(within(screen.getByRole('row', { name: /doc-1\.pdf/ })).getByTestId('document-reading-status').textContent).toContain('Reading');
     });
 
     // A reopened Admin keeps nothing from the click: the queued attempt is the server's own record.
     cleanup();
     render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
-    expect(within(await screen.findByRole('row', { name: /doc-1\.pdf/ })).getByText('Queued')).toBeTruthy();
+    expect(within(await screen.findByRole('row', { name: /doc-1\.pdf/ })).getByTestId('document-reading-status').textContent).toContain('Reading');
     expect(screen.queryByText(/Retry queued/)).toBeNull();
   });
 
@@ -1095,10 +1118,8 @@ describe('collections panel', () => {
     expect(await screen.findByText('1 of 4 files')).toBeTruthy();
   });
 
-  it('never reads a finished import as still queued, and keeps the wait for an approval', async () => {
+  it('shows terminal import outcomes without approval or stale progress stages', async () => {
     api.listCollectionImports.mockResolvedValue(history([
-      importEntry('job-waiting', { state: 'COMPLETE', stage: 'awaiting-approval', filesCompleted: 1, filesTotal: 3 }),
-      // The stage an import last entered before it finished: the row reads its outcome, not that stage.
       importEntry('job-done', { state: 'COMPLETE', stage: 'queue', filesCompleted: 2, filesTotal: 2 }),
       importEntry('job-failed', { state: 'FAILED', stage: 'queue', errorCode: 'IMPORT_FAILED' }),
     ]));
@@ -1108,12 +1129,7 @@ describe('collections panel', () => {
     const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
     await screen.findByText('2 of 2 files');
     expect(within(area).queryByText('Queued')).toBeNull();
-    // Newest first: the waiting import is listed before the one that finished with a stale stage.
-    const [waiting, done] = within(area).getAllByRole('row', { name: /Complete|Waiting for approval/ });
-    // A job waiting for a person has not completed, so its State column says what it waits for.
-    expect(within(waiting).getByText('Waiting for approval')).toBeTruthy();
-    expect(within(waiting).queryByText('Complete')).toBeNull();
-    expect(within(waiting).getByText('Awaiting approval')).toBeTruthy();
+    const done = within(area).getByRole('row', { name: /Complete/ });
     expect(within(done).queryByText(/Queued|Awaiting/)).toBeNull();
     const failed = within(area).getByRole('row', { name: /Failed/ });
     expect(within(failed).queryByText('Queued')).toBeNull();
@@ -1269,70 +1285,12 @@ describe('collections panel', () => {
     }
   });
 
-  it('shows the approval form under a waiting import, keeps polling while it waits, and refreshes once approved', async () => {
-    vi.useFakeTimers();
-    try {
-      const waiting = importEntry('job-1', {
-        state: 'COMPLETE',
-        stage: 'awaiting-approval',
-        filesCompleted: 1,
-        filesTotal: 3,
-        externalApproval: { snapshotHash: 'hash-1', distinctPagesSent: 1, allowance: 1, calls: 1 },
-      });
-      api.listCollectionImports
-        .mockResolvedValueOnce(history([waiting]))
-        .mockResolvedValueOnce(history([waiting]))
-        .mockResolvedValue(history([importEntry('job-1', { state: 'RUNNING', stage: 'extract', currentItem: 'b.pdf', filesCompleted: 1, filesTotal: 3 })]));
-      api.approveJobExternal.mockResolvedValue({ jobId: 'job-1', approvalId: 'a1', authorizedDistinctPages: 3, distinctPagesSent: 1, calls: 2 });
-
-      render(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
-      await act(async () => {});
-
-      const area = screen.getByRole('region', { name: 'Import history for Nightfall' });
-      expect(within(area).getByText('Awaiting approval')).toBeTruthy();
-      const form = within(area).getByRole('region', { name: 'Approve external pages' });
-      expect(within(form).getByLabelText('Pages that may leave this machine (in total)')).toBeTruthy();
-
-      // The import still waits, so the history is read again rather than left as it was when the row arrived.
-      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
-      expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
-      expect(within(area).getByRole('region', { name: 'Approve external pages' })).toBeTruthy();
-
-      await act(async () => {
-        await fireEvent.input(within(area).getByLabelText('Pages that may leave this machine (in total)'), { target: { value: '3' } });
-        await fireEvent.click(within(area).getByRole('button', { name: 'Approve external pages' }));
-      });
-      expect(api.approveJobExternal).toHaveBeenCalledWith('job-1', 'hash-1', 3);
-      await act(async () => {});
-      expect(api.listCollectionImports).toHaveBeenCalledTimes(3);
-      expect(within(area).queryByRole('region', { name: 'Approve external pages' })).toBeNull();
-      expect(within(area).getByText('Extracting · b.pdf')).toBeTruthy();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('cancels a waiting import from its approval form and stops showing the form', async () => {
-    const waiting = importEntry('job-1', {
-      state: 'COMPLETE',
-      stage: 'awaiting-approval',
-      filesCompleted: 0,
-      filesTotal: 1,
-      externalApproval: { snapshotHash: 'hash-1', distinctPagesSent: 0, allowance: 0, calls: 0 },
-    });
-    api.listCollectionImports
-      .mockResolvedValueOnce(history([waiting]))
-      .mockResolvedValue(history([importEntry('job-1', { state: 'CANCELLED', stage: null, filesCompleted: 0, filesTotal: 1 })]));
-    api.cancelJob.mockResolvedValue({});
-
+  it('does not expose approval controls for a completed import', async () => {
+    api.listCollectionImports.mockResolvedValue(history([importEntry('job-1', { state: 'COMPLETE', filesCompleted: 1, filesTotal: 1 })]));
     render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
-
     const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
-    await fireEvent.click(await within(area).findByRole('button', { name: 'Cancel import' }));
-
-    expect(api.cancelJob).toHaveBeenCalledWith('job-1');
-    await waitFor(() => expect(within(area).queryByRole('region', { name: 'Approve external pages' })).toBeNull());
-    expect(within(area).getByText('Cancelled')).toBeTruthy();
+    expect(await within(area).findByText('Complete')).toBeTruthy();
+    expect(within(area).queryByText(/approval|review/i)).toBeNull();
   });
 
   it('renames the selected collection, showing pending then success, and refreshes the selectors', async () => {
@@ -1400,67 +1358,21 @@ describe('collections panel', () => {
     expect(screen.queryByText('Name saved.')).toBeNull();
   });
 
-  it('saves OCR languages for future work, and reads no documents again', async () => {
-    api.updateCollectionOcrLanguages.mockResolvedValue({ ...collection('Nightfall', 2), ocrLanguages: 'eng+swe' });
-
+  it('shows the selected collection language in OCR settings', async () => {
     render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
-    await screen.findByRole('region', { name: 'Settings for Nightfall' });
-
-    const languages = await screen.findByLabelText('OCR languages');
-    expect((languages as HTMLInputElement).value).toBe('eng');
-    await fireEvent.input(languages, { target: { value: ' eng+swe ' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR languages' }));
-
-    expect(api.updateCollectionOcrLanguages).toHaveBeenCalledWith('nightfall', 'eng+swe');
-    expect(await screen.findByText('OCR languages saved.')).toBeTruthy();
-    expect((screen.getByLabelText('OCR languages') as HTMLInputElement).value).toBe('eng+swe');
-
-    const settings = screen.getByRole('region', { name: 'Settings for Nightfall' });
-    expect(within(settings).getByText(/future imports and by explicit retries/)).toBeTruthy();
-    expect(within(settings).getByText(/Completed documents are not reprocessed automatically/)).toBeTruthy();
-    expect(within(settings).getByText(/may have to repeat extraction/)).toBeTruthy();
-    // A settings save is not an automatic reprocessing: no document is re-read or re-queued.
+    expect((await screen.findByLabelText('OCR language') as HTMLInputElement).value).toBe('eng');
+    expect(await screen.findByLabelText('Default reading method')).toBeTruthy();
     expect(api.listCollectionDocuments).toHaveBeenCalledTimes(1);
-    expect(api.getCollectionDocument).not.toHaveBeenCalled();
     expect(api.enqueueImport).not.toHaveBeenCalled();
   });
 
-  it('surfaces an invalid language setting and a failed save as readable errors', async () => {
-    api.updateCollectionOcrLanguages.mockRejectedValueOnce(
-      new ApiError('INVALID_REQUEST', 'collection ocr languages must not be blank'),
-    );
-
-    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
-
-    await fireEvent.input(await screen.findByLabelText('OCR languages'), { target: { value: '   ' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR languages' }));
-
-    expect(api.updateCollectionOcrLanguages).toHaveBeenCalledWith('nightfall', '');
-    const settings = screen.getByRole('region', { name: 'Settings for Nightfall' });
-    expect((await within(settings).findByRole('alert')).textContent).toContain('must not be blank');
-    expect(within(settings).queryByText('OCR languages saved.')).toBeNull();
-
-    api.updateCollectionOcrLanguages.mockRejectedValueOnce(new ApiError('INTERNAL_ERROR', 'the archive is unavailable'));
-    await fireEvent.input(screen.getByLabelText('OCR languages'), { target: { value: 'swe' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR languages' }));
-
-    expect((await within(settings).findByRole('alert')).textContent).toContain('the archive is unavailable');
-    expect(within(settings).queryByText('OCR languages saved.')).toBeNull();
-  });
-
-  it('shows the newly selected collection own name and languages in the settings fields', async () => {
+  it('switches OCR settings with the selected collection', async () => {
     const { rerender } = render(CollectionsPanel, props({
-      collections: [collection('Default'), { ...collection('Nightfall'), ocrLanguages: 'swe' }],
-      selectedId: 'default',
+      collections: [collection('Default'), { ...collection('Nightfall'), language: 'swe' }], selectedId: 'default',
     }));
-
-    expect((await screen.findByLabelText('Collection name') as HTMLInputElement).value).toBe('Default');
-    expect((screen.getByLabelText('OCR languages') as HTMLInputElement).value).toBe('eng');
-
+    expect((await screen.findByLabelText('OCR language') as HTMLInputElement).value).toBe('eng');
     await rerender({ selectedId: 'nightfall' });
-
-    expect((screen.getByLabelText('Collection name') as HTMLInputElement).value).toBe('Nightfall');
-    expect((screen.getByLabelText('OCR languages') as HTMLInputElement).value).toBe('swe');
+    expect((screen.getByLabelText('OCR language') as HTMLInputElement).value).toBe('swe');
   });
 
   it('ignores a rename answer that arrives after another collection was selected', async () => {
@@ -1490,29 +1402,6 @@ describe('collections panel', () => {
     expect(screen.queryByText('Name saved.')).toBeNull();
     expect(screen.getByRole('button', { name: 'Save name' })).toBeTruthy();
     expect(onCollectionsChanged).not.toHaveBeenCalled();
-  });
-
-  it('ignores an OCR-language answer that arrives after another collection was selected', async () => {
-    let finish!: (value: Collection) => void;
-    api.updateCollectionOcrLanguages
-      .mockImplementation(() => new Promise<Collection>((resolve) => { finish = resolve; }));
-
-    const { rerender } = render(CollectionsPanel, props({
-      collections: [collection('Default'), { ...collection('Nightfall'), ocrLanguages: 'swe' }],
-      selectedId: 'default',
-    }));
-
-    await fireEvent.input(await screen.findByLabelText('OCR languages'), { target: { value: 'eng+swe' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR languages' }));
-    expect(api.updateCollectionOcrLanguages).toHaveBeenCalledWith('default', 'eng+swe');
-
-    await rerender({ selectedId: 'nightfall' });
-    expect((screen.getByLabelText('OCR languages') as HTMLInputElement).value).toBe('swe');
-
-    await act(async () => { finish({ ...collection('Default'), ocrLanguages: 'eng+swe' }); });
-
-    expect((screen.getByLabelText('OCR languages') as HTMLInputElement).value).toBe('swe');
-    expect(screen.queryByText('OCR languages saved.')).toBeNull();
   });
 
   it('shows the collection saved ignore patterns, one per line, in the settings', async () => {
@@ -2045,239 +1934,18 @@ describe('collections panel', () => {
     expect(screen.queryByText(/selected on this page/)).toBeNull();
   });
 
-  describe('OCR engine settings and rescanning', () => {
-    const cloud = {
-      id: 'p-cloud',
-      name: 'Cloud vision',
-      enabled: true,
-      revisionId: 'p-cloud-r1',
-      sequence: 1,
-      provider: 'OPENAI_COMPATIBLE' as const,
-      endpoint: 'https://example.test/v1',
-      scope: 'EXTERNAL' as const,
-      model: 'vision-model',
-      contextWindow: 128_000,
-      maxOutputTokens: 4_096,
-      inputPricePerMillion: 0.5,
-      outputPricePerMillion: 1.5,
-      apiKeyEnvironmentVariable: 'OCR_API_KEY',
-      keyAvailable: true,
-      imageCapabilityMeasured: true,
-      imageCapabilityCheckedAt: null,
-    };
-
-    const snapshot = {
-      engine: 'LLM' as const,
-      mode: 'CHECK_AND_IMPROVE' as const,
-      language: 'eng',
-      extractorVersion: '3',
-      transcriptionPromptVersion: 1,
-      reviewPromptVersion: 2,
-      policyVersion: 1,
-      externalPageLimit: 5,
-      transcriptionProfileRevisionId: 'p-cloud-r1',
-    };
-
-    function scan(stage: 'AWAITING_APPROVAL' | 'OCR' | 'COMPLETE', over: Record<string, unknown> = {}) {
-      return {
-        operationId: 'op-1',
-        collectionId: 'nightfall',
-        documentId: 'doc-1',
-        snapshot,
-        stage,
-        pageTotal: 12,
-        pagesCommitted: 3,
-        pagesFailed: 0,
-        external: { distinctPages: 5, calls: 6, allowance: 5 },
-        pendingReviewCount: 0,
-        requestId: 'request-1',
-        createdAt: '2026-09-21T07:00:00Z',
-        updatedAt: '2026-09-21T07:00:01Z',
-        ...over,
-      };
-    }
-
-    function previewOf(over: Record<string, unknown> = {}) {
-      return {
-        previewId: 'preview-1',
-        documentId: 'doc-1',
-        managedHash: 'abc',
-        snapshot,
-        snapshotHash: 'hash-1',
-        pageTotal: 12,
-        externalPageUpperBound: 12,
-        destinations: [],
-        approvalRequired: false,
-        externalAllowance: 5,
-        expiresAt: '2026-09-21T08:00:00Z',
-        ...over,
-      };
-    }
-
-    async function openDetails(): Promise<HTMLElement> {
+  describe('OCR reading dialog integration', () => {
+    it('shows one document status and starts a rescan through the shared method dialog', async () => {
       api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { originalFilename: 'ledger.pdf' })]));
-      api.getCollectionDocument.mockResolvedValue({
-        document: documentRow('doc-1', { originalFilename: 'ledger.pdf' }),
-        errorMessage: null,
-        sourceId: 'unit-1',
-      });
+      api.getCollectionDocument.mockResolvedValue({ document: documentRow('doc-1', { originalFilename: 'ledger.pdf' }), errorMessage: null, sourceId: 'unit-1' });
+      api.previewRescan.mockResolvedValue({ previewId: 'preview-1', documentId: 'doc-1', managedHash: 'hash', snapshot: {} as never, pageTotal: 12, externalPageUpperBound: 0, destinations: [], external: false });
       render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
-      await screen.findByRole('table');
-      await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
-      return screen.findByRole('region', { name: 'Document details' });
-    }
-
-    it('shows the collection OCR engine controls beside the languages and saves through the settings route', async () => {
-      api.listOcrProfiles.mockResolvedValue([cloud]);
-      api.updateCollectionOcrSettings.mockResolvedValue({
-        ...collection('Nightfall'),
-        ocrEngine: 'LLM',
-        ocrTranscriptionProfileId: 'p-cloud',
-        ocrExternalPageLimit: 5,
-      });
-      const onCollectionsChanged = vi.fn();
-      render(CollectionsPanel, props({
-        collections: [collection('Nightfall')],
-        selectedId: 'nightfall',
-        onCollectionsChanged,
-      }));
-
-      const settings = await screen.findByRole('region', { name: 'Settings for Nightfall' });
-      expect((within(settings).getByLabelText('OCR engine') as HTMLSelectElement).value).toBe('TESSERACT');
-      await act(async () => {});
-      await fireEvent.change(within(settings).getByLabelText('OCR engine'), { target: { value: 'LLM' } });
-      await fireEvent.change(within(settings).getByLabelText('Transcription profile'), { target: { value: 'p-cloud' } });
-      await fireEvent.input(within(settings).getByLabelText('External page allowance'), { target: { value: '5' } });
-      await fireEvent.click(within(settings).getByRole('button', { name: 'Save OCR engine settings' }));
-      await act(async () => {});
-
-      expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('nightfall', {
-        ocrEngine: 'LLM',
-        ocrImportMode: 'FILL_MISSING',
-        ocrTranscriptionProfileId: 'p-cloud',
-        ocrReviewProfileId: '',
-        ocrExternalPageLimit: 5,
-      });
-      expect(api.updateCollectionOcrLanguages).not.toHaveBeenCalled();
-      expect(onCollectionsChanged).toHaveBeenCalled();
-    });
-
-    it('does not let a settings save of one collection overwrite the collection selected meanwhile', async () => {
-      let finish!: (value: Collection) => void;
-      api.updateCollectionOcrSettings.mockImplementation(() => new Promise<Collection>((resolve) => { finish = resolve; }));
-      const { rerender } = render(CollectionsPanel, props({
-        collections: [collection('Nightfall'), { ...collection('Dawn'), ocrImportMode: 'CHECK_AND_IMPROVE', ocrExternalPageLimit: 9 }],
-        selectedId: 'nightfall',
-      }));
-
-      await act(async () => {});
-      await fireEvent.change(await screen.findByLabelText('OCR engine'), { target: { value: 'SURYA' } });
-      await fireEvent.click(screen.getByRole('button', { name: 'Save OCR engine settings' }));
-      await rerender({ selectedId: 'dawn' });
-      await act(async () => {});
-
-      expect((screen.getByLabelText('OCR engine') as HTMLSelectElement).value).toBe('TESSERACT');
-      expect((screen.getByLabelText('Import mode') as HTMLSelectElement).value).toBe('CHECK_AND_IMPROVE');
-      finish({ ...collection('Nightfall'), ocrEngine: 'SURYA' });
-      await act(async () => {});
-
-      expect((screen.getByLabelText('OCR engine') as HTMLSelectElement).value).toBe('TESSERACT');
-      expect((screen.getByLabelText('External page allowance') as HTMLInputElement).value).toBe('9');
-      expect(screen.queryByText('OCR engine settings saved.')).toBeNull();
-    });
-
-    it('offers Scan again in the document details and previews for the selected document', async () => {
-      api.previewRescan.mockResolvedValue(previewOf());
-      const details = await openDetails();
-      await act(async () => {});
-
-      expect(api.listRescanOperations).toHaveBeenCalledWith('nightfall', 'doc-1');
+      await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+      const details = await screen.findByRole('region', { name: 'Document details' });
+      expect(within(details).getByTestId('document-reading-status').textContent).toContain('Done');
       await fireEvent.click(within(details).getByRole('button', { name: 'Scan again' }));
-      await act(async () => {});
-      await fireEvent.click(within(details).getByRole('button', { name: 'Preview scan' }));
-      await act(async () => {});
-
-      expect(api.previewRescan).toHaveBeenCalledWith('nightfall', 'doc-1', {});
-      expect(within(details).getByRole('region', { name: 'Scan preview' })).toBeTruthy();
-    });
-
-    it('restores a waiting approval after a reload from the persisted operation', async () => {
-      api.listRescanOperations.mockResolvedValue([scan('AWAITING_APPROVAL')]);
-      api.getRescanOperation.mockResolvedValue(scan('AWAITING_APPROVAL'));
-      const details = await openDetails();
-      await act(async () => {});
-
-      const latest = within(details).getByRole('group', { name: 'Latest scan' });
-      expect(latest.textContent).toContain('Waiting for approval');
-      expect(within(latest).getByRole('button', { name: 'Review approval' })).toBeTruthy();
-      expect(within(latest).getByRole('button', { name: 'Cancel scan' })).toBeTruthy();
-    });
-
-    it('drops a preview that answers after another collection was selected', async () => {
-      let late!: (value: ReturnType<typeof previewOf>) => void;
-      api.previewRescan.mockImplementation(() => new Promise<ReturnType<typeof previewOf>>((resolve) => { late = resolve; }));
-      api.listCollectionDocuments
-        .mockResolvedValueOnce(page([documentRow('doc-1', { originalFilename: 'ledger.pdf' })]))
-        .mockResolvedValue(page([]));
-      api.getCollectionDocument.mockResolvedValue({
-        document: documentRow('doc-1', { originalFilename: 'ledger.pdf' }),
-        errorMessage: null,
-        sourceId: 'unit-1',
-      });
-      const { rerender } = render(CollectionsPanel, props({
-        collections: [collection('Nightfall', 1), collection('Dawn')],
-        selectedId: 'nightfall',
-      }));
-      await screen.findByRole('table');
-      await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
-      await screen.findByRole('region', { name: 'Document details' });
-      await act(async () => {});
-      await fireEvent.click(screen.getByRole('button', { name: 'Scan again' }));
-      await act(async () => {});
-      await fireEvent.click(screen.getByRole('button', { name: 'Preview scan' }));
-
-      await rerender({ selectedId: 'dawn' });
-      await act(async () => {});
-      late(previewOf());
-      await act(async () => {});
-
-      expect(screen.queryByRole('region', { name: 'Scan preview' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Start scan' })).toBeNull();
-    });
-
-    it('drops an operation read that answers after another collection was selected', async () => {
-      vi.useFakeTimers();
-      try {
-        api.listRescanOperations.mockResolvedValue([scan('OCR')]);
-        let late!: (value: ReturnType<typeof scan>) => void;
-        api.getRescanOperation.mockImplementation(() => new Promise<ReturnType<typeof scan>>((resolve) => { late = resolve; }));
-        api.listCollectionDocuments
-          .mockResolvedValueOnce(page([documentRow('doc-1', { originalFilename: 'ledger.pdf' })]))
-          .mockResolvedValue(page([]));
-        api.getCollectionDocument.mockResolvedValue({
-          document: documentRow('doc-1', { originalFilename: 'ledger.pdf' }),
-          errorMessage: null,
-          sourceId: 'unit-1',
-        });
-        const { rerender } = render(CollectionsPanel, props({
-          collections: [collection('Nightfall', 1), collection('Dawn')],
-          selectedId: 'nightfall',
-        }));
-        await act(async () => {});
-        await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
-        await act(async () => {});
-        await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
-
-        await rerender({ selectedId: 'dawn' });
-        await act(async () => {});
-        late(scan('COMPLETE', { pendingReviewCount: 4 }));
-        await act(async () => {});
-
-        expect(screen.queryByRole('group', { name: 'Latest scan' })).toBeNull();
-        expect(screen.queryByText(/Needs review: 4 pages/)).toBeNull();
-      } finally {
-        vi.useRealTimers();
-      }
+      expect(await within(details).findByRole('dialog')).toBeTruthy();
+      expect(api.previewRescan).toHaveBeenCalledWith('nightfall', 'doc-1', 'tesseract');
     });
   });
 });

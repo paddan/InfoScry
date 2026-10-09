@@ -8,6 +8,7 @@ import infoscry.domain.DocumentStatus
 import infoscry.domain.UnitKind
 import infoscry.jobs.ImportJobHandler
 import infoscry.ocr.OcrQualityScorer
+import infoscry.ocr.OcrOperation
 import infoscry.storage.DocumentListing
 import infoscry.storage.DocumentProgress
 import infoscry.storage.DocumentSort
@@ -187,6 +188,7 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                 val documents = context.documents.listListing(listing, minOf(limit, MAX_DOCUMENTS_PER_PAGE), offset)
                 // One batched read for the whole page: a progress cell per row must not be a query per row.
                 val progress = context.content.documentProgress(documents.map { it.id })
+                val readings = context.ocrOperations.latestForDocuments(documents.map { it.id })
                 // Only complete documents are scored, so the text is read for those alone and in one batch too.
                 val texts = context.content.extractedTextsOf(
                     documents.filter { it.status == DocumentStatus.COMPLETE }.map { it.id },
@@ -195,7 +197,11 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                     HttpStatusCode.OK,
                     DocumentsResponse(
                         documents = documents.map {
-                            it.toListItem(progress[it.id]?.toView(), it.qualityScoreFrom { texts[it.id] })
+                            it.toListItem(
+                                readings[it.id].readingProgress() ?: progress[it.id]?.toView(),
+                                it.qualityScoreFrom { texts[it.id] },
+                                readings[it.id],
+                            )
                         },
                         total = context.documents.countListing(listing),
                     ),
@@ -233,6 +239,8 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                     ?.takeIf { it.collectionId == collection.id }
                     ?: throw NoSuchElementException("no document with id $rawDocumentId exists in this collection")
                 val progress = context.content.documentProgress(listOf(document.id))[document.id]
+                val reading = context.ocrOperations.latestForDocuments(listOf(document.id))[document.id]
+                val currentProgress = reading.readingProgress() ?: progress?.toView()
                 val errorMessage = document.errorCode?.let { ImportJobHandler.messageFor(it) }
                 val qualityScore = document.qualityScoreFrom {
                     context.content.extractedTextsOf(listOf(document.id))[document.id]
@@ -240,12 +248,12 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                 call.respondJson(
                     HttpStatusCode.OK,
                     DocumentDetail(
-                        document = document.toListItem(progress?.toView(), qualityScore),
+                        document = document.toListItem(currentProgress, qualityScore, reading),
                         errorMessage = errorMessage,
                         qualityScore = qualityScore,
                         sourceId = context.content.listUnits(document.id, afterOrdinal = -1, limit = 1)
                             .firstOrNull()?.id?.value,
-                        progress = progress?.toView(),
+                        progress = currentProgress,
                         // Retry is offered for work that stopped without finishing the document, and never for
                         // one whose managed copy is gone: there would be nothing to read.
                         retryEligible = context.retryService.isEligible(document) &&
@@ -326,13 +334,13 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                     )
                 }
                 val admission = if (request.allEligible) {
-                    context.retryService.admitRetryOfEligible(collection.id, request.ocr)
+                    context.retryService.admitRetryOfEligible(collection.id, request.method?.let(infoscry.ocr.ReadingMethod::parse), request.requestId)
                 } else {
                     val documentIds = request.documentIds.map { raw ->
                         raw.takeIf(String::isNotBlank)?.let(::DocumentId)
                             ?: throw BadRequestException("a document id in the request was blank")
                     }
-                    context.retryService.admitRetry(collection.id, documentIds, request.ocr)
+                    context.retryService.admitRetry(collection.id, documentIds, request.method?.let(infoscry.ocr.ReadingMethod::parse), request.requestId)
                 }
                 call.respondJson(
                     HttpStatusCode.Accepted,
@@ -358,10 +366,11 @@ data class RetryDocumentsRequest(
     val documentIds: List<String> = emptyList(),
     val allEligible: Boolean = false,
     /**
-     * The OCR method to read with instead of the collection's, or absent to keep the collection's settings.
+     * A new reading method, or absent to resume each failed run's frozen settings.
      * It is validated and admitted like a rescan preview, and applies to every document of the request.
      */
-    val ocr: infoscry.document.RetryOcrChoice? = null,
+    val method: String? = null,
+    val requestId: String? = null,
 )
 
 /** One document a retry refused, and InfoScry's own sentence for the reason. */
@@ -439,13 +448,17 @@ private inline fun Document.qualityScoreFrom(unitTexts: () -> List<String>?): Do
     return OcrQualityScorer.documentScoreOfTexts(unitTexts().orEmpty())
 }
 
-private fun Document.toListItem(progress: DocumentProgressView? = null, qualityScore: Double? = null) = DocumentListItem(
+private fun Document.toListItem(
+    progress: DocumentProgressView? = null,
+    qualityScore: Double? = null,
+    reading: OcrOperation? = null,
+) = DocumentListItem(
     id = id,
     collectionId = collectionId,
     mediaType = mediaType,
     originalFilename = originalFilename,
     sizeBytes = sizeBytes,
-    status = status,
+    status = if (reading?.stage?.holdsDocument == true && status != DocumentStatus.QUEUED) DocumentStatus.OCR else status,
     createdAt = createdAt,
     updatedAt = updatedAt,
     title = title,
@@ -465,3 +478,14 @@ private fun DocumentProgress.toView() = DocumentProgressView(
     directTextUnits = directTextUnits,
     ocrUnits = ocrUnits,
 )
+/** A staged reading counts its own pages while the published import checkpoints remain intact. */
+private fun OcrOperation?.readingProgress(): DocumentProgressView? = this?.takeIf { it.stage.holdsDocument }?.let {
+    DocumentProgressView(
+        unitKind = UnitKind.PAGE,
+        totalUnits = it.pageTotal,
+        processedUnits = it.pagesCommitted,
+        failedUnits = it.pagesFailed,
+        directTextUnits = 0,
+        ocrUnits = it.pagesCommitted,
+    )
+}

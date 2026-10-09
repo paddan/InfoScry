@@ -25,16 +25,11 @@ import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportJobPayload
 import infoscry.jobs.ImportPipeline
 import infoscry.logging.LoggingBootstrap
-import infoscry.ocr.OcrEndpointScope
-import infoscry.ocr.OcrExternalOwner
-import infoscry.ocr.OcrOperationStage
 import infoscry.server.ApiJson
 import infoscry.server.PRODUCT_NAME
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
-import infoscry.storage.JobStore
 import infoscry.storage.MaintenanceInProgressException
-import infoscry.storage.OcrOperationStore
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.delay
@@ -99,6 +94,9 @@ class ImportCommand(
         help = "Files or directories to import",
     ).multiple(required = true)
 
+    private val methodOption by option("--method", help = "Reading method: tesseract, surya, or llm:<profileId>")
+    private val yesFlag by option("--yes", help = "Confirm sending the previewed pages to an external endpoint").flag()
+
     private val waitFlag by option(
         "--wait",
         help = "Wait for the import to finish and report every document",
@@ -132,12 +130,22 @@ class ImportCommand(
         val paths = AppPaths.of(options.dataDir)
         val requested = canonicalSources(sources)
 
-        val remote = RuntimeInfo.discover(paths.runtimeFile)
-        if (remote != null) {
-            importThroughServer(remote, requested, extensions, options)
-            return
+        try {
+            val remote = RuntimeInfo.discover(paths.runtimeFile)
+            if (remote != null) {
+                importThroughServer(remote, requested, extensions, options)
+                return
+            }
+            importHere(paths, requested, extensions, options)
+        } catch (unavailable: infoscry.ocr.ReadingMethodUnavailableException) {
+            throw CliFailure("METHOD_UNAVAILABLE: ${unavailable.reason}", unavailable)
+        } catch (stale: infoscry.jobs.StaleImportPreviewException) {
+            throw CliFailure(stale.message.orEmpty(), stale)
+        } catch (conflict: infoscry.storage.StartRequestConflictException) {
+            throw CliFailure("REQUEST_ID_CONFLICT: ${conflict.message.orEmpty()}", conflict)
+        } catch (invalid: IllegalArgumentException) {
+            throw CliFailure(invalid.message.orEmpty(), invalid)
         }
-        importHere(paths, requested, extensions, options)
     }
 
     /** The extension filter the flags name, or a refusal when both lists are given. */
@@ -182,45 +190,17 @@ class ImportCommand(
                 err = true,
             )
             val collection = open.collectionService.requireActiveByNameOrId(collection)
-            // The tool's version is asked for once here, before the job exists, because it is part of what
-            // the job's checkpoints are keyed by. `runBlocking` rather than a suspend command: the CLI is
-            // a blocking program, and this is the one suspension it has before its own job loop starts. The
-            // snapshot records the reading engine's runtime for the same reason — a resumed attempt reads
-            // under the runtime it was admitted with, never one discovered later.
-            val snapshot = runBlocking {
-                open.ocr.withProbedRuntime(
-                    open.ocr.snapshotFor(
-                        settings = collection.ocrSettings(),
-                        extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
-                        renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
-                    ),
-                )
-            }
-            val settings = runBlocking { ToolProbe.extractionSettings(collection.ocrLanguages) }
-                .forOcrSettings(snapshot)
-            val payload = ImportJobPayload.of(
-                collectionId = collection.id,
-                sources = requested,
-                settings = settings,
-                recursive = recursiveFlag,
-                ocr = snapshot,
-                extensions = extensions,
-                ignore = open.collectionService.ignorePatterns(collection.id),
-            )
+            val method = methodOption?.let(infoscry.ocr.ReadingMethod::parse) ?: collection.ocrSettings().defaultMethod
+            val previewRequest = infoscry.jobs.ImportPreviewRequest(collection = collection.id, paths = requested,
+                recursive = recursiveFlag, include = extensions.include, exclude = extensions.exclude, method = method)
+            val preview = open.importPreviewService.preview(previewRequest)
+            confirmPreview(preview, method.id)
             val job = try {
                 runBlocking {
-                    open.mutations.withMutation {
-                        // The same gate the API route passes: an unresolved unsafe deletion refuses new work
-                        // here too, so a standalone import cannot add documents an operator has to repair
-                        // around first.
-                        open.collectionService.requireMutationsAllowed()
-                        open.jobs.enqueue(
-                            type = JobType.IMPORT,
-                            collectionId = collection.id,
-                            payload = payload.encode(),
-                            total = 0,
-                        )
-                    }
+                    open.importStartService.start(infoscry.jobs.ImportStartRequest(collectionId = collection.id,
+                        paths = requested, recursive = recursiveFlag, include = extensions.include,
+                        exclude = extensions.exclude, method = method, previewHash = preview.previewHash,
+                        requestId = commandRequestId(previewRequest, preview.previewHash), restartStopped = true))
                 }
             } catch (maintenance: MaintenanceInProgressException) {
                 throw CliFailure("MAINTENANCE_IN_PROGRESS: ${maintenance.message.orEmpty()}", maintenance)
@@ -239,18 +219,11 @@ class ImportCommand(
                 )
             }
             val items = open.importItems.listForJob(job.id)
-            // What this import did with pages that leave the machine, and what has to happen before more of them
-            // may: a command that reported a clean success while a scope waited for a person would be telling
-            // the person the archive did something it did not do.
-            reportExternalAdmission(open, job.id, payload, items)
             report(
                 job = finished,
                 items = items,
                 options = options,
                 executedHere = true,
-                // The standalone path holds the payload, so the remedy can name the exact hash an approval has
-                // to carry rather than a placeholder.
-                snapshotHash = payload.ocr?.let(OcrOperationStore::snapshotHashOf),
             )
         }
     }
@@ -265,7 +238,18 @@ class ImportCommand(
         LoopbackApi(runtime).use { api ->
             val accepted = try {
                 runBlocking {
-                    api.enqueueImport(collection, requested, recursiveFlag, extensions.include, extensions.exclude)
+                    val selected = api.listCollections().let { all ->
+                        all.firstOrNull { it.id.value == collection } ?: all.firstOrNull { it.name.equals(collection, ignoreCase = true) }
+                    } ?: throw CliFailure("no usable collection named or identified by '$collection'")
+                    val method = methodOption?.let(infoscry.ocr.ReadingMethod::parse) ?: selected.ocrSettings().defaultMethod
+                    val request = infoscry.jobs.ImportPreviewRequest(collection = selected.id, paths = requested,
+                        recursive = recursiveFlag, include = extensions.include, exclude = extensions.exclude, method = method)
+                    val preview = api.previewImport(request)
+                    confirmPreview(preview, method.id)
+                    api.enqueueImport(infoscry.server.ImportRequest(collection = selected.id.value, paths = requested,
+                        recursive = recursiveFlag, include = extensions.include, exclude = extensions.exclude,
+                        method = method.id, previewHash = preview.previewHash,
+                        requestId = commandRequestId(request, preview.previewHash), restartStopped = true))
                 }
             } catch (failure: RemoteApiFailure) {
                 throw CliFailure("${failure.code}: ${failure.message}", failure)
@@ -278,6 +262,35 @@ class ImportCommand(
             val items = runBlocking { api.importItems(accepted.job.id) }
             report(finished, items, options, executedHere = false)
         }
+    }
+
+    private fun confirmPreview(preview: infoscry.jobs.ImportPreview, method: String) {
+        val count = (if (preview.atLeast) "at least " else "") + preview.totalPages
+        val action = if (preview.external) "Send" else "Read"
+        echo("$action $count pages ${if (preview.external) "to" else "on"} ${preview.destination} with $method.", err = true)
+        if (preview.external) {
+            if (preview.atLeast) {
+                echo("All pages in these files will be sent; the total cost is unavailable because their page count is unknown:", err = true)
+                preview.files.forEach { file ->
+                    echo("${file.path}: ${file.pages?.let { "$it pages" } ?: "page count unknown"}", err = true)
+                }
+            }
+            preview.estimatedCostUsd?.let { echo("Estimated cost: USD $it.", err = true) }
+            preview.costBasis?.let { echo(it, err = true) }
+            if (!yesFlag) {
+                echo("Send these pages? [y/N]", err = true)
+                if (readlnOrNull()?.trim()?.lowercase() !in setOf("y", "yes")) {
+                    throw CliFailure("Import cancelled before any job was queued.")
+                }
+            }
+        }
+    }
+
+    private fun commandRequestId(request: infoscry.jobs.ImportPreviewRequest, previewHash: String): String {
+        val canonical = request.copy(paths = request.paths.distinct().sorted(),
+            include = request.include.sorted(), exclude = request.exclude.sorted())
+        val bytes = (ApiJson.encodeToString(canonical) + "\n" + previewHash).toByteArray(Charsets.UTF_8)
+        return "cli-import-" + java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))
     }
 
     private fun reportAccepted(jobId: JobId, state: JobState, options: CliOptions, executedHere: Boolean) {
@@ -314,27 +327,11 @@ class ImportCommand(
         items: List<ImportItem>,
         options: CliOptions,
         executedHere: Boolean,
-        snapshotHash: String? = null,
     ) {
         val counts = items.groupingBy { it.outcome }.eachCount()
         val imported = counts[ImportItemOutcome.IMPORTED] ?: 0
         val duplicates = counts[ImportItemOutcome.DUPLICATE] ?: 0
         val failed = counts[ImportItemOutcome.FAILED] ?: 0
-
-        // A job that stopped for an external page approval has *not* finished: what it did is exactly the part
-        // of the import that needed nothing external, and the rest is waiting for a person. Reporting a result
-        // here would tell them the archive did something it deliberately did not — nothing beyond the approved
-        // scope was sent — so the requirement and its remedy are what this prints.
-        if (job.stage == JobStore.AWAITING_APPROVAL_STAGE) {
-            val waiting = items.count { it.outcome != ImportItemOutcome.IMPORTED }
-            echo("$waiting of ${items.size} file(s) wait for an external page approval before they can be read.", err = true)
-            echo(waitingApprovalRemedy(job.id.value, snapshotHash), err = true)
-            throw CliFailure(
-                "the import stopped before sending a page its external scope did not cover; approve the scope " +
-                    "and run the import again — the files it already imported are skipped, and nothing beyond " +
-                    "the approved scope was sent",
-            )
-        }
 
         if (options.json) {
             echo(
@@ -387,100 +384,6 @@ class ImportCommand(
             throw CliFailure("the import ended as ${job.state} without processing every document")
         }
     }
-
-    /**
-     * Reports what left the machine, and fails when an admission a person owes is outstanding.
-     *
-     * The standalone import owns its process until the job ends, so this is the moment the truth is known
-     * rather than guessed. Two things are reported: the external-page counters of the *job* — one allowance
-     * covers every file of one import — and the remedy for an operation that is waiting for an approval.
-     * More pages sent than the allowance authorized is a failure of the command, because the archive has done
-     * something no person approved; a scope that is exactly spent is a warning, because the work is done.
-     */
-    private fun reportExternalAdmission(
-        context: AppContext,
-        jobId: JobId,
-        payload: ImportJobPayload,
-        items: List<ImportItem>,
-    ) {
-        val snapshot = payload.ocr
-        val external = snapshot != null && listOfNotNull(
-            snapshot.transcriptionProfileRevisionId,
-            snapshot.reviewProfileRevisionId,
-        ).any { revisionId -> context.ocrProfiles.findRevision(revisionId)?.scope == OcrEndpointScope.EXTERNAL }
-        if (external) {
-            val owner = OcrExternalOwner.job(jobId.value)
-            val account = context.ocrOperations.allowanceFor(
-                owner = owner,
-                configuredAllowance = snapshot.externalPageLimit,
-                snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
-            )
-            echo(
-                "External pages: ${account.distinctPages} distinct page(s) sent, allowance ${account.allowance}, " +
-                    "${account.calls} provider call(s) (a page transcribed and then reviewed is one page and " +
-                    "two calls).",
-            )
-            if (account.distinctPages > account.allowance) {
-                echo(approvalRemedy(jobId.value, snapshot.externalPageLimit, account.distinctPages), err = true)
-                throw CliFailure(
-                    "this import sent ${account.distinctPages} page(s) while only ${account.allowance} were " +
-                        "authorized; the scope has to be approved before more pages may leave this machine",
-                )
-            }
-        }
-
-        // A rescan of an imported document — a person's later action, or another process's — can also be left
-        // waiting for an approval, and an import that reported success while one was would be hiding it.
-        val waiting = items.mapNotNull { item -> item.documentId }
-            .distinct()
-            .flatMap { documentId -> context.ocrOperations.operations(documentId) }
-            .filter { operation -> operation.stage == OcrOperationStage.AWAITING_APPROVAL }
-        if (waiting.isEmpty()) return
-        waiting.forEach { operation ->
-            echo(
-                "Approval needed: document ${operation.documentId.value} has sent " +
-                    "${operation.external.distinctPages} page(s) and waits before it reads another.",
-                err = true,
-            )
-            echo(approvalRemedy(operation), err = true)
-        }
-        throw CliFailure(
-            "${waiting.size} rescan(s) are waiting for an external page approval; nothing beyond the approved " +
-                "scope was sent",
-        )
-    }
-
-    /**
-     * The remedy for an import that stopped for an external page approval, as a command a person can run.
-     *
-     * The approval is bound to the job's own OCR selection — that binding is what stops one scope's approval
-     * from covering another — and this standalone path knows the hash because the payload is its own. The
-     * remote path never receives the payload, so it names what the body has to carry rather than inventing a
-     * hash no approval would match.
-     */
-    private fun waitingApprovalRemedy(jobId: String, snapshotHash: String?): String =
-        "Approve the import's scope: POST /api/jobs/$jobId/approve-external with the runtime bearer token and " +
-            "body {\"expectedSnapshotHash\":\"${snapshotHash ?: "the job's OCR selection hash"}\"," +
-            "\"maxDistinctPages\":<the number of distinct pages you authorize>}"
-
-    /**
-     * The remedy for an unapproved external scope, as a command a person can run.
-     *
-     * It names the exact call, the snapshot hash the approval has to bind to, and the collection and document
-     * it belongs to, because an approval that named another scope would be refused — that refusal is the point
-     * of binding one to a snapshot hash.
-     */
-    private fun approvalRemedy(operation: infoscry.ocr.OcrOperation): String =
-        "Approve the scope it was admitted with: POST " +
-            "/api/collections/${operation.collectionId}/documents/${operation.documentId.value}/ocr/operations/" +
-            "${operation.operationId}/approve-external with the runtime bearer token and body " +
-            "{\"expectedSnapshotHash\":\"${OcrOperationStore.snapshotHashOf(operation.snapshot)}\"," +
-            "\"maxDistinctPages\":<the number of distinct pages you authorize>}"
-
-    private fun approvalRemedy(jobId: String, allowance: Int, sent: Int): String =
-        "Approve the import's scope: POST /api/jobs/$jobId/approve-external with the runtime bearer token and " +
-            "body {\"expectedSnapshotHash\":\"<the job's snapshot hash>\",\"maxDistinctPages\":<more than " +
-            "$sent, the pages already sent with an allowance of $allowance>}"
 
     private fun describe(item: ImportItem): String = buildString {
         append(item.outcome)

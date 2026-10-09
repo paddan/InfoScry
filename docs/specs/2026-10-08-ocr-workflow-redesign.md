@@ -1,7 +1,7 @@
 # OCR workflow redesign: choose at start, read everything, no review
 
-Status: design agreed in conversation on 2026-10-08; **this spec awaits the
-product owner's review and nothing in it is implemented.** It supersedes the
+Status: approved for implementation on 2026-10-08. Implementation and verification
+are recorded in the [ticket status](../tickets/ocr-workflow-redesign/STATUS.md). It supersedes the
 parts of [selectable OCR and rescanning](2026-09-30-ocr-rescanning.md) listed
 under "Superseded contracts". Where the two disagree, this document wins once
 approved; until then the older spec describes the shipped behavior.
@@ -42,6 +42,12 @@ The redesign gives one place to decide, one confirmation, and one result.
    start yet" may be the answer to starting again. See "Always restartable".
 8. The application is single-user. Protection for other readers of a document
    while it is being rescanned is not required.
+9. For an external import with an unknown page count, approval covers every page
+   in the exact unchanged files shown in the dialog. The confirmed source
+   manifest (path, size and SHA-256) is the authority; no exact page allowance or
+   exact cost is claimed. A retry may retain that scope only when it resumes the
+   original reading against the same immutable managed document and unchanged
+   method snapshot.
 
 ## Reading methods
 
@@ -73,7 +79,9 @@ Opened by *Import* (file or directory) and by *Scan again* on a document.
 - For an import of a directory the page total is computed before the dialog
   opens (see "Preview"). A file whose page count cannot be determined is listed
   as such; the total then reads `at least N` and the approval covers the stated
-  files only.
+  files only. When the method is external, an unknown count means the exact
+  unchanged files shown are approved for all their pages; the dialog says that
+  no exact cost estimate is available.
 
 ## Preview
 
@@ -136,8 +144,8 @@ behind.**
 ## Collection settings
 
 Kept: OCR language, default reading method (engine and profile as one value).
-Removed: import mode, reviewer profile, external page allowance. A migration
-drops the removed values; a stored engine/profile pair that disagrees is
+Removed: import mode, reviewer profile, external page allowance. The removed columns remain for database compatibility and are no longer read or written;
+idempotent startup cleanup withdraws stale work. a stored engine/profile pair that disagrees is
 resolved to the engine's local method.
 
 ## Single-user simplifications (read this part carefully)

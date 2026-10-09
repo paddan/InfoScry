@@ -14,7 +14,6 @@
     listUnfinishedDeletions,
     renameCollection,
     updateCollectionIgnorePatterns,
-    updateCollectionOcrLanguages,
     type Collection,
     type DeletionOperation,
     type DocumentApiRow,
@@ -33,14 +32,12 @@
   } from './api';
   import CollectionOcrSettings from './CollectionOcrSettings.svelte';
   import DocumentRescan from './DocumentRescan.svelte';
-  import OcrChoiceFields from './OcrChoiceFields.svelte';
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
-  import JobApproval from './JobApproval.svelte';
-  import { emptyChoice, retryChoice } from './ocrRescan';
   import { qualityLabel } from './ocrQuality';
+  import { documentStatus } from './documentStatus';
 
   export let collections: Collection[];
   export let selectedId: string;
@@ -71,13 +68,13 @@
    * request and hands back what to show: the attempt it queued, or the server's own sentence for a refusal.
    * The panel never touches the viewer, so nothing about the page's source state moves for a retry.
    */
-  export let onRetryDocument: (documentId: string, ocr?: RetryOcrChoice) => Promise<RetryAttempt>;
+  export let onRetryDocument: (documentId: string, options?: RetryOcrChoice) => Promise<RetryAttempt>;
   /**
    * Asks for every eligible document of the managed collection to be read again, across all pages. It names
    * no documents and carries no filter or page, because the collection-wide set is the server's to pick; the
    * page answers with what the server admitted and refused.
    */
-  export let onRetryAllDocuments: (ocr?: RetryOcrChoice) => Promise<RetryAdmission>;
+  export let onRetryAllDocuments: (options?: RetryOcrChoice) => Promise<RetryAdmission>;
 
   /** The rows one page asks for; the server's own maximum stays 200. */
   const PAGE_SIZE = 50;
@@ -101,7 +98,6 @@
     INDEXING: 'Indexing',
     COMPLETE: 'Complete',
     COMPLETE_WITH_WARNINGS: 'Complete with warnings',
-    NEEDS_REVIEW: 'Needs review',
     FAILED: 'Failed',
     CANCELLED: 'Cancelled',
     NEEDS_TOOL: 'Needs a tool',
@@ -164,7 +160,6 @@
   let renameSaving = false;
   let renameError: string | null = null;
   let renameSaved = false;
-  let ocrLanguages = '';
   // The ignore patterns draft: one pattern per line. `ignoreLoaded` is false until the saved list has been read, so a
   // save can never replace a list the reader has not seen.
   let ignoreText = '';
@@ -172,9 +167,6 @@
   let ignoreSaving = false;
   let ignoreError: string | null = null;
   let ignoreSaved = false;
-  let ocrSaving = false;
-  let ocrError: string | null = null;
-  let ocrSaved = false;
   /**
    * The settings draft's generation. A save reads across an await and the reader can select another
    * collection meanwhile, so the generation captured when a save starts is what decides whether its
@@ -209,14 +201,6 @@
   let detailGeneration = 0;
   /** One retry at a time, because it is one attempt per document and the button is per document too. */
   let retrySubmitting = false;
-  let retryMessage: string | null = null;
-  let retryError: string | null = null;
-  /**
-   * Whether this retry reads with a method chosen here instead of the collection's settings, and the choice.
-   * Closed by default, and an open form that names nothing is the same request as a closed one.
-   */
-  let retryChoiceOpen = false;
-  let retryChoiceValue = emptyChoice();
 
   /**
    * The collection-wide retry: one submission at a time, what the server answered, and the documents it
@@ -227,8 +211,6 @@
   let retryAllMessage: string | null = null;
   let retryAllRejected: RetryRejection[] = [];
   let retryAllError: string | null = null;
-  let retryAllChoiceOpen = false;
-  let retryAllChoiceValue = emptyChoice();
 
   let imports: ImportHistoryEntry[] = [];
   let importsTotal = 0;
@@ -377,24 +359,18 @@
     retryAllMessage = null;
     retryAllRejected = [];
     retryAllError = null;
-    retryAllChoiceOpen = false;
-    retryAllChoiceValue = emptyChoice();
     startImports();
     void loadDocuments();
   }
 
-  /** The settings fields start from the selected collection's own stored name and OCR languages. */
+  /** The settings fields start from the selected collection's own stored name. */
   function startSettings(collectionId: string): void {
     settingsGeneration += 1;
     const collection = collections.find((candidate) => candidate.id === collectionId);
     renameName = collection?.name ?? '';
-    ocrLanguages = collection?.ocrLanguages ?? '';
     renameSaving = false;
     renameError = null;
     renameSaved = false;
-    ocrSaving = false;
-    ocrError = null;
-    ocrSaved = false;
     ignoreText = '';
     ignoreLoaded = false;
     ignoreSaving = false;
@@ -467,36 +443,6 @@
       renameError = describe(failure);
     } finally {
       if (generation === settingsGeneration) renameSaving = false;
-    }
-  }
-
-  /**
-   * Saves the OCR languages the server snapshots into future imports and explicit retries. Nothing
-   * here reprocesses a document: the server changes what the next attempt starts with, and a
-   * completed document is left exactly as it is.
-   */
-  async function saveLanguages(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    const collection = selected;
-    if (collection === null || ocrSaving) return;
-    const generation = settingsGeneration;
-    ocrSaving = true;
-    ocrError = null;
-    ocrSaved = false;
-    try {
-      const updated = await updateCollectionOcrLanguages(collection.id, ocrLanguages.trim());
-      // Same guard as the name: another collection's answer must not land in this collection's draft.
-      if (generation !== settingsGeneration) return;
-      ocrLanguages = updated.ocrLanguages;
-      ocrSaved = true;
-      // The listing the panel was handed now carries the settings it just wrote, so the draft stays
-      // truthful when another collection is managed and this one is opened again.
-      await onCollectionsChanged();
-    } catch (failure) {
-      if (generation !== settingsGeneration) return;
-      ocrError = describe(failure);
-    } finally {
-      if (generation === settingsGeneration) ocrSaving = false;
     }
   }
 
@@ -628,10 +574,6 @@
     detailError = null;
     detailLoading = false;
     retrySubmitting = false;
-    retryMessage = null;
-    retryError = null;
-    retryChoiceOpen = false;
-    retryChoiceValue = emptyChoice();
   }
 
   /**
@@ -641,27 +583,29 @@
    * does with the answer is show it and re-read the document, so the row and the details show the attempt the
    * server actually queued rather than the one the click hoped for.
    */
-  async function retryDocument(entry: DocumentDetail | null): Promise<void> {
-    if (entry === null || retrySubmitting) return;
+  async function retryDocument(entry: DocumentDetail | null, options?: RetryOcrChoice): Promise<RetryAttempt> {
+    if (entry === null || retrySubmitting) return { accepted: false, reason: 'A retry is already running.' };
     const documentId = entry.document.id;
     retrySubmitting = true;
-    retryMessage = null;
-    retryError = null;
     try {
-      const ocr = retryChoiceOpen ? retryChoice(retryChoiceValue) : undefined;
-      const attempt = ocr === undefined ? await onRetryDocument(documentId) : await onRetryDocument(documentId, ocr);
-      if (!attempt.accepted) {
-        retryError = attempt.reason;
-        return;
-      }
-      retryMessage = 'Retry queued. The document will be read again from the copy InfoScry holds.';
+      const attempt = await onRetryDocument(documentId, options);
+      if (!attempt.accepted) return attempt;
       await openDetails(documentId);
       await loadDocuments();
+      return attempt;
     } catch (failure) {
-      retryError = describe(failure);
+      throw failure;
     } finally {
       retrySubmitting = false;
     }
+  }
+
+  async function refreshRetriedDocument(): Promise<DocumentApiRow | undefined> {
+    const current = detail;
+    if (current === null) return undefined;
+    await openDetails(current.document.id);
+    await loadDocuments();
+    return detail?.document;
   }
 
   /**
@@ -680,8 +624,7 @@
     retryAllRejected = [];
     retryAllError = null;
     try {
-      const ocr = retryAllChoiceOpen ? retryChoice(retryAllChoiceValue) : undefined;
-      const admission = ocr === undefined ? await onRetryAllDocuments() : await onRetryAllDocuments(ocr);
+      const admission = await onRetryAllDocuments();
       retryAllRejected = admission.rejected;
       retryAllMessage = retryAllSummary(admission);
       await loadDocuments();
@@ -803,12 +746,9 @@
     }, IMPORT_REFRESH_MILLIS);
   }
 
-  /**
-   * An import the history must keep reading: one not yet finished, or one that finished into the wait for
-   * an external-page approval, which the approval moves on from.
-   */
+  /** An import history entry that has not reached a terminal state. */
   function isWatchedImport(entry: ImportHistoryEntry): boolean {
-    return !TERMINAL_JOB_STATES.includes(entry.state) || entry.externalApproval !== undefined;
+    return !TERMINAL_JOB_STATES.includes(entry.state);
   }
 
   function changeImportsPage(delta: number): void {
@@ -859,20 +799,14 @@
     itemsLoading = false;
   }
 
-  /**
-   * What the State column says. A job paused for an external approval is COMPLETE in its record, but it has
-   * not completed: it waits for a person, so the row says so.
-   */
   function stateCell(entry: ImportHistoryEntry): string {
-    if (entry.state === 'COMPLETE' && entry.stage === 'awaiting-approval') return 'Waiting for approval';
     return JOB_STATE_LABELS[entry.state] ?? entry.state;
   }
 
   /**
    * What the Stage column says: the stage in a reader's words, and — while the import is unfinished — the
    * file it is reading now, e.g. `Extracting · report.pdf`. A finished import is in no stage and has nothing
-   * being read, so its row is empty, except for the wait for an approval; a stage the server never reported
-   * is an em dash.
+   * being read, so its row is empty; a stage the server never reported is an em dash.
    */
   function stageCell(entry: ImportHistoryEntry): string {
     const current = TERMINAL_JOB_STATES.includes(entry.state) ? null : entry.currentItem;
@@ -1415,31 +1349,6 @@
             {#if renameSaved}<p role="status">Name saved.</p>{/if}
           </form>
 
-          <form class="settings-form" onsubmit={saveLanguages}>
-            <div class="field">
-              <label for="collection-settings-ocr-languages">OCR languages</label>
-              <input
-                id="collection-settings-ocr-languages"
-                bind:value={ocrLanguages}
-                oninput={() => (ocrSaved = false)}
-                aria-invalid={ocrError !== null}
-                aria-describedby="collection-settings-ocr-note"
-              />
-            </div>
-            <div class="actions">
-              <button type="submit" class="primary" disabled={ocrSaving}>
-                {ocrSaving ? 'Saving languages…' : 'Save OCR languages'}
-              </button>
-            </div>
-            {#if ocrError !== null}<p role="alert">{ocrError}</p>{/if}
-            {#if ocrSaved}<p role="status">OCR languages saved.</p>{/if}
-            <p class="hint" id="collection-settings-ocr-note">
-              Saved languages are used by future imports and by explicit retries. Completed documents are
-              not reprocessed automatically; a retry that needs different languages may have to repeat
-              extraction for the documents it targets.
-            </p>
-          </form>
-
           <form class="settings-form" onsubmit={saveIgnorePatterns}>
             <div class="field">
               <label for="collection-settings-ignore">Ignored files</label>
@@ -1530,17 +1439,6 @@
             filter, sort order and current page do not restrict which documents it selects. Completed
             documents, and documents that only have warnings, are left alone.
           </p>
-          <label class="choice-toggle">
-            <input type="checkbox" bind:checked={retryAllChoiceOpen} />
-            Choose the OCR method for this retry
-          </label>
-          {#if retryAllChoiceOpen}
-            <p class="hint">
-              A choice left on the collection default uses the collection's settings. The collection itself is not
-              changed, and documents that already have a published text are left to Scan again.
-            </p>
-            <OcrChoiceFields idPrefix="retry-all" purpose="retry" showLanguage bind:choice={retryAllChoiceValue} />
-          {/if}
           <div class="actions">
             <button
               type="button"
@@ -1599,6 +1497,7 @@
               <tbody>
                 {#each documents as row (row.id)}
                   {@const quality = qualityLabel(row.qualityScore)}
+                  {@const reading = documentStatus(row)}
                   <tr>
                     <td class="select-cell">
                       <input
@@ -1612,13 +1511,18 @@
                     <td>{row.mediaType}</td>
                     <td>{formatSize(row.sizeBytes)}</td>
                     <td>{formatDate(row.createdAt)}</td>
-                    <td>{statusLabel(row.status)}</td>
+                    <td><span data-testid="document-reading-status">{reading.label}</span></td>
                     <td>
                       {progressLabel(row.progress)}
                       {#if quality !== null}<span class="ocr-quality {quality.level}">{quality.text}</span>{/if}
                     </td>
                     <td>
                       <button type="button" onclick={() => void openDetails(row.id)}>Details</button>
+                      {#if reading.nextAction !== null}
+                        <button type="button" aria-label={`${reading.nextAction === 'scan' ? 'Scan again' : reading.nextAction === 'retry' ? 'Retry' : 'Cancel and start over'} ${row.originalFilename}`} onclick={() => void openDetails(row.id)}>
+                          {reading.nextAction === 'scan' ? 'Scan again' : reading.nextAction === 'retry' ? 'Retry' : 'Cancel and start over'}
+                        </button>
+                      {/if}
                     </td>
                     <td>
                       <button
@@ -1693,8 +1597,6 @@
                 <dd>{formatSize(detail.document.sizeBytes)}</dd>
                 <dt>Imported</dt>
                 <dd>{formatDate(detail.document.createdAt)}</dd>
-                <dt>Status</dt>
-                <dd>{statusLabel(detail.document.status)}</dd>
               </dl>
               {#if detail.progress !== null && detail.progress !== undefined}
                 <dl class="progress">
@@ -1736,30 +1638,10 @@
                 </div>
               {/if}
               {#if detail.retryEligible}
-                <label class="choice-toggle">
-                  <input type="checkbox" bind:checked={retryChoiceOpen} />
-                  Choose the OCR method for this retry
-                </label>
-                {#if retryChoiceOpen}
-                  <p class="hint">
-                    A choice left on the collection default uses the collection's settings. A document that already
-                    has a published text is read again with Scan again instead, which shows the new reading before
-                    it replaces the old one.
-                  </p>
-                  <OcrChoiceFields idPrefix="retry" purpose="retry" showLanguage bind:choice={retryChoiceValue} />
-                {/if}
-                <div class="actions">
-                  <button type="button" onclick={() => void retryDocument(detail)} disabled={retrySubmitting}>
-                    {retrySubmitting ? 'Retrying…' : 'Retry'}
-                  </button>
-                </div>
                 <p class="hint">
-                  Retry reads this document again from the copy InfoScry holds, keeping its identity and any
-                  part of it that was already read successfully. If the collection's OCR languages changed
-                  since the last attempt, extraction may need to be repeated.
+                  Retry resumes this document from the copy InfoScry holds, using the settings of its failed
+                  reading and keeping the parts already read successfully.
                 </p>
-                {#if retryMessage !== null}<p role="status">{retryMessage}</p>{/if}
-                {#if retryError !== null}<p role="alert">{retryError}</p>{/if}
               {/if}
             {/if}
             {#if detail !== null}
@@ -1768,6 +1650,10 @@
                   collectionId={selected.id}
                   documentId={detail.document.id}
                   documentName={detail.document.originalFilename}
+                  document={detail.document}
+                  retryEligible={detail.retryEligible}
+                  onRetry={(options) => retryDocument(detail, options)}
+                  onRetryFinished={refreshRetriedDocument}
                 />
                 <OcrHistoryPanel
                   collectionId={selected.id}
@@ -1821,13 +1707,6 @@
                         </button>
                       </td>
                     </tr>
-                    {#if entry.externalApproval}
-                      <tr class="approval-row">
-                        <td colspan="5">
-                          <JobApproval jobId={entry.id} approval={entry.externalApproval} onapproved={() => void loadImports()} oncancelled={() => void loadImports()} />
-                        </td>
-                      </tr>
-                    {/if}
                   {/each}
                 </tbody>
               </table>

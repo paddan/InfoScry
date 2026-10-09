@@ -2,16 +2,16 @@
   import { onDestroy } from 'svelte';
   import {
     ApiError,
-    enqueueImport,
     getImportItems,
     getJob,
     pickPaths,
-    type ImportExternalApprovalResponse,
+    type ImportStarted,
     type ImportItemApiView,
     type JobApiView,
     type JobState,
   } from './api';
-  import JobApproval from './JobApproval.svelte';
+  import type { RescanStarted } from './api';
+  import StartReadingDialog from './StartReadingDialog.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { importProgressText } from './importProgress';
 
@@ -30,6 +30,7 @@
   let importing = false;
   let error: string | null = null;
   let job: JobApiView | null = null;
+  let dialogOpen = false;
   let items: ImportItemApiView[] = [];
   let importGeneration = 0;
   /**
@@ -57,14 +58,6 @@
 
   function isTerminal(state: JobState): boolean {
     return TERMINAL_STATES.includes(state);
-  }
-
-  /**
-   * A job paused for external pages is COMPLETE in its record, so its state alone reads as finished. The
-   * stage and the approval the server attaches say it is still waiting on a person.
-   */
-  function awaitingApproval(current: JobApiView): boolean {
-    return current.state === 'COMPLETE' && current.stage === 'awaiting-approval' && Boolean(current.externalApproval);
   }
 
   function addPaths(paths: string[]): void {
@@ -123,23 +116,27 @@
     });
   }
 
-  async function startImport(): Promise<void> {
+  function startImport(): void {
     if (collectionId === '' || selectedPaths.length === 0 || extensionListEmpty || importing) return;
+    dialogOpen = true;
+  }
+
+  function readingStarted(run: ImportStarted | RescanStarted): void {
+    dialogOpen = false;
+    if (!('job' in run)) return;
+    void followImport(run.job);
+  }
+
+  async function followImport(initial: JobApiView): Promise<void> {
     const generation = ++importGeneration;
     error = null;
     items = [];
     job = null;
     importing = true;
     try {
-      const extensions = {
-        include: fileTypes === 'include' ? listedExtensions : [],
-        exclude: fileTypes === 'exclude' ? listedExtensions : [],
-      };
-      const enqueued = await enqueueImport(collectionId, selectedPaths, recursive, extensions);
-      if (generation !== importGeneration) return;
-      job = enqueued.job;
-      let current = enqueued.job;
-      while (!isTerminal(current.state) || awaitingApproval(current)) {
+      job = initial;
+      let current = initial;
+      while (!isTerminal(current.state)) {
         await sleep(1000);
         if (generation !== importGeneration) return;
         current = await getJob(current.id);
@@ -168,27 +165,10 @@
   }
 
   /**
-   * The server recorded the approval and the job resumes, so the form leaves. The polling loop is still
-   * running and reads the job's new state on its next poll; the state given here only bridges that gap.
-   */
-  function approved(answer: ImportExternalApprovalResponse): void {
-    if (job === null) return;
-    const state: JobState = answer.state === 'QUEUED' ? 'QUEUED' : 'RUNNING';
-    job = { ...job, state, stage: answer.stage ?? null, externalApproval: undefined };
-  }
-
-  /** The server ended the paused import as cancelled, so the form leaves and the polling loop sees it ended. */
-  function cancelled(): void {
-    if (job === null) return;
-    job = { ...job, state: 'CANCELLED', stage: null, externalApproval: undefined };
-  }
-
-  /**
    * The status line for the job as it is now. It takes its inputs as arguments so the reactive statement
    * below re-runs whenever the job, the run state or the results change.
    */
   function jobStatus(current: JobApiView | null, active: boolean, results: ImportItemApiView[]): string {
-    if (active && current !== null && awaitingApproval(current)) return 'Waiting for your approval.';
     if (active && current !== null) {
       // The line names the file being imported and the stage a reader can act on: `Importing report.pdf
       // — Copying · 3 of 12 files`. The stage and the file's name are the server's; the words are ours.
@@ -223,6 +203,7 @@
 </script>
 
 <section class="import-panel" aria-label="Import local files">
+  <h3 class="visually-hidden">Import local files</h3>
   {#if collectionName !== ''}<p class="destination">Adding documents to <strong>{collectionName}</strong>.</p>{/if}
   {#if error !== null}<p role="alert">{error}</p>{/if}
   {#if importing && job !== null}
@@ -234,9 +215,6 @@
       {/if}
       <p role="status">{status}</p>
     </div>
-  {/if}
-  {#if importing && job !== null && job.externalApproval && awaitingApproval(job)}
-    <JobApproval jobId={job.id} approval={job.externalApproval} onapproved={approved} oncancelled={cancelled} />
   {/if}
   {#if !importing && job !== null && isTerminal(job.state)}
     <p role={job.state === 'FAILED' ? 'alert' : 'status'}>{status}</p>
@@ -322,6 +300,14 @@
         {/each}
       </tbody>
     </table>
+  {/if}
+  {#if dialogOpen}
+    <StartReadingDialog
+      {collectionId}
+      request={{ kind: 'import', paths: selectedPaths, recursive, include: fileTypes === 'include' ? listedExtensions : [], exclude: fileTypes === 'exclude' ? listedExtensions : [] }}
+      onstarted={readingStarted}
+      oncancel={() => (dialogOpen = false)}
+    />
   {/if}
 </section>
 

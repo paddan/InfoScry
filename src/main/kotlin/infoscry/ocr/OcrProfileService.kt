@@ -71,6 +71,9 @@ class OcrProfileService(
 
     fun get(id: String): OcrProfile? = profiles.findById(id)
 
+    /** Resolves an immutable revision captured by an operation or preview. */
+    fun findRevision(revisionId: String): OcrProfileRevision? = profiles.findRevision(revisionId)
+
     /** One profile by id, or a failure naming that no such profile exists. */
     fun require(id: String): OcrProfile =
         get(id) ?: throw NoSuchElementException("no OCR profile with id $id")
@@ -243,17 +246,14 @@ class OcrProfileService(
         // Both slots are read in one transaction before either is refused, so the snapshot freezes one
         // moment even when an edit lands between the two lookups, and a refusal names the slot that was
         // wrong rather than the order the reads happened to run in.
-        val selected = profiles.findByIds(
-            listOfNotNull(settings.transcriptionProfileId, settings.reviewProfileId).distinct(),
-        )
+        val selectedProfileId = (settings.defaultMethod as? ReadingMethod.Llm)?.profileId
+        val selected = profiles.findByIds(listOfNotNull(selectedProfileId).distinct())
         return OcrSettingsSnapshot.of(
             settings = settings,
             extractorVersion = extractorVersion,
-            transcriptionProfileRevisionId = settings.transcriptionProfileId?.let { profileId ->
-                requireSelectable(selected[profileId], profileId, OcrProfileRole.TRANSCRIPTION).revision.revisionId
-            },
-            reviewProfileRevisionId = settings.reviewProfileId?.let { profileId ->
-                requireSelectable(selected[profileId], profileId, OcrProfileRole.REVIEW).revision.revisionId
+            transcriptionProfileRevisionId = selectedProfileId?.let { profileId ->
+                requireSelectable(selected[profileId], profileId, OcrProfileRole.TRANSCRIPTION)
+                    .revision.revisionId
             },
             toolVersion = toolVersion,
             modelVersion = modelVersion,

@@ -5,6 +5,10 @@ import infoscry.extract.ExtractionSettings
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
+/** A source file whose identity was included in the preview a person confirmed. */
+@Serializable
+data class ConfirmedImportSource(val path: String, val sizeBytes: Long, val sha256: String)
+
 /**
  * What an import job was asked to do, captured when it was enqueued.
  *
@@ -41,11 +45,15 @@ data class ImportJobPayload(
      * written before this field reads as no patterns.
      */
     val ignore: IgnorePatterns = IgnorePatterns.NONE,
+    /** Exact files and byte identities named by a confirmed preview; null for legacy imports. */
+    val confirmedSources: List<ConfirmedImportSource>? = null,
 ) {
 
     init {
         require(collectionId.isNotBlank()) { "an import payload needs a collection" }
-        require(sources.isNotEmpty()) { "an import payload needs at least one source" }
+        require(sources.isNotEmpty() || confirmedSources != null) {
+            "an import payload needs at least one source unless it carries a confirmed file manifest"
+        }
         // Blank or relative paths would make the job's meaning depend on the working directory of
         // whichever process runs it, which is exactly what a durable request must not do.
         require(sources.none { it.isBlank() }) { "an import payload must not hold a blank source path" }
@@ -70,6 +78,7 @@ data class ImportJobPayload(
             ocr: infoscry.ocr.OcrSettingsSnapshot? = null,
             extensions: ExtensionFilter = ExtensionFilter.NONE,
             ignore: IgnorePatterns = IgnorePatterns.NONE,
+            confirmedSources: List<ConfirmedImportSource>? = null,
         ): ImportJobPayload = ImportJobPayload(
             collectionId = collectionId.value,
             sources = sources.map { java.nio.file.Path.of(it).toAbsolutePath().normalize().toString() },
@@ -78,6 +87,7 @@ data class ImportJobPayload(
             recursive = recursive,
             extensions = extensions,
             ignore = ignore,
+            confirmedSources = confirmedSources,
         )
 
         /**

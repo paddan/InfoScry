@@ -97,39 +97,8 @@ data class RetryPrerequisites(
 }
 
 /** One document an admission refused, with the sentence that says why and, where there is one, a safe code. */
-data class RejectedRetry(val documentId: String, val reason: String, val code: String? = null)
-
-/**
- * The OCR method a person chose for one retry, over the collection's settings.
- *
- * Every field is optional and an absent one means the collection's value, so a choice that names nothing is
- * the same request as no choice at all. The fields are the ones a rescan preview lets a person override, plus
- * the language list, and they are resolved by the same code ([RescanService.resolveChosenReading]) - this
- * type only carries the choice to it. It is never stored: what a retry runs with is the snapshot it resolves
- * to, frozen into the retry's payload.
- */
 @Serializable
-data class RetryOcrChoice(
-    val engine: OcrEngine? = null,
-    val importMode: OcrImportMode? = null,
-    val transcriptionProfileId: String? = null,
-    val reviewProfileId: String? = null,
-    val language: String? = null,
-) {
-
-    /** Whether the choice names nothing, so the retry keeps the collection's settings exactly as before. */
-    val isEmpty: Boolean
-        get() = engine == null && importMode == null && transcriptionProfileId == null &&
-            reviewProfileId == null && language.isNullOrBlank()
-
-    internal fun toOverrides(): RescanOverrides = RescanOverrides(
-        engine = engine,
-        importMode = importMode,
-        transcriptionProfileId = transcriptionProfileId,
-        reviewProfileId = reviewProfileId,
-        language = language?.takeIf { it.isNotBlank() }?.let(::requireOcrLanguages),
-    )
-}
+data class RejectedRetry(val documentId: String, val reason: String, val code: String? = null)
 
 /**
  * What a retry with a chosen OCR method asks of the rest of the archive, as one seam.
@@ -140,7 +109,7 @@ data class RetryOcrChoice(
 interface RetryReadingChoices {
 
     /** The validated, frozen reading the choice makes for [collection]; refuses with a [RescanRefusalException]. */
-    suspend fun resolve(collection: Collection, choice: RetryOcrChoice): OcrSettingsSnapshot
+    suspend fun resolve(collection: Collection, choice: infoscry.ocr.ReadingMethod): OcrSettingsSnapshot
 
     /** Why this document's format cannot be read from page images at all, or null when it can. */
     fun pageImagesRefusal(document: Document): RescanRefusalException?
@@ -198,18 +167,20 @@ class RetryService(
     },
     /** How a chosen OCR method is validated and frozen; null for a build that offers no choice. */
     private val choices: RetryReadingChoices? = null,
+    private val pageCountOf: (Document) -> Int? = { null },
 ) {
 
     /** Queues one attempt for exactly [documentIds] and answers which were accepted and which were not. */
     suspend fun admitRetry(
         collectionId: CollectionId,
         documentIds: List<DocumentId>,
-        choice: RetryOcrChoice? = null,
-    ): RetryAdmission = admit(collectionId, choice) { documentIds.distinct() }
+        choice: infoscry.ocr.ReadingMethod? = null,
+        requestId: String? = null,
+    ): RetryAdmission = admit(collectionId, choice, requestId, documentIds.map { it.value }.distinct().sorted().joinToString("\n")) { documentIds.distinct() }
 
     /** Queues one attempt for every eligible document of the collection, across pages. */
-    suspend fun admitRetryOfEligible(collectionId: CollectionId, choice: RetryOcrChoice? = null): RetryAdmission =
-        admit(collectionId, choice) { connection -> eligibleDocuments(connection, collectionId) }
+    suspend fun admitRetryOfEligible(collectionId: CollectionId, choice: infoscry.ocr.ReadingMethod? = null, requestId: String? = null): RetryAdmission =
+        admit(collectionId, choice, requestId, "allEligible") { connection -> eligibleDocuments(connection, collectionId) }
 
     /** Whether one document would be accepted right now, for the details view's Retry action. */
     fun isEligible(document: Document): Boolean =
@@ -217,12 +188,23 @@ class RetryService(
 
     private suspend fun admit(
         collectionId: CollectionId,
-        choice: RetryOcrChoice?,
+        choice: infoscry.ocr.ReadingMethod?,
+        requestId: String?,
+        selectionKey: String,
         select: (Connection) -> List<DocumentId>,
     ): RetryAdmission {
+        val starts = infoscry.storage.StartRequestStore(database)
+        val canonical = kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.json.JsonArray.serializer(),
+            kotlinx.serialization.json.JsonArray(listOf(collectionId.value, choice?.id ?: "-", selectionKey).map { kotlinx.serialization.json.JsonPrimitive(it) }))
+        val bodyHash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray()))
+        fun replay(): RetryAdmission? = requestId?.let { starts.lookup(it, "retry", bodyHash) }?.let { id ->
+            val existing = checkNotNull(jobs.get(id))
+            RetryAdmission(existing, RetryJobPayload.decode(existing.payload).admissionRejected)
+        }
+        replay()?.let { return it }
         blockers.requireMutationsAllowed()
         // An empty choice is no choice: the collection's settings are used exactly as they always were.
-        val chosen = choice?.takeUnless { it.isEmpty }
+        val chosen = choice
         val collection = activeCollection(collectionId)
         // Probed once, before anything is queued: the settings travel in the payload and cannot be re-read
         // later, and an absent prerequisite is a refusal rather than a job that was falsely accepted.
@@ -248,6 +230,7 @@ class RetryService(
                 else -> prerequisites(admitted)
             }
             database.transaction { connection ->
+                replay()?.let { return@transaction it }
                 val accepted = mutableListOf<DocumentId>()
                 val rejected = mutableListOf<RejectedRetry>()
                 select(connection).distinct().forEach { documentId ->
@@ -263,21 +246,74 @@ class RetryService(
                 // concurrent admission reads is one where the work already exists — that is what makes two
                 // clicks one attempt instead of two.
                 accepted.forEach { documentId -> documents.updateStatus(documentId, DocumentStatus.QUEUED) }
+                val snapshots = accepted.mapNotNull { id ->
+                    val document = checkNotNull(documents.get(id))
+                    val snapshot = if (chosen == null) lastSnapshot(document) ?: reconciled.ocr else reconciled.ocr
+                    snapshot?.let { frozen ->
+                        val perDocument = if (chosen != null && frozen.transcriptionProfileRevisionId != null) {
+                            val external = database.read { c ->
+                                c.prepareStatement("SELECT endpoint FROM ocr_profile_revisions WHERE revision_id = ?").use { q ->
+                                    q.setString(1, frozen.transcriptionProfileRevisionId)
+                                    q.executeQuery().use { r -> r.next() && infoscry.ocr.endpointScope(r.getString(1)) == infoscry.ocr.OcrEndpointScope.EXTERNAL }
+                                }
+                            }
+                            if (external) {
+                                val pageCount = pageCountOf(document) ?: throw RescanRefusalException(
+                                    RescanRefusalException.MANAGED_COPY_MISSING,
+                                    "the document's page count could not be read, so the number of pages cannot be confirmed",
+                                )
+                                frozen.copy(externalPageLimit = pageCount)
+                            } else frozen
+                        } else frozen
+                        id.value to perDocument
+                    }
+                }.toMap()
                 val payload = RetryJobPayload(
                     collectionId = collectionId.value,
                     documentIds = accepted.map { it.value },
                     settings = reconciled.settings,
                     ocr = reconciled.ocr,
+                    documentSnapshots = snapshots,
+                    admissionRejected = rejected,
                 )
-                val job = jobs.enqueue(
-                    type = JobType.RETRY,
-                    collectionId = collectionId,
-                    payload = payload.encode(),
-                    total = accepted.size,
-                )
+                fun enqueue() = jobs.enqueue(type = JobType.RETRY, collectionId = collectionId,
+                    payload = payload.encode(), total = accepted.size).id
+                val jobId = if (requestId == null) enqueue() else starts.claim(requestId, "retry", bodyHash, ::enqueue)
+                val job = checkNotNull(jobs.get(jobId))
                 RetryAdmission(job = job, rejected = rejected)
             }
         }
+    }
+
+    /** The last frozen reading, including cancelled and interrupted attempts. */
+    private fun lastSnapshot(document: Document): OcrSettingsSnapshot? {
+        val candidates = mutableListOf<Pair<String, OcrSettingsSnapshot>>()
+        database.read { c ->
+            c.prepareStatement("SELECT snapshot, created_at FROM ocr_operations WHERE document_id = ? ORDER BY rowid DESC").use { q ->
+                q.setString(1, document.id.value)
+                q.executeQuery().use { r ->
+                    while (r.next()) candidates += r.getString(2) to
+                        kotlinx.serialization.json.Json.decodeFromString<OcrSettingsSnapshot>(r.getString(1))
+                }
+            }
+            c.prepareStatement("SELECT DISTINCT j.type, j.payload, j.created_at FROM jobs j LEFT JOIN import_items i ON i.job_id = j.id WHERE j.collection_id = ? AND (i.document_id = ? OR j.type = 'RETRY') ORDER BY j.created_at DESC").use { q ->
+                q.setString(1, document.collectionId.value)
+                q.setString(2, document.id.value)
+                q.executeQuery().use { r ->
+                    while (r.next()) {
+                        val snapshot = when (r.getString(1)) {
+                            "IMPORT" -> infoscry.jobs.ImportJobPayload.decode(r.getString(2)).ocr
+                            "RETRY" -> RetryJobPayload.decode(r.getString(2)).let { p ->
+                                if (document.id.value in p.documentIds) p.documentSnapshots[document.id.value] ?: p.ocr else null
+                            }
+                            else -> null
+                        }
+                        snapshot?.let { candidates += r.getString(3) to it }
+                    }
+                }
+            }
+        }
+        return candidates.maxByOrNull { it.first }?.second
     }
 
     private fun rejectionFor(
@@ -318,7 +354,7 @@ class RetryService(
     private suspend fun withChosenReading(
         collection: Collection,
         probed: RetryPrerequisites,
-        chosen: RetryOcrChoice,
+        chosen: infoscry.ocr.ReadingMethod,
     ): RetryPrerequisites {
         val reading = checkNotNull(choices) { "this archive was built without a way to choose an OCR method" }
         val snapshot = reading.resolve(collection, chosen)
@@ -343,9 +379,6 @@ class RetryService(
      */
     private fun choiceRejection(document: Document): RejectedRetry? {
         val reading = checkNotNull(choices)
-        if (reading.publishesText(document.id)) {
-            return RejectedRetry(document.id.value, USE_SCAN_AGAIN, USE_SCAN_AGAIN_CODE)
-        }
         return reading.pageImagesRefusal(document)?.let { refusal ->
             RejectedRetry(document.id.value, refusal.message.orEmpty(), refusal.code)
         }

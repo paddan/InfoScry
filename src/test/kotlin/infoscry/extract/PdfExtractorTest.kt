@@ -186,6 +186,21 @@ class PdfExtractorTest {
     }
 
     @Test
+    fun `read all sends every text-layer page to the selected OCR engine`() {
+        val spy = OcrSpy()
+        val legacy = checkAndImprove()
+        val readAll = legacy.copy(
+            ocrMode = OcrImportMode.READ_ALL,
+            ocrAttempt = legacy.ocrAttempt?.copy(mode = OcrImportMode.READ_ALL),
+        )
+
+        val events = collect(pdfExtractor(spy), inputFor(fixture(TEXT_NAME), probe(), settings = readAll), probe())
+
+        assertEquals(listOf(1, 2, 3), spy.readPages)
+        assertEquals(listOf("läst sida 1", "läst sida 2", "läst sida 3"), units(events).map { it.unit.extractedText })
+    }
+
+    @Test
     fun `check and improve hands over the page's own text beside what it read from the image`() {
         // The mode's whole point: the page carries a text layer *and* its image was read, so one unit has to
         // account for both readings — the engine's as the unit's text, the page's own beside it — because

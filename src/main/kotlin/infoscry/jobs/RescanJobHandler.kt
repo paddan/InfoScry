@@ -7,8 +7,9 @@ import infoscry.domain.CollectionLifecycle
 import infoscry.domain.CollectionId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
+import infoscry.domain.DocumentStatus
 import infoscry.domain.Job
-import infoscry.document.PageReviewer
+import infoscry.domain.JobId
 import infoscry.document.RescanPage
 import infoscry.document.RescanPageSource
 import infoscry.document.RevisionPublicationService
@@ -16,8 +17,8 @@ import infoscry.embedding.DocumentEmbedder
 import infoscry.extract.OcrUnavailableException
 import infoscry.library.ManagedLibrary
 import infoscry.ocr.CandidateRevisionPhases
+import infoscry.ocr.ExternalPageAllowanceExceededException
 import infoscry.ocr.ImageLlmException
-import infoscry.ocr.OcrComparisonException
 import infoscry.ocr.OcrDispatchAuthority
 import infoscry.ocr.OcrDispatchStage
 import infoscry.ocr.OcrEndpointScope
@@ -27,14 +28,9 @@ import infoscry.ocr.OcrOperationStage
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrProfileRevision
 import infoscry.ocr.OcrSettingsSnapshot
-import infoscry.ocr.PageComparisonInput
 import infoscry.ocr.PageOcrEngine
-import infoscry.ocr.PageReview
-import infoscry.ocr.PublicationDisposition
 import infoscry.ocr.RescanAttemptFailedException
 import infoscry.ocr.StagedCandidatePage
-import infoscry.ocr.failAttempt
-import infoscry.ocr.readingTextHash
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.DocumentBeingDeletedException
@@ -43,7 +39,6 @@ import infoscry.storage.DocumentStore
 import infoscry.storage.JobStore
 import infoscry.storage.MutationCoordinator
 import infoscry.storage.OcrOperationStore
-import infoscry.storage.OcrReviewStore
 import infoscry.storage.PageApproval
 import infoscry.storage.RevisionPageText
 import java.io.IOException
@@ -57,26 +52,23 @@ import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 
 /**
- * Reads a published document's pages again and replaces its text through a whole reviewed revision.
+ * Reads every page of a published document and replaces its text through one candidate revision.
  *
  * The attempt is deliberately not the import path with other settings. Four things are its own, and each is
  * why a rescan is a job type rather than a mode:
  *
- * - **Nothing published is touched until a whole revision is approved.** Pages are staged into a *candidate*
- *   revision, so a failed, cancelled or half-read attempt leaves the document's text, its index rows and its
- *   evidence exactly as they were. A page nobody has decided about stays pending, which is a state a document
- *   can be in for weeks without being served as if its reading had been accepted.
- * - **Every durable step is one page.** A page's text is committed when it was read and reviewed, its passages
- *   when they were chunked, its vectors when they were embedded. A restart therefore resumes at the page it
+ * - **The previous reading stays published until replacement is ready.** Pages are staged into a *candidate*
+ *   revision, so a failed, cancelled or partial attempt leaves the document's text, index rows and evidence
+ *   unchanged. Publication switches the complete candidate as one revision.
+ * - **Every durable step is one page.** A page's text is committed when it was read, its passages when they
+ *   were chunked, and its vectors when they were embedded. A restart therefore resumes at the page it
  *   stopped at rather than paying for the document again, and a cancellation is bounded between pages and
  *   provider requests.
- * - **No image leaves the machine without an approval for that scope.** The attempt's dispatch authority is
- *   built from the operation's persisted snapshot, its allowance and the newest approval covering *that*
- *   snapshot, and every dispatch — the reading and the review alike — is counted where it happens.
+ * - **External sends stay within the confirmed scope.** The attempt's dispatch authority comes from the
+ *   operation's persisted snapshot and counts each page at dispatch time.
  * - **A failure is a named state with a remedy, never a substitution.** An engine this build does not have, a
- *   missing embedder, an unreadable page, a stale baseline and an unreachable provider each end the operation
- *   in their own stage with their own code; nothing here tries another engine, and a review failure keeps the
- *   baseline rather than discarding a completed reading.
+ *   missing embedder, stale baseline or unreachable provider ends the operation with its own code; nothing here
+ *   tries another engine, and a page that cannot be read retains its previously published text.
  */
 class RescanJobHandler internal constructor(
     private val paths: AppPaths,
@@ -87,17 +79,16 @@ class RescanJobHandler internal constructor(
     private val jobs: JobStore,
     private val revisions: DocumentRevisionStore,
     private val operations: OcrOperationStore,
-    private val reviews: OcrReviewStore,
     private val publication: RevisionPublicationService,
     private val chunker: Chunker,
     private val documentEmbedder: () -> DocumentEmbedder?,
     /** How the attempt gets the engine its snapshot selects, wired to this attempt's dispatch authority. */
     private val engineFor: (infoscry.ocr.OcrEngine, OcrSettingsSnapshot, OcrDispatchAuthority?) -> PageOcrEngine?,
-    /** How the attempt gets the reviewer its snapshot selects, wired to the same kind of authority. */
-    private val reviewerFor: (OcrSettingsSnapshot, OcrDispatchAuthority?) -> PageReviewer,
-    /** How a snapshotted reviewer revision id is resolved, so the authority can read its scope. */
+    /** How a snapshotted transcription revision id is resolved, so the authority can read its scope. */
     private val profileRevisionOf: (String) -> OcrProfileRevision?,
     private val pages: RescanPageSource = RescanPageSource(),
+    /** A narrow seam for exercising cancellation after authority moved but before status finalization. */
+    private val afterCandidatePublished: suspend (JobId) -> Unit = {},
 ) : JobHandler {
 
     /** What a staged reading becomes: the page it is decided to be, its passages, and the publication. */
@@ -128,6 +119,7 @@ class RescanJobHandler internal constructor(
         if (documents.isDeletionTarget(documentId)) throw DocumentBeingDeletedException(documentId)
 
         try {
+            stage.run(STAGE_RECORD) { updateDocumentStatus(operation, DocumentStatus.OCR) }
             runAttempt(job, operation, collection, document, stage)
         } catch (cancelled: CancellationException) {
             // A cancellation request ends the operation; a shutdown does not, because the next process
@@ -141,6 +133,16 @@ class RescanJobHandler internal constructor(
                 )
             }
             throw cancelled
+        } catch (alreadyRecorded: RescanAttemptFailedException) {
+            throw alreadyRecorded
+        } catch (failure: Exception) {
+            endOperationOutsideTheAttempt(
+                operationId = operationId,
+                stage = OcrOperationStage.FAILED,
+                code = RESCAN_FAILED,
+                message = "the rescan stopped unexpectedly; the published text was kept",
+            )
+            throw failure
         }
     }
 
@@ -189,12 +191,6 @@ class RescanJobHandler internal constructor(
             document = document,
             revisionId = snapshot.transcriptionProfileRevisionId,
             dispatchStage = OcrDispatchStage.TRANSCRIPTION,
-        )
-        val reviewDispatch = dispatchAuthority(
-            operation = operation,
-            document = document,
-            revisionId = snapshot.reviewProfileRevisionId,
-            dispatchStage = OcrDispatchStage.REVIEW,
         )
         val engine = engineFor(snapshot.engine, snapshot, transcriptionDispatch)
             ?: fail(
@@ -260,6 +256,7 @@ class RescanJobHandler internal constructor(
         var failed = 0
         stage.run(STAGE_OCR) {
             operations.advance(operation.operationId, OcrOperationStage.OCR)
+            updateDocumentStatus(operation, DocumentStatus.OCR)
             operations.recordProgress(
                 operationId = operation.operationId,
                 pageTotal = pageImages.size,
@@ -269,7 +266,7 @@ class RescanJobHandler internal constructor(
         }
         stage.reportProgress(completed = 0, total = pageImages.size)
 
-        // ---- phase 1: read and review, one page at a time ----
+        // ---- phase 1: read, one page at a time ----
         // Everything this phase can refuse — an engine this build cannot use, a provider that will not answer,
         // a baseline the document moved past — ends the operation with the code that says so and the remedy a
         // person can act on. A per-page failure is *not* one of them: it is recorded against the page and the
@@ -282,41 +279,16 @@ class RescanJobHandler internal constructor(
             val alreadyStaged = revisions.page(candidate, page.image.ordinal)
                 ?.let { staged -> staged.sourceImage?.sha256 == page.image.sha256 } == true
             if (alreadyStaged) {
-                // These exact pixels were read under this operation's snapshot before: the reading and the
-                // review behind it are durable, and reading the page again would be paid for twice.
+                // These exact pixels were read under this operation's snapshot before: the staged reading is
+                // durable, and reading the page again would be paid for twice.
                 stage.reportProgress(completed, pageImages.size)
                 continue
             }
-            val outcome = try {
-                read(page, engine, snapshot)
-            } catch (paused: RescanPaused) {
-                // A dispatch was refused because this scope has no approval for another page. The operation's
-                // waiting state is already durable, and no further page may be read: this attempt ends here
-                // and the approval starts another one with the same snapshot and the same counters.
-                pauseForApproval(job, operation, stage)
-                return
-            }
-            // A review refusal is not thrown out of the comparison — an unreachable reviewer makes a review
-            // uncertain rather than failing a page — so the durable waiting state is what says the scope was
-            // spent. It is checked before the page is staged, because the refusal means no further page of
-            // this scope may be sent.
-            if (isWaitingForApproval(operation.operationId)) {
-                pauseForApproval(job, operation, stage)
-                return
-            }
-            val review = outcome.reading?.let { reading ->
-                review(page, reading, snapshot, reviewDispatch, baselineRevisionId)
-            }
-            if (isWaitingForApproval(operation.operationId)) {
-                pauseForApproval(job, operation, stage)
-                return
-            }
+            val outcome = read(page, engine, snapshot)
             val stagedPage = outcome.reading?.let { reading ->
                 phases.acceptedPageOf(
                     page,
                     reading,
-                    review,
-                    reviewerConfigured = snapshot.reviewProfileRevisionId != null,
                 )
             }
             stage.run(STAGE_COMMIT) {
@@ -328,7 +300,7 @@ class RescanJobHandler internal constructor(
                     committed++
                 } else {
                     // A page with no usable reading keeps what the document publishes for it. That is staged
-                    // as an approved page rather than left out, because leaving it out would drop published
+                    // as a publishable page rather than left out, because leaving it out would drop published
                     // text from the replacement; a page with no baseline keeps nothing, because there is
                     // nothing to keep.
                     page.baseline?.let { baselinePage ->
@@ -340,7 +312,6 @@ class RescanJobHandler internal constructor(
                                 stagedPage = StagedCandidatePage(
                                     text = baselinePage.extractedText,
                                     approval = PageApproval.APPROVED,
-                                    disposition = PublicationDisposition.KEEP,
                                     confidence = baselinePage.meanConfidence,
                                     artifactRelativePath = baselinePage.artifactRelativePath,
                                     artifactSha256 = baselinePage.artifactSha256,
@@ -377,20 +348,45 @@ class RescanJobHandler internal constructor(
         }
 
         // ---- phase 2: chunk what was staged ----
-        stage.run(STAGE_CHUNK) { operations.advance(operation.operationId, OcrOperationStage.CHUNKING) }
+        stage.run(STAGE_CHUNK) {
+            operations.advance(operation.operationId, OcrOperationStage.CHUNKING)
+            updateDocumentStatus(operation, DocumentStatus.CHUNKING)
+        }
         phases.chunkCandidate(operation.operationId, candidate, document, stage)
 
         // ---- phase 3: embed the passages that have no vector ----
-        stage.run(STAGE_EMBED) { operations.advance(operation.operationId, OcrOperationStage.EMBEDDING) }
+        stage.run(STAGE_EMBED) {
+            operations.advance(operation.operationId, OcrOperationStage.EMBEDDING)
+            updateDocumentStatus(operation, DocumentStatus.EMBEDDING)
+        }
         phases.embedCandidate(candidate, embedder, stage)
 
         // ---- phase 4: publish the whole revision, or leave the document's text alone ----
-        stage.run(STAGE_INDEX) { operations.advance(operation.operationId, OcrOperationStage.INDEXING) }
+        stage.run(STAGE_INDEX) {
+            operations.advance(operation.operationId, OcrOperationStage.INDEXING)
+            updateDocumentStatus(operation, DocumentStatus.INDEXING)
+        }
         if (phases.publishCandidate(operation, candidate, stage)) {
+            afterCandidatePublished(job.id)
+            stage.run(STAGE_RECORD) {
+                updateDocumentStatus(
+                    operation,
+                    if (failed == 0) DocumentStatus.COMPLETE else DocumentStatus.COMPLETE_WITH_WARNINGS,
+                )
+            }
             LOGGER.atInfo()
                 .addKeyValue(DOCUMENT_FIELD, operation.documentId.value)
                 .addKeyValue(OPERATION_FIELD, operation.operationId)
                 .log("a rescan published a replacement revision")
+        } else {
+            stage.run(STAGE_RECORD) {
+                updateDocumentStatus(
+                    operation,
+                    DocumentStatus.FAILED,
+                    PUBLICATION_REFUSED,
+                    "the replacement could not be published; the previous text was kept",
+                )
+            }
         }
     }
 
@@ -433,13 +429,12 @@ class RescanJobHandler internal constructor(
             unavailable.code,
             "the engine could not read this document: ${unavailable.message}",
         )
+    } catch (exhausted: ExternalPageAllowanceExceededException) {
+        throw RescanAttemptFailedException(
+            MORE_PAGES_THAN_CONFIRMED,
+            exhausted.message ?: "the run needed more pages than were confirmed",
+        )
     } catch (refused: ImageLlmException) {
-        if (refused.code == ImageLlmException.EXTERNAL_DISPATCH_NOT_PERMITTED) {
-            // The dispatch was refused because this scope has no approval left, and the refusal already wrote
-            // the durable waiting state. It is not a failure of the page or of the attempt: the page was never
-            // sent, and the operation waits for a person.
-            throw RescanPaused()
-        }
         // The provider's own refusal, as a safe code with a curated remedy. Nothing is retried here and no
         // other engine is tried: the code names what a person can do about it.
         throw RescanAttemptFailedException(
@@ -452,73 +447,6 @@ class RescanJobHandler internal constructor(
         PageRead(null)
     }
 
-    /**
-     * Judges one page's reading against what the document publishes there, or answers that no reviewer is
-     * configured.
-     *
-     * The comparison may dispatch to an external reviewer, so it too runs outside a permit. Every failure it
-     * can report — an unreachable reviewer, a truncated or malformed answer, a wrong page — is this page's
-     * outcome: the comparison returns an uncertain review whose disposition keeps the baseline, and the
-     * completed reading is never discarded because a reviewer failed. A comparison that cannot be *made*
-     * (a baseline the document moved past, another prompt or policy version) is the attempt's failure and is
-     * thrown, because a decision taken against other text must not be persisted as this page's.
-     */
-    private suspend fun review(
-        page: RescanPage,
-        reading: OcrPageResult,
-        snapshot: OcrSettingsSnapshot,
-        dispatch: OcrDispatchAuthority?,
-        baselineRevisionId: String?,
-    ): PageReview? {
-        val reviewerRevisionId = snapshot.reviewProfileRevisionId ?: return null
-        val baselineText = page.baseline?.extractedText
-        val input = PageComparisonInput(
-            page = page.image,
-            candidateText = reading.text,
-            reviewProfileRevisionId = reviewerRevisionId,
-            baselineRevisionId = page.baseline?.let { baselineRevisionId },
-            baselineText = baselineText,
-            baselineTextHash = baselineText?.let(::readingTextHash),
-            reviewPromptVersion = snapshot.reviewPromptVersion,
-            policyVersion = snapshot.policyVersion,
-        )
-        return try {
-            reviewerFor(snapshot, dispatch).compare(input)
-        } catch (stale: OcrComparisonException) {
-            throw RescanAttemptFailedException(
-                stale.code,
-                stale.message ?: "the page could not be compared with the reading the document publishes",
-            )
-        }
-    }
-
-    /**
-     * Whether the attempt must stop because this operation now waits for an external page approval.
-     *
-     * The waiting state is durable and is what the refusal wrote; the attempt reads it back rather than
-     * tracking a flag of its own, so an approval that arrived while the page was being read — or a pause a
-     * previous process left behind — is honored the same way.
-     */
-    private fun isWaitingForApproval(operationId: String): Boolean =
-        operations.operation(operationId)?.stage == OcrOperationStage.AWAITING_APPROVAL
-
-    /**
-     * Ends the attempt without failing it, because the work is not defective: it is waiting for a person.
-     *
-     * The operation keeps its snapshot, its candidate and every page it has already committed, and the job
-     * ends as complete with the stage saying what it waits for. An approval queues another attempt that
-     * continues from exactly here, which is what makes a job larger than the allowance survivable across a
-     * restart — and it is why nothing beyond the approved scope was ever sent.
-     */
-    private suspend fun pauseForApproval(job: Job, operation: OcrOperation, stage: JobStage) {
-        stage.run(STAGE_RECORD) { operations.pause(operation.operationId) }
-        stage.run(STAGE_RECORD) { jobs.progress(job.id, stage = JobStore.AWAITING_APPROVAL_STAGE) }
-        LOGGER.atInfo()
-            .addKeyValue(DOCUMENT_FIELD, operation.documentId.value)
-            .addKeyValue(OPERATION_FIELD, operation.operationId)
-            .log("a rescan waits for an external page scope to be approved before it reads another page")
-    }
-
     /** Ends the operation with a code and a remedy, and fails the attempt with the same code. */
     private suspend fun fail(
         stage: JobStage,
@@ -526,14 +454,20 @@ class RescanJobHandler internal constructor(
         stageName: OcrOperationStage,
         code: String,
         message: String,
-    ): Nothing = failAttempt(
-        operations = operations,
-        stage = stage,
-        operationId = operation.operationId,
-        stageName = stageName,
-        code = code,
-        message = message,
-    )
+    ): Nothing {
+        stage.run(STAGE_RECORD) {
+            operations.atomically {
+                operations.finish(operation.operationId, stageName, code, message)
+                updateDocumentStatus(
+                    operation,
+                    if (stageName == OcrOperationStage.NEEDS_TOOL) DocumentStatus.NEEDS_TOOL else DocumentStatus.FAILED,
+                    code,
+                    message,
+                )
+            }
+        }
+        throw RescanAttemptFailedException(code, message)
+    }
 
     // ---- dispatch authority ----
 
@@ -561,19 +495,6 @@ class RescanJobHandler internal constructor(
             stage = dispatchStage,
             profileRevisionId = revisionId,
             configuredAllowance = operation.snapshot.externalPageLimit,
-            snapshotHash = OcrOperationStore.snapshotHashOf(operation.snapshot),
-            onExhausted = { account ->
-                // The waiting state is persisted *before* the refusal reaches the engine, so the page that
-                // would have exceeded the allowance is not sent, and a process restarting later reads the same
-                // state rather than re-deciding on its own.
-                operations.pause(operation.operationId)
-                LOGGER.atInfo()
-                    .addKeyValue(DOCUMENT_FIELD, document.id.value)
-                    .addKeyValue(OPERATION_FIELD, operation.operationId)
-                    .addKeyValue(DISTINCT_PAGES_FIELD, account.distinctPages)
-                    .addKeyValue(ALLOWANCE_FIELD, account.allowance)
-                    .log("an external page scope is spent; the operation waits for an approval")
-            },
         )
     }
 
@@ -594,7 +515,45 @@ class RescanJobHandler internal constructor(
         withContext(NonCancellable) {
             runCatching {
                 mutations.awaitMutation {
-                    operations.finish(operationId, stage, code, message)
+                    operations.atomically {
+                        val operation = operations.operation(operationId) ?: return@atomically
+                        val publishedCandidate = operation.candidateRevisionId?.let { candidate ->
+                            revisions.activeRevisionId(operation.documentId) == candidate
+                        } == true
+                        // Publication is the point of no return. If cancellation or a failure is observed
+                        // after the candidate became authoritative, finish the operation as published.
+                        val finalStage = if (publishedCandidate) {
+                            OcrOperationStage.COMPLETE
+                        } else if (operation.stage.isTerminal) {
+                            operation.stage
+                        } else {
+                            stage
+                        }
+                        val finalCode = if (publishedCandidate) null else if (operation.stage.isTerminal) operation.errorCode else code
+                        val finalMessage = if (publishedCandidate) null else if (operation.stage.isTerminal) operation.errorMessage else message
+                        if (!operation.stage.isTerminal || publishedCandidate) {
+                            operations.finish(operationId, finalStage, finalCode, finalMessage)
+                        }
+                        if (operations.latestForDocuments(listOf(operation.documentId))[operation.documentId]?.operationId ==
+                            operationId
+                        ) {
+                            documents.get(operation.documentId)?.let { document ->
+                                val status = when (finalStage) {
+                                    OcrOperationStage.COMPLETE -> if (operation.pagesFailed > 0) {
+                                        DocumentStatus.COMPLETE_WITH_WARNINGS
+                                    } else {
+                                        DocumentStatus.COMPLETE
+                                    }
+                                    OcrOperationStage.CANCELLED -> DocumentStatus.CANCELLED
+                                    OcrOperationStage.NEEDS_TOOL -> DocumentStatus.NEEDS_TOOL
+                                    else -> DocumentStatus.FAILED
+                                }
+                                if (document.status != status || document.errorCode != finalCode) {
+                                    documents.updateStatus(operation.documentId, status, finalCode, finalMessage)
+                                }
+                            }
+                        }
+                    }
                 }
             }.onFailure { failure ->
                 // The row may already be gone with its document, and a cleanup that cannot write may not
@@ -602,6 +561,19 @@ class RescanJobHandler internal constructor(
                 LOGGER.atWarn().addKeyValue(OPERATION_FIELD, operationId).setCause(failure)
                     .log("a cancelled rescan could not record its own end")
             }
+        }
+    }
+
+    /** Prevent a stopped worker from overwriting the status of a replacement operation. */
+    private fun updateDocumentStatus(
+        operation: OcrOperation,
+        status: DocumentStatus,
+        errorCode: String? = null,
+        errorMessage: String? = null,
+    ) {
+        val latest = operations.latestForDocuments(listOf(operation.documentId))[operation.documentId]
+        if (latest?.operationId == operation.operationId) {
+            documents.updateStatus(operation.documentId, status, errorCode, errorMessage)
         }
     }
 
@@ -632,11 +604,15 @@ class RescanJobHandler internal constructor(
         const val RESCAN_PAGES_DIRECTORY = "rescan"
 
         const val CANCELLED_CODE = "RESCAN_CANCELLED"
+        const val RESCAN_FAILED = "RESCAN_FAILED"
+        const val PUBLICATION_REFUSED = "PUBLICATION_REFUSED"
         const val STALE_BASELINE = "OCR_STALE_BASELINE"
         const val MANAGED_COPY_CHANGED = "RESCAN_MANAGED_COPY_CHANGED"
         const val RUNTIME_CHANGED = "RESCAN_ENGINE_RUNTIME_CHANGED"
         const val PAGE_IMAGES_UNSUPPORTED = "PAGE_IMAGES_UNSUPPORTED"
         const val EMBEDDING_UNAVAILABLE = "EMBEDDING_UNAVAILABLE"
+        const val MORE_PAGES_THAN_CONFIRMED = "MORE_PAGES_THAN_CONFIRMED"
+        const val MORE_PAGES_MESSAGE = "the run needed more pages than were confirmed; no additional page was sent"
         const val NEEDS_ENGINE_PREFIX = "NEEDS_"
 
         const val HASH_BUFFER_BYTES = 64 * 1024
@@ -650,19 +626,7 @@ class RescanJobHandler internal constructor(
     }
 }
 
-/**
- * The attempt stopped because a dispatch was refused for want of an external page approval.
- *
- * It is control flow rather than a failure: the page was never sent, the operation's waiting state is already
- * durable, and the approval starts another attempt that continues from here.
- */
-private class RescanPaused : RuntimeException("this rescan waits for an external page scope to be approved")
-
 private val LOGGER = LoggerFactory.getLogger("infoscry.rescan")
-
-/** How a snapshotted reviewer revision id is resolved for a production attempt's dispatch authority. */
-internal fun profileRevisionResolver(profiles: infoscry.storage.OcrProfileStore): (String) -> OcrProfileRevision? =
-    { revisionId -> profiles.findRevision(revisionId) }
 
 /**
  * The engine factory a production attempt uses: the two local engines and the image-model engine.

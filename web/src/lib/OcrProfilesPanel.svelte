@@ -343,7 +343,7 @@
 
 <section class="admin-panel" aria-label="OCR profile administration">
   <p class="hint">
-    OCR profiles describe image-reading models. A collection picks one for transcription and one for review.
+    OCR profiles describe image-reading models. Collections use them as reading methods.
     They are separate from the Ask and Investigate profiles. API keys stay in environment variables.
   </p>
 

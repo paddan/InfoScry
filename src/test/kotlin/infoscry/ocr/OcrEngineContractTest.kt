@@ -474,9 +474,9 @@ class OcrEngineContractTest {
                 "a page with no baseline at its ordinal inherited another page's identity",
             )
             assertEquals(
-                listOf(PageApproval.PENDING, PageApproval.PENDING, PageApproval.PENDING),
+                listOf(PageApproval.APPROVED, PageApproval.APPROVED, PageApproval.APPROVED),
                 staged.map { it.approval },
-                "a staged page was already approved by the attempt that read it",
+                "a completed reading must not create pages waiting for a person",
             )
             assertTrue(staged.all { it.extractionMethod == ExtractionMethod.OCR })
             assertEquals("the new reading of page 1", staged.first().extractedText)
@@ -1051,6 +1051,7 @@ class OcrEngineContractTest {
         ocrMode = mode,
         ocrAttempt = OcrAttemptIdentity(
             engine = engine,
+            mode = mode,
             language = "eng",
             transcriptionPromptVersion = OCR_TRANSCRIPTION_PROMPT_VERSION,
             extractorSchemaVersion = EXTRACTOR_SCHEMA_VERSION,

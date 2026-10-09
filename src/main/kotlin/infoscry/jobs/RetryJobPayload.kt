@@ -31,6 +31,8 @@ data class RetryJobPayload(
      * Tesseract, fill-missing, no external pages.
      */
     val ocr: infoscry.ocr.OcrSettingsSnapshot? = null,
+    val admissionRejected: List<infoscry.document.RejectedRetry> = emptyList(),
+    val documentSnapshots: Map<String, infoscry.ocr.OcrSettingsSnapshot> = emptyMap(),
 ) {
 
     init {

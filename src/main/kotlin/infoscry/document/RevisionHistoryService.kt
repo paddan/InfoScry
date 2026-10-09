@@ -6,12 +6,12 @@ import infoscry.domain.ExtractionMethod
 import infoscry.ocr.OcrOperation
 import infoscry.ocr.OcrProfileRevision
 import infoscry.ocr.OcrSettingsSnapshot
-import infoscry.ocr.PublicationDisposition
 import infoscry.storage.DocumentRevision
 import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.OcrOperationStore
 import infoscry.storage.OcrReviewStore
+import infoscry.storage.HistoricalReviewDisposition
 import infoscry.storage.PageApproval
 import infoscry.storage.PageDigest
 import infoscry.storage.RevisionState
@@ -196,16 +196,15 @@ class RevisionHistoryService(
     /**
      * Who decided that a page's text changed, from the reviews recorded against the reading it replaced.
      *
-     * A review whose candidate is exactly this page's text and whose disposition was APPROVE is the policy
-     * accepting it without a person; one that was only PROPOSEd became text because a person approved it. Text
-     * that matches no review's candidate, on a page that was reviewed, is text a person wrote. A page with no
-     * review at all has no record to say either way, and is reported as unknown rather than guessed.
+     * A historical review whose candidate is exactly this page's text and whose disposition was APPROVE marks
+     * the old policy's automatic acceptance. A PROPOSE row became text through a person's action. A page with
+     * no matching historical row is reported as unknown rather than guessed.
      */
     private fun decisionOf(documentId: DocumentId, revision: DocumentRevision, page: PageDigest): Decision {
         val against = reviews.forPage(documentId, page.unitId.value, page.ordinal)
             .filter { it.baselineRevisionId == revision.parentRevisionId }
         if (against.isEmpty()) return Decision.UNKNOWN
         val matching = against.lastOrNull { it.candidateHash == page.textSha256 } ?: return Decision.MANUAL
-        return if (matching.disposition == PublicationDisposition.APPROVE) Decision.AUTOMATIC else Decision.MANUAL
+        return if (matching.disposition == HistoricalReviewDisposition.APPROVE) Decision.AUTOMATIC else Decision.MANUAL
     }
 }

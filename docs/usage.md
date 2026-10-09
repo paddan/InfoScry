@@ -13,7 +13,11 @@ Search.
 2. Select the destination collection and choose **Add documents**.
 3. Use **Choose files…** or **Choose folder…**. Enable **Include subfolders**
    to import a folder recursively.
-4. Follow processing progress and inspect the per-file results in import history.
+4. Press **Import** to open the reading dialog. Choose Tesseract, Surya or an
+   enabled image-capable LLM profile. The collection default only pre-selects it.
+5. Check the page count, destination and estimated cost, then confirm **Read …**
+   or **Send …**. Unavailable methods show their reason.
+6. Follow processing progress and inspect the per-file results in import history.
 
 The picker opens on the Mac running the server and requires a graphical session.
 When that is unavailable, enter paths manually. Imports use immutable managed
@@ -49,23 +53,24 @@ clears its results and source viewer.
 
 ## Change settings and retry processing
 
-Edit a collection's name or OCR languages in its management area. Renaming
-preserves its documents and history. Language changes apply to future imports
-and explicit retries; saving them does not reprocess completed documents.
+Collection settings keep OCR language and one default reading method. Saving a
+default does not start a run; the start dialog confirms the method each time.
 
-A failed, cancelled or tool-blocked document offers **Retry**. It reads from
-the managed copy, so moving the external original does not prevent retrying.
-Successfully read units are retained where reusable; changed OCR languages may
-require extraction again.
+**Scan again** opens the same dialog for a document's managed copy. All pages
+are read, including pages with an existing text layer. A successful run replaces
+the text and search entries automatically. **Text history** keeps previous
+versions and offers **Restore** without reading the pages again.
 
-**Retry all eligible documents** covers the whole collection, including hidden
-pages and documents outside the current filter. The result distinguishes
-accepted attempts from skipped documents and explains refusals, such as an
-active import, deletion or missing runtime dependency.
+Each document shows Imported, Reading n of N, Done, Failed or Cancelled. A
+failed document offers **Retry**, which resumes reusable committed pages;
+choosing a different method reads them again. Cancelled and interrupted work
+can be started again immediately. Cancellation or failure leaves existing
+published text intact. External sending is confirmed at start for the shown
+pages; exceeding that count fails the run before another page is sent.
 
 If a failed import item never became a document, add that file again through
 **Add documents**. If the managed copy is missing, that document fails safely.
-Queued retries continue on the server after leaving Admin.
+Jobs continue on the server after leaving Admin.
 
 ## Delete documents or collections
 

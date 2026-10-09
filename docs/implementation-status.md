@@ -22,18 +22,13 @@ application suites.
 
 ## OCR engines and document rescanning
 
-[Selectable OCR and document rescanning](specs/2026-09-30-ocr-rescanning.md) is
-implemented through the manual product: Tesseract, a local Surya engine and
-image-capable LLM profiles can transcribe page images; documents carry immutable
-revisions with a recoverable publication boundary; a rescan compares its reading
-with the published text, a reviewer recommends and a person decides in Admin.
-Admin has OCR profiles (with the LLM provider presets and image-capable models,
-or a copy of an image-capable LLM profile), collection OCR controls, Scan again,
-page review and a text history that names the OCR settings each revision was
-read with, with explicit restoration. Everything stays in pilot mode: no
-replacement happens without a manual decision. Fake-provider browser acceptance
-passes; real-runtime acceptance and the measured pilot are open; the remaining
-work is superseded by the [OCR workflow redesign](specs/2026-10-08-ocr-workflow-redesign.md). See the [ticket plan](tickets/ocr-rescanning/STATUS.md).
+The [OCR workflow redesign](specs/2026-10-08-ocr-workflow-redesign.md) replaces
+collection engine/profile/mode controls with one reading method confirmed at
+start. Every page is read and successful runs publish automatically, preserving
+text history and Restore. Stopped and legacy paused work is cleaned on startup.
+See the [redesign ticket record](tickets/ocr-workflow-redesign/STATUS.md) for
+current implementation and verification. Real providers and CoreML remain
+separate manual gates; fake tests do not establish OCR quality.
 
 ## Fixes from local testing
 
@@ -89,9 +84,18 @@ classes passing (Collections 13, OCR 12, Investigate 8, Search 1) and 3
 failures because Tesseract and Surya are not installed there. `./gradlew check`,
 real OCR tools and CoreML were not run.
 
+On 2026-10-09 the OCR workflow redesign passed `./gradlew check externalTest`
+on the local Mac: 1,534 JVM tests, 336 frontend tests and 36 external tests,
+without failures or skipped tests. The browser classes cover Collections 14,
+OCR 11, Investigate 8 and Search 1; two independent real-tool tests cover
+Tesseract and Surya. Svelte/TypeScript checks reported zero errors or warnings.
+The final Retry help-text correction passed all 79 Collections frontend tests
+and typecheck afterwards. Real external-provider OCR and the complete workflow
+with real CoreML were not run.
+
 ## What browser acceptance proves
 
-**Collections:** thirteen scenarios exercise empty start, creation, folder import
+**Collections:** fourteen scenarios exercise empty start, creation, folder import
 and duplicates, filtered/paged browsing, details and source reading, settings,
 single/bulk retry, single/bulk deletion, collection deletion during an import,
 restart recovery, the legacy `Default` collection, a finished import's stage,
@@ -106,10 +110,11 @@ HTTP rejection, empty evidence, research limits, repeated-call limits and
 cancellation recovery. They use a local fake provider. The Investigate report
 (removed from `docs/` once complete; see git history before commit `c9edfab`) records the details.
 
-**OCR:** twelve scenarios exercise OCR profiles and their provider catalog,
-collection OCR controls including image-capable LLM profiles, Scan again, page
-review decisions, text history with the import's OCR settings and restoration.
-They use fake engines and a local fake provider.
+**OCR:** the redesigned scenarios exercise OCR profiles and their provider catalog,
+language and default-method settings, explicit method selection, automatic
+publication, cancellation, restart after interruption, text history and guarded
+restoration. Eleven scenarios pass with fake engines and a local fake provider;
+the current run is recorded in the redesign ticket status.
 
 **Search:** a Chromium scenario exercises live advanced filters, a delayed
 older response, inclusive date bounds, a single-digit query, mode changes and

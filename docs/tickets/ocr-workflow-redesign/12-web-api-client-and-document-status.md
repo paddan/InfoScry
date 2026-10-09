@@ -1,6 +1,6 @@
 # 12: Web API client and document status model
 
-**Status:** Not started
+**Status:** Implemented; automated gates passed (2026-10-09). See [verification record](STATUS.md#verification-record).
 **Blocked by:** None. The backend routes are not required: tests mock `fetch` per CONTRACTS section 11.
 **Plan:** [OCR workflow redesign, Task 12](../../plans/2026-10-08-ocr-workflow-redesign.md). Read first: this ticket, [CONTRACTS.md](CONTRACTS.md) (sections 2, 4, 5, 7, 11, 12, 13), `AGENTS.md`, the [spec](../../specs/2026-10-08-ocr-workflow-redesign.md) ("Run and document status").
 
@@ -24,13 +24,13 @@ CONTRACTS sections 2, 4, 7 and 11 (request/response shapes) with `fetch` mocked 
 - Create `web/src/lib/documentStatus.ts` (CONTRACTS section 11).
 - Tests `web/src/lib/api.test.ts`, `web/src/lib/documentStatus.test.ts`.
 
-## Test-first implementation
+## Original test-first implementation plan
 
-- [ ] Write failing tests for the URL, method and body of each client function, and for every status mapping in CONTRACTS section 11 including a failed run with a cause label; a `PREVIEW_STALE` response surfaces `code === 'PREVIEW_STALE'`.
-- [ ] Run `cd web && npm test -- --run`; expect FAIL.
-- [ ] Idempotence: `documentStatus` is a pure function (same input, same output); `startImport` sends the caller's `requestId` unchanged on every call.
-- [ ] Implement.
-- [ ] Run tests and `npm run check`; expect PASS.
+- Write failing tests for the URL, method and body of each client function, and for every status mapping in CONTRACTS section 11 including a failed run with a cause label; a `PREVIEW_STALE` response surfaces `code === 'PREVIEW_STALE'`.
+- Run `cd web && npm test -- --run`; expect FAIL.
+- Idempotence: `documentStatus` is a pure function (same input, same output); `startImport` sends the caller's `requestId` unchanged on every call.
+- Implement.
+- Run tests and `npm run check`; expect PASS.
 
 ## Focused verification
 

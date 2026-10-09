@@ -67,8 +67,7 @@ a real provider or GPU.
   result instead of an error or a duplicate side effect, and must converge from
   any partial state a crash can leave. Design and test it for each new
   operation: run it twice, interrupt it at each step and run it again.
-- OCR direction (approved 2026-10-08, not yet implemented; shipped behavior
-  differs until the plan lands): the reading method (engine and profile as one
+- OCR workflow (implemented 2026-10-09; real-provider/CoreML workflow gates remain open): the reading method (engine and profile as one
   choice) is confirmed in a start dialog on every import and rescan, with the
   collection default only pre-filling it; all pages are read; external sending
   is approved once in that dialog, never by a mid-run pause; there is no

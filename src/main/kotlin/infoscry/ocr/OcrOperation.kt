@@ -8,22 +8,16 @@ import kotlinx.serialization.Serializable
 /**
  * Where a rescan operation has got to.
  *
- * The stages are the operation's durability, not a progress label: every one of them is a state a process
- * can be killed in and resume from, because each is reached only after the work behind it is committed.
- * Their shape is the one thing the ticket fixes, so a later reader can always answer "what is this document
- * doing right now" from the row alone.
+ * The stages record which durable part of a reading was reached. `AWAITING_APPROVAL` and `REVIEW` remain
+ * only so rows written by older versions deserialize; startup cleanup turns those rows into terminal failures.
  *
- * Three pairs are easy to confuse and are deliberately distinct:
+ * Terminal states distinguish work that can be resumed from outcomes that need a new attempt:
  *
- * - [AWAITING_APPROVAL] is *before* any page of an unapproved scope is dispatched. It is a waiting state a
- *   process can restart into, not a failure: the job that reached it ends, and the approval resumes the
- *   operation through another attempt with the same snapshot and the same counters.
  * - [NEEDS_TOOL] is a **failure** whose remedy is an installation. It is separate from [FAILED] because the
  *   document is not broken — nothing about it can be read until a tool exists — and separate from a per-page
  *   failure, which does not stop the operation at all.
- * - [COMPLETE] is about the *reading*, not about the review backlog. An operation can be complete with pages
- *   still awaiting a person's decision; the pending-review count is what says so, and such a document is
- *   shown as needing review rather than as fully searchable.
+ * - [COMPLETE] means the whole candidate was published. Older completed operations with pending review rows
+ *   are cleaned up at startup before they can block another reading.
  */
 @Serializable
 enum class OcrOperationStage {
@@ -40,20 +34,15 @@ enum class OcrOperationStage {
     NEEDS_TOOL,
     ;
 
-    /** Whether this stage means nothing further will happen without an explicit new attempt. */
+    /** Legacy approval/review stages stay non-terminal only until startup cleanup releases their documents. */
     val isTerminal: Boolean get() = this != PREFLIGHT && this != AWAITING_APPROVAL && this != OCR &&
         this != REVIEW && this != CHUNKING && this != EMBEDDING && this != INDEXING
 
     /**
      * Whether an operation in this stage owns the document's reading.
      *
-     * A document may be under one reading at a time: two overlapping rescans would each stage a candidate
-     * against the same baseline and one of them would publish over the other's decision. Every stage that
-     * either is doing work or is waiting for somebody holds the document — including [AWAITING_APPROVAL],
-     * which is a documented wait and not an end: the reading continues once the scope is approved, with the
-     * same snapshot and the same counters, so admitting a second operation meanwhile would race that
-     * continuation. Terminal stages release the document: a failed or cancelled operation's proposal is
-     * dead, and a complete one has already published.
+     * A document may be under one reading at a time so overlapping candidates cannot publish over each other.
+     * Legacy approval/review stages hold the document until startup cleanup converts them to a terminal state.
      */
     val holdsDocument: Boolean get() = !isTerminal
 }
@@ -85,7 +74,7 @@ data class OcrExternalOwner(val kind: OcrExternalOwnerKind, val id: String) {
     }
 }
 
-/** Which stage of an attempt sent a page: the reading, or the reviewer judging two readings. */
+/** Legacy dispatch stages remain readable for persisted call counts. */
 @Serializable
 enum class OcrDispatchStage {
     TRANSCRIPTION,
@@ -97,29 +86,22 @@ enum class OcrDispatchStage {
  *
  * The two counters are deliberately separate. [distinctPages] is the allowance's unit: one page that left
  * this Mac, however many times it was sent and by whichever stage. [calls] is what was paid for, retries
- * included, and a page transcribed and then reviewed counts once and twice respectively. [allowance] is the
- * maximum distinct pages this owner may send right now — the collection's configured allowance, raised by an
- * approved scope — and [approvedDistinctPages] is what a person approved, absent when nobody approved
- * anything.
+ * included, and [allowance] is the maximum distinct pages this owner may send under its confirmed snapshot.
  */
 @Serializable
 data class OcrExternalAccount(
     val distinctPages: Int,
     val calls: Int,
     val allowance: Int,
-    val approvedDistinctPages: Int? = null,
 ) {
 
     init {
         require(distinctPages >= 0) { "a distinct page count is not negative, was $distinctPages" }
         require(calls >= 0) { "a call count is not negative, was $calls" }
         require(allowance >= 0) { "an external page allowance is not negative, was $allowance" }
-        require(approvedDistinctPages == null || approvedDistinctPages >= 0) {
-            "an approved page scope is not negative, was $approvedDistinctPages"
-        }
     }
 
-    /** How many more distinct pages may leave this machine before an approval is needed. */
+    /** How many more distinct pages may leave this machine before the confirmed limit is reached. */
     val remaining: Int get() = (allowance - distinctPages).coerceAtLeast(0)
 }
 
@@ -232,14 +214,10 @@ data class OcrCostEstimate(
  *
  * The preview is durable (see `ocr_rescan_previews`) because admission revalidates against it: [managedHash]
  * is the archive's own copy of the bytes the reading would be made from, [baseRevisionId] the reading it
- * would compare against, and [snapshot] the settings whose hash an external approval is bound to. A person
- * who approved "these 12 pages through this endpoint and model" must not have that approval apply to another
- * scope because something was edited in between.
+ * would replace, and [snapshot] the settings the operation was admitted with.
  *
  * [externalPageUpperBound] is conservative: it is the number of pages that *could* be sent if the whole
- * document were read, and it is absent when the total is not known, which is the state in which an approval
- * is required before the first page beyond the allowance. [approvalRequired] is that requirement, computed
- * against the collection's configured allowance.
+ * document were read, and it is absent when the total is not known.
  */
 @Serializable
 data class RescanPreview(
@@ -254,7 +232,6 @@ data class RescanPreview(
     val destinations: List<OcrNamedDestination> = emptyList(),
     val costEstimate: OcrCostEstimate? = null,
     val costUnavailableReason: String? = null,
-    val approvalRequired: Boolean = false,
     val externalAllowance: Int = 0,
     val expiresAt: String,
 ) {
@@ -262,7 +239,7 @@ data class RescanPreview(
     init {
         require(previewId.isNotBlank()) { "a preview names itself" }
         require(managedHash.isNotBlank()) { "a preview names the bytes it would read" }
-        require(snapshotHash.isNotBlank()) { "a preview names the snapshot an approval would bind to" }
+        require(snapshotHash.isNotBlank()) { "a preview names the settings it was taken with" }
         require(expiresAt.isNotBlank()) { "a preview carries the moment it stops being valid" }
         require(externalAllowance >= 0) {
             "a preview names a non-negative allowance, was $externalAllowance"

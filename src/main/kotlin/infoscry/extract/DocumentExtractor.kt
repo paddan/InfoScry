@@ -270,8 +270,12 @@ data class ExtractionSettings(
         val legacy = snapshot.engine == infoscry.ocr.OcrEngine.TESSERACT &&
             snapshot.mode == infoscry.ocr.OcrImportMode.FILL_MISSING &&
             snapshot.transcriptionProfileRevisionId == null
-        if (legacy) return this
-        return copy(ocrAttempt = snapshot.attemptIdentity(), ocrMode = snapshot.mode)
+        if (legacy) return copy(ocrLanguages = snapshot.language)
+        return copy(
+            ocrLanguages = snapshot.language,
+            ocrAttempt = snapshot.attemptIdentity(),
+            ocrMode = snapshot.mode,
+        )
     }
 
     /**

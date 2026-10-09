@@ -1,27 +1,20 @@
 package infoscry.document
 
-import infoscry.chunk.Chunker
-import infoscry.domain.ContentUnit
-import infoscry.embedding.DocumentEmbedder
 import infoscry.collection.DeletionBlockers
 import infoscry.config.AppPaths
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
-import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
-import infoscry.domain.SourceImageRoot
-import infoscry.domain.SourceLocation
-import infoscry.domain.UnitKind
-import infoscry.extract.PageImageSupport
+import infoscry.extract.PageCounter
+import infoscry.extract.DefaultPageCounter
 import infoscry.extract.PdfExtractor
 import infoscry.extract.PdfPageRenderer
 import infoscry.extract.PngPageRenderer
 import infoscry.extract.TextNormalizer
 import infoscry.jobs.RescanJobPayload
 import infoscry.ocr.CollectionOcrSettings
-import infoscry.ocr.ExternalDispatchPermitValidator
 import infoscry.ocr.OcrCostEstimate
 import infoscry.ocr.OcrDispatchAuthority
 import infoscry.ocr.OcrEndpointScope
@@ -31,13 +24,12 @@ import infoscry.ocr.OcrOperationStage
 import infoscry.ocr.OcrProfileRevision
 import infoscry.ocr.OcrProfileRole
 import infoscry.ocr.OcrSettingsSnapshot
-import infoscry.ocr.PageComparisonInput
+import infoscry.ocr.ReadingMethod
+import infoscry.ocr.ReadingMethodCatalog
+import infoscry.ocr.ReadingMethodUnavailableException
 import infoscry.ocr.PageImage
-import infoscry.ocr.PageReview
 import infoscry.ocr.PageImageRenderer
 import infoscry.ocr.RescanPreview
-import infoscry.ocr.readingTextHash
-import infoscry.search.LuceneIndex
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.DocumentBeingDeletedException
@@ -47,10 +39,6 @@ import infoscry.storage.JobStore
 import infoscry.storage.MutationCoordinator
 import infoscry.storage.OcrOperationConflictException
 import infoscry.storage.OcrOperationStore
-import infoscry.storage.OcrReviewStore
-import infoscry.storage.PageApproval
-import infoscry.storage.RevisionState
-import infoscry.storage.RescanPreviewOverrides
 import infoscry.storage.RevisionPageText
 import infoscry.storage.StaleRescanPreviewException
 import java.io.IOException
@@ -117,33 +105,6 @@ class RescanRefusalException(val code: String, message: String) : IllegalStateEx
     }
 }
 
-/** An engine and profile choice for one rescan, overriding the collection's defaults. */
-data class RescanOverrides(
-    val engine: infoscry.ocr.OcrEngine? = null,
-    val importMode: infoscry.ocr.OcrImportMode? = null,
-    val transcriptionProfileId: String? = null,
-    val reviewProfileId: String? = null,
-    /**
-     * The OCR language list for this reading, or null for the collection's. A rescan preview never sets it; a
-     * retry with a chosen method may, and it travels through the same resolution as every other choice.
-     */
-    val language: String? = null,
-)
-
-
-
-/**
- * Judging one page's comparison, as an attempt uses it.
- *
- * The attempt owns the page, the readings and the staging; the reviewer answers one question about one
- * comparison and publishes nothing, which is why this seam has a single method rather than a service object
- * the handler would have to reach into.
- */
-fun interface PageReviewer {
-
-    suspend fun compare(input: PageComparisonInput): PageReview
-}
-
 /**
  * One page image an attempt reads, with the reading it is compared against.
  *
@@ -170,6 +131,7 @@ data class RescanPage(val image: PageImage, val baseline: RevisionPageText?)
 class RescanPageSource(
     private val draw: PdfPageRenderer = PngPageRenderer,
     private val maxRenderedPixels: Long = PdfExtractor.MAX_RENDERED_PIXELS,
+    private val pageCounter: PageCounter = DefaultPageCounter(),
 ) {
 
     /** Whether this media type has pages that can be rendered and read. */
@@ -186,11 +148,8 @@ class RescanPageSource(
      * The count is what a preview shows and what makes a preflight allowance conservative, so it is read from
      * the container's own header rather than by rendering anything.
      */
-    fun pageCount(managedPath: Path, mediaType: String): Int? = when {
-        mediaType == PDF_MEDIA_TYPE -> openPdf(managedPath)?.use { it.numberOfPages }
-        mediaType in PICTURE_MEDIA_TYPES -> 1
-        else -> null
-    } ?: throw RescanRefusalException(
+    fun pageCount(managedPath: Path, mediaType: String): Int? = pageCounter.pageCount(managedPath, mediaType)
+        ?: throw RescanRefusalException(
         RescanRefusalException.MANAGED_COPY_MISSING,
         "the document's managed copy could not be opened, so its pages are unknown; add the file again to " +
             "restore it",
@@ -356,7 +315,7 @@ class RescanPageSource(
 }
 
 /**
- * Admitting, following, approving and cancelling a rescan of one document.
+ * Admitting, following and cancelling a rescan of one document.
  *
  * The service is the admission boundary of the feature, and it exists because every one of those steps has to
  * happen against persisted state rather than against what a caller believes:
@@ -372,9 +331,6 @@ class RescanPageSource(
  *   which is what keeps two candidates from being staged against the same baseline.
  * - **A repeated request is one operation.** The request id and the request's own body are both recorded, so a
  *   retry after a timeout returns the operation that exists and a reused id with another body conflicts.
- * - **Approval binds a scope, not a person's intent.** An approval names the snapshot hash and the maximum
- *   number of distinct pages, and the dispatch authority reads it from there: a later attempt whose snapshot
- *   differs cannot inherit it.
  */
 class RescanService(
     private val paths: AppPaths,
@@ -382,15 +338,16 @@ class RescanService(
     private val documents: DocumentStore,
     private val revisions: DocumentRevisionStore,
     private val jobs: JobStore,
+    /** Signals a live worker attempt after persisting the cancellation request. */
+    private val cancelAttempt: suspend (infoscry.domain.JobId) -> infoscry.domain.Job = { id -> jobs.cancel(id) },
     private val operations: OcrOperationStore,
-    private val reviews: OcrReviewStore,
     private val mutations: MutationCoordinator,
     private val blockers: DeletionBlockers,
     private val publication: RevisionPublicationService,
-    private val index: () -> LuceneIndex,
     /** Resolving a profile id to the revision it *currently* points at, which is what admission freezes. */
     private val profileOf: (String) -> infoscry.ocr.OcrProfile?,
     private val profileRevisionOf: (String) -> OcrProfileRevision?,
+    private val methodCatalog: ReadingMethodCatalog? = null,
     /**
      * How an attempt gets the engine its snapshot selects, so admission can validate prerequisites — and probe
      * the runtime a reading would be identified by — without sending anything.
@@ -407,15 +364,6 @@ class RescanService(
     private val keyAvailable: (String?) -> Boolean = { variable -> variable == null || System.getenv(variable) != null },
     private val pages: RescanPageSource = RescanPageSource(),
     private val clock: () -> Instant = Instant::now,
-    /**
-     * The chunker a decided page's text is cut into passages with, or null when this process has none.
-     *
-     * It is the one an import chunks with, so a person's edit is measured by the same exact tokenizer, prefix,
-     * special tokens and repeated header as every other passage and is never truncated.
-     */
-    private val chunker: () -> Chunker? = { null },
-    /** The embedder this process has, or null when there is none; resolved on demand and never cached here. */
-    private val embedder: () -> DocumentEmbedder? = { null },
 ) {
 
     // ---- preview ----
@@ -429,21 +377,28 @@ class RescanService(
     suspend fun preview(
         collectionId: CollectionId,
         documentId: DocumentId,
-        overrides: RescanOverrides = RescanOverrides(),
+        method: ReadingMethod,
     ): RescanPreview {
         val collection = requireActiveCollection(collectionId)
         val document = requireDocument(collectionId, documentId)
-        val settings = collection.ocrSettings().withOverrides(overrides)
-        val snapshot = snapshotFor(settings)
+        methodCatalog?.require(collectionId, method)
+        pageImagesRefusal(document)?.let { throw it }
+        val settings = CollectionOcrSettings(collection.ocrLanguages, method)
+        val pageTotal = pages.pageCount(
+            managedCopyOf(document, paths.documentDir(collectionId, documentId)),
+            document.mediaType,
+        ) ?: throw RescanRefusalException(
+            RescanRefusalException.MANAGED_COPY_MISSING,
+            "the document's page count could not be read, so the number of pages cannot be confirmed",
+        )
+        val snapshot = snapshotFor(settings, externalPageLimit = if (method is ReadingMethod.Llm &&
+            profileOf(method.profileId)?.revision?.scope == OcrEndpointScope.EXTERNAL
+        ) pageTotal else 0)
         requireRescanable(document, snapshot)
         val baselineRevisionId = revisions.activeRevisionId(documentId)
-        val managedPath = paths.documentDir(collectionId, documentId)
-        val pageTotal = pages.pageCount(managedCopyOf(document, managedPath), document.mediaType)
-        val destinations = destinationsOf(snapshot, collection)
-        val external = snapshot.transcriptionProfileRevisionId?.let { profileRevisionOf(it)?.scope } ==
-            OcrEndpointScope.EXTERNAL ||
-            snapshot.reviewProfileRevisionId?.let { profileRevisionOf(it)?.scope } == OcrEndpointScope.EXTERNAL
-        val upperBound = if (external) pageTotal else 0
+        val destinations = destinationsOf(snapshot)
+        val external = snapshot.transcriptionProfileRevisionId?.let { profileRevisionOf(it)?.scope } == OcrEndpointScope.EXTERNAL
+        val upperBound = pageTotal
         val previewId = "preview-" + UUID.randomUUID()
         val snapshotHash = OcrOperationStore.snapshotHashOf(snapshot)
         val estimate = costEstimateOf(snapshot, pageTotal, external)
@@ -459,10 +414,6 @@ class RescanService(
             destinations = destinations,
             costEstimate = estimate.first,
             costUnavailableReason = estimate.second,
-            // Conservative: a scope whose page total nobody knows needs approval, because there is no bound
-            // to check the allowance against.
-            approvalRequired = external &&
-                (upperBound == null || upperBound > snapshot.externalPageLimit),
             externalAllowance = snapshot.externalPageLimit,
             expiresAt = clock().plus(PREVIEW_LIFETIME).toString(),
         ).also { preview ->
@@ -470,24 +421,22 @@ class RescanService(
                 collectionId.value,
                 documentId,
                 preview,
-                overridesJson = overrides.asPreviewOverridesJson(),
+                overridesJson = null,
             )
         }
     }
 
-    /**
-     * The reading a choice would make for [collection], validated exactly as a preview validates it.
-     *
-     * It is the half of [preview] that does not depend on one document: the collection's settings with the
-     * choice applied are resolved into the snapshot (profiles must exist and be enabled, the engine's runtime
-     * is probed), and the snapshot is then refused when its engine is not in this build, no embedder exists, or
-     * an external profile was never measured as image capable or lacks its key. A retry with a chosen OCR
-     * method admits through this, so it can never accept a reading a rescan preview would refuse.
-     *
-     * @throws RescanRefusalException with the same codes a preview answers with.
-     */
-    suspend fun resolveChosenReading(collection: Collection, overrides: RescanOverrides): OcrSettingsSnapshot {
-        val snapshot = snapshotFor(collection.ocrSettings().withOverrides(overrides))
+    /** Resolves and validates the method chosen for a retry against this collection's settings. */
+    suspend fun resolveChosenReading(
+        collection: Collection,
+        method: ReadingMethod,
+        externalPageLimit: Int = 0,
+    ): OcrSettingsSnapshot {
+        methodCatalog?.require(collection.id, method)
+        val snapshot = snapshotFor(
+            CollectionOcrSettings(collection.ocrLanguages, method),
+            externalPageLimit = externalPageLimit,
+        )
         requireReadingUsable(snapshot)
         return snapshot
     }
@@ -548,16 +497,15 @@ class RescanService(
                     "the document publishes ${active ?: "no revision"} now, not the reading it named",
                 )
             }
-            // The snapshot is re-validated against the profiles the settings name *now*, and against every
-            // field of the effective settings the preview was taken with: a preview whose profile was
-            // repointed, whose engine, mode, language or allowance was edited, or whose reviewer was
-            // deselected between being shown and being admitted is a different reading, and admitting it would
-            // dispatch a scope and a text nobody looked at.
+            // The snapshot is revalidated against the selected profile revision and collection settings at
+            // admission, so a changed method or profile cannot silently replace the choice shown in preview.
             requireSnapshotStillResolvable(preview.snapshot)
             requirePreviewStillCurrent(preview, collection)
             requireRescanable(document, preview.snapshot)
-            operations.activeOperation(documentId)?.let { running ->
-                throw OcrOperationConflictException(documentId, running.stage)
+            // Signal a live worker before the store transaction closes its operation. The transaction below
+            // still enforces replacement atomically, including a concurrent admission that wins this race.
+            operations.activeOperation(documentId)?.let { previous ->
+                cancelWithinMutation(collectionId, documentId, previous.operationId)
             }
             val admitted = operations.admit(
                 collectionId = collectionId.value,
@@ -589,63 +537,6 @@ class RescanService(
     }
 
     /**
-     * Approves an external page scope for one operation, and resumes the attempt that was waiting for it.
-     *
-     * [expectedSnapshotHash] is what makes this approval *this scope's*: a caller that approves a scope while
-     * the operation's snapshot has moved on is refused, because the pages it is authorizing are not the pages
-     * it was shown. The authorized maximum is bound to the same hash, so no later attempt of another scope can
-     * inherit it.
-     */
-    suspend fun approveExternal(
-        collectionId: CollectionId,
-        documentId: DocumentId,
-        operationId: String,
-        expectedSnapshotHash: String,
-        maxDistinctPages: Int,
-    ): OcrOperation {
-        require(maxDistinctPages >= 1) {
-            "an approval authorizes at least one page, was $maxDistinctPages"
-        }
-        return mutations.withMutation {
-            val operation = requireScopedOperation(collectionId, documentId, operationId)
-            if (operation.stage.isTerminal) {
-                throw RescanRefusalException(
-                    RescanRefusalException.SNAPSHOT_NOT_RESUMABLE,
-                    "this operation is ${operation.stage}; there is nothing left to approve",
-                )
-            }
-            val snapshotHash = OcrOperationStore.snapshotHashOf(operation.snapshot)
-            if (snapshotHash != expectedSnapshotHash) {
-                throw StaleRescanPreviewException(
-                    operationId,
-                    "its settings are not the ones this approval names, so the approval was refused rather " +
-                        "than bound to another scope",
-                )
-            }
-            val sent = operations.distinctPageCount(ownerOf(operation))
-            if (maxDistinctPages < sent) {
-                throw IllegalArgumentException(
-                    "the approved scope of $maxDistinctPages pages is smaller than the $sent pages this " +
-                        "operation has already sent; an approval can only widen the scope",
-                )
-            }
-            operations.approveExternalScope(
-                owner = ownerOf(operation),
-                snapshotHash = snapshotHash,
-                authorizedDistinctPages = maxDistinctPages,
-            )
-            // An approval while an attempt is running is *its* approval: the authority resolves the allowance
-            // again on every dispatch, so the reading already under way continues past the scope it was
-            // waiting on. Starting another attempt for it would be a second worker on one candidate and one
-            // set of counters, which is what the claim seam refuses; there is simply nothing to resume.
-            if (operations.liveAttempt(operation.operationId) != null) {
-                return@withMutation checkNotNull(operations.operation(operation.operationId))
-            }
-            resumeAttempt(operation)
-        }
-    }
-
-    /**
      * Queues another attempt for an operation that stopped — a cancellation, a failure, a missing tool.
      *
      * The snapshot and the counters are the operation's own and are not touched: a resume either continues the
@@ -658,12 +549,6 @@ class RescanService(
             when (operation.stage) {
                 OcrOperationStage.COMPLETE ->
                     throw IllegalArgumentException("this operation is complete; there is nothing to resume")
-
-                OcrOperationStage.AWAITING_APPROVAL ->
-                    throw IllegalStateException(
-                        "this operation waits for external approval; approve a page scope rather than " +
-                            "resuming it",
-                    )
 
                 else -> Unit
             }
@@ -692,19 +577,31 @@ class RescanService(
      * has committed. A publication whose authority has moved is past the point a cancellation can undo, which
      * is why the attempt's own stage is what decides.
      */
-    suspend fun cancel(collectionId: CollectionId, documentId: DocumentId, operationId: String): OcrOperation {
+    suspend fun cancel(collectionId: CollectionId, documentId: DocumentId, operationId: String): OcrOperation =
+        mutations.withMutation { cancelWithinMutation(collectionId, documentId, operationId) }
+
+    private suspend fun cancelWithinMutation(
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        operationId: String,
+    ): OcrOperation {
         val operation = requireScopedOperation(collectionId, documentId, operationId)
-        if (operation.stage.isTerminal) return operation
+        if (operation.stage.isTerminal) {
+            if (operation.stage == OcrOperationStage.CANCELLED) markDocumentCancelledIfLatest(operation)
+            return operation
+        }
         val jobId = operation.jobId
         if (jobId == null) {
-            return operations.finish(
+            val cancelled = operations.finish(
                 operationId = operation.operationId,
                 stage = OcrOperationStage.CANCELLED,
                 errorCode = CANCELLED_CODE,
                 errorMessage = "this rescan was cancelled before it read anything",
             )
+            markDocumentCancelledIfLatest(cancelled)
+            return cancelled
         }
-        val cancelled = jobs.cancel(infoscry.domain.JobId(jobId))
+        val cancelled = cancelAttempt(infoscry.domain.JobId(jobId))
         return if (cancelled.state == infoscry.domain.JobState.RUNNING) {
             // The attempt owns the end of the operation, bounded between pages: it is the only thing that
             // knows what it committed, and a stage written here could claim a page that never got there.
@@ -715,524 +612,23 @@ class RescanService(
                 stage = OcrOperationStage.CANCELLED,
                 errorCode = CANCELLED_CODE,
                 errorMessage = "this rescan was cancelled before it read anything",
-            )
+            ).also(::markDocumentCancelledIfLatest)
         }
     }
 
-    /**
-     * Drops the replacement an operation staged but nobody decided, and releases the document it holds.
-     *
-     * A COMPLETE operation whose candidate still has pages awaiting a decision holds its document, and a
-     * cancellation does not touch a terminal operation, so this is the explicit way out: it withdraws the
-     * candidate through the revision store (the same state a failed stager leaves behind), removes the
-     * undecided pages' stored reviews, and sets the pending count to zero. The published revision, its text and
-     * its index rows are never touched, and no page is read or sent anywhere.
-     *
-     * @throws RescanRefusalException unless the operation is COMPLETE with an unpublished candidate that still
-     *   has undecided pages.
-     */
-    suspend fun discardPending(collectionId: CollectionId, documentId: DocumentId, operationId: String): OcrOperation =
-        mutations.withMutation {
-            val operation = requireScopedOperation(collectionId, documentId, operationId)
-            requireNotBeingDeleted(documentId)
-            val candidate = operation.candidateRevisionId
-            val unpublished = candidate != null && revisions.revision(candidate)?.state == RevisionState.CANDIDATE
-            val pending = if (candidate != null && unpublished) {
-                revisions.pages(candidate).filter { it.approval == PageApproval.PENDING }
-            } else {
-                emptyList()
-            }
-            if (operation.stage != OcrOperationStage.COMPLETE || candidate == null || pending.isEmpty()) {
-                throw RescanRefusalException(
-                    RescanRefusalException.NOTHING_TO_DISCARD,
-                    "this operation has no unpublished pages waiting for a decision, so there is nothing to discard",
-                )
-            }
-            reviews.pending(documentId).forEach { review ->
-                if (pending.any { page -> review.matchesPending(operation, page) }) {
-                    reviews.delete(review.fingerprint, review.imageSha256)
-                }
-            }
-            revisions.withdrawCandidate(candidate)
-            operations.recordProgress(operation.operationId, pendingReview = 0)
-            operations.finish(
-                operationId = operation.operationId,
-                stage = OcrOperationStage.COMPLETE,
-                errorCode = DISCARDED_CODE,
-                errorMessage = "the new reading was discarded without a decision; the existing text is unchanged",
-            )
-        }
-
-    // ---- reviews and decisions ----
-
-    /**
-     * The pages of one document that are waiting for a person's decision.
-     *
-     * Read through the operation so the answer is scoped: another document's proposals are not this
-     * operation's to show.
-     */
-    fun pendingReviews(collectionId: CollectionId, documentId: DocumentId, operationId: String): List<PendingReview> {
-        val operation = requireScopedOperation(collectionId, documentId, operationId)
-        val candidate = operation.candidateRevisionId ?: return emptyList()
-        val staged = revisions.pages(candidate).associateBy { it.ordinal }
-        return reviews.pending(documentId).mapNotNull { review ->
-            val page = staged[review.ordinal]?.takeIf { review.matchesPending(operation, it) } ?: return@mapNotNull null
-            PendingReview(review, imageAvailable = pageImageFile(collectionId, documentId, page, review) != null)
-        }
-    }
-
-    /**
-     * One pending page's candidate text, for the person who has to decide about it.
-     *
-     * Only a page that has a proposal *and* has not been decided is readable here, and the text is the staged
-     * candidate's own — never the published reading, and never a page of another operation. A candidate past
-     * [MAX_CANDIDATE_CHARS] is cut and says so: the hash still names the whole text, so a decision is bound to
-     * what was staged rather than to the excerpt shown.
-     *
-     * @throws NoSuchElementException for anything that is not a pending page of this operation, in one answer
-     *   that names neither the page's text nor any stored identifier.
-     * @throws DocumentBeingDeletedException when the document is on its way out.
-     */
-    fun pendingCandidate(
-        collectionId: CollectionId,
-        documentId: DocumentId,
-        operationId: String,
-        unitId: String,
-    ): PendingCandidateReading {
-        val (operation, page, _) = pendingPage(collectionId, documentId, operationId, unitId)
-        val text = page.extractedText
-        val bounded = boundedText(text)
-        return PendingCandidateReading(
-            unitId = page.unitId.value,
-            ordinal = page.ordinal,
-            candidateHash = page.textSha256 ?: readingTextHash(text),
-            baselineRevisionId = operation.baseRevisionId,
-            text = bounded,
-            totalChars = text.length,
-            truncated = bounded.length < text.length,
-        )
-    }
-
-    /**
-     * The image one pending page's reading was made from: the managed artifact the comparison used.
-     *
-     * The bytes are read once, from the artifact the page's own record names inside its own document's
-     * directory, and served only when their SHA-256 is both the one the page recorded and the one the review
-     * was made against and they are a raster this build allow-lists. Nothing here accepts or reveals a path.
-     *
-     * @throws NoSuchElementException for anything that is not a pending page with an intact image.
-     */
-    fun pendingImage(
-        collectionId: CollectionId,
-        documentId: DocumentId,
-        operationId: String,
-        unitId: String,
-    ): PendingPageImage {
-        val (_, page, review) = pendingPage(collectionId, documentId, operationId, unitId)
-        val file = pageImageFile(collectionId, documentId, page, review) ?: throw noPendingPage()
-        val bytes = try {
-            Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(MAX_IMAGE_BYTES + 1) }
-        } catch (_: IOException) {
-            throw noPendingPage()
-        }
-        if (bytes.size > MAX_IMAGE_BYTES || sha256Hex(bytes) != review.imageSha256) throw noPendingPage()
-        val mediaType = rasterMediaTypeOf(bytes) ?: throw noPendingPage()
-        return PendingPageImage(bytes, mediaType)
-    }
-
-    private fun noPendingPage() = NoSuchElementException("no pending review exists for that page of this operation")
-
-    private fun pendingPage(
-        collectionId: CollectionId,
-        documentId: DocumentId,
-        operationId: String,
-        unitId: String,
-    ): Triple<OcrOperation, RevisionPageText, PageReview> {
-        val operation = requireScopedOperation(collectionId, documentId, operationId)
-        requireNotBeingDeleted(documentId)
-        val candidate = operation.candidateRevisionId ?: throw noPendingPage()
-        val page = revisions.pageForUnit(candidate, ContentUnitId(unitId)) ?: throw noPendingPage()
-        val review = reviews.pending(documentId).firstOrNull { it.matchesPending(operation, page) }
-            ?: throw noPendingPage()
-        return Triple(operation, page, review)
-    }
-
-    /** Whether this proposal is the one waiting on this staged page: same page, same baseline, same text, undecided. */
-    private fun PageReview.matchesPending(operation: OcrOperation, page: RevisionPageText): Boolean =
-        page.approval == PageApproval.PENDING &&
-            unitId == page.unitId.value &&
-            ordinal == page.ordinal &&
-            baselineRevisionId == operation.baseRevisionId &&
-            candidateHash == (page.textSha256 ?: readingTextHash(page.extractedText))
-
-    /**
-     * The file a page's reading was made from, or null when it is not there, not a plain file inside its own
-     * document's directory, too large to serve, or not the image the review was made against.
-     *
-     * The hash is *not* computed here: this is the cheap answer a listing gives for every page, and
-     * [pendingImage] is what verifies the bytes it serves.
-     */
-    private fun pageImageFile(
-        collectionId: CollectionId,
-        documentId: DocumentId,
-        page: RevisionPageText,
-        review: PageReview,
-    ): Path? {
-        val provenance = page.sourceImage ?: return null
-        if (provenance.sha256 != review.imageSha256) return null
-        val root = when (provenance.root) {
-            SourceImageRoot.ARTIFACTS -> paths.artifactsDir(collectionId, documentId)
-            SourceImageRoot.MANAGED_COPY -> paths.documentDir(collectionId, documentId)
-        }
-        return try {
-            val relative = Path.of(provenance.relativePath)
-            if (relative.isAbsolute) return null
-            val base = root.toAbsolutePath().normalize()
-            val file = base.resolve(relative).normalize()
-            if (file == base || !file.startsWith(base)) return null
-            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return null
-            // A directory of the path that is a link could still lead out: the real location has to be inside too.
-            if (!file.toRealPath().startsWith(base.toRealPath())) return null
-            file.takeIf { Files.size(it) <= MAX_IMAGE_BYTES }
-        } catch (_: IOException) {
-            null
-        } catch (_: java.nio.file.InvalidPathException) {
-            null
-        }
-    }
-
-    private fun boundedText(text: String): String {
-        if (text.length <= MAX_CANDIDATE_CHARS) return text
-        val end = if (Character.isHighSurrogate(text[MAX_CANDIDATE_CHARS - 1])) MAX_CANDIDATE_CHARS - 1 else MAX_CANDIDATE_CHARS
-        return text.substring(0, end)
-    }
-
-    private fun sha256Hex(bytes: ByteArray): String =
-        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))
-
-    /** The allow-listed media type the leading bytes of an image name, or null when they are none of them. */
-    private fun rasterMediaTypeOf(bytes: ByteArray): String? {
-        fun startsWith(vararg prefix: Int) =
-            bytes.size >= prefix.size && prefix.indices.all { bytes[it].toInt() and 0xFF == prefix[it] }
-        return when {
-            startsWith(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) -> "image/png"
-            startsWith(0xFF, 0xD8, 0xFF) -> "image/jpeg"
-            startsWith('G'.code, 'I'.code, 'F'.code, '8'.code) -> "image/gif"
-            startsWith('B'.code, 'M'.code) -> "image/bmp"
-            startsWith('R'.code, 'I'.code, 'F'.code, 'F'.code) && bytes.size >= WEBP_HEADER_BYTES &&
-                String(bytes, 8, 4, Charsets.US_ASCII) == "WEBP" -> "image/webp"
-            startsWith('I'.code, 'I'.code, 0x2A, 0x00) || startsWith('M'.code, 'M'.code, 0x00, 0x2A) -> "image/tiff"
-            else -> null
-        }
-    }
-
-    /**
-     * Applies explicit page decisions to an operation's candidate and answers with the operation.
-     *
-     * A decision names the page and the hash of the text it was taken against, and the guard is the page's own
-     * stored hash: a decision taken against another reading — because another rescan staged a page in between,
-     * or because the page was decided somewhere else — is refused rather than applied to text it did not see.
-     *
-     * The three choices mean what the review UI says:
-     *
-     * - [ReviewChoice.USE_NEW] approves the candidate reading that was proposed.
-     * - [ReviewChoice.EDIT] approves the person's own text, which replaces the candidate's.
-     * - [ReviewChoice.KEEP] retains what the document publishes. That is only meaningful for a page that
-     *   publishes something: a page with no baseline has no text to keep, and the decision is refused with the
-     *   reason rather than approving the candidate's text under a "keep" label.
-     */
-    fun decideReviews(
-        collectionId: CollectionId,
-        documentId: DocumentId,
-        operationId: String,
-        requestId: String,
-        expectedRevisionId: String,
-        decisions: List<ReviewDecision>,
-        documentWide: ReviewChoice? = null,
-    ): ReviewDecisionResult {
-        require(requestId.isNotBlank()) { "a review decision needs a request id" }
-        val operation = requireScopedOperation(collectionId, documentId, operationId)
-        // The revision guard runs before anything else, so a decision taken against another reading is
-        // answered as that conflict whatever state the operation happens to be in.
-        requireDecisionsApplyToActiveReading(documentId, expectedRevisionId)
-        val candidate = operation.candidateRevisionId
-            ?: throw IllegalArgumentException("this operation has staged no replacement to decide about")
-        val applied = mutableListOf<AppliedDecision>()
-        val staged = revisions.pages(candidate).associateBy { it.ordinal }
-        // A document-wide choice is resolved against the server-side pending set rather than against a list the
-        // caller sent, so an old tab cannot decide pages that appeared after it was rendered; the revision
-        // guard above is what keeps that set the one the caller named.
-        val resolved = if (documentWide != null) {
-            pendingOrdinals(candidate).map { ordinal ->
-                val page = staged.getValue(ordinal)
-                ReviewDecision(
-                    unitId = page.unitId.value,
-                    ordinal = ordinal,
-                    candidateHash = page.textSha256 ?: readingTextHash(page.extractedText),
-                    choice = documentWide,
-                )
-            }
-        } else {
-            decisions
-        }
-        resolved.forEach { decision ->
-            val page = staged[decision.ordinal]
-                ?: throw IllegalArgumentException(
-                    "this operation staged no page at ordinal ${decision.ordinal}",
-                )
-            if (page.unitId.value != decision.unitId) {
-                throw IllegalArgumentException(
-                    "ordinal ${decision.ordinal} of this document is not the page this decision names",
-                )
-            }
-            val storedHash = page.textSha256 ?: readingTextHash(page.extractedText)
-            if (storedHash != decision.candidateHash) {
-                throw StaleCandidateDecisionException(
-                    "the text of page ${decision.ordinal} is not the text this decision was taken against, so " +
-                        "it was refused rather than applied to a reading nobody saw",
-                )
-            }
-            applied += applyDecision(operation, candidate, page, decision)
-        }
-        // The stored backlog is re-derived from the candidate's own pages, so deciding the last proposal
-        // reads as "nothing waits for a person" rather than leaving the count the staging pass wrote.
-        return ReviewDecisionResult(
-            operation = operations.recordProgress(
-                operation.operationId,
-                pageTotal = operation.pageTotal,
-                pendingReview = pendingOrdinals(candidate).size,
-            ),
-            applied = applied,
-        )
-    }
-
-    /**
-     * Admits the publication of an operation's decided candidate, and answers what happened to it.
-     *
-     * The candidate is published as one whole revision, so a page still awaiting a decision refuses the
-     * publication with the reason instead of dropping that page's text: the archive is never served a
-     * half-reviewed document.
-     */
-    suspend fun publishDecisions(
-        collectionId: CollectionId,
-        documentId: DocumentId,
-        operationId: String,
-        expectedRevisionId: String,
-    ): PublicationDecisionResult {
-        val operation = requireScopedOperation(collectionId, documentId, operationId)
-        requireDecisionsApplyToActiveReading(documentId, expectedRevisionId)
-        val candidate = operation.candidateRevisionId
-            ?: throw IllegalArgumentException("this operation has staged no replacement to publish")
-        // A page a person kept or edited carries text the attempt never chunked or embedded. They are made
-        // here, before the publication boundary and outside any permit, so a model that fails leaves the
-        // document's text exactly as it was and the decisions recorded for the next try.
-        completeDecidedPages(documentId, candidate)
-        val publicationId = publication.publish(
-            documentId = documentId,
-            baseRevisionId = operation.baseRevisionId,
-            candidateRevisionId = candidate,
-        )
-        val intent = revisions.intent(publicationId)
-        val published = intent?.phase == infoscry.storage.PublicationPhase.PUBLISHED
-        // A published candidate has no page left to decide; a refused one still has its backlog. Either way the
-        // stored count is what the candidate holds now, so a finished operation never keeps holding its document.
-        operations.recordProgress(operation.operationId, pendingReview = pendingOrdinals(candidate).size)
-        val finished = if (published) {
-            operations.finish(operation.operationId, OcrOperationStage.COMPLETE)
-        } else {
-            operations.finish(
-                operationId = operation.operationId,
-                stage = OcrOperationStage.COMPLETE,
-                errorCode = intent?.errorCode ?: AWAITING_REVIEW_CODE,
-                errorMessage = intent?.errorMessage ?: "the replacement is waiting for a decision on its pages",
-            )
-        }
-        return PublicationDecisionResult(
-            operation = finished,
-            publicationId = publicationId,
-            phase = intent?.phase?.name ?: "UNKNOWN",
-            errorCode = intent?.errorCode,
+    /** A queued or not-yet-created attempt has no worker to publish its terminal document status. */
+    private fun markDocumentCancelledIfLatest(operation: OcrOperation) {
+        if (operations.operations(operation.documentId).firstOrNull()?.operationId != operation.operationId) return
+        if (documents.isDeletionTarget(operation.documentId)) return
+        documents.updateStatus(
+            operation.documentId,
+            infoscry.domain.DocumentStatus.CANCELLED,
+            CANCELLED_CODE,
+            "this rescan was cancelled; the document still shows its published text",
         )
     }
 
     // ---- internals ----
-
-    /**
-     * Gives every approved page of the candidate the passages and vectors the publication requires.
-     *
-     * Use new publishes a page the attempt already chunked and embedded, so it needs nothing. Keep existing and
-     * Edit text replace the staged page with text that has neither, and both are chunked here the same way:
-     * from the page's own text with the import's exact tokenizer, so a kept page is measured by the current
-     * tokenizer rather than trusting the vectors of an older embedding, and an edit is never cut to fit. Only
-     * what is missing is done, which is what lets a retry after a failed embedding resume without repeating
-     * the pages that already have their vectors.
-     *
-     * Nothing here changes what readers search: the candidate is not published until the whole set exists.
-     *
-     * @throws RescanRefusalException when this process cannot chunk or embed, or the embedder fails; the
-     *   words are curated and never carry the provider's own.
-     */
-    private suspend fun completeDecidedPages(documentId: DocumentId, candidate: String) {
-        val pages = revisions.pages(candidate)
-        // A page still owed a decision refuses the whole publication on its own; nothing is worth computing.
-        if (pages.any { page -> page.approval == PageApproval.PENDING }) return
-        val chunksByPage = revisions.chunks(candidate).groupBy { chunk -> chunk.unitOrdinal }
-        val unchunked = pages.filter { page -> page.approval == PageApproval.APPROVED && page.ordinal !in chunksByPage }
-        val unembedded = chunksByPage.values.any { chunks -> chunks.any { chunk -> !chunk.isStaged } }
-        if (unchunked.isEmpty() && !unembedded) return
-
-        // Resolved outside any permit: the first call can load a model. No embedder is a refusal rather than a
-        // reason to measure or embed some other way.
-        val resolvedEmbedder = try {
-            embedder()
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            null
-        }
-        val resolvedChunker = chunker()
-        if (resolvedEmbedder == null || resolvedChunker == null) {
-            throw RescanRefusalException(
-                RescanRefusalException.REVIEW_EMBEDDING_UNAVAILABLE,
-                "this machine has no embedding model available, so the decided pages cannot be indexed and " +
-                    "nothing was published; the document still shows its current text and your decisions are " +
-                    "kept. Keyword search and source viewing are unaffected",
-            )
-        }
-        try {
-            withContext(Dispatchers.IO) {
-                unchunked.forEach { page ->
-                    val plan = resolvedChunker.chunk(
-                        unit = ContentUnit(
-                            id = page.unitId,
-                            documentId = documentId,
-                            ordinal = page.ordinal,
-                            locator = page.locator,
-                            extractedText = page.extractedText,
-                            searchText = page.searchText,
-                            artifactRelativePath = page.artifactRelativePath,
-                            artifactSha256 = page.artifactSha256,
-                            meanConfidence = page.meanConfidence,
-                            extractionMethod = page.extractionMethod,
-                        ),
-                        maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
-                        overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
-                    )
-                    revisions.recordPageChunks(candidate, page.ordinal, plan.drafts)
-                }
-                revisions.chunks(candidate).groupBy { chunk -> chunk.unitOrdinal }.forEach { (ordinal, chunks) ->
-                    val ordered = chunks.sortedBy { chunk -> chunk.ordinal }
-                    val missing = ordered.filter { chunk -> !chunk.isStaged }
-                    if (missing.isEmpty()) return@forEach
-                    val vectors = missing.chunked(EMBED_BATCH).flatMap { batch ->
-                        val embedded = resolvedEmbedder.embedDocuments(batch.map { chunk -> chunk.text })
-                        check(embedded.size == batch.size) {
-                            "the embedder returned ${embedded.size} vectors for ${batch.size} passages"
-                        }
-                        embedded
-                    }
-                    var next = 0
-                    // Every passage of the page is written together, in order: the ones already embedded keep
-                    // the vector they have.
-                    revisions.recordChunkVectors(
-                        candidate,
-                        ordinal,
-                        ordered.map { chunk -> chunk.embedding ?: vectors[next++] },
-                    )
-                }
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            // What the model threw may carry a provider's text, so it goes to the log as a type only.
-            org.slf4j.LoggerFactory.getLogger("infoscry.document").atWarn()
-                .addKeyValue("document", documentId.value)
-                .addKeyValue("error", failure::class.simpleName)
-                .log("the passages of decided pages could not be chunked and embedded")
-            throw RescanRefusalException(
-                RescanRefusalException.REVIEW_EMBEDDING_FAILED,
-                "the decided pages could not be chunked and embedded, so nothing was published; the document " +
-                    "still shows its current text and your decisions are kept. Publish again to retry",
-            )
-        }
-    }
-
-    private fun applyDecision(
-        operation: OcrOperation,
-        candidate: String,
-        page: RevisionPageText,
-        decision: ReviewDecision,
-    ): AppliedDecision {
-        when (decision.choice) {
-            ReviewChoice.USE_NEW -> {
-                revisions.recordPageApproval(candidate, page.ordinal, PageApproval.APPROVED)
-                return AppliedDecision(decision.ordinal, decision.choice.name, page.unitId.value)
-            }
-
-            ReviewChoice.EDIT -> {
-                val edit = decision.text?.takeIf { it.isNotBlank() }
-                    ?: throw IllegalArgumentException("an edited page needs the text the person wrote")
-                val normalised = TextNormalizer.normalize(edit)
-                revisions.appendPage(
-                    candidate,
-                    infoscry.storage.RevisionPageDraft(
-                        ordinal = page.ordinal,
-                        unitId = page.unitId,
-                        locator = page.locator,
-                        extractedText = normalised.extracted,
-                        searchText = normalised.search,
-                        extractionMethod = page.extractionMethod,
-                        meanConfidence = page.meanConfidence,
-                        artifactRelativePath = page.artifactRelativePath,
-                        artifactSha256 = page.artifactSha256,
-                        sourceImage = page.sourceImage,
-                        // An edit is a person's decision, which is the one thing that may approve a page.
-                        approval = PageApproval.APPROVED,
-                    ),
-                )
-                return AppliedDecision(decision.ordinal, decision.choice.name, page.unitId.value)
-            }
-
-            ReviewChoice.KEEP -> {
-                val baseline = operation.baseRevisionId
-                    ?.let { revisionId -> revisions.page(revisionId, page.ordinal) }
-                    ?: throw IllegalArgumentException(
-                        "page ${page.ordinal} publishes no text, so there is nothing to keep: a page with no " +
-                            "baseline has to be read again or excluded deliberately",
-                    )
-                revisions.appendPage(
-                    candidate,
-                    infoscry.storage.RevisionPageDraft(
-                        ordinal = page.ordinal,
-                        unitId = baseline.unitId,
-                        locator = baseline.locator,
-                        extractedText = baseline.extractedText,
-                        searchText = baseline.searchText,
-                        extractionMethod = baseline.extractionMethod,
-                        meanConfidence = baseline.meanConfidence,
-                        artifactRelativePath = baseline.artifactRelativePath,
-                        artifactSha256 = baseline.artifactSha256,
-                        sourceImage = baseline.sourceImage,
-                        approval = PageApproval.APPROVED,
-                    ),
-                )
-                return AppliedDecision(decision.ordinal, decision.choice.name, page.unitId.value)
-            }
-        }
-    }
-
-    private fun pendingOrdinals(candidate: String): List<Int> =
-        revisions.pages(candidate).filter { it.approval == PageApproval.PENDING }.map { it.ordinal }
-
-    private fun requireDecisionsApplyToActiveReading(documentId: DocumentId, expectedRevisionId: String) {
-        val active = revisions.activeRevisionId(documentId)
-        if (active != expectedRevisionId) {
-            throw StaleActiveRevisionException(
-                "the document publishes ${active ?: "no revision"} now, not the reading this decision names, " +
-                    "so it was refused rather than applied to text nobody saw",
-            )
-        }
-    }
 
     private suspend fun resumeAttempt(operation: OcrOperation): OcrOperation {
         val collectionId = CollectionId(operation.collectionId)
@@ -1240,7 +636,7 @@ class RescanService(
         // refuses rather than queueing a second one, so two workers cannot read the same pages into the same
         // candidate and count the same external pages twice.
         return operations.startAttempt(operation.operationId, OcrOperationStage.PREFLIGHT) {
-            jobs.enqueue(
+            val queued = jobs.enqueue(
                 type = infoscry.domain.JobType.RESCAN,
                 collectionId = collectionId.takeIf { collections.get(it) != null },
                 payload = RescanJobPayload(
@@ -1249,7 +645,11 @@ class RescanService(
                     operationId = operation.operationId,
                 ).encode(),
                 total = 1,
-            ).id.value
+            )
+            // The document's status and the queued attempt are one durable transition. Otherwise a completed
+            // document can briefly be shown as Done while its operation already reports Reading 0/N.
+            documents.updateStatus(operation.documentId, infoscry.domain.DocumentStatus.QUEUED)
+            queued.id.value
         }
     }
 
@@ -1333,7 +733,6 @@ class RescanService(
             )
         }
         requireProfile(snapshot.transcriptionProfileRevisionId, OcrProfileRole.TRANSCRIPTION)
-        requireProfile(snapshot.reviewProfileRevisionId, OcrProfileRole.REVIEW)
     }
 
     /**
@@ -1370,28 +769,28 @@ class RescanService(
     }
 
     /** The snapshot of one attempt: the settings' engine, mode, allowance and the revisions they name now. */
-    private suspend fun snapshotFor(settings: CollectionOcrSettings): OcrSettingsSnapshot {
-        val transcription = settings.transcriptionProfileId?.let { profileId ->
-            requireProfileRevision(profileId, OcrProfileRole.TRANSCRIPTION)
-        }
-        val review = settings.reviewProfileId?.let { profileId ->
-            requireProfileRevision(profileId, OcrProfileRole.REVIEW)
+    private suspend fun snapshotFor(
+        settings: CollectionOcrSettings,
+        externalPageLimit: Int = 0,
+    ): OcrSettingsSnapshot {
+        val profileId = (settings.defaultMethod as? ReadingMethod.Llm)?.profileId
+        val transcription = profileId?.let {
+            requireProfileRevision(it, OcrProfileRole.TRANSCRIPTION)
         }
         val snapshot = OcrSettingsSnapshot.of(
             settings = settings,
             extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
             transcriptionProfileRevisionId = transcription?.revisionId,
-            reviewProfileRevisionId = review?.revisionId,
             toolVersion = null,
             modelVersion = null,
             renderDpi = DEFAULT_RENDER_DPI,
-        )
+        ).copy(externalPageLimit = externalPageLimit)
         // What the engine would read with right now is probed *here*, before the attempt exists, so the
         // fingerprint a resumed attempt looks its checkpoints up by is the one its own runtime produced: a
         // changed tool, model or inference server is then a different key rather than a silent reuse. The
         // probe is asked with no dispatch authority, which is what keeps a capability question from being able
         // to send anything.
-        val identity = engines(settings.engine, snapshot, null)?.runtimeIdentity()
+        val identity = engines(snapshot.engine, snapshot, null)?.runtimeIdentity()
         return snapshot.copy(runtimeIdentity = identity)
     }
 
@@ -1419,13 +818,11 @@ class RescanService(
      * a job already admitted keeps its revisions, and a job that has not been admitted yet may not be admitted
      * against a preview whose scope an edit changed.
      *
-     * It deliberately does not compare the snapshot's engine with the collection's. A snapshot may carry an
-     * engine chosen for one scan, which is not a collection default and so is not a collection change; the
-     * collection's drift for a preview is decided by [requirePreviewStillCurrent], which re-applies the
-     * preview's own overrides first.
+     * It deliberately does not compare the snapshot's engine with the collection's. The collection's drift
+     * for a preview is decided by [requirePreviewStillCurrent].
      */
     private fun requireSnapshotStillResolvable(snapshot: OcrSettingsSnapshot) {
-        listOfNotNull(snapshot.transcriptionProfileRevisionId, snapshot.reviewProfileRevisionId).forEach { id ->
+        listOfNotNull(snapshot.transcriptionProfileRevisionId).forEach { id ->
             val revision = profileRevisionOf(id)
                 ?: throw StaleRescanPreviewException(
                     id,
@@ -1441,22 +838,10 @@ class RescanService(
         }
     }
 
-    /**
-     * Whether the settings a preview showed are still the settings this collection would produce.
-     *
-     * This is the whole of what a person agreed to, re-resolved at the moment it is acted on. The preview's
-     * own overrides are re-applied first, so "the collection's engine was edited" and "this preview never
-     * used the collection's engine" stay two different answers: an overridden field cannot drift, because
-     * re-applying the override yields exactly what was shown. Everything not overridden is compared field by
-     * field, and a profile slot is compared as the revision it resolves to *now*, because a profile repointed
-     * at another revision is a different reading whether or not its id changed.
-     *
-     * The allowance is part of this on purpose: a preview shown with no external pages allowed, admitted after
-     * the collection was raised to send twenty, would send pages the person never agreed to.
-     */
+    /** Revalidates the explicit method and language shown in the preview, independent of collection defaults. */
     private fun requirePreviewStillCurrent(preview: infoscry.storage.OcrOperationStore.StoredPreview, collection: Collection) {
         val shown = preview.snapshot
-        val current = collection.ocrSettings().withOverrides(preview.overrides.asOverrides())
+        val current = collection.ocrSettings()
 
         fun refuse(field: String, was: Any?, now: Any?): Nothing = throw StaleRescanPreviewException(
             preview.previewId,
@@ -1464,36 +849,28 @@ class RescanService(
                 "cannot be produced any more; preview again",
         )
 
-        if (current.engine != shown.engine) refuse("engine", shown.engine, current.engine)
-        if (current.importMode != shown.mode) refuse("import mode", shown.mode, current.importMode)
         if (current.language != shown.language) refuse("OCR language", shown.language, current.language)
-        if (current.externalPageLimit != shown.externalPageLimit) {
-            refuse("external page allowance", shown.externalPageLimit, current.externalPageLimit)
+        val selectedMethod = when (shown.engine) {
+            infoscry.ocr.OcrEngine.TESSERACT -> ReadingMethod.Tesseract
+            infoscry.ocr.OcrEngine.SURYA -> ReadingMethod.Surya
+            infoscry.ocr.OcrEngine.LLM -> {
+                val revisionId = shown.transcriptionProfileRevisionId
+                    ?: refuse("transcription profile", "none", "missing")
+                val revision = profileRevisionOf(revisionId)
+                    ?: refuse("transcription profile", revisionId, "missing")
+                val activeRevisionId = profileOf(revision.profileId)?.revision?.revisionId
+                if (activeRevisionId != revisionId) {
+                    refuse("transcription profile", revisionId, activeRevisionId ?: "unavailable")
+                }
+                ReadingMethod.Llm(revision.profileId)
+            }
         }
-        val transcription = selectedRevisionOf(current.transcriptionProfileId)
-        if (transcription != shown.transcriptionProfileRevisionId) {
-            refuse(
-                "transcription profile",
-                shown.transcriptionProfileRevisionId ?: "none",
-                transcription ?: "none",
-            )
-        }
-        val review = selectedRevisionOf(current.reviewProfileId)
-        if (review != shown.reviewProfileRevisionId) {
-            refuse("review profile", shown.reviewProfileRevisionId ?: "none", review ?: "none")
+        try {
+            methodCatalog?.require(collection.id, selectedMethod)
+        } catch (unavailable: ReadingMethodUnavailableException) {
+            refuse("reading method", selectedMethod.id, "unavailable")
         }
     }
-
-    /**
-     * The profile revision a profile slot resolves to right now, or null when the slot is empty or its
-     * profile cannot be dispatched to.
-     *
-     * A profile that was switched off resolves to nothing rather than throwing here: the question this
-     * answers is "is this the same selection the person was shown", and a deselected or disabled profile is a
-     * different answer, not a missing one.
-     */
-    private fun selectedRevisionOf(profileId: String?): String? =
-        profileId?.let { id -> profileOf(id)?.takeIf { profile -> profile.enabled }?.revision?.revisionId }
 
     /**
      * Whether the document may still be read again at all, as the lifecycle sees it now.
@@ -1534,24 +911,20 @@ class RescanService(
     /** What an external dispatch would be made through, named so a person can see where pages would go. */
     private fun destinationsOf(
         snapshot: OcrSettingsSnapshot,
-        collection: Collection,
     ): List<OcrNamedDestination> = buildList {
-        listOf(
-            OcrProfileRole.TRANSCRIPTION to snapshot.transcriptionProfileRevisionId,
-            OcrProfileRole.REVIEW to snapshot.reviewProfileRevisionId,
-        ).forEach { (role, revisionId) ->
-            if (revisionId == null) return@forEach
-            val revision = profileRevisionOf(revisionId) ?: return@forEach
-            add(
-                OcrNamedDestination(
-                    role = role.name,
-                    engine = if (role == OcrProfileRole.TRANSCRIPTION) snapshot.engine else infoscry.ocr.OcrEngine.LLM,
-                    scope = revision.scope,
-                    endpoint = revision.endpoint,
-                    model = revision.model,
-                    profileRevisionId = revision.revisionId,
-                ),
-            )
+        snapshot.transcriptionProfileRevisionId?.let { revisionId ->
+            profileRevisionOf(revisionId)?.let { revision ->
+                add(
+                    OcrNamedDestination(
+                        role = OcrProfileRole.TRANSCRIPTION.name,
+                        engine = snapshot.engine,
+                        scope = revision.scope,
+                        endpoint = revision.endpoint,
+                        model = revision.model,
+                        profileRevisionId = revision.revisionId,
+                    ),
+                )
+            }
         }
         if (snapshot.engine != infoscry.ocr.OcrEngine.LLM) {
             add(
@@ -1578,35 +951,8 @@ class RescanService(
         snapshot: OcrSettingsSnapshot,
         pageTotal: Int?,
         external: Boolean,
-    ): Pair<OcrCostEstimate?, String?> {
-        if (!external) return null to "nothing is sent off this machine, so there is no external cost"
-        if (pageTotal == null) {
-            return null to "the document's page count is unknown, so no estimate can be made"
-        }
-        val revisions = listOfNotNull(snapshot.transcriptionProfileRevisionId, snapshot.reviewProfileRevisionId)
-            .mapNotNull { revisionId -> profileRevisionOf(revisionId) }
-            .filter { revision -> revision.scope == OcrEndpointScope.EXTERNAL }
-        if (revisions.isEmpty()) return null to "no external profile is selected"
-        val unpriced = revisions.firstOrNull { it.inputPricePerMillion <= 0.0 || it.outputPricePerMillion <= 0.0 }
-        if (unpriced != null) {
-            return null to "profile revision ${unpriced.revisionId} names no input or output price, so the " +
-                "cost of sending $pageTotal pages is unavailable"
-        }
-        val perMillion = revisions.sumOf { revision ->
-            revision.inputPricePerMillion + revision.outputPricePerMillion
-        }
-        val reviewsPerPage = if (snapshot.reviewProfileRevisionId != null) 1 else 0
-        val tokensPerPage = ASSUMED_TOKENS_PER_PAGE
-        val amount = pageTotal.toDouble() * (1 + reviewsPerPage) * tokensPerPage * perMillion / 1_000_000.0
-        return OcrCostEstimate(
-            amountUsd = amount,
-            basis = "$pageTotal pages × ${1 + reviewsPerPage} call(s) per page at an assumed $tokensPerPage " +
-                "tokens each, priced at $perMillion per million tokens",
-        ) to null
-    }
-
-    private fun ownerOf(operation: OcrOperation) =
-        infoscry.ocr.OcrExternalOwner.operation(operation.operationId)
+    ): Pair<OcrCostEstimate?, String?> =
+        infoscry.document.costEstimateOf(snapshot, pageTotal, external, profileRevisionOf)
 
     private fun admissionHash(collectionId: CollectionId, documentId: DocumentId, previewId: String): String =
         hexHash(listOf("collection=${collectionId.value}", "document=${documentId.value}", "preview=$previewId"))
@@ -1632,35 +978,9 @@ class RescanService(
         /** The resolution a rescan renders at, and what its own snapshot records. */
         const val DEFAULT_RENDER_DPI: Int = 200
 
-        /**
-         * What one page image is assumed to cost in tokens when an estimate is made.
-         *
-         * It is an assumption and the estimate says so: a page image's token cost depends on the provider's
-         * tiling, which this build cannot know before the first page is sent. A number that is *only* based on
-         * recorded prices and a named assumption is still an estimate; inventing one without either is not.
-         */
-        const val ASSUMED_TOKENS_PER_PAGE: Int = 2_000
-
         const val HASH_BUFFER_BYTES: Int = 64 * 1024
 
-        /** The most characters of one candidate page a review read returns; the rest is reported, not sent. */
-        const val MAX_CANDIDATE_CHARS: Int = 262_144
-
-        /** The largest page image a review read serves. Rendered pages are bounded well below this. */
-        const val MAX_IMAGE_BYTES: Int = 32 * 1024 * 1024
-
-        /** Bytes needed to tell a WebP container (`RIFF`, a size, `WEBP`). */
-        const val WEBP_HEADER_BYTES: Int = 12
-
-        /** How many passages one embedding call holds, so a long page stays interruptible. */
-        const val EMBED_BATCH: Int = 64
-
         const val CANCELLED_CODE: String = "RESCAN_CANCELLED"
-
-        const val AWAITING_REVIEW_CODE: String = "AWAITING_REVIEW"
-
-        /** The code an operation carries when its undecided replacement was discarded. */
-        const val DISCARDED_CODE: String = "REPLACEMENT_DISCARDED"
 
         private fun hexHash(fields: List<String>): String =
             HexFormat.of().formatHex(
@@ -1668,103 +988,3 @@ class RescanService(
             )
     }
 }
-
-/** One explicit page decision: which page, the text it was taken against, and what to do with it. */
-data class ReviewDecision(
-    val unitId: String,
-    val ordinal: Int,
-    /** The hash of the candidate text this decision was taken against. */
-    val candidateHash: String,
-    val choice: ReviewChoice,
-    /** The person's own text, required exactly for [ReviewChoice.EDIT]. */
-    val text: String? = null,
-) {
-
-    init {
-        require(unitId.isNotBlank()) { "a review decision names the page it is about" }
-        require(ordinal >= 0) { "a review decision names a page ordinal, was $ordinal" }
-        require(candidateHash.isNotBlank()) { "a review decision names the text it was taken against" }
-        require((choice == ReviewChoice.EDIT) == (text != null)) {
-            "an edited page carries the person's text, and no other decision does"
-        }
-    }
-}
-
-/** What a person may do with one proposed page. */
-enum class ReviewChoice {
-    KEEP,
-    USE_NEW,
-    EDIT,
-}
-
-/** One proposal waiting for a person, and whether an intact-by-record image of its page can be requested. */
-data class PendingReview(val review: PageReview, val imageAvailable: Boolean)
-
-/** One pending page's candidate text as a review read returns it: bounded, with what is needed to spot staleness. */
-data class PendingCandidateReading(
-    val unitId: String,
-    val ordinal: Int,
-    /** The hash of the *whole* candidate text; a decision is guarded by it. */
-    val candidateHash: String,
-    val baselineRevisionId: String?,
-    val text: String,
-    val totalChars: Int,
-    val truncated: Boolean,
-)
-
-/** One page image's verified bytes and the allow-listed media type they were recognised as. */
-class PendingPageImage(val bytes: ByteArray, val mediaType: String)
-
-/** One decision as it was applied, so the caller can show what happened to each page. */
-data class AppliedDecision(val ordinal: Int, val choice: String, val unitId: String)
-
-/** The outcome of one decision batch, with the operation as it stands after it. */
-data class ReviewDecisionResult(val operation: OcrOperation, val applied: List<AppliedDecision>)
-
-/** What admitting a publication of decided pages answered. */
-data class PublicationDecisionResult(
-    val operation: OcrOperation,
-    val publicationId: String,
-    val phase: String,
-    val errorCode: String?,
-)
-
-/** A decision was taken against another reading of the page than the one the operation holds. */
-class StaleCandidateDecisionException(message: String) : IllegalStateException(message)
-
-/** A decision names a document revision the document no longer publishes. */
-class StaleActiveRevisionException(message: String) : IllegalStateException(message)
-
-/** The stored overrides of a preview, as the choice a preview request made. */
-private fun RescanPreviewOverrides?.asOverrides(): RescanOverrides = RescanOverrides(
-    engine = this?.engine,
-    importMode = this?.importMode,
-    transcriptionProfileId = this?.transcriptionProfileId,
-    reviewProfileId = this?.reviewProfileId,
-)
-
-/**
- * The choices a preview request made, as the row stores them, or null when it made none. Without this the
- * admission re-resolves against the collection alone and calls a per-scan choice a collection change.
- */
-private fun RescanOverrides.asPreviewOverridesJson(): String? {
-    val chosen = RescanPreviewOverrides(
-        engine = engine,
-        importMode = importMode,
-        transcriptionProfileId = transcriptionProfileId,
-        reviewProfileId = reviewProfileId,
-    )
-    if (chosen == RescanPreviewOverrides()) return null
-    return kotlinx.serialization.json.Json.encodeToString(RescanPreviewOverrides.serializer(), chosen)
-}
-
-/** The collection's OCR settings with a caller's overrides applied. */
-private fun CollectionOcrSettings.withOverrides(overrides: RescanOverrides): CollectionOcrSettings =
-    CollectionOcrSettings(
-        language = overrides.language ?: language,
-        engine = overrides.engine ?: engine,
-        importMode = overrides.importMode ?: importMode,
-        transcriptionProfileId = overrides.transcriptionProfileId ?: transcriptionProfileId,
-        reviewProfileId = overrides.reviewProfileId ?: reviewProfileId,
-        externalPageLimit = externalPageLimit,
-    )

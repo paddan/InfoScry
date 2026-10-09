@@ -8,6 +8,9 @@ import infoscry.domain.JobType
 import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.ResultSet
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Nothing was ever enqueued under this job id. */
 class NoSuchJobException(val jobId: JobId) : NoSuchElementException("no job with id ${jobId.value}")
@@ -91,6 +94,93 @@ open class JobStore(private val database: Database) {
                 statement.setInt(2, offset)
                 statement.executeQuery().use { rows -> rows.readAll() }
             }
+        }
+    }
+
+    /** Legacy jobs that ended only because an external-page approval was requested. */
+    fun legacyAwaitingApprovalJobs(): List<Job> = database.read { connection ->
+        connection.prepareStatement(
+            "$SELECT_JOBS WHERE state = ? AND stage = ? ORDER BY created_at, rowid",
+        ).use { statement ->
+            statement.setString(1, JobState.COMPLETE.name)
+            statement.setString(2, "awaiting-approval")
+            statement.executeQuery().use { rows -> rows.readAll() }
+        }
+    }
+
+    /** Cancels a legacy paused job only while its persisted state still matches. */
+    fun cancelLegacyAwaitingApproval(id: JobId): Boolean = database.transaction { connection ->
+        connection.prepareStatement(
+            "UPDATE jobs SET state = ?, stage = NULL, current_item = NULL, cancel_requested = 1, " +
+                "updated_at = ? WHERE id = ? AND state = ? AND stage = ?",
+        ).use { statement ->
+            statement.setString(1, JobState.CANCELLED.name)
+            statement.setString(2, Instants.now())
+            statement.setString(3, id.value)
+            statement.setString(4, JobState.COMPLETE.name)
+            statement.setString(5, "awaiting-approval")
+            statement.executeUpdate() == 1
+        }
+    }
+
+    /** Fails a rescan job whose operation cleanup already determined that its process was interrupted. */
+    fun failInterruptedRescanJob(id: JobId): Boolean = database.transaction { connection ->
+        connection.prepareStatement(
+            "UPDATE jobs SET state = ?, stage = NULL, current_item = NULL, cancel_requested = 1, " +
+                "error_code = 'INTERRUPTED', " +
+                "error_message = 'the previous reading was interrupted; start it again', updated_at = ? " +
+                "WHERE id = ? AND type = ? AND state IN (?, ?)",
+        ).use { statement ->
+            statement.setString(1, JobState.FAILED.name)
+            statement.setString(2, Instants.now())
+            statement.setString(3, id.value)
+            statement.setString(4, JobType.RESCAN.name)
+            statement.setString(5, JobState.QUEUED.name)
+            statement.setString(6, JobState.RUNNING.name)
+            statement.executeUpdate() == 1
+        }
+    }
+
+    /** Completes a queued/running rescan whose candidate is already the document's authoritative revision. */
+    fun completePublishedRescanJob(id: JobId): Boolean = database.transaction { connection ->
+        connection.prepareStatement(
+            "UPDATE jobs SET state = ?, stage = NULL, current_item = NULL, cancel_requested = 0, " +
+                "error_code = NULL, error_message = NULL, updated_at = ? " +
+                "WHERE id = ? AND type = ? AND state IN (?, ?)",
+        ).use { statement ->
+            statement.setString(1, JobState.COMPLETE.name)
+            statement.setString(2, Instants.now())
+            statement.setString(3, id.value)
+            statement.setString(4, JobType.RESCAN.name)
+            statement.setString(5, JobState.QUEUED.name)
+            statement.setString(6, JobState.RUNNING.name)
+            statement.executeUpdate() == 1
+        }
+    }
+
+    /** Repairs a rescan job after an older process cleared its operation pointer before ending the job. */
+    fun finishRescanJobsForOperation(operationId: String, published: Boolean): Int = database.transaction { connection ->
+        val candidates = connection.prepareStatement(
+            "$SELECT_JOBS WHERE type = ? AND state IN (?, ?)",
+        ).use { statement ->
+            statement.setString(1, JobType.RESCAN.name)
+            statement.setString(2, JobState.QUEUED.name)
+            statement.setString(3, JobState.RUNNING.name)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        val job = rows.toJob()
+                        val payloadOperationId = runCatching {
+                            Json.parseToJsonElement(job.payload.orEmpty()).jsonObject
+                                .getValue("operationId").jsonPrimitive.content
+                        }.getOrNull()
+                        if (payloadOperationId == operationId) add(job.id)
+                    }
+                }
+            }
+        }
+        candidates.count { id ->
+            if (published) completePublishedRescanJob(id) else failInterruptedRescanJob(id)
         }
     }
 
@@ -197,8 +287,7 @@ open class JobStore(private val database: Database) {
      * Ends a running attempt as complete.
      *
      * The stage the attempt last entered is cleared, because it described work that has stopped: a finished
-     * import must not read as still queued or copying. The one stage kept is [AWAITING_APPROVAL_STAGE], which
-     * is why the attempt ended and what the approval route resumes from.
+     * import must not read as still queued or copying.
      */
     fun complete(id: JobId): Job = database.transaction { connection ->
         val job = requireRunning(connection, id, "only a RUNNING attempt can complete")
@@ -209,44 +298,10 @@ open class JobStore(private val database: Database) {
             connection,
             "UPDATE jobs SET state = ?, stage = ?, updated_at = ? WHERE id = ? AND state = ?",
             JobState.COMPLETE.name,
-            job.stage?.takeIf { it == AWAITING_APPROVAL_STAGE },
+            null,
             Instants.now(),
             id.value,
             JobState.RUNNING.name,
-        )
-        readIn(connection, id)
-    }
-
-    /**
-     * Returns a job that paused for an external page approval to the queue, and answers with it.
-     *
-     * A job that waits for a person is not finished *and* not running: its attempt ended — nothing is holding
-     * the archive for work nobody can do yet — and the row keeps the waiting stage so the queue, the CLI and
-     * the approval route can all see what it is waiting for. Resuming is therefore not a state change a
-     * handler can make, and this is the one place a completed attempt may leave `COMPLETE` again: the wait is
-     * a state the archive put the job in deliberately, and the approval is the thing that ends it.
-     *
-     * A job that is not waiting is answered unchanged rather than refused: an approval is also how a person
-     * widens the scope of work that will run later, and a job that is queued, running or already finished has
-     * nothing to resume. Its stage is not a reason to fail the request that granted the scope.
-     *
-     * The stage is cleared and the counters are kept, exactly as a shutdown's requeue does: what the attempt
-     * already imported is what the next one skips.
-     *
-     * @throws NoSuchJobException when no such job exists.
-     */
-    fun resumeAwaitingApproval(id: JobId): Job = database.transaction { connection ->
-        val job = selectById(connection, id) ?: throw NoSuchJobException(id)
-        if (job.state != JobState.COMPLETE || job.stage != AWAITING_APPROVAL_STAGE) return@transaction job
-        updateIn(
-            connection,
-            "UPDATE jobs SET state = ?, stage = NULL, current_item = NULL, error_code = NULL, " +
-                "error_message = NULL, updated_at = ? WHERE id = ? AND state = ? AND stage = ?",
-            JobState.QUEUED.name,
-            Instants.now(),
-            id.value,
-            JobState.COMPLETE.name,
-            AWAITING_APPROVAL_STAGE,
         )
         readIn(connection, id)
     }
@@ -280,8 +335,7 @@ open class JobStore(private val database: Database) {
      *
      * A queued job is cancelled outright: nothing has started, so there is no stage to interrupt. A
      * running job is only flagged — its worker may still be inside work that has to finish and record
-     * what it did — and [finishCancelled] is the honest end of it. A job paused for an external approval is
-     * cancelled outright (its wait ends). A job that already ended is returned
+     * what it did — and [finishCancelled] is the honest end of it. A job that already ended is returned
      * unchanged: cancelling finished work is not an error, it is simply too late.
      */
     fun cancel(id: JobId): Job = database.transaction { connection ->
@@ -309,22 +363,6 @@ open class JobStore(private val database: Database) {
                 id.value,
                 JobState.RUNNING.name,
             )
-
-            // A job paused for an external approval has no attempt to interrupt: it is COMPLETE only because
-            // its attempt ended while a person decides. Cancelling it is that decision, so the wait ends here
-            // and the job reads as cancelled. Files it already imported are not touched.
-            JobState.COMPLETE -> if (job.stage == AWAITING_APPROVAL_STAGE) {
-                updateIn(
-                    connection,
-                    "UPDATE jobs SET state = ?, stage = NULL, current_item = NULL, cancel_requested = 1, " +
-                        "updated_at = ? WHERE id = ? AND state = ? AND stage = ?",
-                    JobState.CANCELLED.name,
-                    Instants.now(),
-                    id.value,
-                    JobState.COMPLETE.name,
-                    AWAITING_APPROVAL_STAGE,
-                )
-            }
 
             else -> Unit
         }
@@ -489,15 +527,6 @@ open class JobStore(private val database: Database) {
     companion object {
 
         /**
-         * The stage a job's row carries while it waits for a person to approve an external page scope.
-         *
-         * It is a stage rather than a state because the attempt really did end: the job is complete, nothing
-         * holds the archive, and the wait is a fact about *why* it stopped that the queue, the CLI and the
-         * approval route all have to be able to read.
-         */
-        const val AWAITING_APPROVAL_STAGE: String = "awaiting-approval"
-
-        /**
          * The states a job may move between: queued may run or be cancelled outright, a running attempt
          * may complete, fail, be cancelled, or be queued again after a shutdown, and nothing may leave a
          * terminal state. Every write path checks this before its `WHERE` clause, so an illegal
@@ -514,16 +543,11 @@ open class JobStore(private val database: Database) {
         fun isLegalTransition(from: JobState, to: JobState): Boolean = to in LEGAL_TRANSITIONS.getValue(from)
 
         /**
-         * The stage a job reports to a reader, given the stage its row holds.
-         *
-         * A finished job reports no stage except the approval wait: the stage an ended attempt last entered is
-         * not a fact about the job any more. The row is cleared when a job ends, and this read applies the same
-         * rule to rows written before that, so no surface (history, job API, CLI) can show a stale stage.
+         * The stage a job reports to a reader, given the stage its row holds. A finished job has no stage:
+         * it described work that has stopped, and the old approval stage is retired by startup cleanup.
          */
-        fun visibleStage(state: JobState, storedStage: String?): String? = when {
-            state in TERMINAL_STATES && storedStage != AWAITING_APPROVAL_STAGE -> null
-            else -> storedStage
-        }
+        fun visibleStage(state: JobState, storedStage: String?): String? =
+            if (state in TERMINAL_STATES) null else storedStage
 
         private val TERMINAL_STATES: Set<JobState> = setOf(JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED)
 

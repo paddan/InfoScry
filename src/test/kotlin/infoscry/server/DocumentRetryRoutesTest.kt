@@ -56,6 +56,24 @@ class DocumentRetryRoutesTest {
     }
 
     @Test
+    fun `a repeated retry request returns the existing job and changed body conflicts`() = runBlocking {
+        val collectionId = CollectionId(createCollection("Repeat"))
+        val document = seedDocument(collectionId, "failed.txt", "failed once", DocumentStatus.FAILED)
+        val body = """{"documentIds":["${document.value}"],"requestId":"retry-once"}"""
+        val first = requestRetry(collectionId.value, body)
+        assertEquals(HttpStatusCode.Accepted, first.status)
+        val accepted = ApiJson.decodeFromString<RetryDocumentsResponse>(first.bodyAsText())
+        val again = requestRetry(collectionId.value, body)
+        assertEquals(HttpStatusCode.Accepted, again.status)
+        assertEquals(accepted, ApiJson.decodeFromString<RetryDocumentsResponse>(again.bodyAsText()))
+        assertEquals(1, jobsOfType(JobType.RETRY).size)
+        val changed = requestRetry(collectionId.value,
+            """{"documentIds":["another"],"requestId":"retry-once"}""")
+        assertEquals(HttpStatusCode.Conflict, changed.status)
+        assertContains(changed.bodyAsText(), "REQUEST_ID_CONFLICT")
+    }
+
+    @Test
     fun `an eligible document is accepted as a retry job and moves to queued`() = runBlocking {
         val collectionId = CollectionId(createCollection("Nightfall"))
         val document = seedDocument(collectionId, "failed.txt", "failed once", DocumentStatus.FAILED)
@@ -490,7 +508,7 @@ class DocumentRetryRoutesTest {
                 racedDir,
                 retryPrerequisites = { collection ->
                     probes++
-                    if (probes == 1) server.context.collections.updateOcrLanguages(collection.id, "deu+eng")
+                    if (probes == 1) server.context.collections.updateOcrSettings(collection.id, infoscry.ocr.CollectionOcrSettings("deu+eng", collection.ocrSettings().defaultMethod))
                     RetryPrerequisites(
                         settings = ExtractionSettings(ocrLanguages = collection.ocrLanguages),
                         ocrToolAvailable = true,

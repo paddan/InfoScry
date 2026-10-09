@@ -17,6 +17,8 @@ import infoscry.storage.DocumentStore
 import infoscry.storage.JobStore
 import infoscry.storage.MutationCoordinator
 import java.nio.file.Files
+import java.security.MessageDigest
+import java.util.HexFormat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -53,8 +55,8 @@ class RetryJobHandler internal constructor(
     private val mutations: MutationCoordinator,
     /**
      * The attempt-level wiring an import and this retry share: the dispatch authority a page is sent through
-     * and the review a staged page is judged by come from the same job-owned scope and the same snapshotted
-     * reviewer an import admitted with, so Retry is not a second answer to what either may do.
+ * and the reading method comes from the job's frozen settings snapshot, so Retry resumes the method chosen
+ * for that document instead of silently substituting another one.
      */
     private val attemptDispatch: AttemptDispatch,
     private val ingest: DocumentIngest,
@@ -87,13 +89,14 @@ class RetryJobHandler internal constructor(
         try {
             for (document in documentsToRetry) {
                 try {
-                    // A document an earlier run of this job already finished is not read again: the wait for an
-                    // external approval may have paused after an earlier document completed, and re-reading it would
-                    // repeat committed work — or reopen a published check-and-improve candidate as review-pending.
+                    // A document an earlier run of this job already finished is not read again: if the job was
+                    // interrupted between documents, repeating completed work would add cost without changing it.
                     val finishedByPreviousRun = completedByPreviousRun > 0 &&
                         document.status in ImportJobHandler.FINISHED_STATUSES
                     if (!finishedByPreviousRun) {
-                        retryOne(job, collection, payload.settings, payload.ocr, document, stage)
+                        val snapshot = payload.documentSnapshots[document.id.value] ?: payload.ocr
+                        val settings = snapshot?.let(payload.settings::forOcrSettings) ?: payload.settings
+                        retryOne(job, collection, settings, snapshot, document, stage)
                     }
                 } catch (deleted: DocumentBeingDeletedException) {
                     // A deletion won this race. The document stays deleted: nothing here publishes it again,
@@ -105,16 +108,6 @@ class RetryJobHandler internal constructor(
                 completed++
                 stage.reportProgress(completed, documentsToRetry.size)
             }
-        } catch (waiting: AttemptAwaitingApproval) {
-            // A page would have exceeded this job's external scope, and it was not sent. The waiting state is
-            // durable and the attempt ends here rather than reading the next document: no page of any document
-            // may be dispatched until a person approves the scope, and the documents this attempt already
-            // finished are not revisited when the approved job runs again, so the wait costs no work.
-            stage.run(STAGE_RECORD) { jobs.progress(job.id, stage = JobStore.AWAITING_APPROVAL_STAGE) }
-            LOGGER.atInfo()
-                .addKeyValue(JOB_ID_FIELD, waiting.jobId.value)
-                .log("a retry waits for an external page scope to be approved before another page is sent")
-            return
         } catch (cancelled: CancellationException) {
             // An interrupted attempt must not leave a document looking permanently active. A shutdown that
             // only requeues the job is not a cancellation — the next process finishes the same document — so
@@ -141,6 +134,17 @@ class RetryJobHandler internal constructor(
             recordFailure(stage, document, MANAGED_COPY_MISSING, MANAGED_COPY_MISSING_MESSAGE)
             return
         }
+        val managedCopyIsIntact = managedCopyMatches(managedPath, document.sha256)
+        if (!managedCopyIsIntact) {
+            recordFailure(
+                stage,
+                document,
+                MANAGED_COPY_CHANGED,
+                MANAGED_COPY_CHANGED_MESSAGE,
+            )
+            return
+        }
+        val confirmedManagedCopy = snapshot?.externalConfirmedSourceScope == true
         ingest.ingest(
             collection = collection,
             settings = settings,
@@ -152,26 +156,34 @@ class RetryJobHandler internal constructor(
             onFailure = { code, message -> recordFailure(stage, document, code, message) },
             // The page allowance this document's pages leave under: the *job's*, because the retry's
             // documents share one scope exactly as an import's files do, and this attempt's, because nothing
-            // may be dispatched before the scope was approved.
+            // may be dispatched beyond the scope confirmed when the job was admitted.
             dispatch = attemptDispatch.authorityFor(
                 job = job,
                 document = document,
                 snapshot = snapshot,
                 dispatchStage = OcrDispatchStage.TRANSCRIPTION,
-            ),
-            // How this document's staged pages are judged, or null when the attempt has no reviewer: the
-            // page's own text is compared with the engine's reading while the draft is in hand, and the
-            // review is recorded for a person — the same rules an import's staged pages are judged by.
-            review = attemptDispatch.stagedPageReviewOf(
-                job = job,
-                document = document,
-                collection = collection,
-                snapshot = snapshot,
+                perDocumentScope = true,
+                confirmedManifestScope = confirmedManagedCopy,
             ),
             // The selection this retry was admitted with, which the revision it publishes records as its reading.
             reading = snapshot,
         )
     }
+
+    /** A prior confirmed-source snapshot may authorize this retry only for the same immutable managed bytes. */
+    private fun managedCopyMatches(path: java.nio.file.Path, expectedSha256: String): Boolean = runCatching {
+        if (!Files.isRegularFile(path)) return@runCatching false
+        val digest = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(path).use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        HexFormat.of().formatHex(digest.digest()).equals(expectedSha256, ignoreCase = true)
+    }.getOrDefault(false)
 
     /** Records why one document could not be read again, as its own status rather than the job's. */
     private suspend fun recordFailure(stage: JobStage, document: Document, code: String, message: String) {
@@ -218,6 +230,9 @@ class RetryJobHandler internal constructor(
         const val MANAGED_COPY_MISSING_MESSAGE =
             "the document's managed copy is missing, so it cannot be read again; add the file again to " +
                 "restore it"
+        const val MANAGED_COPY_CHANGED = "MANAGED_COPY_CHANGED"
+        const val MANAGED_COPY_CHANGED_MESSAGE =
+            "the document's managed copy no longer matches its confirmed source, so it cannot be read again"
 
         const val CANCELLED_CODE = "RETRY_CANCELLED"
         const val CANCELLED_MESSAGE = "this attempt was cancelled before the document was read"

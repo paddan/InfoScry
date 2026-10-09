@@ -188,41 +188,6 @@ data class ImageReading(
     val modelVersion: String? = null,
 )
 
-/**
- * Which side of the review request the image supports, in the request's own labels.
- *
- * The request labels its two readings A and B and says nothing else about them, so this is the whole of what
- * a reviewer can answer: a side, or `UNCERTAIN` when the image cannot settle the difference. Which side is
- * the published reading and which is the candidate is deliberately not in this vocabulary — the request must
- * not tell the reviewer which side to prefer, and the caller that sent the readings maps this to its own
- * [ReviewerRecommendation] where it knows which side each reading went out as.
- */
-@Serializable
-enum class ReviewerSide { A_BETTER, B_BETTER, UNCERTAIN }
-
-/** One validated reviewer answer, as the review schema carries it. */
-data class ImageReview(
-    val recommendation: ReviewerSide,
-    /** The reviewer's own confidence, when it gave one between 0 and 1. It decides nothing. */
-    val confidence: Double?,
-    val reasons: List<ImageReviewReason>,
-    /** The model version the provider reported, when it reported one. */
-    val modelVersion: String?,
-)
-
-/**
- * One reason a reviewer gave, with the spans it pointed at validated inside the two readings it judged.
- *
- * The explanation is the reviewer's own bounded words: untrusted text, shown to a person beside the page and
- * never used to change what the text is. A span is present only when the reviewer named that side, which is
- * how a region only one reading holds is described.
- */
-data class ImageReviewReason(
-    val explanation: String,
-    val spanA: TextSpan?,
-    val spanB: TextSpan?,
-)
-
 /** One validated answer, with what the provider said about the model that produced it. */
 data class ImageAnswer<T>(val value: T, val modelVersion: String?)
 
@@ -263,65 +228,13 @@ object OcrTranscriptionPrompt {
     )
 }
 
-/**
- * The shipped review instructions, as one versioned body.
- *
- * The body is a resource rather than a string constant for the same reason the transcription body is: it is
- * read from the classpath so it can be reviewed as prose. The *number* is [OCR_REVIEW_PROMPT_VERSION] in the
- * seam, because it travels in the review's fingerprint: two comparisons of one page under different
- * instructions are not the same comparison, so a body change is a new version and an attempt snapshotted
- * under the old one is refused rather than judged with the new words.
- *
- * Four placeholders are substituted: the page's stable unit id and ordinal, which the answer has to echo, and
- * the two readings the reviewer is asked about. The readings are inserted inside fixed markers and are
- * treated as data — the reviewer has no tools, and a reading that contains instructions of its own cannot
- * change what this asks for, nor can a reading that happens to spell a placeholder: substitution happens in
- * one pass over the body, so text this prompt inserts is never read as this prompt's own template. Nothing
- * in the body says which reading is preferred, or which of the two is the published one and which the
- * candidate: the readings are labelled A and B and nothing else, and the answer the body asks for names a
- * side (`A_BETTER`, `B_BETTER` or `UNCERTAIN`) rather than this application's own
- * [ReviewerRecommendation], so the request itself cannot introduce a preference for either side.
- */
-object OcrReviewPrompt {
-
-    /** The classpath resource the body lives in. */
-    const val RESOURCE_PATH: String = "prompts/ocr-review.txt"
-
-    /** The version this build's body is, which an attempt's snapshot has to agree with. */
-    val version: Int get() = OCR_REVIEW_PROMPT_VERSION
-
-    private val body: String by lazy {
-        OcrReviewPrompt::class.java.classLoader.getResourceAsStream(RESOURCE_PATH)?.use { stream ->
-            stream.readBytes().decodeToString()
-        } ?: error("prompt resource $RESOURCE_PATH is missing from the classpath")
-    }
-
-    /** The shipped body with its placeholders unsubstituted. */
-    fun body(): String = body
-
-    /** The body for one comparison, with the page identity and both readings substituted into it. */
-    fun forPage(identity: PageDispatchIdentity, readingA: String, readingB: String): String = renderPrompt(
-        body,
-        mapOf(
-            "unitId" to identity.unitId,
-            "ordinal" to identity.ordinal.toString(),
-            "readingA" to readingA,
-            "readingB" to readingB,
-        ),
-    )
-}
-
 /** The placeholders the shipped prompt bodies are written in. */
-private val PROMPT_PLACEHOLDER = Regex("\\{(unitId|ordinal|readingA|readingB)\\}")
+private val PROMPT_PLACEHOLDER = Regex("\\{(unitId|ordinal)\\}")
 
 /**
  * One prompt body with its placeholders substituted, in a single pass over the *body*.
  *
- * The pass is single because what it substitutes includes page text, which is untrusted: substituting one
- * value and then looking for the next placeholder in the result would let a reading that contains another
- * placeholder's spelling be rewritten — a text holding the literal `{readingB}` would have a different
- * reading put into the middle of it — and the reviewer would be asked about a reading nobody supplied. This
- * replaces every placeholder in the template exactly once and never looks at what it inserted.
+ * The pass is single and replaces every placeholder in the template exactly once.
  *
  * A name the body does not use is simply not in [values], and a placeholder with no value left in the body
  * is a prompt this build cannot render, which is a build defect rather than something to send half-filled.
@@ -469,9 +382,14 @@ class ImageLlmClient(
      * the caller that holds the raster can ask whether the paper is blank.
      */
     suspend fun transcribe(page: PageImage): ImageReading {
-        val answer = requestOn(page, OcrTranscriptionPrompt.forPage(identityOf(page))) { content ->
-            transcriptionOf(content)
-        }
+        val image = imageOf(page)
+        val answer = exchange(
+            identity = identityOf(page),
+            image = image,
+            form = imageFormOf(image, page),
+            instructions = OcrTranscriptionPrompt.forPage(identityOf(page)),
+            decode = ::transcriptionOf,
+        )
         return ImageReading(
             text = answer.value.text,
             unreadable = answer.value.unreadable,
@@ -492,7 +410,7 @@ class ImageLlmClient(
      * a permit validator only when this client was built with [allowSyntheticProbeWithoutPermit]: the synthetic
      * image is a constant that names no document, and the check runs only because a user asked for it. A
      * validator that is present is still asked, and a refusal stops the probe before anything is sent.
-     * Transcription and review have no such exception.
+     * Transcription has no such exception.
      */
     suspend fun probeCapability(): ImageReading {
         val identity = PageDispatchIdentity(unitId = CAPABILITY_PROBE_UNIT_ID, ordinal = 0)
@@ -508,50 +426,6 @@ class ImageLlmClient(
             text = answer.value.text,
             unreadable = answer.value.unreadable,
             modelVersion = answer.modelVersion,
-        )
-    }
-
-    /**
-     * Asks the reviewer which of two readings of [page] the page image supports.
-     *
-     * This is the comparison slice's own call, and it goes through the same envelope as a transcription:
-     * the page's own bytes, hashed and format-checked, budgeted against the profile's window, one bounded
-     * timeout, no redirects, a permit for any destination off this machine, and an answer that has to be
-     * complete and to name this page. What is validated *extra* here is this answer's own schema: the
-     * recommendation is one of the three the prompt promises, the confidence is a number between 0 and 1, the
-     * reasons are bounded in number and in length, and every span a reason names is a stretch of the reading
-     * it claims to be about. An answer that fails any of that is refused as this schema's failure rather than
-     * stored as an opinion about a page.
-     *
-     * Which of the two readings is which is the caller's business, not this client's: the labels are fixed so
-     * the same comparison always asks the same question, nothing in the request says which reading is the
-     * published one or the one being proposed, and the answer this returns names a side rather than a side's
-     * standing, so the client is never told which side is which either.
-     */
-    suspend fun review(page: PageImage, readingA: String, readingB: String): ImageReview {
-        val answer = requestOn(page, OcrReviewPrompt.forPage(identityOf(page), readingA, readingB)) { content ->
-            reviewOf(content, readingA = readingA, readingB = readingB)
-        }
-        return answer.value.copy(modelVersion = answer.modelVersion)
-    }
-
-    /**
-     * One bounded image request with a caller's own instructions and answer schema.
-     *
-     * The comparison slice's review call is the next user of this: it shares the serialization, budgeting,
-     * bounded I/O, redirect refusal, permit and identity checks, and supplies its own prompt and its own
-     * decoder for its own answer document. Everything the envelope has to satisfy — a complete response,
-     * an answer naming this page, the size and timeout bounds — is enforced here rather than by the caller.
-     */
-    suspend fun <T> requestOn(page: PageImage, instructions: String, decode: (String) -> T): ImageAnswer<T> {
-        val image = imageOf(page)
-        val form = imageFormOf(image, page)
-        return exchange(
-            identity = identityOf(page),
-            image = image,
-            form = form,
-            instructions = instructions,
-            decode = decode,
         )
     }
 
@@ -1010,104 +884,6 @@ class ImageLlmClient(
         return Transcription(answer.text, spans.sortedBy { span -> span.startOffset })
     }
 
-    /**
-     * The review schema, as this build validates it.
-     *
-     * The shipped prompt promises one shape and names every field in it, so the recommendation and each
-     * reason's explanation are required and nothing the shape does not have is accepted — the codec is the
-     * same strict one the transcription answer uses. The recommendation is therefore also checked to be one
-     * of the sides the request asked about, because that is the only vocabulary the reviewer was given. What is checked beyond the shape is what makes an answer
-     * a judgement of *these two readings*: the confidence has to be a number a confidence can be, the reasons
-     * are bounded in number and in length, and every span has to be a stretch of the reading it claims. A
-     * reason that names a place in neither reading is not a reason, and an answer that fails any of this is
-     * refused rather than stored as an opinion about a page: the caller turns the refusal into `UNCERTAIN`
-     * with the baseline retained.
-     */
-    private fun reviewOf(content: String, readingA: String, readingB: String): ImageReview {
-        val answer = try {
-            StrictAnswerJson.decodeFromString<OcrReviewAnswer>(content)
-        } catch (failure: Throwable) {
-            throw ImageLlmException(
-                ImageLlmException.MALFORMED_RESPONSE,
-                "the provider's answer is not the review schema, so it is not a judgement of this page",
-                dispatched = true,
-            )
-        }
-        val confidence = answer.confidence
-        if (confidence != null && (confidence < 0.0 || confidence > 1.0)) {
-            throw ImageLlmException(
-                ImageLlmException.MALFORMED_RESPONSE,
-                "the provider's answer gave a confidence outside 0 to 1, which is not a confidence",
-                dispatched = true,
-            )
-        }
-        if (answer.reasons.size > MAX_REVIEW_REASONS) {
-            throw ImageLlmException(
-                ImageLlmException.MALFORMED_RESPONSE,
-                "the provider's answer gave more reasons than a review holds, so it was refused rather than " +
-                    "stored unbounded",
-                dispatched = true,
-            )
-        }
-        val reasons = answer.reasons.map { reason ->
-            if (reason.explanation.isBlank() || reason.explanation.length > MAX_REVIEW_EXPLANATION_CHARACTERS) {
-                throw ImageLlmException(
-                    ImageLlmException.MALFORMED_RESPONSE,
-                    "one of the provider's reasons is empty or longer than a bounded explanation, so the " +
-                        "answer is not the shape the review asks for",
-                    dispatched = true,
-                )
-            }
-            val spanA = spanOf(reason.aStart, reason.aEnd, readingA.length)
-            val spanB = spanOf(reason.bStart, reason.bEnd, readingB.length)
-            if (spanA == null && spanB == null) {
-                throw ImageLlmException(
-                    ImageLlmException.MALFORMED_RESPONSE,
-                    "one of the provider's reasons points at neither reading, so it is not a reason about " +
-                        "this comparison",
-                    dispatched = true,
-                )
-            }
-            ImageReviewReason(explanation = reason.explanation, spanA = spanA, spanB = spanB)
-        }
-        return ImageReview(
-            recommendation = answer.recommendation,
-            confidence = confidence,
-            reasons = reasons,
-            modelVersion = null,
-        )
-    }
-
-    /**
-     * One span a reviewer named, refused unless it is a stretch of the reading it claims to be about.
-     *
-     * A reason says which side it is about by naming that side's offsets and leaving the other side's absent,
-     * so half a span is not a side. An offset outside its reading, or an empty or reversed stretch, marks a
-     * place the answer cannot have read, which is a refusal rather than a reason pointing at nothing.
-     */
-    private fun spanOf(start: Int?, end: Int?, length: Int): TextSpan? {
-        if (start == null || end == null) {
-            if (start != end) {
-                throw ImageLlmException(
-                    ImageLlmException.MALFORMED_RESPONSE,
-                    "one of the provider's reasons gave half a span, so it does not name a stretch of a " +
-                        "reading",
-                    dispatched = true,
-                )
-            }
-            return null
-        }
-        if (start < 0 || end <= start || end > length) {
-            throw ImageLlmException(
-                ImageLlmException.MALFORMED_RESPONSE,
-                "one of the provider's reasons pointed outside the reading it is about, so it marks a place " +
-                    "that answer did not read",
-                dispatched = true,
-            )
-        }
-        return TextSpan(start, end)
-    }
-
     private fun failureFor(status: Int): ImageLlmException = when {
         status == 401 || status == 403 -> ImageLlmException(
             ImageLlmException.AUTHENTICATION,
@@ -1346,12 +1122,6 @@ class ImageLlmClient(
         /** The most bytes one page's answer may be before it is refused unread. */
         const val MAX_RESPONSE_BYTES: Int = 1024 * 1024
 
-        /** The most reasons one review answer may carry, matching what the shipped prompt asks for. */
-        const val MAX_REVIEW_REASONS: Int = 5
-
-        /** The longest explanation one reason may carry, matching what the shipped prompt asks for. */
-        const val MAX_REVIEW_EXPLANATION_CHARACTERS: Int = 200
-
         /**
          * The synthetic page a capability check sends.
          *
@@ -1472,33 +1242,6 @@ internal data class OcrTranscriptionAnswer(
 
 @Serializable
 internal data class OcrTranscriptionSpan(val start: Int, val end: Int)
-
-/**
- * The review answer's own schema, as the shipped prompt asks for it.
- *
- * The identity, the recommendation and the reasons are required and none is defaulted, so an answer that
- * leaves one out is refused rather than completed here. The recommendation is the request's own vocabulary,
- * a side ([ReviewerSide]) rather than this application's [ReviewerRecommendation]: an answer in the latter
- * is not this schema and is refused. A reason names the stretches it is about by giving the offsets of the
- * side or sides it points at, which is why a half-named span is refused rather than read as "no span".
- */
-@Serializable
-internal data class OcrReviewAnswer(
-    val unitId: String,
-    val ordinal: Int,
-    val recommendation: ReviewerSide,
-    val confidence: Double? = null,
-    val reasons: List<OcrReviewReason> = emptyList(),
-)
-
-@Serializable
-internal data class OcrReviewReason(
-    val explanation: String,
-    val aStart: Int? = null,
-    val aEnd: Int? = null,
-    val bStart: Int? = null,
-    val bEnd: Int? = null,
-)
 
 /**
  * The codec for the answer *document*, which is this build's schema rather than a provider's protocol.

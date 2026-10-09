@@ -1,6 +1,6 @@
 # 13: `StartReadingDialog.svelte`
 
-**Status:** Not started
+**Status:** Implemented; automated gates passed (2026-10-09). See [verification record](STATUS.md#verification-record).
 **Blocked by:** 12 for the types and client function names only (`ReadingMethodOption`, `ImportPreview`, `listReadingMethods`, `previewImport`, `startImport`, `previewRescan`, `startRescan`). If 12 has not landed, add exactly those declarations from CONTRACTS section 11 to `web/src/lib/api.ts` and let 12 keep them.
 **Plan:** [OCR workflow redesign, Task 13](../../plans/2026-10-08-ocr-workflow-redesign.md). Read first: this ticket, [CONTRACTS.md](CONTRACTS.md) (sections 11, 12, 13), `AGENTS.md`, the [spec](../../specs/2026-10-08-ocr-workflow-redesign.md) ("Start dialog", "Preview").
 
@@ -29,13 +29,13 @@ are fixed in CONTRACTS section 11.
 - For rescan: `previewRescan` then `startRescan({previewId, requestId})`; for import: `previewImport` then `startImport({...request, method, previewHash, requestId})`.
 - Plain HTML/CSS, English copy, accessible (labelled radio group or `<select>`, `role="dialog"`, focus management, disabled options carry their reason as visible text).
 
-## Test-first implementation
+## Original test-first implementation plan
 
-- [ ] Write failing tests: default pre-selected; unavailable method shows its reason and cannot be chosen; changing the method re-previews; confirm label for local, external and `atLeast`; double click submits once; a `PREVIEW_STALE` response triggers a re-preview with the message "The files changed; review the summary again."
-- [ ] Run `cd web && npm test -- --run`; expect FAIL.
-- [ ] Idempotence: reopening the dialog creates a new `requestId`; submitting twice from one open sends the same `requestId` (a retry after a network error does not start a second run); an unknown cost shows the cost basis text instead of a number.
-- [ ] Implement.
-- [ ] Run tests and `npm run check`; expect PASS.
+- Write failing tests: default pre-selected; unavailable method shows its reason and cannot be chosen; changing the method re-previews; confirm label for local, external and `atLeast`; double click submits once; a `PREVIEW_STALE` response triggers a re-preview with the message "The files changed; review the summary again."
+- Run `cd web && npm test -- --run`; expect FAIL.
+- Idempotence: reopening the dialog creates a new `requestId`; submitting twice from one open sends the same `requestId` (a retry after a network error does not start a second run); an unknown cost shows the cost basis text instead of a number.
+- Implement.
+- Run tests and `npm run check`; expect PASS.
 
 ## Focused verification
 

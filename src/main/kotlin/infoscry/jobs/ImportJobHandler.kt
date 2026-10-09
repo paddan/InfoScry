@@ -28,7 +28,6 @@ import infoscry.library.ManagedImportOutcome
 import infoscry.library.ManagedLibrary
 import infoscry.ocr.OcrDispatchStage
 import infoscry.ocr.SuryaOcr
-import infoscry.ocr.ocrReviewerFactory
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
@@ -40,6 +39,8 @@ import infoscry.storage.ImportItemStore
 import infoscry.storage.JobStore
 import io.ktor.client.engine.HttpClientEngine
 import java.io.IOException
+import java.security.MessageDigest
+import java.util.HexFormat
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.CancellationException
@@ -134,6 +135,10 @@ class ImportJobHandler internal constructor(
     private val discardCreatedDocument: suspend (CollectionId, DocumentId) -> Unit = { _, _ -> },
 ) : JobHandler {
 
+    /** Directory and file enumeration shared by the running import and its preview. */
+    internal fun enumerateForPreview(sources: List<String>, recursive: Boolean, ignore: IgnorePatterns): List<ImportSource> =
+        enumerate(sources, recursive, ignore)
+
     override suspend fun handle(job: Job, stage: JobStage) {
         val payload = ImportJobPayload.decode(job.payload)
         val collectionId = CollectionId(payload.collectionId)
@@ -150,10 +155,13 @@ class ImportJobHandler internal constructor(
         // any byte is copied, so a skipped file leaves no item, no document and no count. The payload's extension
         // filter is applied here, so a resumed attempt applies the filter the import was queued with. A missing
         // source that passes the filter is still admitted: its item reports that it is gone.
-        val sources = enumerate(payload.sources, payload.recursive, payload.ignore)
+        val selected = enumerate(payload.sources, payload.recursive, payload.ignore)
             .filter { source ->
                 selection.admits(source.path, source.relativePath, source.exists, payload.ignore, payload.extensions)
-            }
+        }
+        val sources = payload.confirmedSources?.let { manifest ->
+            validateConfirmedSources(job, manifest, selected)
+        } ?: selected
         stage.reportProgress(completed = 0, total = sources.size)
 
         var completed = 0
@@ -165,21 +173,63 @@ class ImportJobHandler internal constructor(
                 // outcome: its item is durably marked CANCELLED so no later attempt copies the deleted
                 // document again, and the remaining files of the import keep running.
                 stage.run(STAGE_RECORD) { items.cancelTargeting(job.id, deleted.documentId) }
-            } catch (waiting: AttemptAwaitingApproval) {
-                // A page would have exceeded this job's external scope, and it was not sent. The waiting
-                // state is durable and the attempt ends here rather than reading the next file: no page of
-                // any file may be dispatched until a person approves the scope. The files this attempt
-                // already imported are skipped when the approved job runs again, so the wait costs no work.
-                stage.run(STAGE_RECORD) { jobs.progress(job.id, stage = JobStore.AWAITING_APPROVAL_STAGE) }
-                LOGGER.atInfo()
-                    .addKeyValue(JOB_ID_FIELD, job.id.value)
-                    .log("an import waits for an external page scope to be approved before another page is sent")
-                return
             }
             completed++
             stage.reportProgress(completed, sources.size)
         }
     }
+
+    /**
+     * Confirms that a queued import still names exactly the files and bytes the start dialog showed.
+     * The complete manifest is checked before any item is queued or any source is copied.
+     */
+    private fun validateConfirmedSources(
+        job: Job,
+        manifest: List<ConfirmedImportSource>,
+        selected: List<ImportSource>,
+    ): List<ImportSource> {
+        val confirmedPaths = manifest.map { it.path }
+        if (confirmedPaths.distinct().size != confirmedPaths.size || selected.map { it.path.toString() } != confirmedPaths) {
+            throw ImportSourceChangedException()
+        }
+        selected.forEach { source ->
+            val confirmed = manifest.single { it.path == source.path.toString() }
+            // Once a previous attempt attached the exact confirmed bytes, a resume is owned by the immutable
+            // managed copy. The original may have moved or changed since that copy committed.
+            val attached = items.find(job.id, source.key)?.documentId?.let(documents::get)
+            val managedCopyMatches = attached?.let { document ->
+                managedCopyMatches(library.managedPathOf(document), document.sha256, confirmed)
+            } == true
+            val sourceMatches = runCatching {
+                val path = Path.of(confirmed.path)
+                Files.isRegularFile(path) && Files.size(path) == confirmed.sizeBytes &&
+                    sha256Of(path) == confirmed.sha256
+            }.getOrDefault(false)
+            if (!managedCopyMatches && !sourceMatches) {
+                throw ImportSourceChangedException()
+            }
+        }
+        return selected
+    }
+
+    private fun sha256Of(path: Path): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(path).use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest())
+    }
+
+    private fun managedCopyMatches(path: Path, recordedSha256: String, confirmed: ConfirmedImportSource): Boolean =
+        runCatching {
+            Files.isRegularFile(path) && Files.size(path) == confirmed.sizeBytes &&
+                recordedSha256.equals(confirmed.sha256, ignoreCase = true) && sha256Of(path) == confirmed.sha256
+        }.getOrDefault(false)
 
     /**
      * One source file: copy it if it is new, then extract what the type allows.
@@ -222,6 +272,23 @@ class ImportJobHandler internal constructor(
         // path, so what it decides below decides for this file too.
         afterAttach()
 
+        val confirmed = payload.confirmedSources?.singleOrNull { it.path == source.path.toString() }
+        if (confirmed != null && !managedCopyMatches(attached.managedPath, document.sha256, confirmed)) {
+            // The source was checked before the item was queued, but it may have changed while the managed
+            // copy was being made. Never read or send bytes different from the ones the preview confirmed.
+            // A new document made from those bytes is removed; a duplicate belongs to an earlier import.
+            if (!attached.duplicate) discard(collection.id, document.id)
+            recordFailure(
+                job = job,
+                source = source,
+                stage = stage,
+                document = null,
+                code = ImportSourceChangedException.CODE,
+                message = ImportSourceChangedException.MESSAGE,
+            )
+            return
+        }
+
         val result = ingest.ingest(
             collection = collection,
             settings = settings,
@@ -240,15 +307,7 @@ class ImportJobHandler internal constructor(
                 document = document,
                 snapshot = payload.ocr,
                 dispatchStage = OcrDispatchStage.TRANSCRIPTION,
-            ),
-            // How this file's staged pages are judged, or null when the attempt has no reviewer: the page's
-            // own text is compared with the engine's reading while the draft is in hand, and the review is
-            // recorded for a person.
-            review = attemptDispatch.stagedPageReviewOf(
-                job = job,
-                document = document,
-                collection = collection,
-                snapshot = payload.ocr,
+                confirmedManifestScope = payload.confirmedSources != null,
             ),
             // The selection this import was admitted with, which the revision it publishes records as its reading.
             reading = payload.ocr,
@@ -262,7 +321,7 @@ class ImportJobHandler internal constructor(
             // stored, the reading is durable and the item records it once. What differs is the document,
             // whose status `ingest` has already written from the reading's own outcome — complete when no
             // page of it still owes a decision, review-pending otherwise.
-            IngestResult.Complete, IngestResult.Staged -> stage.run(STAGE_RECORD) {
+            IngestResult.Complete -> stage.run(STAGE_RECORD) {
                 items.record(job.id, source.key, attached.outcome, document.id)
             }
 
@@ -514,8 +573,6 @@ class ImportJobHandler internal constructor(
      * One file the request selected. [relativePath] is what an ignore pattern is matched against: the path below the
      * folder the file was found in, or just the file's name when it was named directly.
      */
-    private data class ImportSource(val key: String, val path: Path, val exists: Boolean, val relativePath: String)
-
     /**
      * The files a request names, in a stable order and without duplicates.
      *
@@ -528,44 +585,8 @@ class ImportJobHandler internal constructor(
      * A directory is only read down to its own files unless [recursive] says otherwise: importing a
      * directory without `--recursive` takes what is directly inside it, and takes the whole tree with it.
      */
-    private fun enumerate(sources: List<String>, recursive: Boolean, ignore: IgnorePatterns): List<ImportSource> {
-        val byKey = LinkedHashMap<String, ImportSource>()
-        sources.forEach { raw ->
-            val given = Path.of(raw)
-            when {
-                Files.isRegularFile(given) || Files.isSymbolicLink(given) -> {
-                    val resolved = runCatching { given.toRealPath() }
-                        .getOrElse { given.toAbsolutePath().normalize() }
-                    if (Files.isRegularFile(resolved)) {
-                        byKey.putIfAbsent(resolved.toString(), ImportSource(resolved.toString(), resolved, true, nameOf(resolved)))
-                    } else {
-                        val key = given.toAbsolutePath().normalize().toString()
-                        byKey.putIfAbsent(key, ImportSource(key, given, false, nameOf(given)))
-                    }
-                }
-
-                Files.isDirectory(given) -> {
-                    // Walked from the resolved directory, so every file the walk reports has the same
-                    // canonical form a named file does -- otherwise the same document named twice, once
-                    // directly and once through its directory, would produce two items on a filesystem
-                    // that reaches the same tree by two paths.
-                    val root = runCatching { given.toRealPath() }.getOrElse { given.toAbsolutePath().normalize() }
-                    selection.walk(root, recursive, ignore).forEach { file ->
-                        byKey.putIfAbsent(
-                            file.path.toString(),
-                            ImportSource(file.path.toString(), file.path, true, file.relativePath),
-                        )
-                    }
-                }
-
-                else -> {
-                    val key = given.toAbsolutePath().normalize().toString()
-                    byKey.putIfAbsent(key, ImportSource(key, given, false, nameOf(given)))
-                }
-            }
-        }
-        return byKey.values.toList()
-    }
+    private fun enumerate(sources: List<String>, recursive: Boolean, ignore: IgnorePatterns): List<ImportSource> =
+        enumerateImportSources(sources, recursive, ignore, selection)
 
     private fun nameOf(path: Path): String = path.fileName?.toString().orEmpty()
 
@@ -767,16 +788,6 @@ class ImportJobHandler internal constructor(
             val attemptDispatch = AttemptDispatch(
                 operations = context.ocrOperations,
                 profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
-                paths = context.paths,
-                // The same reviewer factory a rescan runs with: an import's staged page, a retry's and a
-                // rescan's are judged by one set of rules, and a second wiring here would be a second answer
-                // to what a reviewer may do.
-                reviewerFor = ocrReviewerFactory(
-                    revisions = context.revisions,
-                    reviews = context.ocrReviews,
-                    profiles = context.ocrProfiles,
-                    clientEngine = clientEngine,
-                ),
             )
             val handler = ImportJobHandler(
                 collections = context.collections,
@@ -817,17 +828,10 @@ class ImportJobHandler internal constructor(
                 jobs = context.jobs,
                 revisions = context.revisions,
                 operations = context.ocrOperations,
-                reviews = context.ocrReviews,
                 publication = context.revisionPublication,
                 chunker = chunker,
                 documentEmbedder = documentEmbedder,
                 engineFor = rescanEngineFactory(context.ocrProfiles, clientEngine = clientEngine),
-                reviewerFor = ocrReviewerFactory(
-                    revisions = context.revisions,
-                    reviews = context.ocrReviews,
-                    profiles = context.ocrProfiles,
-                    clientEngine = clientEngine,
-                ),
                 profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
             )
             val runner = JobRunner(
@@ -926,5 +930,56 @@ class ImportJobHandler internal constructor(
         )
     }
 }
+
+/** A confirmed import's file set or bytes changed after the person reviewed them. */
+internal class ImportSourceChangedException : IllegalStateException(MESSAGE) {
+    companion object {
+        const val CODE = "IMPORT_SOURCE_CHANGED"
+        const val MESSAGE = "the confirmed files changed; review the import summary again before starting"
+    }
+}
+
+/** One file selected by an import request, shared with the import preview. */
+internal data class ImportSource(val key: String, val path: Path, val exists: Boolean, val relativePath: String)
+
+/** Stable, duplicate-free enumeration used by both import execution and preview. */
+internal fun enumerateImportSources(
+    sources: List<String>,
+    recursive: Boolean,
+    ignore: IgnorePatterns,
+    selection: ImportSelection,
+): List<ImportSource> {
+    val byKey = LinkedHashMap<String, ImportSource>()
+    sources.forEach { raw ->
+        val given = Path.of(raw)
+        when {
+            Files.isRegularFile(given) || Files.isSymbolicLink(given) -> {
+                val resolved = runCatching { given.toRealPath() }
+                    .getOrElse { given.toAbsolutePath().normalize() }
+                if (Files.isRegularFile(resolved)) {
+                    byKey.putIfAbsent(resolved.toString(), ImportSource(resolved.toString(), resolved, true, nameOf(resolved)))
+                } else {
+                    val key = given.toAbsolutePath().normalize().toString()
+                    byKey.putIfAbsent(key, ImportSource(key, given, false, nameOf(given)))
+                }
+            }
+
+            Files.isDirectory(given) -> {
+                val root = runCatching { given.toRealPath() }.getOrElse { given.toAbsolutePath().normalize() }
+                selection.walk(root, recursive, ignore).forEach { file ->
+                    byKey.putIfAbsent(file.path.toString(), ImportSource(file.path.toString(), file.path, true, file.relativePath))
+                }
+            }
+
+            else -> {
+                val key = given.toAbsolutePath().normalize().toString()
+                byKey.putIfAbsent(key, ImportSource(key, given, false, nameOf(given)))
+            }
+        }
+    }
+    return byKey.values.toList()
+}
+
+private fun nameOf(path: Path): String = path.fileName?.toString().orEmpty()
 
 private val LOGGER = LoggerFactory.getLogger("infoscry.import")

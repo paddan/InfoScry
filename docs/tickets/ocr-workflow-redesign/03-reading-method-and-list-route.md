@@ -1,6 +1,6 @@
 # 03: `ReadingMethod` and the list of available methods
 
-**Status:** Not started
+**Status:** Implemented; automated gates passed (2026-10-09). See [verification record](STATUS.md#verification-record).
 **Blocked by:** None.
 **Plan:** [OCR workflow redesign, Task 3](../../plans/2026-10-08-ocr-workflow-redesign.md). Read first: this ticket, [CONTRACTS.md](CONTRACTS.md) (sections 1, 2, 12, 13), `AGENTS.md`, the [spec](../../specs/2026-10-08-ocr-workflow-redesign.md) ("Reading methods").
 
@@ -31,13 +31,13 @@ exists (another ticket created it per CONTRACTS section 1), reuse it unchanged.
 - Use `OcrProfileService` (`keyAvailable`, capability record) and the engine availability already used by `RescanService.snapshotFor`.
 - Tests `src/test/kotlin/infoscry/ocr/ReadingMethodTest.kt`, `src/test/kotlin/infoscry/server/ReadingMethodRoutesTest.kt`.
 
-## Test-first implementation
+## Original test-first implementation plan
 
-- [ ] Write failing tests: parse/round-trip of all three ids and a bad id (the route returns 400 for a bad id where one is accepted; `parse` throws `IllegalArgumentException`); the route lists Tesseract and Surya with reasons when the tool/model is missing; an LLM profile with `external = true` and `destination` = its host; a disabled profile or an unset key variable as unavailable with a reason; an LLM profile that never passed its image check is unavailable with that reason.
-- [ ] Run; expect FAIL.
-- [ ] Idempotence test: calling the route twice returns identical bodies and writes nothing.
-- [ ] Implement.
-- [ ] Run both classes; expect PASS.
+- Write failing tests: parse/round-trip of all three ids and a bad id (the route returns 400 for a bad id where one is accepted; `parse` throws `IllegalArgumentException`); the route lists Tesseract and Surya with reasons when the tool/model is missing; an LLM profile with `external = true` and `destination` = its host; a disabled profile or an unset key variable as unavailable with a reason; an LLM profile that never passed its image check is unavailable with that reason.
+- Run; expect FAIL.
+- Idempotence test: calling the route twice returns identical bodies and writes nothing.
+- Implement.
+- Run both classes; expect PASS.
 
 ## Focused verification
 

@@ -18,6 +18,7 @@
   } from '../lib/investigationLimits';
   import { profileOptionLabel, toolCallingRemedy, toolCallingState } from '../lib/toolCalling';
   import { qualityLabel } from '../lib/ocrQuality';
+  import { newRequestId } from '../lib/ocrRescan';
   import {
     ApiError,
     deleteConversation,
@@ -718,7 +719,7 @@
   async function retryManagedDocument(documentId: string, ocr?: RetryOcrChoice): Promise<RetryAttempt> {
     const admission = await retryDocuments(
       managedCollectionId,
-      ocr === undefined ? { documentIds: [documentId] } : { documentIds: [documentId], ocr },
+      { documentIds: [documentId], ...(ocr?.method === undefined ? {} : { method: ocr.method }), requestId: ocr?.requestId ?? newRequestId() },
     );
     const jobId = admission.acceptedJobIds[0];
     if (jobId !== undefined) return { accepted: true, jobId };
@@ -737,7 +738,7 @@
    * a disconnect or a restart does not lose it.
    */
   async function retryAllManagedDocuments(ocr?: RetryOcrChoice): Promise<RetryAdmission> {
-    return retryDocuments(managedCollectionId, ocr === undefined ? { allEligible: true } : { allEligible: true, ocr });
+    return retryDocuments(managedCollectionId, { allEligible: true, ...(ocr?.method === undefined ? {} : { method: ocr.method }), requestId: ocr?.requestId ?? newRequestId() });
   }
 
   /**
@@ -833,7 +834,6 @@
                 <option value="">Any status</option>
                 <option value="COMPLETE">Complete</option>
                 <option value="COMPLETE_WITH_WARNINGS">Complete with warnings</option>
-                <option value="NEEDS_REVIEW">Needs review</option>
                 <option value="FAILED">Failed</option>
                 <option value="NEEDS_TOOL">Needs tool</option>
               </select>

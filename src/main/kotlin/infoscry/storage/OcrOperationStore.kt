@@ -36,7 +36,7 @@ class OcrOperationConflictException(val documentId: DocumentId, val stage: OcrOp
     )
 
 /**
- * A resume or an approval would have started a second attempt of an operation that already has one.
+ * A resume would start a second attempt of an operation that already has one.
  *
  * The operation is the unit of ownership and an attempt is its only owner at a time: two attempts of one
  * operation would read the same pages into the same candidate and count the same external pages twice. The
@@ -49,8 +49,7 @@ class OcrAttemptInProgressException(val operationId: String, val jobId: String) 
 )
 
 /**
- * The durable rescan operations of this archive: their previews, their external-page admission and the
- * approvals that extend it.
+ * The durable rescan operations of this archive, their previews, and bounded external-page accounting.
  *
  * Every question this store answers is a question about *persisted* facts, which is the whole reason it is a
  * store and not a service:
@@ -62,15 +61,16 @@ class OcrAttemptInProgressException(val operationId: String, val jobId: String) 
  *   A caller that retried a POST after a timeout gets its own operation back rather than a second reading.
  * - **"May this page leave the machine?"** The distinct-page row and the call row are written in the same
  *   transaction as the answer, so two concurrent dispatches cannot both see "one page left of the eight
- *   allowed" and both send. The decision and the count are one write.
- * - **"Was this scope approved?"** [approveExternalScope] records the snapshot hash a person approved; the
- *   allowance is read as the larger of the collection's configured allowance and the newest approval, so
- *   resuming never resets the counter and an approval can never be inherited by another scope.
+ *   allowed" and both send. The decision and the count are one write. The operation's frozen snapshot owns
+ *   the bound, so resuming never resets the counter or changes the admitted scope.
  *
  * Nothing here holds page text, a filesystem path or a provider message. The snapshot is settings; the
  * counters are counts; the error code is a safe code beside a curated remedy.
  */
 class OcrOperationStore(private val database: Database) {
+
+    /** Composes operation, document and job writes into one SQLite commit. */
+    fun <T> atomically(block: () -> T): T = database.transaction { block() }
 
     // ---- previews ----
 
@@ -113,7 +113,9 @@ class OcrOperationStore(private val database: Database) {
                 } else {
                     statement.setInt(9, preview.externalPageUpperBound)
                 }
-                statement.setInt(10, if (preview.approvalRequired) 1 else 0)
+                // Keep the baseline column for older database schemas; new previews never advertise a
+                // mid-run pause.
+                statement.setInt(10, 0)
                 statement.setString(11, costEstimateJson)
                 statement.setString(12, Instants.now())
                 statement.setString(13, preview.expiresAt)
@@ -128,7 +130,7 @@ class OcrOperationStore(private val database: Database) {
     fun preview(previewId: String): StoredPreview? = database.read { connection ->
         connection.prepareStatement(
             "SELECT collection_id, document_id, base_revision_id, managed_sha256, snapshot, snapshot_hash, " +
-                "page_total, external_page_upper_bound, approval_required, expires_at, overrides " +
+                "page_total, external_page_upper_bound, expires_at, overrides " +
                 "FROM ocr_rescan_previews WHERE preview_id = ?",
         ).use { statement ->
             statement.setString(1, previewId)
@@ -147,16 +149,7 @@ class OcrOperationStore(private val database: Database) {
         val snapshotHash: String,
         val pageTotal: Int?,
         val externalPageUpperBound: Int?,
-        val approvalRequired: Boolean,
         val expiresAt: String,
-        /**
-         * The overrides the preview was taken with, or null when it used the collection's own settings.
-         *
-         * They are stored rather than inferred because admission asks whether anything the person saw has
-         * changed, and an overridden field is by definition not the collection's: without these, a
-         * collection edit would either be missed on the other fields or read as drift on the overridden one.
-         */
-        val overrides: RescanPreviewOverrides? = null,
     )
 
     // ---- operations ----
@@ -176,7 +169,8 @@ class OcrOperationStore(private val database: Database) {
      * the insert instead of quietly becoming a second reader of one document.
      *
      * @throws OcrRequestConflictException when the request id names another reading.
-     * @throws OcrOperationConflictException when the document is already under an operation that holds it.
+     * A prior operation holding the document is ended as cancelled in this same transaction, so a crash
+     * cannot leave the document released without its replacement admitted.
      */
     fun admit(
         collectionId: String,
@@ -193,7 +187,19 @@ class OcrOperationStore(private val database: Database) {
             return@transaction checkNotNull(connection.selectOperationByRequest(collectionId, documentId, requestId))
         }
         connection.selectActiveOperation(documentId)?.let { holding ->
-            throw OcrOperationConflictException(documentId, holding.stage)
+            connection.prepareStatement(
+                "UPDATE ocr_operations SET stage = ?, error_code = ?, error_message = ?, current_job_id = NULL, " +
+                    "updated_at = ? WHERE operation_id = ?",
+            ).use { statement ->
+                statement.setString(1, OcrOperationStage.CANCELLED.name)
+                statement.setString(2, RESCAN_CANCELLED_CODE)
+                statement.setString(3, "a newer rescan replaced this operation")
+                statement.setString(4, Instants.now())
+                statement.setString(5, holding.operationId)
+                check(statement.executeUpdate() == 1) {
+                    "the active operation ${holding.operationId} changed during replacement"
+                }
+            }
         }
         val id = "ocr-" + UUID.randomUUID()
         val now = Instants.now()
@@ -258,8 +264,7 @@ class OcrOperationStore(private val database: Database) {
      * This is what refuses an overlapping rescan: a document may be under one reading at a time, and the
      * "already running" answer is a stage the document's own row states rather than a lock in a process. The
      * predicate is the schema's own partial unique index, said in SQL rather than in Kotlin so the two cannot
-     * drift: every stage that is still working or waiting, and a COMPLETE operation whose pages nobody has
-     * decided yet.
+     * drift: every stage still running, plus the legacy completed-review rows that startup cleanup retires.
      */
     fun activeOperation(documentId: DocumentId): OcrOperation? = database.read { connection ->
         connection.selectActiveOperation(documentId)
@@ -269,6 +274,85 @@ class OcrOperationStore(private val database: Database) {
     fun operations(documentId: DocumentId): List<OcrOperation> = database.read { connection ->
         connection.selectOperations(documentId)
     }
+
+    /** The newest operation for each requested document, fetched with one query. */
+    fun latestForDocuments(documentIds: Collection<DocumentId>): Map<DocumentId, OcrOperation> {
+        val ids = documentIds.distinct()
+        if (ids.isEmpty()) return emptyMap()
+        val placeholders = ids.joinToString(",") { "?" }
+        return database.read { connection ->
+            val latest = LinkedHashMap<DocumentId, OcrOperation>()
+            connection.prepareStatement(
+                "$SELECT_OPERATION WHERE document_id IN ($placeholders) " +
+                    "ORDER BY document_id, created_at DESC, rowid DESC",
+            ).use { statement ->
+                ids.forEachIndexed { index, id -> statement.setString(index + 1, id.value) }
+                statement.executeQuery().use { rows ->
+                    while (rows.next()) {
+                        val operation = rows.toOperation(connection)
+                        latest.putIfAbsent(operation.documentId, operation)
+                    }
+                }
+            }
+            latest
+        }
+    }
+
+    /** Operations needing startup recovery, including terminal rows whose paired document write was interrupted. */
+    fun operationsNeedingStartupCleanup(): List<OcrOperation> = database.read { connection ->
+        val found = mutableListOf<OcrOperation>()
+        connection.prepareStatement(
+            "$SELECT_OPERATION WHERE ($HOLDS_DOCUMENT) OR " +
+                "(stage = '${OcrOperationStage.FAILED.name}' AND error_code = 'INTERRUPTED') OR " +
+                "stage = '${OcrOperationStage.COMPLETE.name}'",
+        ).use { statement ->
+            statement.executeQuery().use { rows -> while (rows.next()) found += rows.toOperation(connection) }
+        }
+        found
+    }
+
+    /**
+     * Fails a held operation left behind after its attempt ended. The persisted stage and owner are checked
+     * again in the update so a concurrent worker cannot be failed from a stale cleanup snapshot.
+     */
+    fun failInterruptedIfUnowned(
+        operationId: String,
+        expectedStage: OcrOperationStage,
+        expectedJobId: String?,
+    ): Boolean {
+        require(expectedStage.holdsDocument) { "only a held operation can be marked interrupted" }
+        return database.transaction { connection ->
+            connection.prepareStatement(
+                "UPDATE ocr_operations SET stage = ?, error_code = 'INTERRUPTED', " +
+                    "error_message = 'the previous reading was interrupted; start it again', " +
+                    "current_job_id = NULL, updated_at = ? WHERE operation_id = ? AND stage = ? " +
+                    "AND current_job_id IS ?",
+            ).use { statement ->
+                statement.setString(1, OcrOperationStage.FAILED.name)
+                statement.setString(2, Instants.now())
+                statement.setString(3, operationId)
+                statement.setString(4, expectedStage.name)
+                statement.setString(5, expectedJobId)
+                statement.executeUpdate() == 1
+            }
+        }
+    }
+
+    /** Clears a completed operation's pending count only while its candidate and count still match. */
+    fun clearPendingReviewIfComplete(operationId: String, candidateRevisionId: String?, expectedCount: Int): Boolean =
+        database.transaction { connection ->
+            connection.prepareStatement(
+                "UPDATE ocr_operations SET pending_review_count = 0, updated_at = ? WHERE operation_id = ? " +
+                    "AND stage = ? AND candidate_revision_id IS ? AND pending_review_count = ?",
+            ).use { statement ->
+                statement.setString(1, Instants.now())
+                statement.setString(2, operationId)
+                statement.setString(3, OcrOperationStage.COMPLETE.name)
+                statement.setString(4, candidateRevisionId)
+                statement.setInt(5, expectedCount)
+                statement.executeUpdate() == 1
+            }
+        }
 
     /**
      * Moves an operation to [stage], clearing a previous failure's code when the stage is a working one.
@@ -316,8 +400,8 @@ class OcrOperationStore(private val database: Database) {
     /**
      * Starts the one attempt an operation may have at a time, or refuses because it already has one.
      *
-     * A resume and an approval both mean "continue this reading", and both would otherwise queue their own
-     * attempt: two attempts of one operation stage the same pages into the same candidate and count the same
+     * A resume means "continue this reading" and would otherwise queue its own attempt: two attempts of one
+     * operation stage the same pages into the same candidate and count the same
      * external pages, so one of them would read over the other's committed work. The ownership handover and
      * the claim are therefore one write — the update names the attempt only while the operation names none —
      * and [enqueue] runs inside the same transaction, so the attempt it creates exists exactly when the
@@ -450,7 +534,7 @@ class OcrOperationStore(private val database: Database) {
         connection.readOperationById(operationId)
     }
 
-    /** Parks a waiting operation: it keeps its snapshot, its counters and its candidate for a later attempt. */
+    /** Retained for legacy-row compatibility; new OCR attempts do not enter a paused approval state. */
     fun pause(operationId: String, stage: OcrOperationStage = OcrOperationStage.AWAITING_APPROVAL): OcrOperation =
         database.transaction { connection ->
             require(stage == OcrOperationStage.AWAITING_APPROVAL) {
@@ -476,8 +560,7 @@ class OcrOperationStore(private val database: Database) {
      * already counted is admitted again without another count — the same page leaving twice is one page —
      * which is also why resuming never resets the counter.
      *
-     * The allowance itself is resolved by the caller from the persisted snapshot and the newest approval, so
-     * an approval can only ever *widen* the bound for the scope it named.
+     * The allowance comes from the persisted snapshot, so every resumed attempt keeps the same bound.
      */
     fun authorizePage(
         owner: OcrExternalOwner,
@@ -512,8 +595,7 @@ class OcrOperationStore(private val database: Database) {
      * Counts one provider call, retries included.
      *
      * Separate from [authorizePage] because the two are different quantities: a call is what was paid for and
-     * a page is what left the machine. A page transcribed and then reviewed is one page and two calls, which is
-     * the pair the API explains to whoever has to judge the cost.
+     * a page is what left the machine. The page count and provider-call count remain separate measures.
      */
     fun recordCall(
         owner: OcrExternalOwner,
@@ -541,94 +623,12 @@ class OcrOperationStore(private val database: Database) {
         }
     }
 
-    /**
-     * Records one approved external scope and returns it.
-     *
-     * The snapshot hash is what makes the approval *this* scope's: a resumed attempt whose snapshot no longer
-     * hashes the same — a changed engine, endpoint, model, prompt version or policy — cannot inherit it.
-     */
-    fun approveExternalScope(
-        owner: OcrExternalOwner,
-        snapshotHash: String,
-        authorizedDistinctPages: Int,
-    ): OcrExternalApproval {
-        require(authorizedDistinctPages >= 0) {
-            "an approved scope is not negative, was $authorizedDistinctPages"
-        }
-        val approval = OcrExternalApproval(
-            approvalId = "approval-" + UUID.randomUUID(),
-            owner = owner,
-            snapshotHash = snapshotHash,
-            authorizedDistinctPages = authorizedDistinctPages,
-            createdAt = Instants.now(),
-        )
-        database.transaction { connection ->
-            connection.prepareStatement(
-                "INSERT INTO ocr_external_approvals (approval_id, owner_kind, owner_id, snapshot_hash, " +
-                    "authorized_distinct_pages, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ).use { statement ->
-                statement.setString(1, approval.approvalId)
-                statement.setString(2, owner.kind.name)
-                statement.setString(3, owner.id)
-                statement.setString(4, approval.snapshotHash)
-                statement.setInt(5, approval.authorizedDistinctPages)
-                statement.setString(6, approval.createdAt)
-                statement.executeUpdate()
-            }
-        }
-        return approval
-    }
-
-    /** The newest approval for one owner, or null when nothing was approved. */
-    fun latestApproval(owner: OcrExternalOwner): OcrExternalApproval? =
-        database.read { connection -> connection.newestApproval(owner) }
-
-    private fun Connection.newestApproval(owner: OcrExternalOwner): OcrExternalApproval? =
-        prepareStatement(
-            "SELECT approval_id, snapshot_hash, authorized_distinct_pages, created_at FROM ocr_external_approvals " +
-                "WHERE owner_kind = ? AND owner_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        ).use { statement ->
-            statement.setString(1, owner.kind.name)
-            statement.setString(2, owner.id)
-            statement.executeQuery().use { rows ->
-                if (!rows.next()) {
-                    null
-                } else {
-                    OcrExternalApproval(
-                        approvalId = rows.getString("approval_id"),
-                        owner = owner,
-                        snapshotHash = rows.getString("snapshot_hash"),
-                        authorizedDistinctPages = rows.getInt("authorized_distinct_pages"),
-                        createdAt = rows.getString("created_at"),
-                    )
-                }
-            }
-        }
-
-    /**
-     * The allowance one owner may use right now: the collection's configured allowance, raised by the newest
-     * approval that covers the owner's snapshot.
-     *
-     * The larger of the two, never a reset: a job resumed after an approval keeps counting pages it already
-     * sent, and a later attempt without an approval falls back to the configured allowance rather than to
-     * nothing.
-     */
-    fun allowanceFor(owner: OcrExternalOwner, configuredAllowance: Int, snapshotHash: String): OcrExternalAccount {
-        val approval = latestApproval(owner)?.takeIf { it.snapshotHash == snapshotHash }
-        return OcrExternalAccount(
-            distinctPages = database.read { connection -> connection.countSentPages(owner) },
-            calls = database.read { connection -> connection.countCalls(owner) },
-            allowance = maxOf(configuredAllowance, approval?.authorizedDistinctPages ?: 0),
-            approvedDistinctPages = approval?.authorizedDistinctPages,
-        )
-    }
 
     /**
      * The live attempt that owns one operation, or null when nobody is working on it.
      *
-     * This is the question a caller asks *before* deciding whether an operation needs another attempt at all:
-     * an approval recorded while one is running belongs to that running reading, whose dispatch reads the
-     * allowance again on every page, and a second attempt would be work nobody asked for.
+     * This is the question a caller asks before queueing a resume: a second live attempt would stage duplicate
+     * work into the same candidate and count the same external pages.
      */
     fun liveAttempt(operationId: String): String? = database.read { connection ->
         connection.readOperationById(operationId).jobId?.takeIf { owner -> connection.jobIsLive(owner) }
@@ -704,7 +704,6 @@ class OcrOperationStore(private val database: Database) {
         val operationId = getString("operation_id")
         val snapshot = SNAPSHOT_JSON.decodeFromString(OcrSettingsSnapshot.serializer(), getString("snapshot"))
         val owner = OcrExternalOwner(OcrExternalOwnerKind.OPERATION, operationId)
-        val approval = connection.newestApproval(owner)?.takeIf { it.snapshotHash == snapshotHashOf(snapshot) }
         return OcrOperation(
             operationId = operationId,
             collectionId = getString("collection_id"),
@@ -718,21 +717,10 @@ class OcrOperationStore(private val database: Database) {
             pagesCommitted = getInt("pages_committed"),
             pagesFailed = getInt("pages_failed"),
             pendingReviewCount = getInt("pending_review_count"),
-            decidedUnpublishedCount = connection.countDecidedUnpublished(
-                candidateRevisionId = getString("candidate_revision_id"),
-                baseRevisionId = getString("base_revision_id"),
-            ),
-            // The allowance and the two counters are read here rather than left at zero: an operation that
-            // says how many pages it may still send is the answer every caller needs, and an operation that
-            // reported "0 allowed" while an approval existed would refuse work it is allowed to do.
             external = OcrExternalAccount(
                 distinctPages = connection.countSentPages(owner),
                 calls = connection.countCalls(owner),
-                allowance = maxOf(
-                    snapshot.externalPageLimit,
-                    approval?.authorizedDistinctPages ?: 0,
-                ),
-                approvedDistinctPages = approval?.authorizedDistinctPages,
+                allowance = snapshot.externalPageLimit,
             ),
             errorCode = getString("error_code"),
             errorMessage = getString("error_message"),
@@ -740,30 +728,6 @@ class OcrOperationStore(private val database: Database) {
             createdAt = getString("created_at"),
             updatedAt = getString("updated_at"),
         )
-    }
-
-    /**
-     * The pages of an unpublished candidate that a decision approved, counted from the rows that hold them.
-     *
-     * A page counts when its approval is `APPROVED` and a proposal (`PROPOSE`) was recorded for that page
-     * against this operation's baseline: pages the comparison approved on its own never had one, and pages
-     * still `PENDING` are the review backlog, not decisions. Once the candidate is `PUBLISHED` (or withdrawn)
-     * nothing is owed, so the count is zero by construction rather than by a counter somebody must reset.
-     */
-    private fun Connection.countDecidedUnpublished(candidateRevisionId: String?, baseRevisionId: String?): Int {
-        if (candidateRevisionId == null) return 0
-        return prepareStatement(
-            "SELECT COUNT(*) FROM page_text_revisions p " +
-                "JOIN document_revisions r ON r.id = p.revision_id " +
-                "WHERE p.revision_id = ? AND r.state = 'CANDIDATE' AND p.approval = 'APPROVED' " +
-                "AND EXISTS (SELECT 1 FROM page_reviews v WHERE v.document_id = r.document_id " +
-                "AND v.unit_id = p.unit_id AND v.ordinal = p.ordinal AND v.disposition = 'PROPOSE' " +
-                "AND v.baseline_revision_id IS ?)",
-        ).use { statement ->
-            statement.setString(1, candidateRevisionId)
-            statement.setString(2, baseRevisionId)
-            statement.executeQuery().use { rows -> if (rows.next()) rows.getInt(1) else 0 }
-        }
     }
 
     private fun ResultSet.toStoredPreview(previewId: String): StoredPreview = StoredPreview(
@@ -776,11 +740,7 @@ class OcrOperationStore(private val database: Database) {
         snapshotHash = getString("snapshot_hash"),
         pageTotal = getInt("page_total").takeIf { !wasNull() },
         externalPageUpperBound = getInt("external_page_upper_bound").takeIf { !wasNull() },
-        approvalRequired = getInt("approval_required") == 1,
         expiresAt = getString("expires_at"),
-        overrides = getString("overrides")?.let { stored ->
-            SNAPSHOT_JSON.decodeFromString(RescanPreviewOverrides.serializer(), stored)
-        },
     )
 
     private fun Connection.pageAlreadySent(owner: OcrExternalOwner, documentId: DocumentId, unitId: String): Boolean =
@@ -824,7 +784,9 @@ class OcrOperationStore(private val database: Database) {
 
     companion object {
 
-        /** The canonical hash of a snapshot: what an approval binds to. */
+        private const val RESCAN_CANCELLED_CODE = "RESCAN_CANCELLED"
+
+        /** The canonical hash stored with a preview, used to reject changed rescan settings. */
         fun snapshotHashOf(snapshot: OcrSettingsSnapshot): String =
             operationHash(SNAPSHOT_JSON.encodeToString(OcrSettingsSnapshot.serializer(), snapshot))
 
@@ -849,29 +811,3 @@ class OcrOperationStore(private val database: Database) {
                 "'INDEXING') OR (stage = 'COMPLETE' AND pending_review_count > 0)"
     }
 }
-
-/** One persisted approval of an external page scope. */
-data class OcrExternalApproval(
-    val approvalId: String,
-    val owner: OcrExternalOwner,
-    val snapshotHash: String,
-    val authorizedDistinctPages: Int,
-    val createdAt: String,
-)
-
-/**
- * What a preview overrode, stored with it so admission can re-resolve exactly what the person was shown.
- *
- * A null field is "the collection's own value was used", which is what makes the difference between "the
- * collection changed" and "this preview never asked the collection": the first invalidates the preview,
- * because the reading it showed cannot be produced any more, and the second does not, because the override
- * is still in force. It lives in the storage layer rather than beside `RescanOverrides` because it is part
- * of a persisted row's shape.
- */
-@kotlinx.serialization.Serializable
-data class RescanPreviewOverrides(
-    val engine: infoscry.ocr.OcrEngine? = null,
-    val importMode: infoscry.ocr.OcrImportMode? = null,
-    val transcriptionProfileId: String? = null,
-    val reviewProfileId: String? = null,
-)

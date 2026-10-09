@@ -304,7 +304,8 @@ class PdfExtractor(
         input: ExtractionInput,
         document: PDDocument,
     ): PageRun {
-        val readsEveryPage = input.settings.ocrMode == OcrImportMode.CHECK_AND_IMPROVE
+        val readsEveryPage = input.settings.ocrMode == OcrImportMode.READ_ALL ||
+            input.settings.ocrMode == OcrImportMode.CHECK_AND_IMPROVE
         val keepsRenders = readsEveryPage || input.retainsPageImages
         val engine = input.settings.readingEngine()
         // The engines this attempt reads with: the build's own, plus the one this attempt builds for its

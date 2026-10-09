@@ -100,21 +100,16 @@ class LoopbackApi(
             expect(client.get("$base/api/jobs?limit=$limit")),
         ).jobs.map { it.toDomain() }
 
-    /** Hands one import to the server that owns the data directory. */
-    suspend fun enqueueImport(
-        collection: String,
-        paths: List<String>,
-        recursive: Boolean,
-        include: List<String> = emptyList(),
-        exclude: List<String> = emptyList(),
-    ): ImportAcceptedResponse {
-        val request = ImportRequest(
-            collection = collection,
-            paths = paths,
-            recursive = recursive,
-            include = include,
-            exclude = exclude,
-        )
+    suspend fun previewImport(request: infoscry.jobs.ImportPreviewRequest): infoscry.jobs.ImportPreview {
+        val response = client.post("$base/api/imports/preview") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(request))
+        }
+        return ApiJson.decodeFromString(expect(response))
+    }
+
+    suspend fun enqueueImport(request: ImportRequest): ImportAcceptedResponse {
         val response = client.post("$base/api/imports") {
             header()
             contentType(ContentType.Application.Json)

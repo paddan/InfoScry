@@ -568,6 +568,18 @@ class DocumentRevisionStore(private val database: Database, private val content:
         }
     }
 
+    /** Withdraws a still-candidate revision and reports whether this call changed it. */
+    fun withdrawCandidateIfCandidate(revisionId: String): Boolean = database.transaction { connection ->
+        connection.prepareStatement(
+            "UPDATE document_revisions SET state = ? WHERE id = ? AND state = ?",
+        ).use { statement ->
+            statement.setString(1, RevisionState.WITHDRAWN.name)
+            statement.setString(2, revisionId)
+            statement.setString(3, RevisionState.CANDIDATE.name)
+            statement.executeUpdate() == 1
+        }
+    }
+
     /**
      * Records the text and chunks a document already publishes as a new published revision.
      *

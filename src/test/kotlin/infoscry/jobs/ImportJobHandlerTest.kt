@@ -54,10 +54,8 @@ import infoscry.ocr.ImageLlmException
 import infoscry.ocr.LlmOcr
 import infoscry.ocr.PageDispatchIdentity
 import infoscry.ocr.PageImage
-import infoscry.ocr.PublicationDisposition
 import infoscry.ocr.RecordedImageResponse
 import infoscry.ocr.RecordingImageLlmEngine
-import infoscry.ocr.ReviewerRecommendation
 import infoscry.ocr.endpointScope
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
@@ -68,6 +66,8 @@ import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.HexFormat
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 import kotlin.test.Test
@@ -520,6 +520,65 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a confirmed source changed before execution fails before queuing an item`() {
+        withHarness { harness ->
+            val source = harness.writeText("confirmed.txt", "confirmed bytes")
+            val originalBytes = Files.readAllBytes(source)
+            val manifest = ConfirmedImportSource(
+                path = source.toRealPath().toString(),
+                sizeBytes = originalBytes.size.toLong(),
+                sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(originalBytes)),
+            )
+            val jobId = AppContext.open(harness.dataDir).use { context ->
+                harness.enqueueForTest(context, listOf(source), confirmedSources = listOf(manifest)).id
+            }
+            Files.writeString(source, "changed after confirmation")
+
+            val result = harness.resumeDurably(jobId, RecordingUnits(units = 1))
+
+            assertEquals(JobState.FAILED, result.job.state)
+            assertEquals("IMPORT_SOURCE_CHANGED", result.job.errorCode)
+            assertTrue(result.items.isEmpty(), "a changed source was queued before the manifest was checked")
+            assertTrue(result.documents.isEmpty(), "a changed source was copied before the manifest was checked")
+        }
+    }
+
+    @Test
+    fun `bytes changed while copying a confirmed source are removed before extraction`() {
+        withHarness { harness ->
+            val source = harness.writeText("copy-race.txt", "confirmed bytes")
+            val original = Files.readAllBytes(source)
+            val manifest = ConfirmedImportSource(
+                path = source.toRealPath().toString(),
+                sizeBytes = original.size.toLong(),
+                sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(original)),
+            )
+            val reader = RecordingUnits(units = 1)
+            val result = AppContext.open(harness.dataDir).use { context ->
+                val job = harness.enqueueForTest(context, listOf(source), confirmedSources = listOf(manifest))
+                harness.attach(
+                    context,
+                    harness.storedPipeline(context, reader),
+                    beforeCopy = { Files.writeString(source, "changed after preflight") },
+                )
+                val finished = harness.awaitJob(context, job.id)
+                ImportRun(
+                    job = finished,
+                    items = context.importItems.listForJob(job.id),
+                    documents = context.documents.listByCollection(CollectionId("default"), limit = 100)
+                        .associateBy { it.id },
+                )
+            }
+
+            assertEquals(JobState.COMPLETE, result.job.state)
+            assertEquals(ImportItemOutcome.FAILED, result.items.single().outcome)
+            assertEquals("IMPORT_SOURCE_CHANGED", result.items.single().errorCode)
+            assertTrue(reader.produced.isEmpty(), "the changed managed copy reached extraction")
+            assertTrue(result.documents.isEmpty(), "the unconfirmed managed copy was retained")
+        }
+    }
+
+    @Test
     fun `the file an import names advances with the files it works through`() {
         withHarness { harness ->
             val first = harness.writeText("alpha.txt", "first\n")
@@ -776,486 +835,67 @@ class ImportJobHandlerTest {
     }
 
     @Test
-    fun `an import sends nothing before its external scope is approved and waits for one`() {
-        withHarness { harness ->
-            val source = harness.writeText("scan.txt", "Ordinary text\n")
-            val profile = harness.externalProfile()
-            // No page is allowed without an approval: the attempt has a scope, and it is spent before it starts.
-            val snapshot = harness.externalSnapshot(profile = profile, allowance = 0)
-            val dispatcher = DispatchingUnits(text = "read by the model")
-
-            val waiting = harness.importWithOcr(listOf(source), dispatcher, snapshot)
-
-            // Nothing was sent, and the job says what it waits for: the refusal comes first because that is
-            // the promise the allowance makes.
-            assertEquals(0, dispatcher.sent, "a page left this machine before its scope was approved")
-            assertEquals(0, harness.externalAccountOf(waiting.job.id, snapshot).distinctPages)
-            assertEquals(JobState.COMPLETE, waiting.job.state)
-            assertEquals(
-                JobStore.AWAITING_APPROVAL_STAGE,
-                waiting.job.stage,
-                "an import that may not dispatch has to say what it waits for",
-            )
-            assertEquals(
-                0,
-                waiting.items.count { it.outcome == ImportItemOutcome.FAILED },
-                "a job waiting for an approval is not a job whose file failed",
-            )
-
-            // The approval is the scope this job was admitted with, and it puts the same job back in the queue.
-            harness.approveJobScope(waiting.job.id, snapshot, maxDistinctPages = 1)
-            val resumed = harness.resumeWaitingImport(waiting.job.id, dispatcher)
-
-            assertEquals(1, dispatcher.sent, "the approved page was never sent")
-            val account = harness.externalAccountOf(resumed.job.id, snapshot)
-            assertEquals(1, account.distinctPages)
-            assertEquals(1, account.calls)
-            // The file this attempt had already copied is a duplicate of its own earlier work when it is read
-            // again, and it is read: what the wait cost the person is time, not the reading.
-            assertEquals(DocumentStatus.COMPLETE, resumed.documents.values.single().status)
-            assertEquals(0, resumed.items.count { it.outcome == ImportItemOutcome.FAILED })
-        }
-    }
-
-    @Test
-    fun `one allowance covers two files of one job and pauses before the page past it`() {
+    fun `one allowance covers a job and fails before sending the page past it`() {
         withHarness { harness ->
             val first = harness.writeText("first.txt", "First\n")
             val second = harness.writeText("second.txt", "Second\n")
             val profile = harness.externalProfile()
-            // One distinct page: the allowance belongs to the job, so the second file's page is the one
-            // that would exceed it.
+            // One distinct page: the allowance belongs to the job, so the second file's page is denied.
             val snapshot = harness.externalSnapshot(profile = profile, allowance = 1)
             val dispatcher = DispatchingUnits(text = "read by the model")
 
             val limited = harness.importWithOcr(listOf(first, second), dispatcher, snapshot)
 
-            // The bound is the assertion: one page may leave, and the page that would be the second does not.
+            // The bound is the assertion: the confirmed page leaves; the next one is not sent.
             assertEquals(1, dispatcher.sent, "the page past the allowance was sent")
             val sent = harness.externalAccountOf(limited.job.id, snapshot)
             assertEquals(1, sent.distinctPages)
             assertEquals(1, sent.calls)
-            assertEquals(JobStore.AWAITING_APPROVAL_STAGE, limited.job.stage)
+            assertEquals(JobState.FAILED, limited.job.state)
+            assertEquals("MORE_PAGES_THAN_CONFIRMED", limited.job.errorCode)
+            assertNull(limited.job.stage)
             assertEquals(
                 1,
                 limited.items.count { it.outcome == ImportItemOutcome.IMPORTED },
-                "the file whose page was approved was imported",
+                "the confirmed page should finish before the run reaches its limit",
             )
-
-            harness.approveJobScope(limited.job.id, snapshot, maxDistinctPages = 2)
-            val resumed = harness.resumeWaitingImport(limited.job.id, dispatcher)
-
-            // The second file's page is a different page, counted once, and the call count follows it: the
-            // two counters answer two different questions.
-            assertEquals(2, dispatcher.sent)
-            val account = harness.externalAccountOf(resumed.job.id, snapshot)
-            assertEquals(2, account.distinctPages)
-            assertEquals(2, account.calls)
-            assertEquals(2, resumed.documents.size)
-            assertTrue(resumed.documents.values.all { document -> document.status == DocumentStatus.COMPLETE })
-            assertEquals(0, resumed.items.count { it.outcome == ImportItemOutcome.FAILED })
+            assertEquals(
+                1,
+                limited.items.count { it.outcome == ImportItemOutcome.FAILED },
+                "the page beyond the confirmed scope must fail its item",
+            )
         }
     }
 
     @Test
-    fun `one allowance covers a page's transcription and review before the next document pauses before its transport`() {
+    fun `an unknown-count external import reads every page in its unchanged confirmed manifest`() {
         withHarness { harness ->
-            // Both stages dispatch through the injected recording transport: the image model reads page 1
-            // of the first document, the external reviewer judges it, and the second document's page is
-            // refused before any transport could be touched. Scripted entries 3 and 4 exist only so a
-            // wrongly-dispatched second document would answer rather than hide the bug behind a failure.
-            val recorder = RecordingImageLlmEngine(
-                script = listOf(
-                    RecordedImageResponse(body = transcriptionEnvelope("name 128")),
-                    RecordedImageResponse(body = reviewEnvelope(reviewAnswer("B_BETTER"))),
-                    RecordedImageResponse(body = transcriptionEnvelope("name 128")),
-                    RecordedImageResponse(body = reviewEnvelope(reviewAnswer("B_BETTER"))),
-                ),
+            val source = harness.writeText("unknown-page-count.txt", "confirmed source")
+            val bytes = Files.readAllBytes(source)
+            val manifest = ConfirmedImportSource(
+                path = source.toRealPath().toString(),
+                sizeBytes = bytes.size.toLong(),
+                sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
             )
-            try {
-                val transcriptionProfile = harness.externalProfile(
-                    endpoint = "https://transcriber.example.invalid/v1",
-                    keyVariable = "HOME",
-                )
-                val reviewerProfile = harness.externalReviewProfile(
-                    endpoint = "https://reviewer.example.invalid/v1",
-                )
-                // Production's own classification decides that both endpoints leave this machine, and
-                // therefore that both stages dispatch under the job's permit rather than on their own.
-                assertEquals(OcrEndpointScope.EXTERNAL, endpointScope(transcriptionProfile.revision.endpoint))
-                assertEquals(OcrEndpointScope.EXTERNAL, endpointScope(reviewerProfile.revision.endpoint))
-                val snapshot = harness.externalSnapshot(profile = transcriptionProfile, allowance = 1)
-                    .copy(reviewProfileRevisionId = reviewerProfile.revision.revisionId)
-                val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-                val extractor = RecordingLlmUnits(
-                    snapshot = snapshot,
-                    revision = transcriptionProfile.revision,
-                    engine = recorder,
-                    directText = "name 123",
-                )
-                val first = harness.writeText("first.txt", "First page\n")
-                val second = harness.writeText("second.txt", "Second page\n")
-
-                val jobId = AppContext.open(harness.dataDir).use { context ->
-                    val job = harness.enqueueForTest(context, listOf(first, second), settings, snapshot)
-                    harness.attach(context, harness.stagingPipeline(context, extractor), clientEngine = recorder)
-                    val paused = harness.awaitJob(context, job.id)
-                    assertEquals(
-                        JobStore.AWAITING_APPROVAL_STAGE,
-                        paused.stage,
-                        "the page past the allowance waits instead of being sent",
-                    )
-                    job.id
-                }
-
-                assertEquals(
-                    listOf(
-                        "https://transcriber.example.invalid/v1/chat/completions",
-                        "https://reviewer.example.invalid/v1/chat/completions",
-                    ),
-                    recorder.requests.map { it.url },
-                    "the first page's transcription and review were the only dispatches, each at the " +
-                        "endpoint production classified EXTERNAL",
-                )
-                assertTrue(recorder.requests.all { it.method == "POST" })
-                assertTrue(
-                    recorder.requests.first().body.contains("data:image/png;base64,"),
-                    "the recorded transcription carried the page's own bytes",
-                )
-                assertEquals(
-                    "Bearer $RECORDED_TRANSPORT_KEY",
-                    recorder.requests.first().headers["authorization"],
-                    "the recorded request carries the credential the profile's variable resolved to",
-                )
-                assertEquals(1, extractor.dispatched.size, "only the first document's page was transcribed")
-                val account = harness.externalAccountOf(jobId, snapshot)
-                assertEquals(1, account.distinctPages, "one page of one document, counted once across both stages")
-                assertEquals(2, account.calls, "both stages called out against the job's one scope")
-
-                AppContext.open(harness.dataDir).use { context ->
-                    val reviewPending = context.documents.listByCollection(CollectionId("default"), limit = 10)
-                        .filter { document -> document.status == DocumentStatus.NEEDS_REVIEW }
-                    assertEquals(1, reviewPending.size, "only the first document finished into review-pending")
-                    assertTrue(
-                        context.ocrReviews.pending(reviewPending.single().id).isNotEmpty(),
-                        "the recorded reviewer's proposal is pending for a person",
-                    )
-                }
-            } finally {
-                recorder.close()
-            }
-        }
-    }
-
-    @Test
-    fun `a wrong owner, profile or document cannot dispatch and a stale scope stays refused`() {
-        withHarness { harness ->
-            val source = harness.writeText("bind.txt", "Ordinary text\n")
-            val documentId = harness.failedDocument(source, RefusingUnits(unitsBeforeRefusing = 0))
             val profile = harness.externalProfile()
-            val snapshot = harness.externalSnapshot(profile = profile, allowance = 0)
-            val staleSnapshot = snapshot.copy(language = "swe")
-            val page = ExternalDispatchPermitRequest(
-                profileRevisionId = profile.revision.revisionId,
-                page = PageDispatchIdentity(unitId = "page:1", ordinal = 0, documentId = documentId.value),
+            val snapshot = harness.externalSnapshot(profile, allowance = 0).copy(
+                externalConfirmedSourceScope = true,
             )
-            val wrongProfile = page.copy(profileRevisionId = "revision-of-another-profile")
-            val wrongDocument = ExternalDispatchPermitRequest(
-                profileRevisionId = profile.revision.revisionId,
-                page = PageDispatchIdentity(unitId = "page:1", ordinal = 0, documentId = "another-document"),
+            val reader = DispatchingPages(pages = 3)
+
+            val run = harness.importWithOcr(
+                sources = listOf(source),
+                extractor = reader,
+                snapshot = snapshot,
+                confirmedSources = listOf(manifest),
             )
 
-            AppContext.open(harness.dataDir).use { context ->
-                val jobA = harness.enqueueForTest(context, listOf(source))
-                val jobB = harness.enqueueForTest(context, listOf(source))
-                val ownerA = OcrExternalOwner.job(jobA.id.value)
-                val ownerB = OcrExternalOwner.job(jobB.id.value)
-                fun authorityFor(
-                    owner: OcrExternalOwner,
-                    snapshotHash: String = OcrOperationStore.snapshotHashOf(snapshot),
-                ) = OcrDispatchAuthority(
-                    operations = context.ocrOperations,
-                    owner = owner,
-                    documentId = documentId,
-                    stage = OcrDispatchStage.TRANSCRIPTION,
-                    profileRevisionId = profile.revision.revisionId,
-                    configuredAllowance = snapshot.externalPageLimit,
-                    snapshotHash = snapshotHash,
-                )
-
-                // Whatever an allowance would say, another profile revision and another document are never
-                // this authority's to permit: the permit names one revision and one document.
-                fun accountOf(owner: OcrExternalOwner) = context.ocrOperations.allowanceFor(
-                    owner = owner,
-                    configuredAllowance = snapshot.externalPageLimit,
-                    snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
-                )
-                val first = authorityFor(ownerA)
-                assertFalse(first.isPermitted(wrongProfile), "another profile's revision cannot dispatch here")
-                assertFalse(first.isPermitted(wrongDocument), "another document's page cannot dispatch here")
-
-                // A stale scope: an approval that names another snapshot covers this attempt not at all.
-                context.ocrOperations.approveExternalScope(
-                    owner = ownerA,
-                    snapshotHash = OcrOperationStore.snapshotHashOf(staleSnapshot),
-                    authorizedDistinctPages = 5,
-                )
-                val stale = authorityFor(ownerA)
-                assertNull(stale.coveringApproval(), "an approval for another snapshot is not this scope's")
-                assertFalse(stale.isPermitted(page), "a page under a stale scope cannot dispatch")
-                assertEquals(0, accountOf(ownerA).distinctPages)
-
-                // The right approval funds this job's pages and no other job's, and the counters are the
-                // owner's own: one permitted page counts once against job A and nothing against job B.
-                context.ocrOperations.approveExternalScope(
-                    owner = ownerA,
-                    snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
-                    authorizedDistinctPages = 5,
-                )
-                // With an allowance that would otherwise pay for them: another profile's revision and
-                // another document's page are still not this authority's to permit, and a refusal here
-                // must count nothing.
-                assertFalse(
-                    authorityFor(ownerA).isPermitted(wrongProfile),
-                    "an approved allowance does not make another profile's revision dispatchable here",
-                )
-                assertFalse(
-                    authorityFor(ownerA).isPermitted(wrongDocument),
-                    "an approved allowance does not make another document's page dispatchable here",
-                )
-                assertEquals(0, accountOf(ownerA).distinctPages, "a refused dispatch counts nothing")
-                assertTrue(
-                    authorityFor(ownerA).isPermitted(page),
-                    "this job's own approved scope permits its page",
-                )
-                assertFalse(
-                    authorityFor(ownerB).isPermitted(page),
-                    "another job's approval must not fund this one's pages",
-                )
-                assertEquals(1, accountOf(ownerA).distinctPages)
-                assertEquals(0, accountOf(ownerB).distinctPages)
-                assertNotNull(authorityFor(ownerA).coveringApproval())
-            }
-        }
-    }
-
-    @Test
-    fun `an import admitted with check-and-improve reads with the collection's OCR selection`() {
-        withHarness { harness ->
-            val source = harness.writeText("scan.txt", "Ordinary text\n")
-            // What the route does at admission: the collection's selection is resolved into the attempt's
-            // snapshot, and the extraction settings that travel in the payload are derived from it.
-            val snapshot = OcrSettingsSnapshot(
-                engine = OcrEngine.SURYA,
-                mode = OcrImportMode.CHECK_AND_IMPROVE,
-                language = "eng",
-                extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-            )
-            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-            assertEquals(OcrImportMode.CHECK_AND_IMPROVE, settings.ocrMode)
-            assertEquals(OcrEngine.SURYA, settings.ocrAttempt?.engine)
-
-            val extractor = ModeRecordingUnits()
-            val run = harness.importDurably(listOf(source), extractor, settings = settings)
-
-            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
-            assertEquals(OcrImportMode.CHECK_AND_IMPROVE, extractor.mode, "the mode has to reach the extraction")
-            assertEquals(OcrEngine.SURYA, extractor.engine, "the engine has to be the one that was selected")
-        }
-    }
-
-    @Test
-    fun `a check-and-improve import stages its pages as a candidate and leaves published content alone`() {
-        withHarness { harness ->
-            val source = harness.writeText("scan.txt", "Ordinary text\n")
-            // What admission does: the collection's check-and-improve selection becomes the attempt's settings.
-            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(
-                OcrSettingsSnapshot(
-                    engine = OcrEngine.SURYA,
-                    mode = OcrImportMode.CHECK_AND_IMPROVE,
-                    language = "eng",
-                    extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-                ),
-            )
-            var staged: CandidateRevisionSink? = null
-
-            val run = harness.importStaging(listOf(source), RecordingUnits(units = 2), settings) { staged = it }
-
-            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
-            val document = run.documents.values.single()
-            // A reading nobody has decided about is not a finished document: it owes a person an answer, and
-            // a document waiting for one is not complete.
-            assertEquals(DocumentStatus.NEEDS_REVIEW, document.status)
-
-            val candidate = assertNotNull(assertNotNull(staged).candidateRevisionId, "the reading was staged")
-            AppContext.open(harness.dataDir).use { context ->
-                val pages = context.revisions.pages(candidate)
-                assertEquals(listOf(0, 1), pages.map { it.ordinal }, "every page the attempt read is staged")
-                assertTrue(pages.all { page -> page.approval == PageApproval.PENDING })
-
-                // Nothing of the reading reached what the document publishes or what a search reads: no
-                // content unit, no chunk, no index entry, and no revision the document would serve.
-                assertTrue(
-                    context.content.listUnits(document.id, -1, 10).isEmpty(),
-                    "a staged reading must not commit content units",
-                )
-                assertEquals(0, context.content.chunkCount(document.id))
-                assertEquals(0, context.index().chunkCount(CollectionId("default"), document.id))
-                assertNull(context.revisions.activeRevisionId(document.id))
-            }
-        }
-    }
-
-    @Test
-    fun `a check-and-improve import records a pending review for a page its reading disagrees with`() = runBlocking {
-        withHarness { harness ->
-            val source = harness.writeText("scan.txt", "Ordinary text\n")
-            val reviewer = FakeOpenAiServer(
-                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
-            )
-            try {
-                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
-
-                val run = harness.importStaging(
-                    sources = listOf(source),
-                    extractor = CheckAndImprovePages(text = "name 123", reading = "name 128"),
-                    settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot),
-                    ocr = snapshot,
-                )
-
-                val document = run.documents.values.single()
-                assertEquals(
-                    DocumentStatus.NEEDS_REVIEW,
-                    document.status,
-                    "the reading was staged and judged: ${document.errorCode} ${document.errorMessage}",
-                )
-                AppContext.open(harness.dataDir).use { context ->
-                    val review = context.ocrReviews.pending(document.id).single()
-                    // The page's two readings differ, so a person has to decide which one stands — pilot mode
-                    // proposes, whatever the reviewer answered.
-                    assertEquals(PublicationDisposition.PROPOSE, review.disposition)
-                    assertEquals(ReviewerRecommendation.NEW_BETTER, review.recommendation)
-                    assertEquals(
-                        "page:1",
-                        review.unitId,
-                        "the review names the page its reading was made from, the identity the reading dispatched under",
-                    )
-                    assertEquals(0, review.ordinal)
-                    assertTrue(review.reasons.isNotEmpty(), "the reason about the difference is kept")
-                }
-                assertEquals(1, reviewer.handledRequests, "the page's two readings were judged by the reviewer")
-            } finally {
-                reviewer.close()
-            }
-        }
-    }
-
-    @Test
-    fun `a check-and-improve import publishes the pages it approved and leaves the rest pending`() = runBlocking {
-        withHarness { harness ->
-            val source = harness.writeText("scan.txt", "Ordinary text\n")
-            val reviewer = FakeOpenAiServer(
-                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
-            )
-            try {
-                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
-
-                val run = harness.importStaging(
-                    sources = listOf(source),
-                    extractor = CheckAndImproveTwoPages(
-                        matchingText = "approved page text",
-                        differingText = "the page says one thing",
-                        differingReading = "the engine read another",
-                    ),
-                    settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot),
-                    ocr = snapshot,
-                )
-
-                // A reading whose pages are not all decided is neither finished nor failed: what it publishes
-                // is the part nobody has to decide about, and what it owes is a person's answer about the rest.
-                val document = run.documents.values.single()
-                assertEquals(DocumentStatus.NEEDS_REVIEW, document.status)
-                assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
-                assertEquals(JobState.COMPLETE, run.job.state)
-
-                AppContext.open(harness.dataDir).use { context ->
-                    val candidate = assertNotNull(
-                        context.revisions.activeRevisionId(document.id),
-                        "an initial import publishes what it approved rather than waiting for every page",
-                    )
-                    assertEquals(
-                        listOf(PageApproval.APPROVED, PageApproval.PENDING),
-                        context.revisions.pages(candidate).map { page -> page.approval },
-                        "the page whose reading is the text it carries is approved; the other owes a decision",
-                    )
-
-                    // The approved page is the document's text and a reader can find it...
-                    assertEquals(
-                        listOf(0),
-                        context.content.listUnits(document.id, -1, 10).map { unit -> unit.ordinal },
-                        "only the approved page becomes content",
-                    )
-                    val hits = searchable(context, "approved")
-                    assertEquals(listOf("approved page text"), hits.map { hit -> hit.text })
-                    assertEquals(candidate, hits.single().revisionId, "the published text names its revision")
-
-                    // ...while the page nobody has decided about has no searchable text at all: not what the
-                    // engine read, and not what the page itself says, until a person decides which of the two
-                    // stands. Its image and its review are what a person works from instead.
-                    assertTrue(
-                        searchable(context, "engine").isEmpty(),
-                        "the reading of a page awaiting a decision was published",
-                    )
-                    assertTrue(
-                        searchable(context, "says").isEmpty(),
-                        "a page awaiting a decision published one of its readings anyway",
-                    )
-                    val review = context.ocrReviews.pending(document.id).single()
-                    assertEquals("page:2", review.unitId)
-                    assertEquals(PublicationDisposition.PROPOSE, review.disposition)
-                }
-                // Two pages, one comparison: the pair that says the same thing is sent to nobody.
-                assertEquals(1, reviewer.handledRequests)
-            } finally {
-                reviewer.close()
-            }
-        }
-    }
-
-    /** What a reader searching this collection finds, under the revision snapshot a reader is served. */
-    private fun searchable(context: AppContext, query: String) = context.search.search(
-        query,
-        SearchMode.KEYWORD,
-        SearchFilters(collectionId = CollectionId("default")),
-    ).hits
-
-    @Test
-    fun `a check-and-improve import whose reading matches the page's own text records no review`() = runBlocking {
-        withHarness { harness ->
-            val source = harness.writeText("scan.txt", "Ordinary text\n")
-            val reviewer = FakeOpenAiServer(
-                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
-            )
-            try {
-                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
-
-                val run = harness.importStaging(
-                    sources = listOf(source),
-                    extractor = CheckAndImprovePages(text = "name 123", reading = "name 123"),
-                    settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot),
-                    ocr = snapshot,
-                )
-
-                AppContext.open(harness.dataDir).use { context ->
-                    assertTrue(
-                        context.ocrReviews.pending(run.documents.values.single().id).isEmpty(),
-                        "two identical readings are nothing anybody has to decide, so no review is written",
-                    )
-                }
-                assertEquals(0, reviewer.handledRequests, "a pair that does not differ is not sent to a reviewer")
-            } finally {
-                reviewer.close()
-            }
+            assertEquals(JobState.COMPLETE, run.job.state, run.job.errorMessage)
+            assertEquals(listOf("unit-0", "unit-1", "unit-2"), reader.sentKeys)
+            val account = harness.externalAccountOf(run.job.id, snapshot)
+            assertEquals(3, account.distinctPages)
+            assertEquals(3, account.calls)
+            assertEquals(0, account.allowance, "unknown-count scope does not invent a numeric allowance")
         }
     }
 
@@ -1328,92 +968,6 @@ class ImportJobHandlerTest {
     }
 
     @Test
-    fun `the sink follows the selected extractor's page image support, not the mode alone`() {
-        withHarness { harness ->
-            val source = harness.writeText("container.txt", "Ordinary text\n")
-            val reviewer = FakeOpenAiServer(
-                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
-            )
-            try {
-                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
-                val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-                var staged: CandidateRevisionSink? = null
-                // The reader reports its format has no page images, even though the draft it produced happens
-                // to carry a baseline and an image reference. The declaration alone must decide: nothing may
-                // be rebuilt from pixels and no image provider may be asked for a format that reports none.
-                val extractor = NonPageImageFormat(
-                    CheckAndImprovePages(text = "name 123", reading = "name 128"),
-                )
-
-                val run = harness.importStaging(listOf(source), extractor, settings, ocr = snapshot) { staged = it }
-
-                assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
-                assertEquals(
-                    0,
-                    reviewer.handledRequests,
-                    "an image-provider request was made for a format that reports no page images",
-                )
-                assertPublishedOrdinaryExtraction(harness, assertNotNull(run.items.single().documentId), "name 128")
-                assertNull(staged, "the candidate sink was opened for a format without page images")
-            } finally {
-                reviewer.close()
-            }
-        }
-    }
-
-    @Test
-    fun `a supported page with no direct baseline stays pending instead of publishing as ordinary text`() {
-        withHarness { harness ->
-            val source = harness.writeText("scan.txt", "Ordinary text\n")
-            val reviewer = FakeOpenAiServer(
-                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
-            )
-            try {
-                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
-                val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-                var staged: CandidateRevisionSink? = null
-                // A page-image format whose page carries no text layer: there is no baseline to judge the
-                // engine's reading against, so the reading is exactly the proposal a person has to decide
-                // about — the opposite answer from a format that has no pages at all.
-                val run = harness.importStaging(
-                    listOf(source),
-                    CheckAndImprovePages(text = null, reading = "name 128"),
-                    settings,
-                    ocr = snapshot,
-                ) { staged = it }
-
-                val document = run.documents.values.single()
-                assertEquals(
-                    DocumentStatus.NEEDS_REVIEW,
-                    document.status,
-                    "a supported page with no baseline must stay pending",
-                )
-                val candidate = assertNotNull(
-                    assertNotNull(staged).candidateRevisionId,
-                    "the page-image reading was not staged",
-                )
-                AppContext.open(harness.dataDir).use { context ->
-                    val pages = context.revisions.pages(candidate)
-                    assertEquals(listOf(PageApproval.PENDING), pages.map { page -> page.approval })
-                    assertNull(
-                        context.revisions.activeRevisionId(document.id),
-                        "a page nobody approved was published",
-                    )
-                    assertTrue(context.content.listUnits(document.id, -1, 10).isEmpty())
-                    assertEquals(0, context.index().chunkCount(CollectionId("default"), document.id))
-                    assertTrue(
-                        context.ocrReviews.pending(document.id).isEmpty(),
-                        "without a baseline there is nothing to compare — the staged page itself is the proposal",
-                    )
-                }
-                assertEquals(0, reviewer.handledRequests, "a page with no baseline was sent to a reviewer")
-            } finally {
-                reviewer.close()
-            }
-        }
-    }
-
-    @Test
     fun `an attempt reads under the runtime identity the job was admitted with, not one probed later`() {
         withHarness { harness ->
             val source = harness.writeText("scan.txt", "Ordinary text\n")
@@ -1460,38 +1014,6 @@ class ImportJobHandlerTest {
                         .forOcrSettings(admitted.copy(runtimeIdentity = "surya-ocr 0.23.0")),
                 ),
             )
-        }
-    }
-
-    @Test
-    fun `a reading that still owes a person a decision is review-pending, not complete`() {
-        withHarness { harness ->
-            val clean = harness.writeText("clean.txt", "Ordinary text\n")
-
-            val run = harness.importAwaitingDecision(listOf(clean), RecordingUnits(units = 2))
-
-            // Every unit was read and the document finished its pass, so it is neither failed nor waiting for
-            // a tool: what it owes is a person's decision about a page the reading proposed.
-            assertEquals(DocumentStatus.NEEDS_REVIEW, run.documents.values.single().status)
-            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
-            assertEquals(JobState.COMPLETE, run.job.state)
-        }
-    }
-
-    @Test
-    fun `a pending decision outranks a unit that could not be read`() {
-        withHarness { harness ->
-            val mixed = harness.writeText("mixed.txt", "Ordinary text\n")
-
-            val run = harness.importAwaitingDecision(
-                listOf(mixed),
-                FailedUnitsThenFinish(goodUnits = 1, failedUnits = 1),
-            )
-
-            // The question a reader has to answer first is whether anybody accepted the reading, so a
-            // document with both a proposal and a failed unit is review-pending; the failure stays on record
-            // per unit rather than being dropped.
-            assertEquals(DocumentStatus.NEEDS_REVIEW, run.documents.values.single().status)
         }
     }
 
@@ -1807,27 +1329,6 @@ class ImportJobHandlerTest {
     }
 
     @Test
-    fun `a byte-identical import of a review-pending document is a duplicate rather than a re-ingest`() {
-        withHarness { harness ->
-            val source = harness.writeText("pending.txt", "Ordinary text\n")
-            val first = harness.importAwaitingDecision(listOf(source), RecordingUnits(units = 2))
-
-            assertEquals(DocumentStatus.NEEDS_REVIEW, first.documents.values.single().status)
-
-            // The bytes are already stored, and the document owes a person a decision about the reading that
-            // was committed. Reading it again is neither needed nor able to answer that question, so the item
-            // is a duplicate and the document is left exactly as it was.
-            val second = RecordingUnits(units = 2)
-            val run = harness.importDurably(listOf(source), second)
-
-            assertEquals(ImportItemOutcome.DUPLICATE, run.items.single().outcome)
-            assertTrue(second.produced.isEmpty(), "a document that awaits a decision was read again")
-            assertTrue(second.skipped.isEmpty(), "the extractor is not even invoked for a finished duplicate")
-            assertEquals(DocumentStatus.NEEDS_REVIEW, run.documents.values.single().status)
-        }
-    }
-
-    @Test
     fun `a second import of a stored document reuses its units and does not chunk it again`() {
         withHarness { harness ->
             val source = harness.writeText("again.txt", "Ordinary text\n")
@@ -1860,426 +1361,6 @@ class ImportJobHandlerTest {
             }
         }
     }
-
-    @Test
-    fun `a check-and-improve import binds a candidate to the job payload for resuming`() {
-        withHarness { harness ->
-            val source = harness.writeText("two-page.txt", "Ordinary text\n")
-
-            val snapshot = OcrSettingsSnapshot(
-                engine = OcrEngine.TESSERACT,
-                mode = OcrImportMode.CHECK_AND_IMPROVE,
-                language = "eng",
-                extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-            )
-            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-
-            var sinkReceived: ExtractionSink? = null
-            val run = harness.importStaging(
-                listOf(source),
-                RecordingUnits(units = 2),
-                settings,
-                ocr = snapshot,
-            ) { sink ->
-                sinkReceived = sink
-            }
-
-            assertNotNull(sinkReceived, "the import should receive a sink")
-            val candidate = (sinkReceived as? CandidateRevisionSink)?.candidateRevisionId
-
-            // At this point (after import finishes), the candidate should have been created
-            // because pages were delivered to the sink
-            if (candidate == null) {
-                // The sink was created but no pages were delivered to it, or it's not a CandidateRevisionSink
-                assertTrue(sinkReceived is CandidateRevisionSink, "sink should be a CandidateRevisionSink but is ${sinkReceived.javaClass.simpleName}")
-                error("CandidateRevisionSink was created but never received any pages, so candidateRevisionId is null")
-            }
-            assertNotNull(candidate, "a check-and-improve import creates a candidate")
-            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
-            val document = run.documents.values.single()
-            assertEquals(DocumentStatus.NEEDS_REVIEW, document.status)
-
-            // Verify the candidate is properly stored and retrievable
-            AppContext.open(harness.dataDir).use { context ->
-                val pages = context.revisions.pages(candidate)
-                assertEquals(listOf(0, 1), pages.map { it.ordinal })
-                assertTrue(pages.all { it.approval == PageApproval.PENDING })
-            }
-        }
-    }
-
-    @Test
-    fun `a resumed check-and-improve import reuses the candidate revision and page it staged before the interruption`() {
-        withHarness { harness ->
-            val source = harness.writeText("three-page.txt", "Ordinary text\n")
-            val snapshot = OcrSettingsSnapshot(
-                engine = OcrEngine.TESSERACT,
-                mode = OcrImportMode.CHECK_AND_IMPROVE,
-                language = "eng",
-                extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-            )
-            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-            val parked = CompletableDeferred<Unit>()
-
-            // The attempt stages page 1 into a candidate, then dies where a child tool would be working.
-            val jobId = AppContext.open(harness.dataDir).use { context ->
-                val job = harness.enqueueForTest(context, listOf(source.toRealPath()), settings, snapshot)
-                harness.attach(context, harness.stagingPipeline(context, ParkedUnits(parked, units = 3)))
-                runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { parked.await() } }
-                job.id
-            }
-
-            val (candidateBefore, pageBefore) = AppContext.open(harness.dataDir).use { context ->
-                val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
-                val candidate = context.revisions.revisions(document.id)
-                    .single { it.state == infoscry.storage.RevisionState.CANDIDATE }
-                candidate.id to context.revisions.pages(candidate.id).single()
-            }
-
-            // The next process reads the remaining pages and must not read page 1 again.
-            val resumed = RecordingUnits(units = 3)
-            AppContext.open(harness.dataDir).use { context ->
-                harness.attach(context, harness.stagingPipeline(context, resumed))
-                harness.awaitJob(context, jobId)
-                val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
-
-                assertEquals(listOf("unit-1", "unit-2"), resumed.produced, "page 1 was read again")
-                val candidates = context.revisions.revisions(document.id)
-                    .filter { it.state == infoscry.storage.RevisionState.CANDIDATE }
-                assertEquals(
-                    listOf(candidateBefore),
-                    candidates.map { it.id },
-                    "the resume opened another candidate instead of continuing the one it staged",
-                )
-                val pages = context.revisions.pages(candidateBefore)
-                assertEquals(listOf(0, 1, 2), pages.map { it.ordinal })
-                assertEquals(pageBefore.unitId, pages.first().unitId, "page 1 changed its stable identity")
-            }
-        }
-    }
-
-    @Test
-    fun `an import paused for external approval after a staged page resumes into the same candidate without resetting its scope`() {
-        withHarness { harness ->
-            val source = harness.writeText("three-page.txt", "Ordinary text\n")
-            val profile = harness.externalProfile()
-            // The job may send one distinct page: page 1 is staged, and page 2 is the one past the allowance.
-            val snapshot = harness.externalSnapshot(profile = profile, allowance = 1)
-            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-            val pages = DispatchingPages(pages = 3)
-
-            val (jobId, candidateBefore, pageBefore) = AppContext.open(harness.dataDir).use { context ->
-                val job = harness.enqueueForTest(context, listOf(source.toRealPath()), settings, snapshot)
-                harness.attach(context, harness.stagingPipeline(context, pages))
-                val paused = harness.awaitJob(context, job.id)
-                assertEquals(JobStore.AWAITING_APPROVAL_STAGE, paused.stage, "the second page must pause the job")
-                val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
-                val candidate = context.revisions.revisions(document.id)
-                    .single { it.state == infoscry.storage.RevisionState.CANDIDATE }
-                Triple(job.id, candidate.id, context.revisions.pages(candidate.id).single())
-            }
-            assertEquals(listOf("unit-0"), pages.sentKeys, "only the approved page was sent before the pause")
-            val before = harness.externalAccountOf(jobId, snapshot)
-            assertEquals(1, before.distinctPages)
-            assertEquals(1, before.calls)
-
-            harness.approveJobScope(jobId, snapshot, maxDistinctPages = 3)
-
-            AppContext.open(harness.dataDir).use { context ->
-                context.jobs.resumeAwaitingApproval(jobId)
-                harness.attach(context, harness.stagingPipeline(context, pages))
-                harness.awaitJob(context, jobId)
-                val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
-
-                assertEquals(
-                    listOf("unit-0", "unit-1", "unit-2"),
-                    pages.sentKeys,
-                    "page 1 was dispatched again, or a remaining page was not sent exactly once",
-                )
-                val candidates = context.revisions.revisions(document.id)
-                    .filter { it.state == infoscry.storage.RevisionState.CANDIDATE }
-                assertEquals(
-                    listOf(candidateBefore),
-                    candidates.map { it.id },
-                    "the resume opened another candidate instead of continuing the one it staged",
-                )
-                val staged = context.revisions.pages(candidateBefore)
-                assertEquals(listOf(0, 1, 2), staged.map { it.ordinal })
-                assertEquals(pageBefore.unitId, staged.first().unitId, "page 1 changed its stable identity")
-            }
-            // The scope's counters continue from the pause: page 1 stays counted once, and only the two
-            // remaining pages add to the distinct-page and call totals.
-            val after = harness.externalAccountOf(jobId, snapshot)
-            assertEquals(3, after.distinctPages, "the page count was reset or recounted")
-            assertEquals(3, after.calls, "the call count was reset or page 1 was called again")
-        }
-    }
-
-    @Test
-    fun `an interruption after a page is staged but before its approval is recorded still completes that page's decision on resume`() {
-        withHarness { harness ->
-            val source = harness.writeText("scan.txt", "Ordinary text\n")
-            val reviewer = FakeOpenAiServer(
-                listOf(FakeOpenAiResponse(body = reviewEnvelope(reviewAnswer("B_BETTER")))),
-            )
-            try {
-                val snapshot = reviewingSnapshot(harness.reviewProfile(reviewer.url).revision.revisionId)
-                val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-                val extractor = CheckAndImproveTwoPages(
-                    matchingText = "approved page text",
-                    differingText = "the page says one thing",
-                    differingReading = "the engine read another",
-                )
-                val staged = CompletableDeferred<Unit>()
-
-                // Page 1 is read, judged approvable and staged; the process dies before anything records that
-                // approval, which is the window between the sink's commit and the decision's own write.
-                val jobId = AppContext.open(harness.dataDir).use { context ->
-                    val job = harness.enqueueForTest(context, listOf(source.toRealPath()), settings, snapshot)
-                    harness.attach(context, harness.interruptingAfterStaging(context, extractor, staged))
-                    runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { staged.await() } }
-                    job.id
-                }
-                assertEquals(0, reviewer.handledRequests, "page 1 says what it carries, so nothing was sent")
-
-                val (candidateBefore, pageBefore) = AppContext.open(harness.dataDir).use { context ->
-                    val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
-                    val candidate = context.revisions.revisions(document.id)
-                        .single { it.state == infoscry.storage.RevisionState.CANDIDATE }
-                    candidate.id to context.revisions.pages(candidate.id).single()
-                }
-
-                val resumedKeys = mutableListOf<String>()
-                AppContext.open(harness.dataDir).use { context ->
-                    harness.attach(context, harness.stagingPipeline(context, ProducedKeys(extractor, resumedKeys)))
-                    harness.awaitJob(context, jobId)
-                    val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
-
-                    assertEquals(listOf("page:2"), resumedKeys, "page 1 was read again instead of being kept")
-                    val revisions = context.revisions.revisions(document.id)
-                    assertEquals(
-                        listOf(candidateBefore),
-                        revisions.map { it.id },
-                        "the resume opened another revision instead of completing the one it staged into",
-                    )
-                    val pages = context.revisions.pages(candidateBefore)
-                    assertEquals(listOf(0, 1), pages.map { it.ordinal }, "a page was duplicated or lost")
-                    assertEquals(pageBefore.unitId, pages.first().unitId, "page 1 changed its stable identity")
-                    assertEquals(
-                        listOf(PageApproval.APPROVED, PageApproval.PENDING),
-                        pages.map { it.approval },
-                        "page 1's decision was not completed, or the page that needs a person was approved",
-                    )
-                    assertEquals(
-                        "page:2",
-                        context.ocrReviews.pending(document.id).single().unitId,
-                        "only the page whose readings differ is owed to a person",
-                    )
-                    assertEquals(DocumentStatus.NEEDS_REVIEW, document.status)
-                }
-                assertEquals(1, reviewer.handledRequests, "only page 2 is compared, and only once")
-            } finally {
-                reviewer.close()
-            }
-        }
-    }
-
-    @Test
-    fun `a check-and-improve import that fails after staging a page leaves one resumable candidate and publishes nothing`() {
-        withHarness { harness ->
-            val source = harness.writeText("fails.txt", "Ordinary text\n")
-            val snapshot = OcrSettingsSnapshot(
-                engine = OcrEngine.TESSERACT,
-                mode = OcrImportMode.CHECK_AND_IMPROVE,
-                language = "eng",
-                extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-            )
-            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-
-            // Page 1 is staged; page 2's extraction fails, which is the pipeline's own failure path.
-            val failed = harness.importStaging(
-                listOf(source),
-                RecordingUnits(units = 2, failProducingUnit = 1),
-                settings,
-                ocr = snapshot,
-            )
-
-            val item = failed.items.single()
-            assertEquals(ImportItemOutcome.FAILED, item.outcome)
-            val documentId = item.documentId!!
-            val candidateBefore = AppContext.open(harness.dataDir).use { context ->
-                assertEquals(DocumentStatus.FAILED, context.documents.get(documentId)!!.status)
-                assertNull(context.revisions.activeRevisionId(documentId), "a failed import published a revision")
-                assertEquals(0, context.index().chunkCount(CollectionId("default"), documentId), "the index changed")
-                // The failure path does not withdraw: the candidate stays open, so a resume can continue it.
-                val revisions = context.revisions.revisions(documentId)
-                assertEquals(
-                    listOf(infoscry.storage.RevisionState.CANDIDATE),
-                    revisions.map { it.state },
-                    "exactly one candidate, still open, is what a failed attempt leaves",
-                )
-                assertEquals(listOf(0), context.revisions.pages(revisions.single().id).map { it.ordinal })
-                revisions.single().id
-            }
-
-            // The same document under the same snapshot is read again: it continues that candidate.
-            val resumed = RecordingUnits(units = 2)
-            val run = harness.importStaging(listOf(source), resumed, settings, ocr = snapshot)
-
-            assertEquals(listOf("unit-1"), resumed.produced, "the staged page was read again")
-            AppContext.open(harness.dataDir).use { context ->
-                val revisions = context.revisions.revisions(documentId)
-                assertEquals(listOf(candidateBefore), revisions.map { it.id }, "an orphan duplicate candidate was opened")
-                assertEquals(listOf(0, 1), context.revisions.pages(candidateBefore).map { it.ordinal })
-                assertNull(context.revisions.activeRevisionId(documentId))
-            }
-            assertEquals(DocumentStatus.NEEDS_REVIEW, run.documents.getValue(documentId).status)
-        }
-    }
-
-    @Test
-    fun `a check-and-improve import cancelled after staging a page leaves one resumable candidate and publishes nothing`() {
-        withHarness { harness ->
-            val source = harness.writeText("cancelled.txt", "Ordinary text\n")
-            val snapshot = OcrSettingsSnapshot(
-                engine = OcrEngine.TESSERACT,
-                mode = OcrImportMode.CHECK_AND_IMPROVE,
-                language = "eng",
-                extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-            )
-            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
-            val staged = CompletableDeferred<Unit>()
-
-            val (jobId, documentId, candidateBefore) = AppContext.open(harness.dataDir).use { context ->
-                val job = harness.enqueueForTest(context, listOf(source.toRealPath()), settings, snapshot)
-                harness.attach(context, harness.interruptingAfterStaging(context, RecordingUnits(units = 2), staged))
-                runBlocking { withTimeout(PARK_TIMEOUT_MILLIS) { staged.await() } }
-
-                runBlocking { context.cancelJob(job.id) }
-                val finished = runBlocking { awaitTerminal(context, job.id) }
-                assertEquals(JobState.CANCELLED, finished.state)
-
-                val document = context.documents.listByCollection(CollectionId("default"), limit = 10).single()
-                assertNull(context.revisions.activeRevisionId(document.id), "a cancelled import published a revision")
-                assertEquals(0, context.index().chunkCount(CollectionId("default"), document.id), "the index changed")
-                val revisions = context.revisions.revisions(document.id)
-                assertEquals(
-                    listOf(infoscry.storage.RevisionState.CANDIDATE),
-                    revisions.map { it.state },
-                    "exactly one candidate, still open, is what a cancelled attempt leaves",
-                )
-                assertEquals(listOf(0), context.revisions.pages(revisions.single().id).map { it.ordinal })
-                Triple(job.id, document.id, revisions.single().id)
-            }
-            assertNotNull(jobId)
-
-            // A fresh import of the same file under the same snapshot continues that candidate.
-            val resumed = RecordingUnits(units = 2)
-            val run = harness.importStaging(listOf(source), resumed, settings, ocr = snapshot)
-
-            assertEquals(listOf("unit-1"), resumed.produced, "the staged page was read again")
-            AppContext.open(harness.dataDir).use { context ->
-                assertEquals(
-                    listOf(candidateBefore),
-                    context.revisions.revisions(documentId).map { it.id },
-                    "an orphan duplicate candidate was opened",
-                )
-                assertEquals(listOf(0, 1), context.revisions.pages(candidateBefore).map { it.ordinal })
-                assertNull(context.revisions.activeRevisionId(documentId))
-            }
-            assertEquals(DocumentStatus.NEEDS_REVIEW, run.documents.getValue(documentId).status)
-        }
-    }
-
-    /**
-     * The OCR selection a check-and-improve import is admitted with when [reviewerRevisionId] judges its
-     * pages: every page is read by the local engine, and a reviewer is configured.
-     */
-    private fun reviewingSnapshot(reviewerRevisionId: String): OcrSettingsSnapshot = OcrSettingsSnapshot(
-        engine = OcrEngine.TESSERACT,
-        mode = OcrImportMode.CHECK_AND_IMPROVE,
-        language = "eng",
-        extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-        reviewProfileRevisionId = reviewerRevisionId,
-    )
-
-    /**
-     * The OCR selection an import is admitted with when the collection checks and improves: the local
-     * engine reads every page, and no reviewer and no external profile are configured.
-     */
-    private fun checkingSnapshot(): OcrSettingsSnapshot = OcrSettingsSnapshot(
-        engine = OcrEngine.TESSERACT,
-        mode = OcrImportMode.CHECK_AND_IMPROVE,
-        language = "eng",
-        extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-    )
-
-    /**
-     * What a format without page images owes after a check-and-improve import: its ordinary text, committed,
-     * chunked, indexed and published — with nothing staged for a decision and no review anybody owes.
-     *
-     * This is the whole of "non-image formats keep their ordinary searchable extraction": the reading is the
-     * document's content like any import of it before the mode existed, not a candidate waiting for a person.
-     */
-    private fun assertPublishedOrdinaryExtraction(
-        harness: Harness,
-        documentId: DocumentId,
-        expectedText: String,
-    ) {
-        AppContext.open(harness.dataDir).use { context ->
-            val document = assertNotNull(context.documents.get(documentId), "the import stored no document")
-            assertEquals(
-                DocumentStatus.COMPLETE,
-                document.status,
-                "the ordinary reading was stranded: ${document.status} ${document.errorCode} ${document.errorMessage}",
-            )
-            val units = context.content.listUnits(documentId, afterOrdinal = -1, limit = 50)
-            assertTrue(units.isNotEmpty(), "the ordinary text was not committed as content units")
-            assertContains(
-                units.joinToString("\n") { unit -> unit.extractedText },
-                expectedText,
-                message = "the published text is not the file's own text",
-            )
-            val chunks = context.content.chunkCount(documentId)
-            assertTrue(chunks >= 1, "the published text was not chunked")
-            assertEquals(
-                chunks,
-                context.index().chunkCount(CollectionId("default"), documentId),
-                "not every chunk of the published text is searchable",
-            )
-            assertNotNull(
-                context.revisions.activeRevisionId(documentId),
-                "the ordinary reading was never published as a revision",
-            )
-            assertEquals(
-                0,
-                context.content.unitsAwaitingDecision(documentId),
-                "ordinary text owes nobody a decision",
-            )
-            assertTrue(
-                context.ocrReviews.pending(documentId).isEmpty(),
-                "a format without page images produced a review",
-            )
-        }
-    }
-
-    /** Each revision the document's history lists, as the history reads it back. */
-    private fun historyOf(harness: Harness, documentId: DocumentId): List<infoscry.document.RevisionHistoryEntry> =
-        AppContext.open(harness.dataDir).use { context ->
-            context.revisionHistory.history(CollectionId("default"), documentId)
-        }
-
-    private fun ocrSnapshot(
-        language: String,
-        toolVersion: String? = null,
-        mode: OcrImportMode = OcrImportMode.FILL_MISSING,
-    ): OcrSettingsSnapshot = OcrSettingsSnapshot(
-        engine = OcrEngine.TESSERACT,
-        mode = mode,
-        language = language,
-        extractorVersion = EXTRACTOR_SCHEMA_VERSION,
-        toolVersion = toolVersion,
-    )
 
     @Test
     fun `an imported document's history names the OCR engine, mode, language and tool it was read with`() {
@@ -2364,6 +1445,48 @@ class ImportJobHandlerTest {
             assertFalse(entry.noOcrNeeded)
         }
     }
+
+    private fun checkingSnapshot(): OcrSettingsSnapshot = OcrSettingsSnapshot(
+        engine = OcrEngine.TESSERACT,
+        mode = OcrImportMode.CHECK_AND_IMPROVE,
+        language = "eng",
+        extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+    )
+
+    private fun assertPublishedOrdinaryExtraction(
+        harness: Harness,
+        documentId: DocumentId,
+        expectedText: String,
+    ) {
+        AppContext.open(harness.dataDir).use { context ->
+            val document = assertNotNull(context.documents.get(documentId), "the import stored no document")
+            assertEquals(DocumentStatus.COMPLETE, document.status)
+            val units = context.content.listUnits(documentId, afterOrdinal = -1, limit = 50)
+            assertTrue(units.isNotEmpty(), "the ordinary text was not committed as content units")
+            assertContains(units.joinToString("\n") { it.extractedText }, expectedText)
+            val chunks = context.content.chunkCount(documentId)
+            assertTrue(chunks >= 1, "the published text was not chunked")
+            assertEquals(chunks, context.index().chunkCount(CollectionId("default"), documentId))
+            assertNotNull(context.revisions.activeRevisionId(documentId))
+        }
+    }
+
+    private fun historyOf(harness: Harness, documentId: DocumentId): List<infoscry.document.RevisionHistoryEntry> =
+        AppContext.open(harness.dataDir).use { context ->
+            context.revisionHistory.history(CollectionId("default"), documentId)
+        }
+
+    private fun ocrSnapshot(
+        language: String,
+        toolVersion: String? = null,
+        mode: OcrImportMode = OcrImportMode.FILL_MISSING,
+    ): OcrSettingsSnapshot = OcrSettingsSnapshot(
+        engine = OcrEngine.TESSERACT,
+        mode = mode,
+        language = language,
+        extractorVersion = EXTRACTOR_SCHEMA_VERSION,
+        toolVersion = toolVersion,
+    )
 
     /** How many managed document directories the default collection holds: each stored file is one. */
     private fun managedDocumentCount(harness: Harness): Int {
@@ -2594,6 +1717,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
         embedder: DocumentEmbedder = TestDocumentEmbedder(),
         maxChunksPerDocument: Int = ImportJobHandler.MAX_CHUNKS_PER_DOCUMENT,
         clientEngine: io.ktor.client.engine.HttpClientEngine? = null,
+        beforeCopy: suspend () -> Unit = {},
     ): JobRunner =
         ImportJobHandler.attachTo(
             context,
@@ -2601,6 +1725,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
             documentEmbedder = { embedder },
             maxChunksPerDocument = maxChunksPerDocument,
             clientEngine = clientEngine,
+            beforeCopy = beforeCopy,
         )
 
     /**
@@ -2768,39 +1893,29 @@ internal class Harness(val directory: Path) : AutoCloseable {
         collectionId: CollectionId = CollectionId("default"),
         settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
         embedder: DocumentEmbedder = TestDocumentEmbedder(),
+        confirmedSources: List<ConfirmedImportSource>? = null,
     ): ImportRun = AppContext.open(dataDir).use { context ->
-        val job = enqueue(context, sources, settings, collectionId, recursive = false, ocr = snapshot)
+        val job = enqueue(
+            context,
+            sources,
+            settings,
+            collectionId,
+            recursive = false,
+            ocr = snapshot,
+            confirmedSources = confirmedSources,
+        )
         attach(context, storedPipeline(context, extractor), embedder = embedder)
         finish(context, job.id, collectionId)
     }
 
-    /** Records the approval an import waits for, exactly as the job's own approval route does. */
-    fun approveJobScope(jobId: JobId, snapshot: OcrSettingsSnapshot, maxDistinctPages: Int) {
-        AppContext.open(dataDir).use { context ->
-            context.ocrOperations.approveExternalScope(
-                owner = OcrExternalOwner.job(jobId.value),
-                snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
-                authorizedDistinctPages = maxDistinctPages,
-            )
-        }
-    }
-
-    /** What one job-owned scope holds: the pages it sent, what they cost, and what it may send now. */
+    /** The job-owned scope's persisted page and call counters. */
     fun externalAccountOf(jobId: JobId, snapshot: OcrSettingsSnapshot): OcrExternalAccount =
         AppContext.open(dataDir).use { context ->
-            context.ocrOperations.allowanceFor(
-                owner = OcrExternalOwner.job(jobId.value),
-                configuredAllowance = snapshot.externalPageLimit,
-                snapshotHash = OcrOperationStore.snapshotHashOf(snapshot),
+            OcrExternalAccount(
+                distinctPages = context.ocrOperations.distinctPageCount(OcrExternalOwner.job(jobId.value)),
+                calls = context.ocrOperations.callCount(OcrExternalOwner.job(jobId.value)),
+                allowance = snapshot.externalPageLimit,
             )
-        }
-
-    /** Resumes a job that waited for an approval, and runs the attempt it owes in a fresh process. */
-    fun resumeWaitingImport(jobId: JobId, extractor: DocumentExtractor): ImportRun =
-        AppContext.open(dataDir).use { context ->
-            context.jobs.resumeAwaitingApproval(jobId)
-            attach(context, storedPipeline(context, extractor))
-            finish(context, jobId, CollectionId("default"))
         }
 
     /** [resume] with the real durable unit store. */
@@ -2820,7 +1935,16 @@ internal class Harness(val directory: Path) : AutoCloseable {
         settings: ExtractionSettings = ExtractionSettings(ocrLanguages = "eng"),
         ocr: OcrSettingsSnapshot? = null,
         recursive: Boolean = false,
-    ): Job = enqueue(context, sources, settings, CollectionId("default"), recursive, ocr)
+        confirmedSources: List<ConfirmedImportSource>? = null,
+    ): Job = enqueue(
+        context,
+        sources,
+        settings,
+        CollectionId("default"),
+        recursive,
+        ocr,
+        confirmedSources = confirmedSources,
+    )
     /**
      * Queues a retry for documents the archive already holds, without attaching a worker.
      *
@@ -2904,6 +2028,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
         ocr: OcrSettingsSnapshot? = null,
         extensions: ExtensionFilter = ExtensionFilter.NONE,
         ignore: IgnorePatterns = IgnorePatterns.NONE,
+        confirmedSources: List<ConfirmedImportSource>? = null,
     ): Job {
         val payload = ImportJobPayload(
             collectionId = collectionId.value,
@@ -2913,6 +2038,7 @@ internal class Harness(val directory: Path) : AutoCloseable {
             recursive = recursive,
             extensions = extensions,
             ignore = ignore,
+            confirmedSources = confirmedSources,
         )
         return context.jobs.enqueue(
             type = JobType.IMPORT,
@@ -3672,25 +2798,9 @@ internal fun transcriptionAnswer(
 /** One OpenAI-compatible envelope whose single answer is the transcription of [text]. */
 internal fun transcriptionEnvelope(text: String): String = reviewEnvelope(transcriptionAnswer(text))
 
-internal fun reviewAnswer(recommendation: String): String = buildJsonObject {
-    put("unitId", PAGE_KEY_FOR_REVIEW)
-    put("ordinal", 0)
-    put("recommendation", recommendation)
-    put("confidence", 0.9)
-    putJsonArray("reasons") {
-        addJsonObject {
-            put("explanation", "the number in the name differs")
-            put("aStart", 5)
-            put("aEnd", 8)
-            put("bStart", 5)
-            put("bEnd", 8)
-        }
-    }
-}.toString()
-
-/** One OpenAI-compatible envelope whose single answer is [content]. `internal` for the retry tests. */
+/** One OpenAI-compatible envelope whose single answer is [content]. */
 internal fun reviewEnvelope(content: String): String = buildJsonObject {
-    put("model", "vision-reviewer-2026-02-01")
+    put("model", "vision-model")
     putJsonArray("choices") {
         addJsonObject {
             put("finish_reason", "stop")

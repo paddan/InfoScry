@@ -484,7 +484,7 @@ describe('app shell', () => {
     });
     const retry = calls.find((call) => call.url === '/api/collections/nightfall/documents/retry');
     expect(retry?.init?.method).toBe('POST');
-    expect(JSON.parse(String(retry?.init?.body))).toEqual({ allEligible: true });
+    expect(JSON.parse(String(retry?.init?.body))).toEqual({ allEligible: true, requestId: expect.any(String) });
     const outcome = await screen.findByRole('region', { name: 'Retry documents in Nightfall' });
     await waitFor(() => {
       expect(within(outcome).getByRole('status').textContent)
@@ -1949,10 +1949,8 @@ function collection(name: string, documentCount = 0): Collection {
   return {
     id: name.toLowerCase(),
     name,
-    ocrLanguages: 'eng',
-    ocrEngine: 'TESSERACT',
-    ocrImportMode: 'FILL_MISSING',
-    ocrExternalPageLimit: 0,
+    language: 'eng',
+    defaultMethod: 'tesseract',
     createdAt: '2026-09-21T07:00:00Z',
     updatedAt: '2026-09-21T07:00:00Z',
     lifecycle: 'ACTIVE',

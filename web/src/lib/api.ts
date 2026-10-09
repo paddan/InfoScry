@@ -18,14 +18,8 @@ export type OcrImportMode = 'FILL_MISSING' | 'CHECK_AND_IMPROVE';
 export type Collection = {
   id: string;
   name: string;
-  ocrLanguages: string;
-  ocrEngine: OcrEngine;
-  ocrImportMode: OcrImportMode;
-  /** Nulls are omitted from the wire: absent means no profile is selected. */
-  ocrTranscriptionProfileId?: string | null;
-  ocrReviewProfileId?: string | null;
-  /** Distinct pages one operation may send to an external provider before it needs an approval. */
-  ocrExternalPageLimit: number;
+  language: string;
+  defaultMethod: string | null;
   createdAt: string;
   updatedAt: string;
   description?: string | null;
@@ -33,6 +27,43 @@ export type Collection = {
   /** Documents the collection holds; the listing route counts them, a read by id reports `0`. */
   documentCount: number;
 };
+
+/** Current servers still serialize the persisted OCR engine/profile pair; newer ones may also send its method id. */
+type CollectionResponse = Omit<Collection, 'language' | 'defaultMethod'> & {
+  language?: string;
+  defaultMethod?: string | null;
+  ocrLanguages?: string;
+  ocrEngine?: OcrEngine;
+  ocrTranscriptionProfileId?: string | null;
+  ocrImportMode?: OcrImportMode;
+  ocrReviewProfileId?: string | null;
+  ocrExternalPageLimit?: number;
+};
+
+/** Converts the server's collection JSON once at the API boundary into the reading-method model used by the UI. */
+function decodeCollection(response: CollectionResponse): Collection {
+  const {
+    language,
+    defaultMethod,
+    ocrLanguages,
+    ocrEngine,
+    ocrTranscriptionProfileId,
+    ocrImportMode: _ocrImportMode,
+    ocrReviewProfileId: _ocrReviewProfileId,
+    ocrExternalPageLimit: _ocrExternalPageLimit,
+    ...fields
+  } = response;
+  const derivedMethod = ocrEngine === 'SURYA'
+    ? 'surya'
+    : ocrEngine === 'LLM' && ocrTranscriptionProfileId
+      ? `llm:${ocrTranscriptionProfileId}`
+      : 'tesseract';
+  return {
+    ...fields,
+    language: language ?? ocrLanguages ?? 'eng',
+    defaultMethod: defaultMethod === undefined ? derivedMethod : defaultMethod,
+  };
+}
 
 /** The lifecycle of a job record; stages inside a running job are reported separately. */
 export type JobState = 'QUEUED' | 'RUNNING' | 'COMPLETE' | 'FAILED' | 'CANCELLED';
@@ -57,20 +88,11 @@ export type JobApiView = {
   total: number;
   errorCode?: string | null;
   cancelRequested: boolean;
-  /** Present only while the job waits for an external page approval; absent otherwise. */
-  externalApproval?: ExternalApproval;
 };
 
-/**
- * What approving a job's external pages needs: the snapshot the approval must name, what the scope has already
- * sent, what it may send, and how many provider calls that cost.
- */
-export type ExternalApproval = {
-  snapshotHash: string;
-  distinctPagesSent: number;
-  allowance: number;
-  calls: number;
-};
+/** Names used by the reading workflow contract for the existing row and run records. */
+export type DocumentSummary = DocumentApiRow;
+export type JobSummary = JobApiView;
 
 /**
  * What one selected file ended as. `PENDING` is a queued file whose work has not finished: an import that
@@ -226,7 +248,7 @@ export type OcrEndpointScope = 'LOCAL' | 'EXTERNAL';
 
 /**
  * One OCR profile as the server shows it: the profile and the revision it currently reads through.
- * Profiles are not tied to a role; a collection selects one for transcription and another for review.
+ * Profiles are selected as a reading method by a collection.
  * `keyAvailable` is presence of the named environment variable only; no key value is ever returned.
  */
 export type OcrProfile = {
@@ -340,8 +362,8 @@ let sessionToken: string | null = null;
 
 /** Collections this data directory holds, ordered by name. */
 export async function listCollections(): Promise<Collection[]> {
-  const body = (await readJson(await fetch('/api/collections'))) as { collections: Collection[] };
-  return body.collections;
+  const body = (await readJson(await fetch('/api/collections'))) as { collections: CollectionResponse[] };
+  return body.collections.map(decodeCollection);
 }
 
 /** The document statuses the pipeline moves a document through; the server owns this vocabulary. */
@@ -355,7 +377,6 @@ export type DocumentStatusName =
   | 'INDEXING'
   | 'COMPLETE'
   | 'COMPLETE_WITH_WARNINGS'
-  | 'NEEDS_REVIEW'
   | 'FAILED'
   | 'CANCELLED'
   | 'NEEDS_TOOL';
@@ -663,7 +684,7 @@ export async function listOcrLlmCandidates(): Promise<OcrLlmCandidate[]> {
 }
 
 /**
- * Offer an LLM profile for transcription or review: the server copies it into an OCR profile (or brings its
+ * Offer an LLM profile for image reading: the server copies it into an OCR profile (or brings its
  * existing copy up to date) and answers with that profile, which is what a collection selects and an attempt
  * pins. A model the catalog states is text-only is refused with 409 `LLM_PROFILE_TEXT_ONLY`.
  */
@@ -950,41 +971,59 @@ export async function enqueueImport(
   };
 }
 
+export type ReadingMethodOption = {
+  method: string;
+  label: string;
+  destination: string;
+  available: boolean;
+  unavailableReason: string | null;
+  external: boolean;
+};
+export type ReadingMethodList = { methods: ReadingMethodOption[]; default: string | null };
+export type ImportPreviewRequest = {
+  collection: string;
+  paths: string[];
+  recursive: boolean;
+  include: string[];
+  exclude: string[];
+  method: string;
+};
+export type ImportPreview = {
+  files: { path: string; pages: number | null; reason: string | null }[];
+  totalPages: number;
+  atLeast: boolean;
+  destination: string;
+  external: boolean;
+  estimatedCostUsd: number | null;
+  costBasis: string | null;
+  previewHash: string;
+};
+export type ImportStarted = { accepted?: boolean; job: JobApiView };
+
+export async function listReadingMethods(collectionId: string): Promise<ReadingMethodList> {
+  const collection = encodeURIComponent(collectionId);
+  return (await readJson(await fetch(`/api/collections/${collection}/reading-methods`))) as ReadingMethodList;
+}
+
+export async function previewImport(request: ImportPreviewRequest): Promise<ImportPreview> {
+  return (await mutate('/api/imports/preview', 'POST', request)) as ImportPreview;
+}
+
+export async function startImport(
+  request: ImportPreviewRequest & { previewHash: string; requestId: string },
+): Promise<ImportStarted> {
+  return (await mutate('/api/imports', 'POST', request)) as ImportStarted;
+}
+
 /** One job's current record; polling stops once `state` is terminal. */
 export async function getJob(id: string): Promise<JobApiView> {
   const body = (await readJson(await fetch(`/api/jobs/${encodeURIComponent(id)}`))) as { job: JobApiView };
   return body.job;
 }
 
-/** What one approved job scope answers with, as the approval route returns it. */
-export type ImportExternalApprovalResponse = {
-  jobId: string;
-  approvalId: string;
-  authorizedDistinctPages: number;
-  distinctPagesSent: number;
-  calls: number;
-  state?: string | null;
-  stage?: string | null;
-};
-
-/**
- * Approves up to `maxDistinctPages` external pages for the job's OCR selection, which the snapshot hash names,
- * and resumes the job if it waited for that approval.
- */
-export async function approveJobExternal(
-  jobId: string,
-  snapshotHash: string,
-  maxDistinctPages: number,
-): Promise<ImportExternalApprovalResponse> {
-  return (await mutate(`/api/jobs/${encodeURIComponent(jobId)}/approve-external`, 'POST', {
-    expectedSnapshotHash: snapshotHash,
-    maxDistinctPages,
-  })) as ImportExternalApprovalResponse;
-}
-
 /**
  * Cancels a job. A queued job ends at once, a running one at its next stage boundary, and an import paused
- * for an external-page approval ends as cancelled; a job that already ended is answered unchanged.
+ * when a job is running; a job that already ended is answered unchanged.
  */
 export async function cancelJob(id: string): Promise<JobApiView> {
   const body = (await mutate(`/api/jobs/${encodeURIComponent(id)}/cancel`, 'POST')) as { job: JobApiView };
@@ -1019,8 +1058,6 @@ export type ImportHistoryEntry = {
   updatedAt: string;
   /** The persisted per-file outcomes of this import, on the existing job-items route. */
   itemsUrl: string;
-  /** Present only while the import waits for an external page approval; absent otherwise. */
-  externalApproval?: ExternalApproval;
 };
 
 /** A page of one collection's imports plus the total the same criteria match. */
@@ -1055,31 +1092,22 @@ export async function createCollection(name: string, description?: string): Prom
     },
     body: JSON.stringify(request),
   });
-  const body = (await readJson(response)) as { collection: Collection };
-  return body.collection;
+  const body = (await readJson(response)) as { collection: CollectionResponse };
+  return decodeCollection(body.collection);
 }
 
 /** Renames a collection. Its id, its documents and its import history stay as they were. */
 export async function renameCollection(collectionId: string, name: string): Promise<Collection> {
   const body = (await mutate(`/api/collections/${encodeURIComponent(collectionId)}`, 'PATCH', { name })) as {
-    collection: Collection;
+    collection: CollectionResponse;
   };
-  return body.collection;
+  return decodeCollection(body.collection);
 }
 
 /**
  * Saves the OCR languages a collection snapshots into future imports and explicit retries. Nothing is
  * reprocessed by this call: documents that completed are left alone.
  */
-export async function updateCollectionOcrLanguages(collectionId: string, ocrLanguages: string): Promise<Collection> {
-  const body = (await mutate(
-    `/api/collections/${encodeURIComponent(collectionId)}/ocr-languages`,
-    'PATCH',
-    { ocrLanguages },
-  )) as { collection: Collection };
-  return body.collection;
-}
-
 /** A collection's ignore patterns: files and folders that no import into it attempts. One entry per line. */
 export async function getCollectionIgnorePatterns(collectionId: string): Promise<string[]> {
   const body = (await readJson(
@@ -1106,12 +1134,8 @@ export async function updateCollectionIgnorePatterns(collectionId: string, patte
  * profile id sent as an empty string clears that profile.
  */
 export type CollectionOcrSettingsPatch = {
-  ocrLanguages?: string;
-  ocrEngine?: OcrEngine;
-  ocrImportMode?: OcrImportMode;
-  ocrTranscriptionProfileId?: string;
-  ocrReviewProfileId?: string;
-  ocrExternalPageLimit?: number;
+  language?: string;
+  defaultMethod?: string;
 };
 
 /** Saves any of a collection's OCR settings. Nothing is reprocessed; the next import or rescan snapshots them. */
@@ -1123,8 +1147,8 @@ export async function updateCollectionOcrSettings(
     `/api/collections/${encodeURIComponent(collectionId)}/ocr-languages`,
     'PATCH',
     patch,
-  )) as { collection: Collection };
-  return body.collection;
+  )) as { collection: CollectionResponse };
+  return decodeCollection(body.collection);
 }
 
 /**
@@ -1191,12 +1215,8 @@ export async function deleteDocuments(
 /** One document a retry refused, and InfoScry's own sentence for the reason. */
 export type RetryRejection = { documentId: string; reason: string; code?: string | null };
 
-/**
- * The OCR method a retry reads with instead of the collection's. Every field is optional and an absent one
- * means the collection's value; the server validates and admits it as it does a Scan again preview.
- */
-export type RetryOcrChoice = RescanPreviewOverrides & { language?: string };
-
+/** A retry may override its failed run's method; every request carries a stable client id. */
+export type RetryOcrChoice = { method?: string; requestId?: string };
 /**
  * What a retry asks for: the documents to read again, or every eligible one in the collection.
  *
@@ -1204,8 +1224,8 @@ export type RetryOcrChoice = RescanPreviewOverrides & { language?: string };
  * named, and the other picks the set itself.
  */
 export type RetryRequest =
-  | { documentIds: string[]; ocr?: RetryOcrChoice }
-  | { allEligible: true; ocr?: RetryOcrChoice };
+  | ({ documentIds: string[] } & RetryOcrChoice)
+  | ({ allEligible: true } & RetryOcrChoice);
 
 /** What an admitted retry answers with: the attempts it queued and the documents it refused. */
 export type RetryAdmission = {
@@ -1317,11 +1337,8 @@ export type OcrSettingsSnapshot = {
   language: string;
   extractorVersion: string;
   transcriptionPromptVersion: number;
-  reviewPromptVersion: number;
-  policyVersion: number;
   externalPageLimit: number;
   transcriptionProfileRevisionId?: string | null;
-  reviewProfileRevisionId?: string | null;
   toolVersion?: string | null;
   modelVersion?: string | null;
   renderDpi?: number | null;
@@ -1346,31 +1363,25 @@ export type RescanPreview = {
   baseRevisionId?: string | null;
   managedHash: string;
   snapshot: OcrSettingsSnapshot;
-  /** What an external approval binds to; the operation read does not return it. */
-  snapshotHash: string;
+  method?: string;
   pageTotal?: number | null;
   externalPageUpperBound?: number | null;
   destinations: OcrNamedDestination[];
   costEstimate?: { amountUsd: number; basis: string } | null;
   costUnavailableReason?: string | null;
-  approvalRequired: boolean;
-  externalAllowance: number;
-  expiresAt: string;
+  external?: boolean;
+  destination?: string;
+  estimatedCostUsd?: number | null;
+  costBasis?: string | null;
+  previewHash?: string;
+  expiresAt?: string;
 };
 
-/** What a preview may override; the collection's settings are used for everything absent. */
-export type RescanPreviewOverrides = {
-  engine?: OcrEngine;
-  importMode?: OcrImportMode;
-  transcriptionProfileId?: string;
-  reviewProfileId?: string;
-};
+export type RescanStarted = OcrOperation;
 
 export type OcrOperationStage =
   | 'PREFLIGHT'
-  | 'AWAITING_APPROVAL'
   | 'OCR'
-  | 'REVIEW'
   | 'CHUNKING'
   | 'EMBEDDING'
   | 'INDEXING'
@@ -1379,12 +1390,11 @@ export type OcrOperationStage =
   | 'CANCELLED'
   | 'NEEDS_TOOL';
 
-/** `distinctPages` is the allowance's unit; `calls` is what was paid for (a page read then reviewed is two). */
+/** External page and call counts recorded for one reading operation. */
 export type OcrExternalAccount = {
   distinctPages: number;
   calls: number;
   allowance: number;
-  approvedDistinctPages?: number | null;
 };
 
 /** One durable rescan operation: no page text, no path, no provider message. */
@@ -1401,9 +1411,6 @@ export type OcrOperation = {
   pagesCommitted: number;
   pagesFailed: number;
   external: OcrExternalAccount;
-  pendingReviewCount: number;
-  /** Pages already decided whose decisions are not published yet; absent from an older server, which means 0. */
-  decidedUnpublishedCount?: number;
   errorCode?: string | null;
   errorMessage?: string | null;
   requestId: string;
@@ -1419,9 +1426,17 @@ function ocrPath(collectionId: string, documentId: string): string {
 export async function previewRescan(
   collectionId: string,
   documentId: string,
-  overrides: RescanPreviewOverrides = {},
+  method: string,
 ): Promise<RescanPreview> {
-  return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', overrides)) as RescanPreview;
+  return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', { method })) as RescanPreview;
+}
+
+export async function startRescan(
+  collectionId: string,
+  documentId: string,
+  body: { previewId: string; requestId: string },
+): Promise<RescanStarted> {
+  return (await mutate(`${ocrPath(collectionId, documentId)}/rescan`, 'POST', body)) as RescanStarted;
 }
 
 /** Admits a previewed rescan; the same request id with the same body answers with the same operation. */
@@ -1455,21 +1470,6 @@ export async function listRescanOperations(collectionId: string, documentId: str
   return body.operations;
 }
 
-/** Approves up to `maxDistinctPages` external pages for the snapshot the hash names, and resumes the operation. */
-export async function approveRescanExternal(
-  collectionId: string,
-  documentId: string,
-  operationId: string,
-  expectedSnapshotHash: string,
-  maxDistinctPages: number,
-): Promise<OcrOperation> {
-  return (await mutate(
-    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/approve-external`,
-    'POST',
-    { expectedSnapshotHash, maxDistinctPages },
-  )) as OcrOperation;
-}
-
 /** A durable cancellation request; a running attempt ends the operation between pages. */
 export async function cancelRescan(
   collectionId: string,
@@ -1482,123 +1482,6 @@ export async function cancelRescan(
   )) as OcrOperation;
 }
 
-/** Another attempt of an operation that stopped, with the same snapshot and counters. */
-export async function resumeRescan(
-  collectionId: string,
-  documentId: string,
-  operationId: string,
-): Promise<OcrOperation> {
-  return (await mutate(
-    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/resume`,
-    'POST',
-  )) as OcrOperation;
-}
-
-/**
- * Drops a finished scan's undecided new reading and releases the document. The existing text stays published;
- * only an operation that is complete with unpublished pages waiting for a decision accepts it.
- */
-export async function discardPendingRescan(
-  collectionId: string,
-  documentId: string,
-  operationId: string,
-): Promise<OcrOperation> {
-  return (await mutate(
-    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/discard-pending`,
-    'POST',
-  )) as OcrOperation;
-}
-
-// ---- reviewing proposed pages ----
-
-/** One bounded reason behind a review, as the comparison recorded it; spans are character offsets. */
-export type ReviewReason = {
-  code: string;
-  origin: string;
-  baselineStart?: number | null;
-  baselineEnd?: number | null;
-  candidateStart?: number | null;
-  candidateEnd?: number | null;
-  explanation?: string | null;
-};
-
-/**
- * One proposed page. The listing carries hashes and reasons; the candidate text and the page image are read
- * from their own routes, one page at a time.
- */
-export type PendingReview = {
-  unitId: string;
-  ordinal: number;
-  recommendation: string;
-  disposition: string;
-  baselineRevisionId?: string | null;
-  baselineTextHash?: string | null;
-  candidateHash: string;
-  outcomeCode?: string | null;
-  confidence?: number | null;
-  reasons: ReviewReason[];
-  reviewerRevisionId: string;
-  reviewPromptVersion: number;
-  policyVersion: number;
-  searchable: boolean;
-  /** A cheap hint that the image route can be asked; the route is the authority, so a failed load is handled. */
-  imageAvailable?: boolean;
-};
-
-/** The pending page's new reading, bounded; `candidateHash` names the WHOLE text even when it is cut. */
-export type PendingCandidate = {
-  operationId: string;
-  unitId: string;
-  ordinal: number;
-  candidateHash: string;
-  baselineRevisionId?: string | null;
-  text: string;
-  totalChars: number;
-  truncated: boolean;
-};
-
-/** Only pages still waiting for a decision are listed; decided ones are counted in `decidedUnpublishedCount`. */
-export type ReviewsResponse = {
-  reviews: PendingReview[];
-  total: number;
-  pendingPages: number;
-  pendingReviewCount: number;
-  /** Decided pages not yet published; absent from an older server, which means 0. */
-  decidedUnpublishedCount?: number;
-  externalAccounting: string;
-};
-
-export type ReviewChoice = 'KEEP' | 'USE_NEW' | 'EDIT';
-
-export type ReviewDecisionInput = {
-  unitId: string;
-  ordinal: number;
-  candidateHash: string;
-  choice: ReviewChoice;
-  /** The person's own text; sent only for EDIT. */
-  text?: string | null;
-};
-
-export type ReviewDecisionsBody = {
-  requestId: string;
-  expectedRevisionId: string;
-  decisions?: ReviewDecisionInput[];
-  /** One choice for the document's whole server-side pending set; KEEP or USE_NEW. */
-  documentWide?: ReviewChoice | null;
-};
-
-export type ReviewDecisionsResponse = {
-  operation: OcrOperation;
-  applied: { ordinal: number; choice: string; unitId: string }[];
-};
-
-export type PublicationDecisionResponse = {
-  operation: OcrOperation;
-  publicationId: string;
-  phase: string;
-  errorCode?: string | null;
-};
-
 /** What the rescan behind a revision was configured with; absent for an import or a restore. */
 export type RevisionReading = {
   engine: string;
@@ -1607,10 +1490,9 @@ export type RevisionReading = {
   toolVersion?: string | null;
   modelVersion?: string | null;
   transcriptionModel?: string | null;
-  reviewModel?: string | null;
 };
 
-/** How a revision's pages differ from its parent's; `automatic`/`manual` are inferred from recorded reviews. */
+/** How a revision's pages differ from its parent. */
 export type PageChanges = {
   unchanged: number;
   added: number;
@@ -1644,41 +1526,7 @@ export type RevisionsResponse = {
   activeRevisionId?: string | null;
 };
 
-/** One bounded page of the operation's proposals that still wait for a decision. */
-export async function listPendingReviews(
-  collectionId: string,
-  documentId: string,
-  operationId: string,
-  offset: number,
-  limit: number,
-): Promise<ReviewsResponse> {
-  const query = `operationId=${encodeURIComponent(operationId)}&offset=${offset}&limit=${limit}`;
-  return (await readJson(await fetch(`${ocrPath(collectionId, documentId)}/reviews?${query}`))) as ReviewsResponse;
-}
-
-function reviewPagePath(collectionId: string, documentId: string, unitId: string): string {
-  return `${ocrPath(collectionId, documentId)}/reviews/${encodeURIComponent(unitId)}`;
-}
-
-/** One pending page's new reading, capped by the server; the page must still be pending. */
-export async function readPendingCandidate(
-  collectionId: string,
-  documentId: string,
-  operationId: string,
-  unitId: string,
-): Promise<PendingCandidate> {
-  const query = `operationId=${encodeURIComponent(operationId)}`;
-  return (await readJson(
-    await fetch(`${reviewPagePath(collectionId, documentId, unitId)}/candidate?${query}`),
-  )) as PendingCandidate;
-}
-
-/** The URL of one pending page's image, for an `<img>`; built from opaque ids only, never from a path. */
-export function pendingImageUrl(collectionId: string, documentId: string, operationId: string, unitId: string): string {
-  return `${reviewPagePath(collectionId, documentId, unitId)}/image?operationId=${encodeURIComponent(operationId)}`;
-}
-
-/** The document's published history; the review reads the active revision id from it, nothing else. */
+/** The document's published history, including its active revision. */
 export async function listDocumentRevisions(
   collectionId: string,
   documentId: string,
@@ -1731,32 +1579,4 @@ export async function getRestoreOperation(
   return (await readJson(
     await fetch(`${ocrPath(collectionId, documentId)}/restores/${encodeURIComponent(restoreId)}`),
   )) as RestoreOperation;
-}
-
-/** Saves one decision batch; a 409 means the active revision or a page's candidate is no longer the one decided on. */
-export async function decideReviews(
-  collectionId: string,
-  documentId: string,
-  operationId: string,
-  body: ReviewDecisionsBody,
-): Promise<ReviewDecisionsResponse> {
-  return (await mutate(
-    `${ocrPath(collectionId, documentId)}/review-decisions?operationId=${encodeURIComponent(operationId)}`,
-    'POST',
-    body,
-  )) as ReviewDecisionsResponse;
-}
-
-/** Admits the publication of the decided pages; searchable text changes only when it reports PUBLISHED. */
-export async function publishReviewDecisions(
-  collectionId: string,
-  documentId: string,
-  operationId: string,
-  expectedRevisionId: string,
-): Promise<PublicationDecisionResponse> {
-  return (await mutate(
-    `${ocrPath(collectionId, documentId)}/publish-decisions?operationId=${encodeURIComponent(operationId)}`,
-    'POST',
-    { expectedRevisionId },
-  )) as PublicationDecisionResponse;
 }

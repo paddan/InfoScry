@@ -1,6 +1,6 @@
 # 01: Idempotent startup cleanup of stale OCR state
 
-**Status:** Not started
+**Status:** Implemented; automated gates passed (2026-10-09). See [verification record](STATUS.md#verification-record).
 **Blocked by:** None.
 **Plan:** [OCR workflow redesign, Task 1](../../plans/2026-10-08-ocr-workflow-redesign.md). Read first: this ticket, [CONTRACTS.md](CONTRACTS.md) (sections 6, 10, 12, 13), `AGENTS.md`, the [spec](../../specs/2026-10-08-ocr-workflow-redesign.md) ("Always restartable").
 
@@ -38,14 +38,14 @@ Behavior:
 - `COMPLETE` operations with `pendingReviewCount > 0` -> `revisions.withdrawCandidate` and pending count 0. Reuse `RescanService.discardPending`'s logic by extracting it into a shared function (keep `discardPending` behavior unchanged).
 - Every step is a conditional update (`WHERE` the old state still holds) so a repeat finds nothing.
 
-## Test-first implementation
+## Original test-first implementation plan
 
-- [ ] Write failing tests in `StaleOcrStateCleanupTest`, building states with the stores directly: `a paused import job becomes cancelled`, `an operation left in a working stage becomes failed with code INTERRUPTED and releases its document`, `a complete operation with a pending candidate has the candidate withdrawn and no longer holds the document`, `running it twice reports zero changes the second time`, `a live running job is untouched`.
-- [ ] Run `./gradlew test -PskipFrontend --tests 'infoscry.ocr.StaleOcrStateCleanupTest'`; expect FAIL because the class is missing.
-- [ ] Idempotence/restart tests: run the cleanup, then simulate a crash after each of the three steps (call only steps 1..k, then the full `run()`); the final state equals one uninterrupted run, and a database with all three stale states is cleaned by one `run()`, after which the document accepts a new rescan admission (use the existing admission test helper).
-- [ ] The document's published text is unchanged by the cleanup.
-- [ ] Implement `run()`, extract the shared discard function, wire into `AppContext`.
-- [ ] Run the test class plus `JobRunnerRecoveryTest`; expect PASS.
+- Write failing tests in `StaleOcrStateCleanupTest`, building states with the stores directly: `a paused import job becomes cancelled`, `an operation left in a working stage becomes failed with code INTERRUPTED and releases its document`, `a complete operation with a pending candidate has the candidate withdrawn and no longer holds the document`, `running it twice reports zero changes the second time`, `a live running job is untouched`.
+- Run `./gradlew test -PskipFrontend --tests 'infoscry.ocr.StaleOcrStateCleanupTest'`; expect FAIL because the class is missing.
+- Idempotence/restart tests: run the cleanup, then simulate a crash after each of the three steps (call only steps 1..k, then the full `run()`); the final state equals one uninterrupted run, and a database with all three stale states is cleaned by one `run()`, after which the document accepts a new rescan admission (use the existing admission test helper).
+- The document's published text is unchanged by the cleanup.
+- Implement `run()`, extract the shared discard function, wire into `AppContext`.
+- Run the test class plus `JobRunnerRecoveryTest`; expect PASS.
 
 ## Focused verification
 

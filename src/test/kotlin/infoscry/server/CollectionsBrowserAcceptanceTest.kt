@@ -100,6 +100,25 @@ class CollectionsBrowserAcceptanceTest {
         assertTrue(context().llm.list().any { it.name == "acceptance-profile" }, "managing collections must not touch the LLM profiles")
     }
 
+    @Test
+    fun `external import confirms the method destination and page count once in the start dialog`() {
+        startServer("Notes")
+        val profile = context().ocrProfiles.create("External reader", infoscry.ocr.OcrProfileRevisionDraft(
+            provider = LlmProvider.OPENAI_COMPATIBLE, model = "fake-vision", contextWindow = 32000,
+            maxOutputTokens = 2048, endpoint = "https://example.invalid/v1", apiKeyEnvironmentVariable = "PATH"), enabled = true)
+        context().ocrProfiles.recordImageCapability(profile.revision.revisionId, true, Instants.now())
+        val collection = context().collections.list().single { it.name == "Notes" }
+        context().collections.updateOcrSettings(collection.id,
+            infoscry.ocr.CollectionOcrSettings("eng", infoscry.ocr.ReadingMethod.Llm(profile.id)))
+        picker.files = AcceptanceFixtures.files(sourcesDir, "mixed-pages.png")
+        runScenario("external-import-dialog")
+        val job = context().jobs.listImports(collection.id, 10).single()
+        val snapshot = checkNotNull(infoscry.jobs.ImportJobPayload.decode(job.payload).ocr)
+        assertEquals(profile.revision.revisionId, snapshot.transcriptionProfileRevisionId)
+        assertEquals(1, snapshot.externalPageLimit)
+        assertEquals(infoscry.ocr.OcrImportMode.READ_ALL, snapshot.mode)
+    }
+
     /**
      * A `Default` collection that already holds a document is kept until the reader renames or deletes it
      * themselves.
@@ -224,12 +243,11 @@ class CollectionsBrowserAcceptanceTest {
             extractorRun.produced("fail-once-a.txt"),
             "the committed unit is not read again, and the unit the attempt never reached is",
         )
-        // The collection-wide retry happened after the OCR languages changed, so that document's first
-        // reading is not reusable and the attempt repeats it — which is exactly what the panel warns about.
+        // Changing the default affects new readings, while Retry resumes this document's failed snapshot.
         assertEquals(
-            listOf("unit-0", "unit-0", "unit-1"),
+            listOf("unit-0", "unit-1"),
             extractorRun.produced("fail-once-b.txt"),
-            "changed OCR languages make the earlier reading repeat rather than reuse",
+            "a default change does not invalidate the failed attempt’s frozen reading",
         )
         assertEquals(2, context().documents.countListing(DocumentListing(collectionId = collection.id)), "a retry never adds a document")
     }
@@ -399,9 +417,9 @@ class CollectionsBrowserAcceptanceTest {
         val retry = context().jobs.list(limit = 50).single { it.type == JobType.RETRY }
         assertEquals(JobState.COMPLETE, retry.state)
         assertEquals(
-            listOf("unit-0", "unit-0", "unit-1"),
+            listOf("unit-0", "unit-1"),
             extractorRun.produced("fail-once-scan.png"),
-            "the chosen language changes the reading, so the first attempt's unit is read again",
+            "retry resumes the frozen reading without repeating the committed unit",
         )
     }
 
@@ -536,11 +554,12 @@ class CollectionsBrowserAcceptanceTest {
      * the reader opens, and it goes through the same route the CLI and the browser use.
      */
     private fun importThroughTheRoute(collectionName: String, paths: List<String>) = runBlocking {
-        val body = buildString {
-            append("""{"collection":""").append(quoted(collectionName))
-            append(""","paths":[""").append(paths.joinToString(",") { quoted(it) })
-            append("""],"recursive":false}""")
-        }
+        val collection = context().collectionService.requireActiveByNameOrId(collectionName)
+        val previewRequest = infoscry.jobs.ImportPreviewRequest(collection.id, paths,
+            method = collection.ocrSettings().defaultMethod)
+        val preview = context().importPreviewService.preview(previewRequest)
+        val body = ApiJson.encodeToString(ImportRequest(collection = collection.id.value, paths = paths,
+            method = previewRequest.method.id, previewHash = preview.previewHash, requestId = UUID.randomUUID().toString()))
         val response = harness!!.request(HttpMethod.Post, "/api/imports", body, Credential.BEARER)
         check(response.status == HttpStatusCode.Accepted) {
             "the acceptance import must be accepted, was ${response.status}: ${response.bodyAsText()}"

@@ -7,10 +7,9 @@ import infoscry.domain.CollectionLifecycle
 import infoscry.jobs.IgnorePatterns
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.requireOcrLanguages
-import infoscry.ocr.OcrEngine
-import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrProfileRole
 import infoscry.ocr.OcrProfileService
+import infoscry.ocr.ReadingMethod
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.CollectionStore
 import infoscry.storage.Database
@@ -119,21 +118,12 @@ internal data class DeletionStep(val phase: DeletionPhase, val recorded: Boolean
 /**
  * One OCR-settings edit, as a request states it.
  *
- * Every field is optional because an edit says what it changes: a client that predates this feature sends
- * only the OCR languages, and a field it does not send keeps the value the collection already had. That is
- * what stops an old client from silently resetting an engine a newer one chose.
- *
- * The two profile fields have a second meaning for a blank value: `null` means "not part of this edit", a
- * blank id means "no profile", which is how a client clears the reviewer. Blank-means-absent is the same
- * reading a blank endpoint gets everywhere else in this application.
+ * Both fields are optional so a request can change just the language or just the default reading method.
+ * A missing field keeps its current value; the engine and profile stay bundled in [ReadingMethod].
  */
 data class OcrSettingsUpdate(
-    val ocrLanguages: String? = null,
-    val engine: OcrEngine? = null,
-    val importMode: OcrImportMode? = null,
-    val transcriptionProfileId: String? = null,
-    val reviewProfileId: String? = null,
-    val externalPageLimit: Int? = null,
+    val language: String? = null,
+    val defaultMethod: ReadingMethod? = null,
 ) {
 
     /**
@@ -143,21 +133,10 @@ data class OcrSettingsUpdate(
      * edit amounts to can be stated without writing it.
      */
     fun appliedTo(current: CollectionOcrSettings): CollectionOcrSettings = CollectionOcrSettings(
-        language = ocrLanguages?.let { languages -> requireOcrLanguages(languages) }
+        language = language?.let { languages -> requireOcrLanguages(languages) }
             ?: current.language,
-        engine = engine ?: current.engine,
-        importMode = importMode ?: current.importMode,
-        transcriptionProfileId = transcriptionProfileId.profileChoice(current.transcriptionProfileId),
-        reviewProfileId = reviewProfileId.profileChoice(current.reviewProfileId),
-        externalPageLimit = externalPageLimit ?: current.externalPageLimit,
+        defaultMethod = defaultMethod ?: current.defaultMethod,
     )
-}
-
-/** What an edit's profile field asks for: the old profile when it says nothing, no profile when blank. */
-private fun String?.profileChoice(current: String?): String? = when {
-    this == null -> current
-    isBlank() -> null
-    else -> trim()
 }
 
 /**
@@ -268,15 +247,14 @@ class CollectionService(
     /** Updates the settings future import jobs snapshot; already queued payloads remain unchanged. */
     suspend fun updateOcrLanguages(id: CollectionId, ocrLanguages: String): Collection = updateOcrSettings(
         id,
-        OcrSettingsUpdate(ocrLanguages = ocrLanguages),
+        OcrSettingsUpdate(language = ocrLanguages),
     )
 
     /**
      * Saves a collection's OCR settings.
      *
-     * Validated in this order: the collection has to be usable, the settings have to agree with themselves
-     * (an engine and the profile it reads through), and every profile the *edit* names has to exist and be
-     * enabled. A profile that is only carried over from the saved settings is not re-checked, because it is
+     * Validated in this order: the collection has to be usable, and an explicitly selected LLM profile has
+     * to exist and be enabled. A profile carried over from the saved default is not re-checked, because it is
      * not this request's claim: a profile disabled after a collection chose it must not freeze every other
      * edit to that collection. Whether the effective settings are still usable is decided when work is
      * admitted, where the profiles are resolved again into a snapshot.
@@ -286,11 +264,10 @@ class CollectionService(
             requireMutationsAllowed()
             val existing = requireActive(id)
             val settings = update.appliedTo(existing.ocrSettings())
-            update.transcriptionProfileId?.takeIf { it.isNotBlank() }?.let { profileId ->
-                ocrProfiles.requireSelectable(profileId, OcrProfileRole.TRANSCRIPTION)
-            }
-            update.reviewProfileId?.takeIf { it.isNotBlank() }?.let { profileId ->
-                ocrProfiles.requireSelectable(profileId, OcrProfileRole.REVIEW)
+            if (settings.defaultMethod != existing.ocrSettings().defaultMethod) {
+                (settings.defaultMethod as? ReadingMethod.Llm)?.let { method ->
+                    ocrProfiles.requireSelectable(method.profileId, OcrProfileRole.TRANSCRIPTION)
+                }
             }
             collections.updateOcrSettings(id, settings)
         }

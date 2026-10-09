@@ -8,6 +8,8 @@ import infoscry.storage.CollectionStore
 import infoscry.storage.JobStore
 import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.MutationCoordinator
+import infoscry.ocr.RescanAttemptFailedException
+import infoscry.ocr.ExternalPageAllowanceExceededException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -252,6 +254,9 @@ class JobRunner(
     }
 
     private fun errorCodeFor(failure: Throwable): String = when (failure) {
+        is ExternalPageAllowanceExceededException -> "MORE_PAGES_THAN_CONFIRMED"
+        is ImportSourceChangedException -> "IMPORT_SOURCE_CHANGED"
+        is RescanAttemptFailedException -> failure.code
         is CollectionNotActiveException -> "COLLECTION_NOT_ACTIVE"
         is MaintenanceInProgressException -> "MAINTENANCE_IN_PROGRESS"
         is IllegalArgumentException -> "INVALID_REQUEST"

@@ -6,7 +6,6 @@ import infoscry.domain.CollectionLifecycle
 import infoscry.jobs.IgnorePatterns
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrEngine
-import infoscry.ocr.OcrImportMode
 import infoscry.ocr.requireOcrLanguages
 import java.sql.Connection
 import java.sql.ResultSet
@@ -134,25 +133,6 @@ class CollectionStore(private val database: Database) {
         }
     }
 
-    /** Updates the OCR languages used when future import jobs snapshot this collection's settings. */
-    fun updateOcrLanguages(id: CollectionId, ocrLanguages: String): Collection {
-        val trimmedLanguages = requireOcrLanguages(ocrLanguages)
-        return database.transaction { connection ->
-            val existing = selectById(connection, id)
-                ?: throw NoSuchElementException("no collection with id ${id.value}")
-            val updatedAt = Instants.now()
-            connection.prepareStatement(
-                "UPDATE collections SET ocr_languages = ?, updated_at = ? WHERE id = ?",
-            ).use { statement ->
-                statement.setString(1, trimmedLanguages)
-                statement.setString(2, updatedAt)
-                statement.setString(3, id.value)
-                statement.executeUpdate()
-            }
-            existing.copy(ocrLanguages = trimmedLanguages, updatedAt = updatedAt)
-        }
-    }
-
     /**
      * Writes every OCR setting of a collection in one statement, so a reader never sees half an edit.
      *
@@ -164,29 +144,33 @@ class CollectionStore(private val database: Database) {
         database.transaction { connection ->
             val existing = selectById(connection, id)
                 ?: throw NoSuchElementException("no collection with id ${id.value}")
+            val language = requireOcrLanguages(settings.language)
+            val (engine, profileId) = when (val method = settings.defaultMethod) {
+                infoscry.ocr.ReadingMethod.Tesseract -> OcrEngine.TESSERACT to null
+                infoscry.ocr.ReadingMethod.Surya -> OcrEngine.SURYA to null
+                is infoscry.ocr.ReadingMethod.Llm -> OcrEngine.LLM to method.profileId
+            }
+            if (existing.ocrLanguages == language && existing.ocrEngine == engine &&
+                existing.ocrTranscriptionProfileId == profileId
+            ) {
+                return@transaction existing
+            }
             val updatedAt = Instants.now()
             connection.prepareStatement(
-                "UPDATE collections SET ocr_languages = ?, ocr_engine = ?, ocr_import_mode = ?, " +
-                    "ocr_transcription_profile_id = ?, ocr_review_profile_id = ?, " +
-                    "ocr_external_page_limit = ?, updated_at = ? WHERE id = ?",
+                "UPDATE collections SET ocr_languages = ?, ocr_engine = ?, " +
+                    "ocr_transcription_profile_id = ?, updated_at = ? WHERE id = ?",
             ).use { statement ->
-                statement.setString(1, settings.language)
-                statement.setString(2, settings.engine.name)
-                statement.setString(3, settings.importMode.name)
-                statement.setString(4, settings.transcriptionProfileId)
-                statement.setString(5, settings.reviewProfileId)
-                statement.setInt(6, settings.externalPageLimit)
-                statement.setString(7, updatedAt)
-                statement.setString(8, id.value)
+                statement.setString(1, language)
+                statement.setString(2, engine.name)
+                statement.setString(3, profileId)
+                statement.setString(4, updatedAt)
+                statement.setString(5, id.value)
                 statement.executeUpdate()
             }
             existing.copy(
-                ocrLanguages = settings.language,
-                ocrEngine = settings.engine,
-                ocrImportMode = settings.importMode,
-                ocrTranscriptionProfileId = settings.transcriptionProfileId,
-                ocrReviewProfileId = settings.reviewProfileId,
-                ocrExternalPageLimit = settings.externalPageLimit,
+                ocrLanguages = language,
+                ocrEngine = engine,
+                ocrTranscriptionProfileId = profileId,
                 updatedAt = updatedAt,
             )
         }
@@ -292,10 +276,7 @@ class CollectionStore(private val database: Database) {
         description = getString("description"),
         lifecycle = CollectionLifecycle.valueOf(getString("lifecycle")),
         ocrEngine = OcrEngine.valueOf(getString("ocr_engine")),
-        ocrImportMode = OcrImportMode.valueOf(getString("ocr_import_mode")),
         ocrTranscriptionProfileId = getString("ocr_transcription_profile_id"),
-        ocrReviewProfileId = getString("ocr_review_profile_id"),
-        ocrExternalPageLimit = getInt("ocr_external_page_limit"),
     )
 
     companion object {
@@ -306,8 +287,7 @@ class CollectionStore(private val database: Database) {
 
         private const val SELECT_COLLECTIONS =
             "SELECT id, name, description, ocr_languages, lifecycle, created_at, updated_at, " +
-                "ocr_engine, ocr_import_mode, ocr_transcription_profile_id, ocr_review_profile_id, " +
-                "ocr_external_page_limit FROM collections"
+                "ocr_engine, ocr_transcription_profile_id FROM collections"
 
         /**
          * The same columns plus a document count, joined and grouped so one round trip answers the
@@ -316,8 +296,7 @@ class CollectionStore(private val database: Database) {
          */
         private const val SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT =
             "SELECT c.id, c.name, c.description, c.ocr_languages, c.lifecycle, c.created_at, " +
-                "c.updated_at, c.ocr_engine, c.ocr_import_mode, c.ocr_transcription_profile_id, " +
-                "c.ocr_review_profile_id, c.ocr_external_page_limit, COUNT(d.id) AS document_count " +
+                "c.updated_at, c.ocr_engine, c.ocr_transcription_profile_id, COUNT(d.id) AS document_count " +
                 "FROM collections c LEFT JOIN documents d ON d.collection_id = c.id GROUP BY c.id"
     }
 }

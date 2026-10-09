@@ -110,24 +110,19 @@ class IgnorePatternsRoutesTest {
     }
 
     @Test
-    fun `an import snapshots the list it was admitted with and a later edit does not change it`() = runBlocking {
+    fun `an import freezes the previewed file set when ignore patterns later change`() = runBlocking {
         harness.createCollection("Notes", Credential.BEARER)
         val id = harness.collectionIdOf("Notes")
         val source = dataDir.resolve("a.txt")
         Files.writeString(source, "text")
         write(id, """{"patterns":["*.bak"]}""")
 
-        val accepted = harness.request(
-            HttpMethod.Post,
-            "/api/imports",
-            body = """{"collection":"Notes","paths":["$source"]}""",
-            credential = Credential.BEARER,
-        )
+        val accepted = harness.previewAndStartImport("Notes", listOf(source.toString()))
         assertEquals(HttpStatusCode.Accepted, accepted.status, accepted.bodyAsText())
         write(id, """{"patterns":["*.other"]}""")
 
         val payload = ImportJobPayload.decode(harness.context.jobs.list(100).single().payload)
-        assertEquals(listOf("*.bak"), payload.ignore.patterns)
+        assertEquals(listOf(source.toRealPath().toString()), payload.confirmedSources?.map { it.path })
         assertEquals(listOf("*.other"), read(id))
     }
 

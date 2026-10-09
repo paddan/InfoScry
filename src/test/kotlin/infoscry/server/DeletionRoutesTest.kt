@@ -61,12 +61,7 @@ class DeletionRoutesTest {
         val id = createCollection("Nightfall")
         val source = dataDir.resolve("nightfall.txt")
         Files.writeString(source, "A report.")
-        harness.request(
-            HttpMethod.Post,
-            "/api/imports",
-            body = """{"collection":"$id","paths":["$source"]}""",
-            credential = Credential.BEARER,
-        )
+        harness.previewAndStartImport(id, listOf(source.toString()))
 
         val admitted = harness.admitCollectionDeletion(id, "Nightfall")
         val finished = harness.awaitDeletion(admitted.operationId)
@@ -325,11 +320,9 @@ class DeletionRoutesTest {
 
                 // Admitting an import is a mutation like any other: it must not add work to an archive an
                 // operator has to repair first.
-                val importRefused = server.request(
-                    HttpMethod.Post,
-                    "/api/imports",
-                    body = """{"collection":"Elsewhere","paths":["$blockedDir/nightfall.txt"]}""",
-                    credential = Credential.BEARER,
+                val importRefused = server.previewAndStartImport(
+                    "Elsewhere",
+                    listOf(blockedDir.resolve("nightfall.txt").toString()),
                 )
 
                 assertEquals(HttpStatusCode.Conflict, importRefused.status, importRefused.bodyAsText())

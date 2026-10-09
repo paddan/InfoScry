@@ -41,12 +41,11 @@ describe('stageForReader', () => {
     expect(stageForReader('RUNNING', 'extract')).toBe('extract');
   });
 
-  it('shows no stage for a finished job, except the wait for an approval that ended the attempt', () => {
+  it('shows no stage for a finished job', () => {
     expect(stageForReader('COMPLETE', 'queue')).toBeNull();
     expect(stageForReader('COMPLETE', 'index')).toBeNull();
     expect(stageForReader('FAILED', 'record')).toBeNull();
     expect(stageForReader('CANCELLED', 'copy')).toBeNull();
-    expect(stageForReader('COMPLETE', 'awaiting-approval')).toBe('awaiting-approval');
   });
 
   it('says nothing for a job that never reported a stage', () => {

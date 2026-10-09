@@ -401,38 +401,34 @@ class OcrProfileRoutesTest {
     }
 
     @Test
-    fun `a collection names a profile, and a disabled one can no longer be selected`() = runBlocking {
+    fun `a collection retains its saved reading method when the profile is disabled`() = runBlocking {
         val transcriber = create()
         val transcriberId = profileIdOf(transcriber)
-        val reviewer = create(profileBody.replace("Local vision", "Local reviewer"))
-        val reviewerId = profileIdOf(reviewer)
         harness.createCollection("Rescans", Credential.BEARER)
         val collectionId = harness.collectionIdOf("Rescans")
 
         val selected = harness.request(
             HttpMethod.Patch,
             "/api/collections/$collectionId/ocr-languages",
-            body = """{"ocrEngine":"LLM","ocrImportMode":"CHECK_AND_IMPROVE","ocrTranscriptionProfileId":"$transcriberId","ocrReviewProfileId":"$reviewerId","ocrExternalPageLimit":25}""",
+            body = """{"language":"swe","defaultMethod":"llm:$transcriberId"}""",
             credential = Credential.CSRF,
         )
 
         assertEquals(HttpStatusCode.OK, selected.status, selected.bodyAsText())
         assertContains(selected.bodyAsText(), "\"ocrEngine\":\"LLM\"")
-        assertContains(selected.bodyAsText(), "\"ocrExternalPageLimit\":25")
 
-        harness.request(HttpMethod.Delete, "/api/ocr/profiles/$reviewerId", credential = Credential.CSRF)
-        val namingDisabled = harness.request(
+        harness.request(HttpMethod.Delete, "/api/ocr/profiles/$transcriberId", credential = Credential.CSRF)
+        val selectingDisabled = harness.request(
             HttpMethod.Patch,
             "/api/collections/$collectionId/ocr-languages",
-            body = """{"ocrEngine":"LLM","ocrTranscriptionProfileId":"$transcriberId","ocrReviewProfileId":"$reviewerId"}""",
+            body = """{"defaultMethod":"llm:$transcriberId"}""",
             credential = Credential.CSRF,
         )
 
-        assertEquals(HttpStatusCode.BadRequest, namingDisabled.status, namingDisabled.bodyAsText())
-        assertContains(namingDisabled.bodyAsText(), "INVALID_REQUEST")
-        // The refused edit changed nothing: the collection still carries the reviewer it selected.
+        assertEquals(HttpStatusCode.OK, selectingDisabled.status, selectingDisabled.bodyAsText())
+        // Repeating the stored method is idempotent even after its profile becomes unavailable.
         val unchanged = harness.get("/api/collections").bodyAsText()
-        assertContains(unchanged, "\"ocrReviewProfileId\":\"$reviewerId\"")
+        assertContains(unchanged, "\"ocrTranscriptionProfileId\":\"$transcriberId\"")
     }
 
     @Test
@@ -741,8 +737,7 @@ class OcrProfileRoutesTest {
         val profileId = profileIdOf(fromLlm(llm.id))
         val settings = infoscry.ocr.CollectionOcrSettings(
             language = "eng",
-            engine = infoscry.ocr.OcrEngine.LLM,
-            transcriptionProfileId = profileId,
+            defaultMethod = infoscry.ocr.ReadingMethod.Llm(profileId),
         )
         val admitted = harness.context.ocr.snapshotFor(settings, extractorVersion = "test")
 
@@ -766,8 +761,7 @@ class OcrProfileRoutesTest {
         val pinnedRevision = revisionIdOf(copy)
         val settings = infoscry.ocr.CollectionOcrSettings(
             language = "eng",
-            engine = infoscry.ocr.OcrEngine.LLM,
-            transcriptionProfileId = profileId,
+            defaultMethod = infoscry.ocr.ReadingMethod.Llm(profileId),
         )
         val admitted = harness.context.ocr.snapshotFor(settings, extractorVersion = "test")
         assertEquals(pinnedRevision, admitted.transcriptionProfileRevisionId)

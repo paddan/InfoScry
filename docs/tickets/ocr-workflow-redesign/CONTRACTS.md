@@ -109,6 +109,9 @@ Response 200:
   import job uses (`enumerate` in `ImportJobHandler`, exposed for sharing).
 - `estimatedCostUsd` is null with a `costBasis` string when no price is known; both are
   null for local methods.
+- If any external file has an unknown page count, `estimatedCostUsd` is null and
+  `costBasis` says the page count is unknown, even when the profile has prices. A
+  known-page subtotal is not an estimate of the approved full file set.
 - Errors: unknown collection 404; bad method id 400; method not available 409 with
   code `METHOD_UNAVAILABLE` **(chosen)** and the `unavailableReason` as message.
 - `PageCounter` **(chosen name)**: `interface PageCounter { fun pageCount(path: Path): Int? }`
@@ -133,23 +136,40 @@ language, or the file set changes; it does not depend on `paths` ordering.
 ## 5. `POST /api/imports` (ticket 06)
 
 `ImportRequest` gains `method: String`, `previewHash: String`, `requestId: String`
-(all required for new clients). Behavior:
+(all required for new clients), and `restartStopped: Boolean` (optional, defaults to
+false). Behavior:
 
 1. Parse `method` (400 on a bad id), require it available (409 `METHOD_UNAVAILABLE`).
 2. Recompute `hashOf`; mismatch with `previewHash` is 409 with code `PREVIEW_STALE` and
    message `The files changed; review the summary again.` Nothing is queued.
-3. Build the OCR settings snapshot from the method with `externalPageLimit` = the
-   previewed `totalPages` for an external method and `0` for a local one.
+3. Bind the job payload to the exact confirmed source manifest (path, byte size and
+   SHA-256); the handler validates it before queuing or copying and checks the
+   managed copy again before reading. For an external method with known page counts,
+   set `externalPageLimit` to the previewed `totalPages`. If any count is unknown,
+   set the numeric limit to `0` and snapshot `externalConfirmedSourceScope = true`.
+   That flag grants all pages only for the unchanged manifest attached to this
+   import; the dispatcher ignores it without that verified manifest. This is the
+   owner's explicit approval of every page in the named unchanged files, not an
+   unbounded approval of files added later.
 4. Idempotence: same `requestId` and same body returns the job that exists (same
    response shape as a fresh start); same `requestId` with a different body is 409
    with code `REQUEST_ID_CONFLICT` **(chosen)**. A concurrent double submit creates one job.
+   `restartStopped` is false for HTTP/browser callers, preserving strict replay. The
+   CLI opts in with true: it returns an existing QUEUED, RUNNING or COMPLETE job, but
+   when the mapped import job is FAILED or CANCELLED it atomically creates one new
+   import job and updates the request mapping to that job. Concurrent/repeated submits
+   converge on the replacement; a later submit after that replacement itself fails or
+   is cancelled may start its next attempt. Interrupted RUNNING jobs are reset to
+   QUEUED at process startup and therefore resume the existing job.
 
 Storage **(open, default adopted):** table `start_requests(request_id TEXT PRIMARY KEY,
 kind TEXT NOT NULL, body_hash TEXT NOT NULL, job_id TEXT NOT NULL, created_at TEXT NOT NULL)`
 created with `CREATE TABLE IF NOT EXISTS` by `StartRequestStore` in
 `src/main/kotlin/infoscry/storage/StartRequestStore.kt`, with
-`fun claim(requestId, kind, bodyHash, create: () -> JobId): ClaimResult` (insert-then-read
-inside one transaction). Created by the first of tickets 06 and 11 to land; the other reuses it.
+`fun claim(requestId, kind, bodyHash, create: () -> JobId): JobId` retains strict
+replay; the import-only overload also accepts `restartStopped: Boolean` and performs
+terminal replacement inside the same transaction. Created by the first of tickets 06
+and 11 to land; the other reuses it.
 
 ## 6. Run failure codes
 
@@ -185,7 +205,11 @@ No start response may ever say a run "waits for approval", "has pages to review"
 `POST /api/collections/{id}/documents/retry`: the existing body plus optional
 `method: String` (omitted = the failed run's method) and `requestId: String`.
 Retrying a document with pages committed under the same fingerprint reads only the
-remaining pages. Repeating the same `requestId` and body returns the same job.
+remaining pages. Repeating the same `requestId` and body returns the same job. A
+retry without a new method may preserve `externalConfirmedSourceScope` only from
+the original snapshot and only while the immutable managed document still matches
+its recorded SHA-256. An explicit new external method does not inherit that scope;
+it needs a known page count for a numeric allowance.
 
 ## 9. Snapshot, READ_ALL and fingerprint (ticket 07)
 
@@ -294,7 +318,6 @@ Repeating Start/Retry/Cancel returns the current state, not an error.
 Fake providers, temp data dirs, redistributable fixtures only. Backend:
 `./gradlew test -PskipFrontend --tests '<class>'`. Frontend: `(cd web && npm test -- --run && npm run check)`.
 Run the failing tests first and see them fail for the stated reason before implementing.
-Run `./gradlew check` before reporting done. Do not commit; do not touch unrelated working-tree
-changes (the tree has uncommitted edits in `RescanService.kt`, `RescanJobHandlerTest.kt`,
-`CollectionsPanel.svelte`, `DocumentRescan.svelte`, `OcrChoiceFields.svelte`, `ocrRescan.ts`:
-read them first and build on them).
+Run `./gradlew check` before reporting done. Workers do not commit; the primary agent
+reviews and commits the complete change under the explicitly invoked implementation
+workflow. Preserve unrelated working-tree changes; implementation began on a clean checkout.

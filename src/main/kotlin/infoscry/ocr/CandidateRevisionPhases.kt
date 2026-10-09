@@ -29,7 +29,6 @@ import java.nio.file.Path
 internal data class StagedCandidatePage(
     val text: String,
     val approval: PageApproval,
-    val disposition: PublicationDisposition,
     val confidence: Double?,
     val artifactRelativePath: String?,
     val artifactSha256: String?,
@@ -90,84 +89,26 @@ internal class CandidateRevisionPhases(
      *
      * With a reviewer configured, the first three rules are the whole decision, and nothing changes for it.
      */
-    fun acceptedPageOf(
-        page: RescanPage,
-        reading: OcrPageResult,
-        review: PageReview?,
-        reviewerConfigured: Boolean,
-    ): StagedCandidatePage {
+    fun acceptedPageOf(page: RescanPage, reading: OcrPageResult): StagedCandidatePage {
         val baseline = page.baseline
-        if (!reviewerConfigured) {
-            val baselineText = baseline?.extractedText
-            return if (baseline != null && !baselineText.isNullOrBlank() && baselineText == reading.text) {
-                StagedCandidatePage(
-                    text = baseline.extractedText,
-                    approval = PageApproval.APPROVED,
-                    disposition = PublicationDisposition.KEEP,
-                    confidence = baseline.meanConfidence,
-                    artifactRelativePath = baseline.artifactRelativePath,
-                    artifactSha256 = baseline.artifactSha256,
-                )
-            } else {
-                StagedCandidatePage(
-                    text = reading.text,
-                    approval = PageApproval.APPROVED,
-                    disposition = PublicationDisposition.APPROVE,
-                    confidence = reading.meanConfidence,
-                    artifactRelativePath = reading.artifactRelativePath,
-                    artifactSha256 = reading.artifactSha256,
-                )
-            }
-        }
-        val disposition = review?.disposition ?: deterministicDisposition(page, reading)
-        return when {
-            disposition == PublicationDisposition.KEEP && baseline != null -> StagedCandidatePage(
-                text = baseline.extractedText,
+        val baselineText = baseline?.extractedText
+        return if (baseline != null && !baselineText.isNullOrBlank() && baselineText == reading.text) {
+            StagedCandidatePage(
+                text = baselineText,
                 approval = PageApproval.APPROVED,
-                disposition = disposition,
                 confidence = baseline.meanConfidence,
                 artifactRelativePath = baseline.artifactRelativePath,
                 artifactSha256 = baseline.artifactSha256,
             )
-
-            disposition == PublicationDisposition.APPROVE && baseline != null -> StagedCandidatePage(
+        } else {
+            StagedCandidatePage(
                 text = reading.text,
                 approval = PageApproval.APPROVED,
-                disposition = disposition,
-                confidence = reading.meanConfidence,
-                artifactRelativePath = reading.artifactRelativePath,
-                artifactSha256 = reading.artifactSha256,
-            )
-
-            else -> StagedCandidatePage(
-                text = reading.text,
-                approval = PageApproval.PENDING,
-                disposition = PublicationDisposition.PROPOSE,
                 confidence = reading.meanConfidence,
                 artifactRelativePath = reading.artifactRelativePath,
                 artifactSha256 = reading.artifactSha256,
             )
         }
-    }
-
-    /**
-     * What the deterministic checks decide when a reviewer is configured but produced no decision for a page.
-     *
-     * An identical non-empty pair keeps the text: there is nothing to replace, and nobody has to confirm that
-     * a page still says what it said. Everything else is a proposal, because replacing text without a person
-     * is what pilot mode does not do. A rescan with no reviewer configured never reaches this rule; see
-     * [acceptedPageOf].
-     */
-    private fun deterministicDisposition(page: RescanPage, reading: OcrPageResult): PublicationDisposition {
-        val baselineText = page.baseline?.extractedText
-        if (baselineText != null && baselineText.isNotBlank() && baselineText == reading.text) {
-            return PublicationDisposition.KEEP
-        }
-        return OcrDecisionPolicy().disposition(
-            diagnostics = PageDiagnostics.of(baselineText, reading.text),
-            recommendation = ReviewerRecommendation.UNCERTAIN,
-            scope = ReviewerScope(reviewerRevisionId = NO_REVIEWER, reviewPromptVersion = 1),
-        )
     }
 
     /** One staged page, in the form the revision store takes it. */
@@ -325,7 +266,6 @@ internal class CandidateRevisionPhases(
         // keeps no operation publishes its reading through the service itself and records the outcome on
         // its own document instead.
         val store = requireNotNull(operations) { "a publication recorded against an operation names its store" }
-        val pending = revisions.pages(candidate).count { page -> page.approval == PageApproval.PENDING }
         val publicationId = try {
             publication.publish(
                 documentId = operation.documentId,
@@ -352,18 +292,13 @@ internal class CandidateRevisionPhases(
         stage.run(STAGE_RECORD) {
             store.recordProgress(
                 operationId = operation.operationId,
-                pendingReview = pending,
+                pendingReview = 0,
             )
             store.finish(
                 operationId = operation.operationId,
-                stage = OcrOperationStage.COMPLETE,
-                errorCode = if (published) null else (intent?.errorCode ?: AWAITING_REVIEW_CODE),
-                errorMessage = if (published) {
-                    null
-                } else {
-                    intent?.errorMessage ?: "$pending page(s) of the replacement are waiting for a decision, " +
-                        "so the document still shows its published text"
-                },
+                stage = if (published) OcrOperationStage.COMPLETE else OcrOperationStage.FAILED,
+                errorCode = if (published) null else (intent?.errorCode ?: PUBLICATION_REFUSED),
+                errorMessage = if (published) null else (intent?.errorMessage ?: PUBLICATION_REFUSED_MESSAGE),
             )
         }
         return published
@@ -375,11 +310,8 @@ private const val STAGE_CHUNK = "chunk"
 private const val STAGE_EMBED = "embed"
 private const val STAGE_RECORD = "record"
 
-/** The reviewer revision a deterministic decision names when the attempt has no reviewer at all. */
-private const val NO_REVIEWER = "no-reviewer"
-
-/** The code a candidate that did not become the document's text leaves behind when it named none of its own. */
-private const val AWAITING_REVIEW_CODE = "AWAITING_REVIEW"
+private const val PUBLICATION_REFUSED = "PUBLICATION_REFUSED"
+private const val PUBLICATION_REFUSED_MESSAGE = "the replacement was not published; the existing text is unchanged"
 
 /** The code a publication that could not publish at all ends the operation with. */
 private const val PUBLICATION_FAILED = "PUBLICATION_FAILED"

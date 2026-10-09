@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { continueInvestigation, getCollectionDocumentSummary, listOcrProfiles, readInvestigationEvents, readSource, startInvestigation } from './api';
+import { ApiError, continueInvestigation, createCollection, getCollectionDocumentSummary, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -24,6 +24,57 @@ describe('readInvestigationEvents', () => {
     expect(events.map((event) => event.type)).toEqual(['started', 'limit', 'answer-start', 'delta', 'done']);
     expect(events[1]).toEqual({ type: 'limit', code: 'MAX_ROUNDS', message: 'Tool round limit reached.' });
     expect(events[2]).toEqual({ type: 'answer-start' });
+  });
+});
+
+describe('collection response decoding', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('adapts the backend collection JSON for list, create, rename and OCR settings responses', async () => {
+    // This is the current serialized `domain.Collection`: old persisted fields are still on the wire.
+    const backendJson = {
+      id: 'archive-1', name: 'Archive', ocrLanguages: 'swe+eng', ocrEngine: 'LLM',
+      ocrImportMode: 'FILL_MISSING', ocrTranscriptionProfileId: 'vision-7',
+      ocrReviewProfileId: null, ocrExternalPageLimit: 4,
+      createdAt: '2026-10-08T10:00:00Z', updatedAt: '2026-10-08T10:00:00Z',
+      description: null, lifecycle: 'ACTIVE', documentCount: 3,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/collections' && init?.method !== 'POST') {
+        return new Response(JSON.stringify({ collections: [backendJson] }), { status: 200 });
+      }
+      if (String(input) === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-test' }), { status: 200 });
+      return new Response(JSON.stringify({ collection: backendJson }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const expected = {
+      id: 'archive-1', name: 'Archive', language: 'swe+eng', defaultMethod: 'llm:vision-7',
+      createdAt: '2026-10-08T10:00:00Z', updatedAt: '2026-10-08T10:00:00Z',
+      description: null, lifecycle: 'ACTIVE', documentCount: 3,
+    };
+    expect(await listCollections()).toEqual([expected]);
+    expect(await createCollection('Archive')).toEqual(expected);
+    expect(await renameCollection('archive-1', 'Archive')).toEqual(expected);
+    expect(await updateCollectionOcrSettings('archive-1', { language: 'eng', defaultMethod: 'surya' })).toEqual(expected);
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/collections');
+    expect(fetchMock).toHaveBeenCalledWith('/api/collections', expect.objectContaining({ method: 'POST' }));
+    expect(fetchMock).toHaveBeenCalledWith('/api/collections/archive-1', expect.objectContaining({ method: 'PATCH' }));
+    expect(fetchMock).toHaveBeenCalledWith('/api/collections/archive-1/ocr-languages', expect.objectContaining({ method: 'PATCH' }));
+  });
+
+  it('uses the stored engine when a profile is absent or does not belong to that engine', async () => {
+    const legacyRows = [
+      { id: 'surya', name: 'Surya', ocrLanguages: 'eng', ocrEngine: 'SURYA', ocrTranscriptionProfileId: 'stale', createdAt: '', updatedAt: '', lifecycle: 'ACTIVE', documentCount: 0 },
+      { id: 'llm-no-profile', name: 'Local fallback', ocrLanguages: 'eng', ocrEngine: 'LLM', ocrTranscriptionProfileId: null, createdAt: '', updatedAt: '', lifecycle: 'ACTIVE', documentCount: 0 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ collections: legacyRows }), { status: 200 })));
+    const collections = await listCollections();
+    expect(collections.map(({ id, language, defaultMethod }) => ({ id, language, defaultMethod }))).toEqual([
+      { id: 'surya', language: 'eng', defaultMethod: 'surya' },
+      { id: 'llm-no-profile', language: 'eng', defaultMethod: 'tesseract' },
+    ]);
   });
 });
 
@@ -120,5 +171,48 @@ describe('listOcrProfiles', () => {
     expect(profile.apiKeyEnvironmentVariable).toBeNull();
     expect(profile.imageCapabilityMeasured).toBeNull();
     expect(profile.imageCapabilityCheckedAt).toBeNull();
+  });
+});
+
+describe('reading workflow requests', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses the pinned method routes and sends the chosen method and idempotency keys unchanged', async () => {
+    const calls: { url: string; body?: unknown }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/session') return { ok: true, status: 200, text: async () => JSON.stringify({ csrfToken: 'token' }) } as Response;
+      calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      const body = url.includes('reading-methods') ? { methods: [], default: 'surya' }
+        : url === '/api/imports/preview' ? { files: [], totalPages: 3, atLeast: false, destination: 'this machine', external: false, estimatedCostUsd: null, costBasis: null, previewHash: 'hash' }
+          : url.includes('/ocr/preview') ? { previewId: 'preview', pageTotal: 3, externalPageUpperBound: 3 }
+            : url === '/api/imports' ? { job: { id: 'job-1' } }
+              : { operationId: 'op-1' };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) } as Response;
+    }));
+
+    await listReadingMethods('a/b');
+    const request = { collection: 'c', paths: ['/a.pdf'], recursive: true, include: ['pdf'], exclude: [], method: 'surya' };
+    await previewImport(request);
+    await startImport({ ...request, previewHash: 'hash', requestId: 'request-1' });
+    await previewRescan('c', 'd/1', 'llm:p1');
+    await startRescan('c', 'd/1', { previewId: 'p', requestId: 'request-2' });
+
+    expect(calls).toEqual([
+      { url: '/api/collections/a%2Fb/reading-methods', body: undefined },
+      { url: '/api/imports/preview', body: request },
+      { url: '/api/imports', body: { ...request, previewHash: 'hash', requestId: 'request-1' } },
+      { url: '/api/collections/c/documents/d%2F1/ocr/preview', body: { method: 'llm:p1' } },
+      { url: '/api/collections/c/documents/d%2F1/ocr/rescan', body: { previewId: 'p', requestId: 'request-2' } },
+    ]);
+  });
+
+  it('surfaces a stale preview conflict as PREVIEW_STALE', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/session') return { ok: true, status: 200, text: async () => JSON.stringify({ csrfToken: 'token' }) } as Response;
+      return { ok: false, status: 409, statusText: 'Conflict', text: async () => JSON.stringify({ error: { code: 'PREVIEW_STALE', message: 'The files changed; review the summary again.' } }) } as Response;
+    }));
+    await expect(startImport({ collection: 'c', paths: [], recursive: false, include: [], exclude: [], method: 'tesseract', previewHash: 'old', requestId: 'id' }))
+      .rejects.toMatchObject({ code: 'PREVIEW_STALE' });
   });
 });

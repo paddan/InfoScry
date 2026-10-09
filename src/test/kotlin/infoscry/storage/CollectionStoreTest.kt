@@ -2,6 +2,8 @@ package infoscry.storage
 
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.ocr.CollectionOcrSettings
+import infoscry.ocr.ReadingMethod
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -80,7 +82,10 @@ class CollectionStoreTest {
                 store.create("Another", ocrLanguages = languages)
             }
             assertFailsWith<IllegalArgumentException>("store accepted '$languages'") {
-                store.updateOcrLanguages(created.id, languages)
+                store.updateOcrSettings(
+                    created.id,
+                    CollectionOcrSettings(language = languages, defaultMethod = ReadingMethod.Tesseract),
+                )
             }
         }
 

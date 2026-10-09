@@ -1,6 +1,6 @@
 # 08: Rescan preview and admission take a method
 
-**Status:** Not started
+**Status:** Implemented; automated gates passed (2026-10-09). See [verification record](STATUS.md#verification-record).
 **Blocked by:** None for logic. It uses `ReadingMethod.kt` (CONTRACTS section 1) and `ReadingMethodCatalog.require` (build against a fake until ticket 03 lands; the real reason strings come from 03).
 **Plan:** [OCR workflow redesign, Task 8](../../plans/2026-10-08-ocr-workflow-redesign.md). Read first: this ticket, [CONTRACTS.md](CONTRACTS.md) (sections 1, 7, 12, 13), `AGENTS.md`, the [spec](../../specs/2026-10-08-ocr-workflow-redesign.md) ("Preview").
 
@@ -29,13 +29,13 @@ path still uses; ticket 11 finishes that).
 - Modify `src/main/kotlin/infoscry/document/RescanService.kt` (`preview` :436, `admitRescan`, `withOverrides` ~:1700, `requirePreviewStillCurrent`; uncommitted edits exist: read and keep them), `src/main/kotlin/infoscry/server/OcrRoutes.kt` (`RescanPreviewRequest` :35).
 - Test `src/test/kotlin/infoscry/jobs/RescanJobHandlerTest.kt`.
 
-## Test-first implementation
+## Original test-first implementation plan
 
-- [ ] Write failing tests: previewing with each method yields a consistent snapshot; an LLM method without an available profile is refused with the reason from the catalog; admission is idempotent per request id; a changed profile revision between preview and admit raises `StaleRescanPreviewException`.
-- [ ] Run; expect FAIL.
-- [ ] Idempotence/restart: admit twice with the same id gives one operation; admission interrupted before commit leaves no operation and the repeat succeeds; preview twice gives equal results and writes no operation.
-- [ ] Implement; delete the override merging and its helpers.
-- [ ] Run `infoscry.jobs.Rescan*`, `infoscry.document.*`, `infoscry.server.Ocr*`; expect PASS.
+- Write failing tests: previewing with each method yields a consistent snapshot; an LLM method without an available profile is refused with the reason from the catalog; admission is idempotent per request id; a changed profile revision between preview and admit raises `StaleRescanPreviewException`.
+- Run; expect FAIL.
+- Idempotence/restart: admit twice with the same id gives one operation; admission interrupted before commit leaves no operation and the repeat succeeds; preview twice gives equal results and writes no operation.
+- Implement; delete the override merging and its helpers.
+- Run `infoscry.jobs.Rescan*`, `infoscry.document.*`, `infoscry.server.Ocr*`; expect PASS.
 
 ## Focused verification
 

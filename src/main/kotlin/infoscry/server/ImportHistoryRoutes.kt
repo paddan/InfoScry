@@ -35,9 +35,6 @@ data class ImportHistoryEntry(
     val updatedAt: String,
     /** The persisted per-file outcomes of this import, on the existing job-items route. */
     val itemsUrl: String,
-    /** The approval this import waits for, present only while it is paused for external pages. */
-    @EncodeDefault(EncodeDefault.Mode.NEVER)
-    val externalApproval: ExternalApprovalView? = null,
 )
 
 /** A page of one collection's imports plus the total the same criteria match. */
@@ -98,7 +95,6 @@ private fun Job.toImportHistoryEntry(context: AppContext) = ImportHistoryEntry(
     createdAt = createdAt,
     updatedAt = updatedAt,
     itemsUrl = "$JOB_ITEMS_PATH_PREFIX/${id.value}/items",
-    externalApproval = context.externalApprovalOf(this),
 )
 
 /** How many imports one page returns when the caller does not ask for a size. */

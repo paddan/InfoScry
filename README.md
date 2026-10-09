@@ -42,10 +42,19 @@ which may be an external service.
 ## Project status
 
 Implementation is in progress. The backend, CLI and web reader exist;
-Collections, Search, Investigate and the OCR panels have browser acceptance against local test doubles.
-Ask browser acceptance and the format-specific source-viewer finish line remain
-open. See [implementation status](docs/implementation-status.md) for the
-verification boundaries.
+Collections, Search and Investigate have browser acceptance against local test doubles.
+The [OCR workflow redesign](docs/specs/2026-10-08-ocr-workflow-redesign.md) adds a
+confirmed reading method for every import and rescan, reads every page and publishes
+a complete reading automatically while keeping previous text in history. Its new
+browser gate passes against local test doubles. Ask browser acceptance and the format-specific
+source-viewer finish line remain open. See [implementation status](docs/implementation-status.md)
+for recorded checks.
+
+Real OCR providers and real CoreML are separate manual gates. Before treating the
+redesigned OCR workflow as verified on a real archive, check local Tesseract/Surya,
+a confirmed external OCR profile, page totals and cost/destination summaries,
+cancellation and restart, preserved old text on failure, and History → Restore with
+real GPU embeddings. Automated fake-provider tests do not establish OCR quality.
 
 The project targets local use on macOS arm64. CI, distributable packaging and
 public or multi-user hosting are outside the current scope.

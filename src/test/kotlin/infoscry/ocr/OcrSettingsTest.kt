@@ -33,9 +33,8 @@ import kotlinx.serialization.json.Json
  * edit must not change.
  *
  * The reuse rules are the point of this file. A transcription fingerprint decides whether committed
- * page text may be reused and a review fingerprint decides whether a comparison may be reused; the two
- * must not invalidate each other, or a reviewer change would redo OCR and an OCR change would silently
- * accept an old comparison. The pinned digests are the other half: settings that name no OCR attempt
+ * page text may be reused, and method/runtime changes must invalidate it. The pinned digests are the other
+ * half: settings that name no OCR attempt
  * have to hash exactly as they did before OCR attempts existed, so checkpoints and queued jobs written
  * by the previous build keep matching.
  */
@@ -191,44 +190,16 @@ class OcrSettingsTest {
     }
 
     @Test
-    fun `changing the reviewer changes the review fingerprint and leaves transcription alone`() {
-        val snapshot = snapshotFor(engine = OcrEngine.LLM, withReviewer = true)
-        val reviewProfileRevisionId = snapshot.reviewProfileRevisionId!!
-        val reReviewed = snapshot.copy(reviewProfileRevisionId = "reviewer-revision-b")
+    fun `new collection settings always snapshot the read-all page mode`() {
+        val settings = CollectionOcrSettings("eng", ReadingMethod.Tesseract)
+        val first = OcrSettingsSnapshot.of(settings, extractorVersion = "1")
+        val repeated = OcrSettingsSnapshot.of(settings, extractorVersion = "1")
 
-        assertNotEquals(
-            reviewFingerprint(reviewerRevision = reviewProfileRevisionId),
-            reviewFingerprint(reviewerRevision = "reviewer-revision-b"),
-            "a different reviewer revision is a different comparison",
-        )
-        assertNotEquals(
-            reviewFingerprint(reviewerRevision = reviewProfileRevisionId, prompt = OCR_REVIEW_PROMPT_VERSION + 1),
-            reviewFingerprint(reviewerRevision = reviewProfileRevisionId),
-            "another review prompt is another comparison",
-        )
-        assertNotEquals(
-            reviewFingerprint(reviewerRevision = reviewProfileRevisionId, policy = OCR_POLICY_VERSION + 1),
-            reviewFingerprint(reviewerRevision = reviewProfileRevisionId),
-            "another policy version is another comparison",
-        )
+        assertEquals(OcrImportMode.READ_ALL, first.mode)
         assertEquals(
-            reviewFingerprint(reviewerRevision = reviewProfileRevisionId),
-            reviewFingerprint(reviewerRevision = reviewProfileRevisionId),
-            "the same inputs always hash the same",
-        )
-
-        assertEquals(
-            snapshot.attemptIdentity(),
-            reReviewed.attemptIdentity(),
-            "no reviewer field reaches the attempt identity",
-        )
-        assertEquals(
-            ExtractionFingerprint.of("d".repeat(64), ExtractionSettings("eng", ocrAttempt = snapshot.attemptIdentity())),
-            ExtractionFingerprint.of(
-                "d".repeat(64),
-                ExtractionSettings("eng", ocrAttempt = reReviewed.attemptIdentity()),
-            ),
-            "a reviewer edit must not invalidate compatible transcription",
+            ExtractionFingerprint.of("8".repeat(64), ExtractionSettings("eng", ocrAttempt = first.attemptIdentity())),
+            ExtractionFingerprint.of("8".repeat(64), ExtractionSettings("eng", ocrAttempt = repeated.attemptIdentity())),
+            "new starts use the same all-page policy rather than a removed collection mode",
         )
     }
 
@@ -312,10 +283,6 @@ class OcrSettingsTest {
         assertFailsWith<IllegalArgumentException> {
             OcrTranscriptionFingerprint.of("doc-1", "unit-1", 0, second)
         }
-        // The review fingerprint composes its fields the same way, so the same guard has to cover it too.
-        assertFailsWith<IllegalArgumentException> {
-            reviewFingerprint("reviewer-1", candidate = "shot\npolicy=2")
-        }
     }
 
     @Test
@@ -386,23 +353,11 @@ class OcrSettingsTest {
         )
     }
 
-    @Test
-    fun `a candidate or baseline change invalidates only the review`() {
-        val baseline = reviewFingerprint(reviewerRevision = "reviewer-revision-a")
-
-        assertNotEquals(baseline, reviewFingerprint(reviewerRevision = "reviewer-revision-a", candidate = "shot-2"))
-        assertNotEquals(
-            baseline,
-            reviewFingerprint(reviewerRevision = "reviewer-revision-a", baselineRevisionId = null),
-            "a page with no baseline is not the same comparison",
-        )
-    }
-
     // ---- The snapshot ----
 
     @Test
     fun `a snapshot round trips with every field the attempt records`() {
-        val snapshot = snapshotFor(engine = OcrEngine.LLM, withReviewer = true)
+        val snapshot = snapshotFor(engine = OcrEngine.LLM)
         val json = Json { encodeDefaults = true }
 
         assertEquals(
@@ -434,8 +389,7 @@ class OcrSettingsTest {
         val transcriber = profiles.create("Transcriber", draft(model = "vision-1"), enabled = true)
         val settings = CollectionOcrSettings(
             language = "eng",
-            engine = OcrEngine.LLM,
-            transcriptionProfileId = transcriber.id,
+            defaultMethod = ReadingMethod.Llm(transcriber.id),
         )
         val admitted = profiles.snapshotFor(settings, extractorVersion = "1")
 
@@ -459,7 +413,7 @@ class OcrSettingsTest {
     fun `admission records the runtime the engine reports and the queued job carries it`() {
         val probe = RuntimeProbe("surya-ocr 0.22.1 backend llamacpp surya-2.gguf:1")
         val probing = OcrProfileService(store, engineFor = { _, _, _ -> probe })
-        val settings = CollectionOcrSettings(language = "eng", engine = OcrEngine.SURYA)
+        val settings = CollectionOcrSettings(language = "eng", defaultMethod = ReadingMethod.Surya)
 
         val snapshot = runBlocking { probing.withProbedRuntime(probing.snapshotFor(settings, extractorVersion = "1")) }
 
@@ -484,7 +438,7 @@ class OcrSettingsTest {
     fun `a snapshot resolved before a profile is disabled still describes its own reading`() {
         val transcriber = profiles.create("Transcriber", draft(), enabled = true)
         val admitted = profiles.snapshotFor(
-            CollectionOcrSettings(language = "eng", engine = OcrEngine.LLM, transcriptionProfileId = transcriber.id),
+            CollectionOcrSettings(language = "eng", defaultMethod = ReadingMethod.Llm(transcriber.id)),
             extractorVersion = "1",
         )
 
@@ -552,7 +506,7 @@ class OcrSettingsTest {
 
         val profile = listed.single { it.name == "Hand-edited vision" }
         assertEquals("https://vision.example.com/v1", profile.revision.endpoint, "the credential is dropped")
-        assertFalse(profile.enabled, "a repaired address is not selectable until a person reviews it")
+        assertFalse(profile.enabled, "a repaired address is not selectable until it is re-enabled")
         assertFalse(listed.any { it.revision.endpoint.contains(secret) }, "no profile read carries the credential")
         assertEquals(
             "https://vision.example.com/v1",
@@ -582,19 +536,16 @@ class OcrSettingsTest {
     }
 
     @Test
-    fun `a snapshot reads both selected profiles at once and names the slot that is not selectable`() {
+    fun `a snapshot records the selected transcription profile revision`() {
         val transcription = profiles.create("Transcriber", draft(), enabled = true)
-        val reviewer = profiles.create("Reviewer", draft(), enabled = true)
         val settings = CollectionOcrSettings(
             language = "eng",
-            engine = OcrEngine.LLM,
-            transcriptionProfileId = transcription.id,
-            reviewProfileId = reviewer.id,
+            defaultMethod = ReadingMethod.Llm(transcription.id),
         )
 
         assertEquals(
-            setOf(transcription.id, reviewer.id),
-            store.findByIds(listOf(transcription.id, reviewer.id, "missing")).keys,
+            setOf(transcription.id),
+            store.findByIds(listOf(transcription.id, "missing")).keys,
             "one read answers exactly the profiles that exist",
         )
         assertEquals(
@@ -602,19 +553,7 @@ class OcrSettingsTest {
             profiles.snapshotFor(settings, extractorVersion = "1").transcriptionProfileRevisionId,
         )
 
-        // Retired after admission: the next snapshot refuses, and says which of the two slots was wrong
-        // rather than reporting that the first read it happened to make was missing.
-        profiles.disable(reviewer.id)
-        val refusal = assertFailsWith<IllegalArgumentException> {
-            profiles.snapshotFor(settings, extractorVersion = "1")
-        }
-        assertContains(
-            refusal.message ?: "",
-            "review",
-            message = "the refusal names the slot that is not selectable",
-        )
     }
-
     @Test
     fun `a duplicate profile name is refused case-insensitively`() {
         profiles.create("Transcriber", draft(), enabled = true)
@@ -632,7 +571,7 @@ class OcrSettingsTest {
             enabled = true,
         )
         val absent = profiles.create(
-            "Reviewer",
+            "Secondary profile",
             draft(apiKeyEnvironmentVariable = "INFOSCRY_TEST_ABSENT_KEY"),
             enabled = true,
         )
@@ -687,10 +626,8 @@ class OcrSettingsTest {
 
     @Test
     fun `a collection's OCR settings refuse a negative allowance and a mismatched engine`() {
-        assertFailsWith<IllegalArgumentException> { collectionSettings().copy(externalPageLimit = -1) }
         assertFailsWith<IllegalArgumentException> { collectionSettings().copy(language = " ") }
-        assertFailsWith<IllegalArgumentException> { collectionSettings().copy(engine = OcrEngine.LLM) }
-        assertFailsWith<IllegalArgumentException> { collectionSettings().copy(transcriptionProfileId = "profile-a") }
+        assertEquals(ReadingMethod.Tesseract, collectionSettings().defaultMethod)
         assertEquals(
             OcrEndpointScope.EXTERNAL,
             profiles.create("Scoped", draft(endpoint = "https://api.example.com/v1"), enabled = true).revision.scope,
@@ -745,44 +682,26 @@ class OcrSettingsTest {
         apiKeyEnvironmentVariable = apiKeyEnvironmentVariable,
     )
 
-    private fun collectionSettings() = CollectionOcrSettings(language = "eng")
+    private fun collectionSettings() = CollectionOcrSettings(language = "eng", defaultMethod = ReadingMethod.Tesseract)
 
     /** A snapshot of an attempt at one collection's settings, as admission would build it. */
-    private fun snapshotFor(engine: OcrEngine, withReviewer: Boolean = false): OcrSettingsSnapshot {
+    private fun snapshotFor(engine: OcrEngine): OcrSettingsSnapshot {
         profileCount++
         val transcriber = profiles.create("Transcriber $profileCount", draft(), enabled = true)
-        val reviewer = if (withReviewer) profiles.create("Reviewer $profileCount", draft(), enabled = true) else null
         return profiles.snapshotFor(
             CollectionOcrSettings(
                 language = "eng",
-                engine = engine,
-                transcriptionProfileId = transcriber.id.takeIf { engine == OcrEngine.LLM },
-                reviewProfileId = reviewer?.id,
+                defaultMethod = when (engine) {
+                    OcrEngine.TESSERACT -> ReadingMethod.Tesseract
+                    OcrEngine.SURYA -> ReadingMethod.Surya
+                    OcrEngine.LLM -> ReadingMethod.Llm(transcriber.id)
+                },
             ),
             extractorVersion = "1",
             toolVersion = if (engine == OcrEngine.TESSERACT) "tesseract 5.3.0" else null,
             renderDpi = 300,
         )
     }
-
-    private fun reviewFingerprint(
-        reviewerRevision: String,
-        page: String = "1",
-        baselineRevisionId: String? = "document-revision-1",
-        candidate: String = "shot-1",
-        prompt: Int = OCR_REVIEW_PROMPT_VERSION,
-        policy: Int = OCR_POLICY_VERSION,
-    ) = OcrReviewFingerprint.of(
-        documentId = "doc-1",
-        unitId = "unit-$page",
-        ordinal = page.toInt() - 1,
-        baselineRevisionId = baselineRevisionId,
-        baselineTextHash = baselineRevisionId?.let { "baseline-hash-$page" },
-        candidateHash = candidate,
-        reviewProfileRevisionId = reviewerRevision,
-        reviewPromptVersion = prompt,
-        policyVersion = policy,
-    )
 
     @Test
     fun `a collection row written without OCR settings reads back with the defaults`() {
@@ -810,11 +729,7 @@ class OcrSettingsTest {
                 val collection = CollectionStore(reopened).get(CollectionId("c1"))!!
                 assertEquals("deu+eng", collection.ocrLanguages, "a row keeps the languages it was written with")
                 val settings = collection.ocrSettings()
-                assertEquals(OcrEngine.TESSERACT, settings.engine)
-                assertEquals(OcrImportMode.FILL_MISSING, settings.importMode)
-                assertNull(settings.transcriptionProfileId)
-                assertNull(settings.reviewProfileId, "review is explicitly unavailable, never an implicit default")
-                assertEquals(0, settings.externalPageLimit)
+                assertEquals(ReadingMethod.Tesseract, settings.defaultMethod)
 
                 // A payload without OCR attempt state still reads with its own language.
                 val queued = JobStore(reopened).get(JobId("j1"))!!.payload!!

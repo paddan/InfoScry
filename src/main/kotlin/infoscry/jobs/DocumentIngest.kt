@@ -20,9 +20,8 @@ import infoscry.extract.ExtractionSink
 import infoscry.extract.UnitBoundary
 import infoscry.extract.UnsupportedMediaTypeException
 import infoscry.ocr.CandidateRevisionPhases
-import infoscry.ocr.OcrComparisonException
+import infoscry.ocr.ExternalPageAllowanceExceededException
 import infoscry.ocr.OcrSettingsSnapshot
-import infoscry.ocr.StagedPageReview
 import infoscry.search.DocumentRow
 import infoscry.search.LuceneIndex
 import infoscry.storage.CollectionNotActiveException
@@ -51,12 +50,6 @@ internal sealed interface IngestResult {
      * what the document's status is, because only the caller knows what it was before.
      */
     data object NoUnitStore : IngestResult
-
-    /**
-     * The reading was staged for a decision rather than committed as the document's text: its pages are
-     * durable, its approved pages are published, and the document owes a person an answer about the rest.
-     */
-    data object Staged : IngestResult
 
     /** The attempt failed, and [DocumentIngest.ingest]'s reporter has already recorded why. */
     data object Failed : IngestResult
@@ -142,15 +135,6 @@ internal class DocumentIngest(
          * job's twenty files share one, an operation's one document has its own.
          */
         dispatch: infoscry.ocr.OcrDispatchAuthority? = null,
-        /**
-         * How this attempt judges a page it stages for a person's decision, or null when nothing does.
-         *
-         * A staged reading is a proposal, and whether it is worth a person's time is a question about the
-         * page's *two* readings: the engine's and the one the page itself carries. Only the draft knows the
-         * second one, so the comparison happens here, while that draft is in hand — see
-         * [infoscry.ocr.StagedPageReview].
-         */
-        review: infoscry.ocr.StagedPageReview? = null,
         /**
          * The OCR selection this attempt was admitted with, recorded on the revision the reading becomes so
          * the history can say how it was read. Null for an attempt that recorded none.
@@ -241,19 +225,7 @@ internal class DocumentIngest(
                     is ExtractionEvent.Progress -> Unit
                     is ExtractionEvent.UnitReady -> Unit
                 }
-                // A page a check-and-improve attempt stages is judged while its draft is in hand, and
-                // *before* it is staged: the page's own text exists nowhere else, and a review that could
-                // not be made — an unreachable reviewer is not one, it is an uncertain answer — leaves the
-                // page unstaged rather than staged and unjudged, the way a rescan reviews before it
-                // commits. Nothing in the comparison writes a page, so this is not a commit of its own.
-                val judged = if (sink.stagesForReview && event is ExtractionEvent.UnitReady) {
-                    review?.review(document.id, event.key, event.ordinal, event.unit)
-                } else {
-                    null
-                }
-                // The decision is staged with the page, in the same commit: a page approved by a later write
-                // could be staged, lost to an interruption, and skipped as committed on resume, undecided.
-                sink.deliver(document.id, fingerprint, event, judged)
+                sink.deliver(document.id, fingerprint, event)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -267,11 +239,12 @@ internal class DocumentIngest(
             // reference that the deletion has already taken away. The attempt's own record of that is the
             // item's `CANCELLED` disposition, which the caller writes when this exception reaches it.
             throw deleted
-        } catch (waiting: AttemptAwaitingApproval) {
-            // A page would have exceeded the attempt's external scope, so it was not sent. That is not this
-            // document's failure and not a partial reading to keep: the caller ends the attempt in its own
-            // durable waiting state, and the pages this document already committed stay committed.
-            throw waiting
+        } catch (exhausted: ExternalPageAllowanceExceededException) {
+            // The page was refused before dispatch. Persist the named failure on the document and its
+            // import item before letting the job runner fail the attempt; committed earlier units remain
+            // available for a later retry.
+            onFailure("MORE_PAGES_THAN_CONFIRMED", exhausted.message ?: "the run needed more pages than were confirmed")
+            throw exhausted
         } catch (failure: Exception) {
             onFailure(codeFor(failure), failure.message ?: "the extractor failed without a message")
             return IngestResult.Failed
@@ -289,6 +262,13 @@ internal class DocumentIngest(
             return IngestResult.Failed
         }
 
+        if (sink.stagesForReview && lastFailureCode != null) {
+            onFailure(
+                lastFailureCode ?: EXTRACTION_FAILED,
+                "the reading did not finish every page, so the previously published text was kept",
+            )
+            return IngestResult.Failed
+        }
         if (sink.stagesForReview) {
             return publishStagedReading(document, sink, stage, onFailure)
         }
@@ -299,18 +279,11 @@ internal class DocumentIngest(
     }
 
     /**
-     * Makes a reading that was staged for review the document's own text, as far as it has been approved.
+     * Publishes a complete, approved candidate as one replacement of the document's whole text.
      *
-     * An import's staged reading is a candidate like a rescan's, but it is also the document's *first*
-     * reading: there is no published text a partial publication could drop, which is what lets the pages
-     * nobody owes a decision about become searchable while the pages that still owe one keep their
-     * pending-review state and no searchable text at all. Which pages those are is the publication service's
-     * decision — it refuses a reading nobody approved, and publishes the rest — and what this pass
-     * contributes is their passages, their vectors, and the document's own status afterwards.
-     *
-     * A refusal is not a failure of the import: the file was read and its reading is durable, and what the
-     * document owes is a person's decision. Only a refusal about a reading nobody approved at all ends this
-     * way; a publication that refused the reading itself is reported as the failure it is.
+     * The candidate stays separate from the active revision through extraction, chunking and embedding.
+     * Publication uses the candidate's recorded parent, so a retry replaces exactly the version it began
+     * from and a concurrent publication is refused without dropping the existing text.
      */
     private suspend fun publishStagedReading(
         document: Document,
@@ -320,10 +293,17 @@ internal class DocumentIngest(
     ): IngestResult {
         val candidate = sink.candidateRevisionId
         if (candidate == null) {
-            // Nothing was staged, so there is no reading to decide about and nothing to publish: the file
-            // produced no unit at all, and what it owes is still a person's look rather than an index entry.
-            stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.NEEDS_REVIEW) }
-            return IngestResult.Staged
+            // An empty, finished extraction has no candidate to publish. It is terminal, and it never turns
+            // into a request for a person to decide about text that does not exist.
+            stage.run(STAGE_RECORD) {
+                documents.updateStatus(
+                    document.id,
+                    DocumentStatus.COMPLETE_WITH_WARNINGS,
+                    NO_EXTRACTABLE_CONTENT,
+                    "the completed reading produced no pages; the previously published text was kept",
+                )
+            }
+            return IngestResult.Complete
         }
         val embedder = documentEmbedder()
         if (embedder == null) {
@@ -343,7 +323,7 @@ internal class DocumentIngest(
             // exactly what lets the publication service publish the pages it has approved.
             publication.publish(
                 documentId = document.id,
-                baseRevisionId = null,
+                baseRevisionId = revisions.revision(candidate)?.parentRevisionId,
                 candidateRevisionId = candidate,
             )
         } catch (cancelled: CancellationException) {
@@ -361,31 +341,13 @@ internal class DocumentIngest(
         }
         val intent = revisions.intent(publicationId)
         if (intent?.phase != PublicationPhase.PUBLISHED) {
-            // The publication refused in its own words. A reading nobody approved at all is the
-            // pending-review state a person acts on — the status *is* the state, so the document keeps no
-            // error code for it — while a refusal for any other reason (passages that are not complete
-            // enough to index) is this file's failure rather than a decision somebody owes.
+            // A complete reading is either published as a whole or leaves the prior revision active.
             val code = intent?.errorCode
-            if (code != RevisionPublicationService.AWAITING_REVIEW_CODE) {
-                onFailure(
-                    code ?: EMBEDDING_FAILED,
-                    intent?.errorMessage ?: "the staged reading could not be published",
-                )
-                return IngestResult.Failed
-            }
-            stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.NEEDS_REVIEW) }
-            return IngestResult.Staged
+            onFailure(code ?: EMBEDDING_FAILED, intent?.errorMessage ?: "the staged reading could not be published")
+            return IngestResult.Failed
         }
-        // Part of the reading is published. The document is complete only when no page of it still owes a
-        // decision, and otherwise the review-pending state is what says so.
-        val pending = sink.awaitingDecision(document.id)
-        stage.run(STAGE_RECORD) {
-            documents.updateStatus(
-                id = document.id,
-                status = if (pending == 0) DocumentStatus.COMPLETE else DocumentStatus.NEEDS_REVIEW,
-            )
-        }
-        return IngestResult.Staged
+        stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.COMPLETE) }
+        return IngestResult.Complete
     }
 
     /**
@@ -599,10 +561,6 @@ internal class DocumentIngest(
 
     private fun codeFor(failure: Exception): String = when (failure) {
         is UnsupportedMediaTypeException -> failure.code
-        // A comparison that could not be *made* names why in its own code rather than as a generic
-        // extraction failure: the attempt's prompt or policy version is not this build's, and the code is
-        // what a person can act on. The message is the comparison's own and carries no page text.
-        is OcrComparisonException -> failure.code
         else -> EXTRACTION_FAILED
     }
 
@@ -619,6 +577,9 @@ internal class DocumentIngest(
 
         /** The extractor stopped without delivering every unit. */
         internal const val EXTRACTION_FAILED = "EXTRACTION_FAILED"
+
+        /** A completed OCR pass produced no page text, so the existing revision was kept. */
+        internal const val NO_EXTRACTABLE_CONTENT = "NO_EXTRACTABLE_CONTENT"
 
         private const val STAGE_EXTRACT = "extract"
         private const val STAGE_CHUNK = "chunk"

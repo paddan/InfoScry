@@ -37,6 +37,7 @@ enum class OcrEngine {
 enum class OcrImportMode {
     FILL_MISSING,
     CHECK_AND_IMPROVE,
+    READ_ALL,
 }
 
 /**
@@ -214,32 +215,16 @@ data class OcrProfile(
 }
 
 /**
- * One collection's OCR settings: what a future import or rescan snapshots.
- *
- * A profile id here is a selection, not a reading: the attempt snapshots the *revision* the profile
- * pointed at when it was admitted, so editing the profile afterwards changes future attempts only.
- * [transcriptionProfileId] is required exactly when the engine is [OcrEngine.LLM] and must be absent for
- * the local engines, so a collection can never be saved in a state whose engine and profile disagree.
- * [reviewProfileId] is optional and its absence means review is explicitly unavailable — never an
- * external default chosen on the collection's behalf.
+ * One collection's OCR settings: the language list and default method used to prefill future starts.
+ * A profile id is a selection, not a reading: each admitted attempt snapshots the profile revision it chose.
  */
 @Serializable
 data class CollectionOcrSettings(
     val language: String,
-    val engine: OcrEngine = OcrEngine.TESSERACT,
-    val importMode: OcrImportMode = OcrImportMode.FILL_MISSING,
-    val transcriptionProfileId: String? = null,
-    val reviewProfileId: String? = null,
-    val externalPageLimit: Int = 0,
+    val defaultMethod: ReadingMethod = ReadingMethod.Tesseract,
 ) {
     init {
-        require(language.isNotBlank()) { "collection OCR language must not be blank" }
-        require(externalPageLimit >= 0) {
-            "the external page allowance must not be negative, was $externalPageLimit"
-        }
-        require((engine == OcrEngine.LLM) == (transcriptionProfileId != null)) {
-            "engine LLM needs a transcription profile, and a local engine must not name one"
-        }
+        requireOcrLanguages(language)
     }
 }
 
@@ -298,6 +283,7 @@ fun requireOcrLanguages(languages: String): String {
 @Serializable
 data class OcrAttemptIdentity(
     val engine: OcrEngine,
+    val mode: OcrImportMode = OcrImportMode.READ_ALL,
     val language: String,
     val transcriptionPromptVersion: Int,
     val extractorSchemaVersion: String,
@@ -354,6 +340,8 @@ data class OcrSettingsSnapshot(
     val reviewPromptVersion: Int = OCR_REVIEW_PROMPT_VERSION,
     val policyVersion: Int = OCR_POLICY_VERSION,
     val externalPageLimit: Int = 0,
+    /** External import allowance covers only the unchanged files in its confirmed source manifest. */
+    val externalConfirmedSourceScope: Boolean = false,
     val transcriptionProfileRevisionId: String? = null,
     val reviewProfileRevisionId: String? = null,
     val toolVersion: String? = null,
@@ -383,6 +371,7 @@ data class OcrSettingsSnapshot(
     /** The reading's own identity, which is what extraction reuse is keyed by. */
     fun attemptIdentity(): OcrAttemptIdentity = OcrAttemptIdentity(
         engine = engine,
+        mode = mode,
         language = language,
         transcriptionPromptVersion = transcriptionPromptVersion,
         extractorSchemaVersion = extractorVersion,
@@ -414,8 +403,12 @@ data class OcrSettingsSnapshot(
             renderDpi: Int? = null,
             runtimeIdentity: String? = null,
         ): OcrSettingsSnapshot = OcrSettingsSnapshot(
-            engine = settings.engine,
-            mode = settings.importMode,
+            engine = when (settings.defaultMethod) {
+                ReadingMethod.Tesseract -> OcrEngine.TESSERACT
+                ReadingMethod.Surya -> OcrEngine.SURYA
+                is ReadingMethod.Llm -> OcrEngine.LLM
+            },
+            mode = OcrImportMode.READ_ALL,
             language = settings.language,
             extractorVersion = extractorVersion,
             transcriptionProfileRevisionId = transcriptionProfileRevisionId,
@@ -423,7 +416,7 @@ data class OcrSettingsSnapshot(
             toolVersion = toolVersion,
             modelVersion = modelVersion,
             renderDpi = renderDpi,
-            externalPageLimit = settings.externalPageLimit,
+            externalPageLimit = 0,
             runtimeIdentity = runtimeIdentity,
         )
     }
@@ -460,6 +453,7 @@ value class OcrTranscriptionFingerprint(val value: String) {
                 "unit=$unitId",
                 "ordinal=$ordinal",
                 "engine=${attempt.engine}",
+                "mode=${attempt.mode}",
                 "profile_revision=${fingerprintPresence(attempt.profileRevisionId)}",
                 "language=${attempt.language}",
                 "transcription_prompt=${attempt.transcriptionPromptVersion}",
@@ -475,73 +469,6 @@ value class OcrTranscriptionFingerprint(val value: String) {
                 "runtime=${fingerprintPresence(attempt.runtimeIdentity)}",
             ).let(::fingerprintFields)
             return OcrTranscriptionFingerprint(sha256Of(canonical))
-        }
-
-        private const val NONE = "none"
-    }
-}
-
-/**
- * What decides whether one page's comparison may be reused.
- *
- * A comparison is about two texts and the reviewer that judged them, so it is keyed by both texts' hashes,
- * the reviewer's revision and the prompt and policy versions. It is separate from the transcription
- * fingerprint on purpose: a different reviewer must not redo OCR, and a different OCR attempt must not
- * reuse an old comparison.
- */
-@JvmInline
-value class OcrReviewFingerprint(val value: String) {
-
-    override fun toString(): String = value
-
-    companion object {
-
-        /**
-         * The fingerprint of one comparison.
-         *
-         * [baselineRevisionId] and [baselineTextHash] are both absent for a page with no baseline, and
-         * present together otherwise: a baseline named without the hash of the text it held could not be
-         * verified, so it is not a baseline this comparison may claim.
-         */
-        fun of(
-            documentId: String,
-            unitId: String,
-            ordinal: Int,
-            baselineRevisionId: String?,
-            baselineTextHash: String?,
-            candidateHash: String,
-            reviewProfileRevisionId: String,
-            reviewPromptVersion: Int,
-            policyVersion: Int,
-        ): OcrReviewFingerprint {
-            require(documentId.isNotBlank()) { "a review fingerprint needs the document's identity" }
-            require(unitId.isNotBlank()) { "a review fingerprint needs the page's stable unit id" }
-            require(ordinal >= 0) { "a review fingerprint needs the page's ordinal, was $ordinal" }
-            require(candidateHash.isNotBlank()) { "a review fingerprint needs the candidate's hash" }
-            require(reviewProfileRevisionId.isNotBlank()) {
-                "a review fingerprint needs the reviewer revision that judged the page"
-            }
-            require(reviewPromptVersion > 0) {
-                "a review fingerprint needs a positive prompt version, was $reviewPromptVersion"
-            }
-            require(policyVersion > 0) {
-                "a review fingerprint needs a positive policy version, was $policyVersion"
-            }
-            require((baselineRevisionId == null) == (baselineTextHash == null)) {
-                "a baseline is either named with the hash of its text or absent"
-            }
-            val canonical = listOf(
-                "document=$documentId",
-                "unit=$unitId",
-                "ordinal=$ordinal",
-                "baseline_revision=${fingerprintPresence(baselineRevisionId)}",
-                "baseline_hash=${fingerprintPresence(baselineTextHash)}",
-                "candidate_hash=$candidateHash",
-                "reviewer_revision=$reviewProfileRevisionId",
-                "review_prompt=$reviewPromptVersion",
-                "policy=$policyVersion",
-            ).let(::fingerprintFields)
-            return OcrReviewFingerprint(sha256Of(canonical))
         }
 
         private const val NONE = "none"

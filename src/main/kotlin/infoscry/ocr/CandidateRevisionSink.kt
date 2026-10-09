@@ -69,7 +69,7 @@ class CandidateRevisionSink(
 
     override val storesUnits: Boolean = true
 
-    /** Every page this sink stages is pending, so the reading it took is a proposal and not published text. */
+    /** Candidate pages are approved by the confirmed reading and publish together when extraction completes. */
     override val stagesForReview: Boolean = true
 
     /** The candidate this sink stages into, or `null` while it has staged nothing. */
@@ -134,7 +134,7 @@ class CandidateRevisionSink(
             ).also { opened ->
                 candidate = opened
             }
-        revisions.appendPage(revision, pageFor(event, approval ?: PageApproval.PENDING))
+        revisions.appendPage(revision, pageFor(event, approval ?: PageApproval.APPROVED))
         staged.getOrPut(documentId to fingerprint) { mutableSetOf() } += event.key
     }
 

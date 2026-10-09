@@ -414,6 +414,35 @@ class DocumentRoutesTest {
     }
 
     @Test
+    fun `an active rescan shows its own progress instead of the published imports counts`() = runBlocking {
+        val id = CollectionId(newCollection())
+        val documentId = DocumentId("doc-rescan-progress")
+        harness.context.documents.insert(documentAt(documentId.value, id, "scan.pdf", status = DocumentStatus.COMPLETE))
+        harness.context.content.recordProgress(documentId, fingerprintOf(documentId), UnitKind.PAGE, 1)
+        commitUnit(documentId, ordinal = 0, text = "Published page.")
+        val operation = harness.context.ocrOperations.admit(
+            collectionId = id.value, documentId = documentId, baseRevisionId = null,
+            snapshot = infoscry.ocr.OcrSettingsSnapshot.of(
+                infoscry.ocr.CollectionOcrSettings("eng", infoscry.ocr.ReadingMethod.Tesseract), extractorVersion = "test",
+            ),
+            requestId = "progress-rescan", requestHash = "a".repeat(64), pageTotal = 7, jobId = null,
+        )
+        val listed = page(id, "").documents.single()
+        assertEquals(DocumentStatus.OCR, listed.status)
+        assertEquals(7, listed.progress?.totalUnits)
+        assertEquals(0, listed.progress?.processedUnits)
+        harness.context.ocrOperations.recordProgress(operation.operationId, committed = 2, failed = 1)
+        val advanced = page(id, "").documents.single()
+        assertEquals(2, advanced.progress?.processedUnits)
+        assertEquals(1, advanced.progress?.failedUnits)
+        val detail = ApiJson.decodeFromString<DocumentDetail>(
+            harness.get("/api/collections/${id.value}/documents/${documentId.value}").bodyAsText(),
+        )
+        assertEquals(advanced.progress, detail.progress)
+        assertEquals(advanced.progress, detail.document.progress)
+    }
+
+    @Test
     fun `a count with no announced total is shown without a denominator`() = runBlocking {
         val id = CollectionId(newCollection())
         val documentId = DocumentId("doc-open")

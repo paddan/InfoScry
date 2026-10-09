@@ -499,3 +499,6 @@ class RevisionRestoreService(
 }
 
 private val LOGGER = LoggerFactory.getLogger("infoscry.document")
+
+/** The active text changed since the version selected for restoration was listed. */
+class StaleActiveRevisionException(message: String) : IllegalStateException(message)

@@ -3,7 +3,6 @@ package infoscry.server
 import infoscry.AppContext
 import infoscry.collection.DeletionRecoveryBlockedException
 import infoscry.collection.OcrSettingsUpdate
-import infoscry.diagnostics.ToolProbe
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.Job
@@ -11,21 +10,22 @@ import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.domain.JobType
 import infoscry.jobs.ImportJobHandler
-import infoscry.jobs.ExtensionFilter
-import infoscry.jobs.ImportJobPayload
-import infoscry.ocr.OcrEngine
-import infoscry.ocr.OcrImportMode
+import infoscry.jobs.ImportPreviewRequest as ServiceImportPreviewRequest
+import infoscry.jobs.ImportStartRequest
+import infoscry.jobs.StaleImportPreviewException
+import infoscry.ocr.ReadingMethod
+import infoscry.ocr.ReadingMethodUnavailableException
 import infoscry.document.RescanRefusalException
 import infoscry.document.RestoreRefusalException
 import infoscry.document.RestoreRequestConflictException
 import infoscry.document.StaleActiveRevisionException
-import infoscry.document.StaleCandidateDecisionException
 import infoscry.jobs.DocumentIngest
 import infoscry.search.RevisionSnapshotUnavailableException
 import infoscry.storage.DocumentBeingDeletedException
 import infoscry.storage.OcrOperationConflictException
 import infoscry.storage.OcrRequestConflictException
 import infoscry.storage.StaleRescanPreviewException
+import infoscry.storage.StartRequestConflictException
 import infoscry.storage.CollectionConfirmationMismatchException
 import infoscry.storage.DuplicateCollectionNameException
 import infoscry.storage.DuplicateLlmProfileNameException
@@ -92,28 +92,18 @@ data class RenameCollectionRequest(val name: String)
 /**
  * One collection OCR-settings edit.
  *
- * The path keeps its `ocr-languages` name because it is the route clients already call; the body now also
- * carries the engine, the import mode, the two profile selections and the external page allowance. Every new
- * field is optional and absent means "keep what the collection has", so an old request that sends only
- * `ocrLanguages` changes only the languages. A profile id sent as an empty string clears that profile.
+ * The path keeps its `ocr-languages` name for compatibility. The body carries the collection's OCR language
+ * and one default reading method; either field may be absent to keep its current value.
  */
 @Serializable
 data class UpdateOcrLanguagesRequest(
-    val ocrLanguages: String? = null,
-    val ocrEngine: OcrEngine? = null,
-    val ocrImportMode: OcrImportMode? = null,
-    val ocrTranscriptionProfileId: String? = null,
-    val ocrReviewProfileId: String? = null,
-    val ocrExternalPageLimit: Int? = null,
+    val language: String? = null,
+    val defaultMethod: ReadingMethod? = null,
 ) {
 
     fun toUpdate(): OcrSettingsUpdate = OcrSettingsUpdate(
-        ocrLanguages = ocrLanguages,
-        engine = ocrEngine,
-        importMode = ocrImportMode,
-        transcriptionProfileId = ocrTranscriptionProfileId,
-        reviewProfileId = ocrReviewProfileId,
-        externalPageLimit = ocrExternalPageLimit,
+        language = language,
+        defaultMethod = defaultMethod,
     )
 }
 
@@ -149,9 +139,6 @@ data class JobApiView(
     val total: Int = 0,
     val errorCode: String? = null,
     val cancelRequested: Boolean = false,
-    /** The approval this job waits for, present only while it is paused for external pages. */
-    @EncodeDefault(EncodeDefault.Mode.NEVER)
-    val externalApproval: ExternalApprovalView? = null,
 )
 
 @Serializable
@@ -195,6 +182,21 @@ data class ImportRequest(
     // Extension lists for a folder import; both default to empty, which means no filter.
     val include: List<String> = emptyList(),
     val exclude: List<String> = emptyList(),
+    val method: String,
+    val previewHash: String,
+    val requestId: String,
+    /** CLI permits a later identical command to replace a failed or cancelled import. */
+    val restartStopped: Boolean = false,
+)
+
+@Serializable
+data class ImportPreviewRouteRequest(
+    val collection: String,
+    val paths: List<String>,
+    val recursive: Boolean = false,
+    val include: List<String> = emptyList(),
+    val exclude: List<String> = emptyList(),
+    val method: String,
 )
 
 /** What the picker is asked to choose: files (any number of them) or one folder. */
@@ -355,60 +357,53 @@ fun Application.configureRoutes(
         }
 
         route("/api/imports") {
+            post("/preview") {
+                call.handle {
+                    val request = call.receiveJson<ImportPreviewRouteRequest>()
+                    val method = try {
+                        ReadingMethod.parse(request.method)
+                    } catch (_: IllegalArgumentException) {
+                        throw BadRequestException("unknown reading method")
+                    }
+                    val collection = context.collectionService.requireActiveByNameOrId(request.collection)
+                    val preview = context.importPreviewService.preview(
+                        ServiceImportPreviewRequest(
+                            collection = collection.id,
+                            paths = request.paths,
+                            recursive = request.recursive,
+                            include = request.include,
+                            exclude = request.exclude,
+                            method = method,
+                        ),
+                    )
+                    call.respondJson(HttpStatusCode.OK, preview)
+                }
+            }
             post {
                 call.handle {
-                    // A request that names both an include and an exclude list is refused here, before the mutation
-                    // gate and before any job or copy exists.
                     val request = call.receiveJson<ImportRequest>()
-                    val extensions = ExtensionFilter.of(request.include, request.exclude)
-                    context.mutations.withMutation {
-                        // The same gate every other mutating command passes: while an unsafe deletion state is
-                        // unresolved, admitting an import would add work to an archive an operator has to
-                        // repair first.
-                        context.collectionService.requireMutationsAllowed()
-                        val collection = context.collectionService.requireActiveByNameOrId(request.collection)
-                        // The job records the tool version it will run with, so its checkpoints are keyed by
-                        // what actually produced them. That is why the probe happens once per job creation.
-                        // The collection's OCR selection is snapshotted here, once, and travels in the
-                        // payload: the engine, the import mode, the profile revisions and the external page
-                        // allowance of the whole job. Editing a default afterwards changes future imports
-                        // only, and an import of twenty files has one allowance covering all of them.
-                        //
-                        // The snapshot also records the runtime the reading engine reports *now*, before the
-                        // job exists: the attempt's fingerprint is computed from it, so an engine upgraded
-                        // between admission and a restart cannot make a resumed attempt read under a runtime
-                        // nobody admitted.
-                        val snapshot = context.ocr.withProbedRuntime(
-                            context.ocr.snapshotFor(
-                                settings = collection.ocrSettings(),
-                                extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
-                                renderDpi = infoscry.extract.PdfExtractor.DEFAULT_RENDER_DPI,
-                            ),
-                        )
-                        val settings = ToolProbe.extractionSettings(collection.ocrLanguages)
-                            .forOcrSettings(snapshot)
-                        val payload = ImportJobPayload.of(
-                            collectionId = collection.id,
-                            sources = request.paths,
-                            settings = settings,
-                            recursive = request.recursive,
-                            ocr = snapshot,
-                            extensions = extensions,
-                            // Snapshotted here, with the OCR settings: a later edit of the list changes future
-                            // imports only.
-                            ignore = context.collectionService.ignorePatterns(collection.id),
-                        )
-                        val job = context.jobs.enqueue(
-                            type = JobType.IMPORT,
-                            collectionId = collection.id,
-                            payload = payload.encode(),
-                            total = 0,
-                        )
-                        call.respondJson(
-                            HttpStatusCode.Accepted,
-                            ImportAcceptedResponse(accepted = true, job = job.toApiView(context)),
-                        )
+                    val method = try {
+                        ReadingMethod.parse(request.method)
+                    } catch (_: IllegalArgumentException) {
+                        throw BadRequestException("unknown reading method")
                     }
+                    val job = context.importStartService.start(
+                        ImportStartRequest(
+                            collectionId = CollectionId(request.collection),
+                            paths = request.paths,
+                            recursive = request.recursive,
+                            include = request.include,
+                            exclude = request.exclude,
+                            method = method,
+                            previewHash = request.previewHash,
+                            requestId = request.requestId,
+                            restartStopped = request.restartStopped,
+                        ),
+                    )
+                    call.respondJson(
+                        HttpStatusCode.Accepted,
+                        ImportAcceptedResponse(accepted = true, job = job.toApiView(context)),
+                    )
                 }
             }
 
@@ -532,6 +527,7 @@ fun Application.configureRoutes(
         configureSourceRoutes(context)
         configureLlmProfileRoutes(context)
         configureOcrProfileRoutes(context)
+        configureReadingMethodRoutes(context)
         configureOcrLlmCandidateRoutes(context)
         configureOcrRescanRoutes(context)
         configureLlmCatalogRoutes(credentials)
@@ -764,7 +760,6 @@ private fun Job.toApiView(context: AppContext) = JobApiView(
     total = total,
     errorCode = errorCode,
     cancelRequested = cancelRequested,
-    externalApproval = context.externalApprovalOf(this),
 )
 
 private fun ImportItem.toApiView() = ImportItemApiView(
@@ -875,6 +870,21 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = refused.code, message = refused.message.orEmpty())),
         )
+    } catch (unavailable: ReadingMethodUnavailableException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "METHOD_UNAVAILABLE", message = unavailable.reason)),
+        )
+    } catch (stale: StaleImportPreviewException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "PREVIEW_STALE", message = "The files changed; review the summary again.")),
+        )
+    } catch (conflict: StartRequestConflictException) {
+        respondJson(
+            HttpStatusCode.Conflict,
+            ApiErrorResponse(ApiError(code = "REQUEST_ID_CONFLICT", message = conflict.message.orEmpty())),
+        )
     } catch (refused: RestoreRefusalException) {
         // A restore that cannot be done as asked. 409 says the request was understood and the archive's state
         // says no; 503 says this machine cannot embed right now and the request is worth repeating later. The
@@ -914,11 +924,6 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = "OCR_ATTEMPT_IN_PROGRESS", message = attempting.message.orEmpty())),
         )
-    } catch (stale: StaleCandidateDecisionException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "STALE_REVIEW_DECISION", message = stale.message.orEmpty())),
-        )
     } catch (stale: StaleActiveRevisionException) {
         respondJson(
             HttpStatusCode.Conflict,
@@ -930,7 +935,7 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
             ApiErrorResponse(
                 ApiError(
                     code = "DOCUMENT_BEING_DELETED",
-                    message = "this document is being deleted, so no rescan, review decision or restore may be admitted for it",
+                    message = "this document is being deleted, so no rescan or restore may be admitted for it",
                 ),
             ),
         )
