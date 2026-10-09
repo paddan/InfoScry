@@ -40,6 +40,7 @@ import infoscry.ocr.ReadingMethod
 import infoscry.ocr.PageDispatchIdentity
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageOcrEngine
+import infoscry.ocr.RescanPreview
 import infoscry.storage.PageApproval
 import infoscry.storage.RevisionState
 import infoscry.storage.StaleRescanPreviewException
@@ -47,6 +48,11 @@ import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import javax.imageio.ImageIO
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -184,6 +190,41 @@ class RescanJobHandlerTest {
             AppContext.open(harness.archiveDir).use { context ->
                 harness.admitOnly(context, picture)
                 assertEquals(DocumentStatus.QUEUED, context.documents.get(picture.documentId)?.status)
+            }
+        }
+    }
+
+    @Test
+    fun `a rescan reads only the page whose text cannot be trusted and keeps the clean page's published text`() {
+        withHarness { harness ->
+            val cleanText = "The committee approved the annual budget after a long discussion of the transport plan."
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = cleanText,
+                scannedText = "the published reading of the scanned page",
+            )
+
+            // Only the page without a text layer is read, so the preview counts one page of the two.
+            val preview = harness.previewOf(picture.documentId)
+            assertEquals(1, preview.pageTotal, "the preview counted a page a rescan does not read")
+            assertEquals(2, preview.documentPages)
+
+            val engine = FakePageEngine(readings = listOf("the new reading of the scanned page"))
+            val result = harness.rescan(picture, engine = engine)
+
+            assertEquals(1, engine.calls, "the clean page reached the engine")
+            assertEquals(listOf(1), engine.pages.map { page -> page.ordinal })
+            assertEquals(OcrOperationStage.COMPLETE, result.operation.stage)
+            assertNull(result.operation.errorCode)
+            assertEquals(0, result.operation.pagesFailed, "a skipped page was counted as failed")
+
+            AppContext.open(harness.archiveDir).use { context ->
+                val baseline = context.revisions.pages(picture.baselineRevisionId)
+                val candidate = assertNotNull(result.operation.candidateRevisionId)
+                val staged = context.revisions.pages(candidate)
+                assertEquals(listOf(0, 1), staged.map { page -> page.ordinal }, "the candidate lost a page")
+                assertEquals(cleanText, staged[0].extractedText, "the clean page did not keep its published text")
+                assertEquals(baseline[0].unitId, staged[0].unitId, "the clean page changed its identity")
+                assertEquals("the new reading of the scanned page", staged[1].extractedText)
             }
         }
     }
@@ -435,6 +476,43 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
             val revisionId = context.revisions.activeRevisionId(documentId)!!
             val page = context.revisions.pages(revisionId).single()
             return Picture(documentId, revisionId, page.unitId.value, file)
+        }
+    }
+
+    /**
+     * A two-page PDF: page one carries [cleanText] as its own text layer, and page two has no text layer at all,
+     * which is the case a scan presents. The published reading of each page is the one the import committed,
+     * with page two's published text given by [scannedText].
+     */
+    fun importCleanAndScannedPdf(cleanText: String, scannedText: String): Picture {
+        val file = harness.sourcesDir.resolve("clean-and-scanned.pdf")
+        PDDocument().use { pdf ->
+            val clean = PDPage()
+            pdf.addPage(clean)
+            PDPageContentStream(pdf, clean).use { content ->
+                content.beginText()
+                content.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 12f)
+                content.newLineAtOffset(72f, 700f)
+                content.showText(cleanText)
+                content.endText()
+            }
+            pdf.addPage(PDPage())
+            pdf.save(file.toFile())
+        }
+        val run = harness.importDurably(listOf(file), PdfPageUnits(listOf(cleanText, scannedText)))
+        val documentId = assertNotNull(run.items.single().documentId)
+        AppContext.open(harness.dataDir).use { context ->
+            val revisionId = assertNotNull(context.revisions.activeRevisionId(documentId))
+            val firstPage = context.revisions.pages(revisionId).first()
+            return Picture(documentId, revisionId, firstPage.unitId.value, file)
+        }
+    }
+
+    /** What a rescan preview answers for [documentId] when it is taken now, with the Surya method. */
+    fun previewOf(documentId: DocumentId): RescanPreview = AppContext.open(harness.dataDir).use { context ->
+        writeSelection(context)
+        runBlocking {
+            rescanServiceOf(context, FakePageEngine()).preview(CollectionId("default"), documentId, ReadingMethod.Surya)
         }
     }
 
@@ -772,6 +850,38 @@ private class HookedEngine(
         afterRead(context, jobId)
         return reading
     }
+}
+
+/** An extractor for a PDF whose pages the test dictates: one published unit per page, keyed as a PDF page is. */
+internal class PdfPageUnits(private val texts: List<String>) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("application/pdf")
+
+    override fun extract(input: ExtractionInput): kotlinx.coroutines.flow.Flow<ExtractionEvent> =
+        kotlinx.coroutines.flow.flow {
+            texts.forEachIndexed { ordinal, text ->
+                val key = "page:${ordinal + 1}"
+                if (!input.isCommitted(key)) {
+                    input.boundary.unit {
+                        emit(
+                            ExtractionEvent.UnitReady(
+                                key = key,
+                                ordinal = ordinal,
+                                unit = ContentUnitDraft(
+                                    locator = SourceLocation.PdfPage(ordinal + 1),
+                                    extractedText = text,
+                                    searchText = text,
+                                    method = ExtractionMethod.DIRECT_TEXT,
+                                ),
+                            ),
+                        )
+                    }
+                }
+            }
+            input.boundary.unit {
+                emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = texts.size))
+            }
+        }
 }
 
 /** An extractor for a picture document: one page, whose text the test dictates. */

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { fetchLlmCatalog, type LlmCatalogModel, type LlmPreset, type LlmProvider } from './api';
   import { modelPriceLabel } from './modelPrice';
 
@@ -7,8 +8,9 @@
    *
    * LLM profiles and OCR profiles are filled in the same way, so both forms render these fields from one
    * place. The parent owns the draft (`bind:draft`) and the fields that differ (name, enabled, actions);
-   * this component owns the preset choice and the fetched model catalog, which belong to the draft's
-   * connection and are dropped whenever that connection changes.
+   * this component owns the preset choice and the model catalog, which belong to the draft's connection.
+   * The catalog is always fetched from the selected provider: whenever the connection changes it is dropped
+   * and fetched again once the person has stopped typing, so there is nothing to press.
    *
    * With `imageOnly` the model list is limited to models that accept image input: a model the catalog states
    * is text-only is not offered, and one it does not state is offered and labelled "image support unknown"
@@ -50,11 +52,23 @@
   let catalogTried = false;
   let catalogPriceUnknown = false;
   let catalogImageUnknown = false;
+  /** Show only the models the listing states accept image input. */
+  let imageFilter = false;
+  let sortBy: 'name' | 'price-asc' | 'price-desc' = 'name';
   // The connection (provider + endpoint + key) the catalog was fetched for, and a counter that bumps
   // whenever that connection changes so stale fetches are droppable.
   let connectionKey = '';
   let appliedConnectionKey: string | null = null;
   let connectionGeneration = 0;
+  let fetchTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Whether the person is typing in the endpoint or key-variable field. The server sends the profile's key to the
+   * endpoint when it lists models, so nothing is fetched while one of these is being edited: a half-typed address
+   * is a different host. The fetch happens when the field is left.
+   */
+  let typingConnection = false;
+  /** How long the connection must stay unchanged before the provider is asked, so typing sends one request. */
+  const FETCH_DELAY_MS = 400;
 
   $: connectionKey = `${draft.provider}\u0000${draft.endpoint}\u0000${draft.apiKeyEnvironmentVariable ?? ''}`;
   $: if (connectionKey !== appliedConnectionKey) {
@@ -69,8 +83,29 @@
     catalogTried = false;
     catalogPriceUnknown = false;
     catalogImageUnknown = false;
+    if (!typingConnection) scheduleFetch();
   }
+  /** Whether the listing states image input for any model; a provider that states none cannot be filtered on it. */
+  $: imageStated = catalog.some((model) => model.imageInput !== null && model.imageInput !== undefined);
+  $: visibleCatalog = imageFilter && imageStated ? catalog.filter((model) => model.imageInput === true) : catalog;
+  $: sortedCatalog = sortModels(visibleCatalog, sortBy);
   $: unknownImageCount = imageOnly ? catalog.filter((model) => model.imageInput === null).length : 0;
+
+  /** Input price first, output price to break a tie; a model with an unknown price is listed last either way. */
+  function sortModels(models: LlmCatalogModel[], order: typeof sortBy): LlmCatalogModel[] {
+    if (order === 'name') return models;
+    const direction = order === 'price-asc' ? 1 : -1;
+    const known = (model: LlmCatalogModel): boolean =>
+      model.inputPricePerMillion !== null && model.outputPricePerMillion !== null;
+    return [...models].sort((a, b) => {
+      if (known(a) !== known(b)) return known(a) ? -1 : 1;
+      if (!known(a)) return a.id.localeCompare(b.id);
+      const byInput = (a.inputPricePerMillion! - b.inputPricePerMillion!) * direction;
+      if (byInput !== 0) return byInput;
+      const byOutput = (a.outputPricePerMillion! - b.outputPricePerMillion!) * direction;
+      return byOutput !== 0 ? byOutput : a.id.localeCompare(b.id);
+    });
+  }
 
   function applyPreset(id: string): void {
     const preset = presets.find((candidate) => candidate.id === id);
@@ -79,6 +114,37 @@
     draft.endpoint = preset.endpoint;
     draft.apiKeyEnvironmentVariable = preset.apiKeyEnvironmentVariable;
   }
+
+  /** A native provider has a default endpoint; an OpenAI-compatible one needs the person's. */
+  function connectionIsComplete(): boolean {
+    return draft.provider !== 'OPENAI_COMPATIBLE' || (draft.endpoint ?? '').trim() !== '';
+  }
+
+  function startTypingConnection(): void {
+    typingConnection = true;
+    if (fetchTimer !== null) clearTimeout(fetchTimer);
+    fetchTimer = null;
+  }
+
+  /** Leaving a connection field fetches once, for the connection as it now stands. */
+  function stopTypingConnection(): void {
+    typingConnection = false;
+    if (!catalogTried && !fetchingModels) scheduleFetch();
+  }
+
+  function scheduleFetch(): void {
+    if (fetchTimer !== null) clearTimeout(fetchTimer);
+    fetchTimer = null;
+    if (!connectionIsComplete()) return;
+    fetchTimer = setTimeout(() => {
+      fetchTimer = null;
+      void fetchModels();
+    }, FETCH_DELAY_MS);
+  }
+
+  onDestroy(() => {
+    if (fetchTimer !== null) clearTimeout(fetchTimer);
+  });
 
   async function fetchModels(): Promise<void> {
     if (fetchingModels) return;
@@ -129,7 +195,9 @@
 
   function modelOptionLabel(model: LlmCatalogModel): string {
     const parts = [model.id, modelPriceLabel(model)];
-    if (imageOnly && model.imageInput === null) parts.push('image support unknown');
+    if (model.imageInput === true) parts.push('image');
+    else if (model.imageInput === false) parts.push('text only');
+    else if (imageOnly) parts.push('image support unknown');
     return parts.join(' — ');
   }
 </script>
@@ -153,20 +221,27 @@
 </div>
 <div class="field">
   <label for="{idPrefix}-model">Model</label>
-  <div class="inline">
-    <input id="{idPrefix}-model" bind:value={draft.model} placeholder={modelPlaceholder} required={nativeRequired} aria-required="true" />
-    <button type="button" onclick={fetchModels} disabled={fetchingModels}>
-      {fetchingModels ? 'Fetching…' : 'Fetch models'}
-    </button>
-  </div>
+  <input id="{idPrefix}-model" bind:value={draft.model} placeholder={modelPlaceholder} required={nativeRequired} aria-required="true" />
+  {#if fetchingModels}<p class="hint" role="status">Fetching models…</p>{/if}
   {#if imageOnly}
     <p class="hint">Only models that accept image input are listed. A model whose image support the catalog does not state is marked as unknown.</p>
   {/if}
   {#if catalog.length > 0}
+    <label class="check">
+      <input type="checkbox" bind:checked={imageFilter} disabled={!imageStated} />
+      Only models that accept images
+    </label>
+    {#if !imageStated}<p class="hint">This provider's model list does not say which models accept images.</p>{/if}
+    <label for="{idPrefix}-sort">Sort models</label>
+    <select id="{idPrefix}-sort" bind:value={sortBy}>
+      <option value="name">Name</option>
+      <option value="price-asc">Price, lowest first</option>
+      <option value="price-desc">Price, highest first</option>
+    </select>
     <label for="{idPrefix}-catalog">Model catalog</label>
     <select id="{idPrefix}-catalog" bind:value={catalogId} onchange={() => applyCatalogModel(catalogId)}>
       <option value="" disabled>Choose a model…</option>
-      {#each catalog as model (model.id)}
+      {#each sortedCatalog as model (model.id)}
         <option value={model.id}>{modelOptionLabel(model)}</option>
       {/each}
     </select>
@@ -190,11 +265,13 @@
     id="{idPrefix}-endpoint"
     bind:value={draft.endpoint}
     placeholder="https://… (leave empty for Anthropic)"
+    onfocus={startTypingConnection}
+    onblur={stopTypingConnection}
   />
 </div>
 <div class="field">
   <label for="{idPrefix}-key">API key environment variable</label>
-  <input id="{idPrefix}-key" bind:value={draft.apiKeyEnvironmentVariable} placeholder={keyPlaceholder} />
+  <input id="{idPrefix}-key" bind:value={draft.apiKeyEnvironmentVariable} placeholder={keyPlaceholder} onfocus={startTypingConnection} onblur={stopTypingConnection} />
   <p class="hint">{keyHint}</p>
   {#if keyState !== null}
     <p class="hint key-state">{keyState}</p>
@@ -225,8 +302,6 @@
 
 <style>
   .field { display: grid; gap: 0.35rem; align-content: start; }
-  .inline { display: flex; align-items: center; gap: 0.55rem; }
-  .inline button { white-space: nowrap; }
   label { color: #b8bcbb; font-size: 0.82rem; }
   select,
   input:not([type='checkbox']) {
@@ -242,4 +317,6 @@
   input:hover { border-color: #515757; }
   .hint { margin: 0; color: #929997; font-size: 0.78rem; }
   .key-state { color: #a9c7a6; }
+  label.check { display: flex; align-items: center; gap: 0.5rem; }
+  label.check input { width: auto; accent-color: #c4a77d; }
 </style>

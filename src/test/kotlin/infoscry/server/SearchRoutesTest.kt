@@ -40,6 +40,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -355,6 +357,50 @@ class SearchRoutesTest {
             val afterDelete = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
             assertEquals(HttpStatusCode.NotFound, afterDelete.status, afterDelete.bodyAsText())
         }
+
+    @Test
+    fun `a live source read names the neighbouring pages and its place in the document`() = runBlocking {
+        val (documentId, first) = seedUnit(document = "scan.pdf", text = "page one text")
+        val context = harness.context
+        fun commit(ordinal: Int, text: String) = context.content.commitExtractedUnit(
+            documentId = documentId,
+            fingerprint = ExtractionFingerprint.of(
+                "sha-scan.pdf",
+                ExtractionSettings(ocrLanguages = "eng", extractorSchemaVersion = "search-routes-test"),
+            ),
+            key = "unit-$ordinal",
+            ordinal = ordinal,
+            draft = ContentUnitDraft(
+                locator = SourceLocation.TextLines(1, 1),
+                extractedText = text,
+                searchText = text,
+                method = ExtractionMethod.DIRECT_TEXT,
+            ),
+            artifactRoot = context.paths.libraryDir,
+        ).unit.id
+        val second = commit(1, "page two text")
+        val third = commit(2, "page three text")
+        val collectionId = harness.collectionIdOf("Default")
+
+        suspend fun read(id: ContentUnitId) =
+            Json.parseToJsonElement(harness.get("/api/collections/$collectionId/sources/${id.value}").bodyAsText()).jsonObject
+
+        val one = read(first)
+        assertEquals(null, one["previousId"])
+        assertEquals(second.value, one["nextId"]?.jsonPrimitive?.content)
+        assertEquals(1, one["position"]?.jsonPrimitive?.int)
+        assertEquals(3, one["unitCount"]?.jsonPrimitive?.int)
+
+        val two = read(second)
+        assertEquals(first.value, two["previousId"]?.jsonPrimitive?.content)
+        assertEquals(third.value, two["nextId"]?.jsonPrimitive?.content)
+        assertEquals(2, two["position"]?.jsonPrimitive?.int)
+
+        val three = read(third)
+        assertEquals(second.value, three["previousId"]?.jsonPrimitive?.content)
+        assertEquals(null, three["nextId"])
+        assertEquals(3, three["position"]?.jsonPrimitive?.int)
+    }
 
     @Test
     fun `a source read can name the revision an excerpt came from`() = runBlocking {

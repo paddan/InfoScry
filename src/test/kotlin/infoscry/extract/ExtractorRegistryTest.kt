@@ -185,12 +185,15 @@ class ExtractorRegistryTest {
 
             val units = events.filterIsInstance<ExtractionEvent.UnitReady>()
             assertEquals(5, units.size, "a page of the fixture was not delivered: ${units.map { it.ordinal }}")
+            // Page 3 is the first scanned page: the readable pages before it keep their own text layer.
+            val scanned = units.single { it.ordinal == 2 }
             assertContains(
-                units.first().unit.extractedText,
+                scanned.unit.extractedText,
                 "läst",
                 message = "the page's text is not what the configured engine read from its image",
             )
-            assertEquals(ExtractionMethod.OCR, units.first().unit.method)
+            assertEquals(ExtractionMethod.OCR, scanned.unit.method)
+            assertEquals(ExtractionMethod.DIRECT_TEXT, units.first().unit.method)
             assertEquals(
                 listOf(PdfExtractor.PAGE_RENDER_REFUSED_CODE),
                 events.filterIsInstance<ExtractionEvent.UnitFailed>().map { it.code },

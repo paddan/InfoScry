@@ -716,6 +716,35 @@ describe('app shell', () => {
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
   });
 
+  it('steps through the pages of a document with previous and next', async () => {
+    const pages: Record<string, ReturnType<typeof sourcePage>> = {
+      'unit-1': { ...sourcePage('Page one text', 0, 13), position: 1, unitCount: 2, nextId: 'unit-2' } as never,
+      'unit-2': { ...sourcePage('Page two text', 0, 13), id: 'unit-2', position: 2, unitCount: 2, previousId: 'unit-1' } as never,
+    };
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 1')] }),
+      source: (url: string) => jsonResponse(pages[url.includes('unit-2') ? 'unit-2' : 'unit-1']),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 1/s }));
+
+    expect(await screen.findByText('Page 1 of 2')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Previous' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    expect(await screen.findByText('Page two text')).toBeTruthy();
+    expect(screen.getByText('Page 2 of 2')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(calls.some((call) => call.url.startsWith('/api/collections/default/sources/unit-2?'))).toBe(true);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    expect(await screen.findByText('Page one text')).toBeTruthy();
+  });
+
   it('ignores a pending source response after switching collections', async () => {
     let finishSource!: (response: Response) => void;
     stubFetch({

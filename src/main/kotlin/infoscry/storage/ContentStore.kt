@@ -64,6 +64,9 @@ data class ExtractionMarker(
     val completedAt: String,
 )
 
+/** The units beside one unit of a document, and its 1-based place among [total] units. */
+data class UnitNeighbours(val previous: ContentUnitId?, val next: ContentUnitId?, val position: Int, val total: Int)
+
 /** One unit of a document's structure: enough to list what a document contains without reading its text. */
 data class ContentUnitSummary(val id: ContentUnitId, val ordinal: Int, val locator: SourceLocation)
 
@@ -642,6 +645,41 @@ class ContentStore(private val database: Database) {
                 }
             }
         }
+    }
+
+    /**
+     * Where one unit sits among its document's units: the units on either side of it in ordinal order, its
+     * 1-based place, and how many there are. Only ids and counts are read, never text, so a reader can offer
+     * previous and next on a document of any length.
+     */
+    fun neighboursOf(documentId: DocumentId, ordinal: Int): UnitNeighbours = database.read { connection ->
+        fun adjacent(comparison: String, order: String): ContentUnitId? =
+            connection.prepareStatement(
+                "SELECT id FROM content_units WHERE document_id = ? AND ordinal $comparison ? ORDER BY ordinal $order LIMIT 1",
+            ).use { statement ->
+                statement.setString(1, documentId.value)
+                statement.setInt(2, ordinal)
+                statement.executeQuery().use { rows -> if (rows.next()) ContentUnitId(rows.getString(1)) else null }
+            }
+        val before = connection.prepareStatement(
+            "SELECT COUNT(*) FROM content_units WHERE document_id = ? AND ordinal < ?",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setInt(2, ordinal)
+            statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+        }
+        val total = connection.prepareStatement(
+            "SELECT COUNT(*) FROM content_units WHERE document_id = ?",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+        }
+        UnitNeighbours(
+            previous = adjacent("<", "DESC"),
+            next = adjacent(">", "ASC"),
+            position = before + 1,
+            total = total,
+        )
     }
 
     /** What a document contains, without the text: the ordinals and locators a structure listing needs. */

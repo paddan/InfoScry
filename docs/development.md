@@ -30,7 +30,8 @@ export JAVA_HOME="$(asdf where java)"
 | `web/e2e/` | Browser acceptance scripts |
 | `models/embedding-model.json` | Pinned embedding artifacts and runtime settings |
 | `docs/specs/` | Design contracts |
-| `docs/tickets/` | Implementation slices and their verification reports |
+| `docs/plans/` | Plans that break a change into tickets |
+| `docs/tickets/` | Open implementation slices; completed ones are removed (see git history) |
 
 ## Build and run
 

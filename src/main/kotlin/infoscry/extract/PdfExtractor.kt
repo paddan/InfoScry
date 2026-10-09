@@ -175,9 +175,11 @@ data class PdfPageCandidate(val page: Int, val text: String) {
  *
  * A PDF is read one page at a time and each page is decided on its own: in fill-missing mode a page whose
  * text layer is usable becomes a unit without anything being rendered, and a page that is a scan is
- * rendered and handed to the OCR seam. In check-and-improve mode — an attempt admitted to re-read a document
- * whose text is already there, which is what a rescan is — every page image is read, because a text layer
- * that is long is not a text layer that is right. That per-page split is what makes the common case — a
+ * rendered and handed to the OCR seam. In read-all and check-and-improve modes — attempts that read the
+ * document's pages rather than filling gaps, and what a rescan is — a page is read when [PdfPageSelector]
+ * says so: it has no usable text layer, or a large image (at least a quarter of the page) plus a text layer
+ * scoring below 75. Every other page is taken at its own text, without being rendered, because a clean text
+ * layer with no large picture on it says what the page contains. That per-page split is what makes the common case — a
  * digital PDF, or a mostly digital one with a signed attachment at the end — cost nothing, and what keeps a
  * long scan from stalling the mutation gate for the whole document: the permit is taken per page, and the
  * expensive rendering happens inside that page's permit.
@@ -214,6 +216,7 @@ class PdfExtractor(
     private val pageRenderer: PdfPageRenderer = PngPageRenderer,
     private val maxDocumentBytes: Long = MAX_DOCUMENT_BYTES,
     private val maxRenderedPixels: Long = MAX_RENDERED_PIXELS,
+    private val selector: PdfPageSelector = PdfPageSelector(),
 ) : DocumentExtractor {
 
     init {
@@ -342,10 +345,17 @@ class PdfExtractor(
                         run.warnings += "page $page: its own text could not be read (${failure::class.simpleName})"
                         null
                     }
-                    // Fill-missing keeps usable direct text; check-and-improve reads the page image even
-                    // when the text layer passes every heuristic, because a text layer that is long is not
-                    // a text layer that is right. The mode is the attempt's own setting, never a hint.
-                    if (!readsEveryPage && text != null && !PdfPageCandidate(page, text).needsOcr) {
+                    // Fill-missing keeps usable direct text. The read-all and check-and-improve modes keep
+                    // the page's own text too, unless the selector says the page must be read: a page with
+                    // a clean text layer and no large picture is never rendered or sent to an engine. The
+                    // mode is the attempt's own setting, never a hint. A page whose text could not be read
+                    // is always read (the selector says so, and the null check keeps this total).
+                    val directTextSuffices = text != null && if (readsEveryPage) {
+                        !selector.shouldRead(document, page)
+                    } else {
+                        !PdfPageCandidate(page, text).needsOcr
+                    }
+                    if (directTextSuffices) {
                         emitTextUnit(key = key, page = page, text = text, method = ExtractionMethod.DIRECT_TEXT)
                         return@unit
                     }

@@ -11,6 +11,7 @@ import infoscry.extract.PageCounter
 import infoscry.extract.DefaultPageCounter
 import infoscry.extract.PdfExtractor
 import infoscry.extract.PdfPageRenderer
+import infoscry.extract.PdfPageSelector
 import infoscry.extract.PngPageRenderer
 import infoscry.extract.TextNormalizer
 import infoscry.jobs.RescanJobPayload
@@ -112,7 +113,15 @@ class RescanRefusalException(val code: String, message: String) : IllegalStateEx
  * It is read once, when the attempt starts, and travels with the image so the comparison and the page's unit
  * identity are decided from one reading of the revision rather than from whatever it says later.
  */
-data class RescanPage(val image: PageImage, val baseline: RevisionPageText?)
+data class RescanPage(val image: PageImage, val baseline: RevisionPageText?, val read: Boolean = true)
+
+/**
+ * How many pages a managed document has, and how many of them a rescan reads.
+ *
+ * A page is read when the PDF page selector says its own text cannot be trusted, or when the document publishes
+ * no text for it at all. Every other page keeps its published text, so it is not sent to any engine.
+ */
+data class PageCensus(val documentPages: Int, val pagesToRead: Int)
 
 /**
  * The page images of one managed document, produced the way a page-image reading needs them.
@@ -132,6 +141,7 @@ class RescanPageSource(
     private val draw: PdfPageRenderer = PngPageRenderer,
     private val maxRenderedPixels: Long = PdfExtractor.MAX_RENDERED_PIXELS,
     private val pageCounter: PageCounter = DefaultPageCounter(),
+    private val selector: PdfPageSelector = PdfPageSelector(),
 ) {
 
     /** Whether this media type has pages that can be rendered and read. */
@@ -156,7 +166,55 @@ class RescanPageSource(
     )
 
     /**
+     * How many pages the managed copy has and how many a rescan reads, with [baseline] the pages the document
+     * publishes now (keyed by ordinal).
+     *
+     * A PDF is opened once and judged page by page with the same selector the import uses. A picture is one page
+     * and is always read.
+     *
+     * @throws RescanRefusalException when the container cannot be opened or measured.
+     */
+    fun census(
+        managedPath: Path,
+        mediaType: String,
+        baseline: Map<Int, RevisionPageText>,
+    ): PageCensus = when {
+        mediaType == PDF_MEDIA_TYPE -> pdfCensus(managedPath, baseline)
+        mediaType in PICTURE_MEDIA_TYPES -> {
+            // A picture is one page and is always read; pageCount refuses a picture that is not there.
+            pageCount(managedPath, mediaType)
+            PageCensus(documentPages = ORDINAL_OF_THE_ONLY_PAGE + 1, pagesToRead = ORDINAL_OF_THE_ONLY_PAGE + 1)
+        }
+        else -> throw RescanRefusalException(
+            RescanRefusalException.PAGE_IMAGES_UNSUPPORTED,
+            unsupportedReason(mediaType),
+        )
+    }
+
+    private fun pdfCensus(managedPath: Path, baseline: Map<Int, RevisionPageText>): PageCensus {
+        val pdf = openPdf(managedPath) ?: throw RescanRefusalException(
+            RescanRefusalException.MANAGED_COPY_MISSING,
+            PDF_NOT_OPENED_MESSAGE,
+        )
+        return pdf.use { container ->
+            val pagesToRead = (1..container.numberOfPages).count { page -> readsPage(container, page, baseline) }
+            PageCensus(documentPages = container.numberOfPages, pagesToRead = pagesToRead)
+        }
+    }
+
+    /**
+     * Whether an attempt reads [page] (1-based): the selector says its text cannot be trusted, or the document
+     * publishes no text for it, so there is nothing to keep.
+     */
+    private fun readsPage(container: PDDocument, page: Int, baseline: Map<Int, RevisionPageText>): Boolean =
+        baseline[page - 1] == null || selector.shouldRead(container, page)
+
+    /**
      * Renders every page of [document]'s managed copy into [attemptDirectory].
+     *
+     * Every page is rendered, including those a rescan does not read: a [RescanPage] carries its image for the
+     * reading's provenance and for the staged page's identity. Only [RescanPage.read] decides whether an engine
+     * is called.
      *
      * @throws RescanRefusalException when the container cannot be opened, when its copy is not the bytes the
      *   archive recorded, or when a picture cannot be read within the raster bound.
@@ -233,7 +291,11 @@ class RescanPageSource(
                         "bound this build reads at any legible resolution, so it was not read; a rescan cannot " +
                         "produce an image for it",
                 )
-                RescanPage(image = image, baseline = baseline[ordinal])
+                RescanPage(
+                    image = image,
+                    baseline = baseline[ordinal],
+                    read = readsPage(container, page, baseline),
+                )
             }
         }
     }
@@ -305,6 +367,10 @@ class RescanPageSource(
 
         /** The ordinal of the only page of a picture document. */
         const val ORDINAL_OF_THE_ONLY_PAGE: Int = 0
+
+        private const val PDF_NOT_OPENED_MESSAGE =
+            "the document's managed copy could not be opened, so its pages are unknown; add the file again to " +
+                "restore it"
 
         private const val PICTURE_KEY = "image"
         private const val NO_DECLARED_ROTATION = 0
@@ -384,18 +450,22 @@ class RescanService(
         methodCatalog?.require(collectionId, method)
         pageImagesRefusal(document)?.let { throw it }
         val settings = CollectionOcrSettings(collection.ocrLanguages, method)
-        val pageTotal = pages.pageCount(
+        val baselineRevisionId = revisions.activeRevisionId(documentId)
+        val baseline = baselineRevisionId
+            ?.let { revisionId -> revisions.pages(revisionId).associateBy { page -> page.ordinal } }
+            .orEmpty()
+        // The pages a rescan reads, not all the pages: the dialog's count, the cost and the external allowance
+        // all describe what is actually sent, and the pages that keep their published text are not in them.
+        val census = pages.census(
             managedCopyOf(document, paths.documentDir(collectionId, documentId)),
             document.mediaType,
-        ) ?: throw RescanRefusalException(
-            RescanRefusalException.MANAGED_COPY_MISSING,
-            "the document's page count could not be read, so the number of pages cannot be confirmed",
+            baseline,
         )
+        val pageTotal = census.pagesToRead
         val snapshot = snapshotFor(settings, externalPageLimit = if (method is ReadingMethod.Llm &&
             profileOf(method.profileId)?.revision?.scope == OcrEndpointScope.EXTERNAL
         ) pageTotal else 0)
         requireRescanable(document, snapshot)
-        val baselineRevisionId = revisions.activeRevisionId(documentId)
         val destinations = destinationsOf(snapshot)
         val external = snapshot.transcriptionProfileRevisionId?.let { profileRevisionOf(it)?.scope } == OcrEndpointScope.EXTERNAL
         val upperBound = pageTotal
@@ -416,6 +486,7 @@ class RescanService(
             costUnavailableReason = estimate.second,
             externalAllowance = snapshot.externalPageLimit,
             expiresAt = clock().plus(PREVIEW_LIFETIME).toString(),
+            documentPages = census.documentPages,
         ).also { preview ->
             operations.recordPreview(
                 collectionId.value,
@@ -514,7 +585,9 @@ class RescanService(
                 snapshot = preview.snapshot,
                 requestId = requestId,
                 requestHash = requestHash,
-                pageTotal = preview.pageTotal,
+                // A document whose pages all keep their published text reads none, which an operation cannot
+                // record as a positive total; the attempt records the document's page count when it starts.
+                pageTotal = preview.pageTotal?.takeIf { it > 0 },
                 jobId = null,
             )
             // Admission is durable before the attempt exists: the attempt is created by the claim, in the same

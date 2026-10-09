@@ -14,6 +14,7 @@ const methods: ReadingMethodList = { default: 'surya', methods: [
   { method: 'tesseract', label: 'Tesseract', destination: 'this machine', available: true, unavailableReason: null, external: false },
   { method: 'surya', label: 'Surya', destination: 'this machine', available: true, unavailableReason: null, external: false },
   { method: 'llm:p1', label: 'Cloud OCR', destination: 'api.example.com', available: false, unavailableReason: 'Key variable is missing', external: true },
+  { method: 'llm:p2', label: 'LLM: Unchecked', destination: 'api.example.com', available: false, unavailableReason: 'This OCR profile has not passed its image check.', external: true },
 ] };
 const importPreview: ImportPreview = {
   files: [{ path: '/data/report.pdf', pages: 48, reason: null }], totalPages: 48, atLeast: false,
@@ -41,7 +42,12 @@ describe('StartReadingDialog', () => {
     render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
     const select = await screen.findByLabelText('Reading method') as HTMLSelectElement;
     await waitFor(() => expect(select.value).toBe('surya'));
-    expect((screen.getByRole('option', { name: /Cloud OCR — unavailable: Key variable is missing/ }) as HTMLOptionElement).disabled).toBe(true);
+    expect((screen.getByRole('option', { name: 'Cloud OCR — unavailable' }) as HTMLOptionElement).disabled).toBe(true);
+    // The reason is shown beside the list instead of inside the option, which keeps the select narrow.
+    expect(screen.getByText('Cloud OCR: Key variable is missing')).toBeTruthy();
+    // A profile that has not passed its image check cannot be used, so it is not listed at all.
+    expect(screen.queryByRole('option', { name: /Unchecked/ })).toBeNull();
+    expect(screen.queryByText(/image check/)).toBeNull();
     expect(api.previewImport).toHaveBeenLastCalledWith({ collection: 'c', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [], method: 'surya' });
     await fireEvent.change(select, { target: { value: 'tesseract' } });
     await waitFor(() => expect(api.previewImport).toHaveBeenLastCalledWith(expect.objectContaining({ method: 'tesseract' })));
@@ -86,6 +92,45 @@ describe('StartReadingDialog', () => {
 
     expect(await screen.findByText('The document changed; review the summary again.')).toBeTruthy();
     await waitFor(() => expect(api.previewRescan).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows how many pages of each file will be read when the document has more', async () => {
+    vi.mocked(api.previewImport).mockResolvedValueOnce({
+      ...importPreview,
+      files: [{ path: '/data/report.pdf', pages: 12, reason: null, documentPages: 48 }],
+      totalPages: 12,
+    });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+
+    expect(await screen.findByText('/data/report.pdf: 12 of 48 pages will be read')).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Read 12 pages with Surya' })).toBeTruthy();
+  });
+
+  it('keeps the plain per-file count when every page of the file is read', async () => {
+    vi.mocked(api.previewImport).mockResolvedValueOnce({
+      ...importPreview,
+      files: [{ path: '/data/report.pdf', pages: 48, reason: null, documentPages: 48 }],
+    });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+
+    expect(await screen.findByText('/data/report.pdf: 48 pages')).toBeTruthy();
+    expect(screen.queryByText(/will be read \(of/)).toBeNull();
+  });
+
+  it('says how many pages of the document a rescan reads', async () => {
+    vi.mocked(api.previewRescan).mockResolvedValueOnce(rescanPreview({ pageTotal: 12, externalPageUpperBound: 12, documentPages: 48 }));
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'rescan', documentId: 'doc-1' }, onstarted: vi.fn(), oncancel: vi.fn() });
+
+    const summary = await screen.findByText(/12 pages will be read/);
+    expect(summary.textContent?.replace(/\s+/g, ' ').trim()).toBe('12 pages will be read (of 48 in the document).');
+  });
+
+  it('says plainly when a rescan has no page to read', async () => {
+    vi.mocked(api.previewRescan).mockResolvedValueOnce(rescanPreview({ pageTotal: null, externalPageUpperBound: null, documentPages: 3 }));
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'rescan', documentId: 'doc-1' }, onstarted: vi.fn(), oncancel: vi.fn() });
+
+    expect(await screen.findByText('No page needs reading; the document keeps its text.')).toBeTruthy();
+    expect(screen.queryByText(/Unknown pages/)).toBeNull();
   });
 
   it('replays the exact start body after a lost response and blocks method changes or closing', async () => {

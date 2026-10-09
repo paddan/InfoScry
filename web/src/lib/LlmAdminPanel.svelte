@@ -2,17 +2,21 @@
   import { onMount } from 'svelte';
   import {
     ApiError,
+    copyLlmProfileToOcr,
     createLlmProfile,
     deleteLlmProfile,
     listLlmPresets,
     listLlmProfiles,
+    listOcrProfiles,
     probeLlmProfile,
+    probeOcrProfile,
     setLlmDefault,
     updateLlmProfile,
     type LlmDefaults,
     type LlmPreset,
     type LlmProfile,
     type LlmProfileInput,
+    type OcrProfile,
   } from './api';
   import ProviderModelFields from './ProviderModelFields.svelte';
   import { toolCallingState } from './toolCalling';
@@ -20,6 +24,10 @@
   let profiles: LlmProfile[] = [];
   /** A tool-calling check is in flight; a second click while it runs is ignored, so one check is sent. */
   let probing = false;
+  /** The OCR copies of these profiles: what a collection's reading methods and an OCR attempt actually pin. */
+  let ocrCopies: OcrProfile[] = [];
+  /** An image-reading check is in flight; a second click while it runs is ignored. */
+  let checkingImages = false;
   let defaults: LlmDefaults = { ASK: null, INVESTIGATE: null };
   let selectedId = '';
   let draft: LlmProfileInput = emptyDraft();
@@ -32,6 +40,7 @@
   let presetError: string | null = null;
 
   $: selectedProfile = profiles.find((profile) => profile.id === selectedId) ?? null;
+  $: ocrCopy = ocrCopies.find((copy) => copy.sourceLlmProfileId === selectedId) ?? null;
   function emptyDraft(): LlmProfileInput {
     return {
       name: '',
@@ -68,6 +77,16 @@
     const data = await listLlmProfiles();
     profiles = data.profiles;
     defaults = data.defaults;
+    await reloadOcrCopies();
+  }
+
+  /** The copies only decorate this panel; failing to list them must not hide the profiles themselves. */
+  async function reloadOcrCopies(): Promise<void> {
+    try {
+      ocrCopies = await listOcrProfiles();
+    } catch {
+      ocrCopies = [];
+    }
   }
 
   async function load(): Promise<void> {
@@ -154,6 +173,15 @@
         draft = toInput(created);
       } else {
         const updated = await updateLlmProfile(selectedId, payload);
+        // An existing OCR copy is what OCR reads through, so it follows the edit. The new revision has not
+        // passed the image check, which is the safe state until the person runs it again.
+        if (ocrCopy !== null) {
+          try {
+            await copyLlmProfileToOcr(selectedId);
+          } catch {
+            // A model the catalog now states is text-only keeps its old copy; the status line shows it.
+          }
+        }
         await reload();
         draft = toInput(updated);
       }
@@ -186,6 +214,38 @@
     } finally {
       probing = false;
     }
+  }
+
+  /**
+   * Offers the saved profile for OCR and measures it with the server's synthetic image. The copy is made first
+   * (or brought up to date) so the check is of the settings OCR will read through; only a passed check makes the
+   * profile selectable as a reading method.
+   */
+  async function checkImageReading(): Promise<void> {
+    if (checkingImages || creating || selectedProfile === null) return;
+    checkingImages = true;
+    error = null;
+    flash = null;
+    try {
+      const copy = await copyLlmProfileToOcr(selectedId);
+      const result = await probeOcrProfile(copy.id);
+      await reloadOcrCopies();
+      flash = result.supported
+        ? 'Image reading confirmed: this profile can be chosen as a reading method for OCR.'
+        : 'Image reading failed: this model did not read the test image, so OCR cannot use it.';
+    } catch (failure) {
+      error = describe(failure);
+    } finally {
+      checkingImages = false;
+    }
+  }
+
+  function imageReadingText(copy: OcrProfile | null): string {
+    if (copy === null || copy.imageCapabilityMeasured === null) return 'Image reading for OCR: not checked';
+    if (copy.imageCapabilityMeasured) {
+      return `Image reading for OCR: confirmed (measured ${copy.imageCapabilityCheckedAt ?? 'unknown time'})`;
+    }
+    return `Image reading for OCR: failed the check (measured ${copy.imageCapabilityCheckedAt ?? 'unknown time'})`;
   }
 
   function toolCallingText(profile: LlmProfile): string {
@@ -301,6 +361,20 @@
           </div>
           <p class="hint">
             Sends two short requests to the saved profile, not to the values above. Investigate needs a supported profile.
+          </p>
+        </div>
+      {/if}
+
+      {#if !creating && selectedProfile !== null}
+        <div class="field tool-calling">
+          <p class="key-state" role="status">{imageReadingText(ocrCopy)}</p>
+          <div class="inline">
+            <button type="button" onclick={checkImageReading} disabled={checkingImages}>
+              {checkingImages ? 'Checking…' : 'Check image reading'}
+            </button>
+          </div>
+          <p class="hint">
+            Sends a test image to the saved profile. Only a profile that reads it can be chosen for OCR; the image goes to this profile's endpoint.
           </p>
         </div>
       {/if}

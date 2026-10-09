@@ -115,6 +115,45 @@ class ImportPreviewServiceTest {
     }
 
     @Test
+    fun `the preview counts the pages that will be read and reports the document's own pages`() {
+        val document = directory.resolve("mixed-document.pdf").also { Files.writeString(it, "placeholder") }
+        val selection = ImportSelection(MediaTypeDetector(), ExtractorRegistry(listOf(PlainTextExtractor())))
+        val counting = ImportPreviewService(
+            collections = collections,
+            catalog = object : ReadingMethodCatalog {
+                override fun availability(collectionId: CollectionId) = listOf(
+                    MethodAvailability(
+                        method = ReadingMethod.Tesseract,
+                        label = "Tesseract",
+                        destination = "this machine",
+                        available = true,
+                        unavailableReason = null,
+                        external = false,
+                    ),
+                )
+            },
+            profiles = OcrProfileService(OcrProfileStore(database)),
+            pageCounter = object : PageCounter {
+                override fun pageCount(path: Path): Int? = 48
+                override fun readablePageCount(path: Path): Int? = 12
+            },
+            selection = selection,
+            enumerate = { paths, recursive, ignore -> enumerateImportSources(paths, recursive, ignore, selection) },
+            ignorePatterns = { IgnorePatterns.NONE },
+        )
+
+        val preview = counting.preview(
+            ImportPreviewRequest(collectionId, listOf(document.toString()), method = ReadingMethod.Tesseract),
+        )
+
+        val file = preview.files.single()
+        assertEquals(12, file.pages)
+        assertEquals(48, file.documentPages)
+        assertEquals(12, preview.totalPages)
+        assertEquals(false, preview.atLeast)
+    }
+
+    @Test
     fun `unknown external page count has no misleading exact cost estimate`() {
         val source = directory.resolve("bad-external.txt").also { Files.writeString(it, "unknown pages") }
         val profiles = OcrProfileService(OcrProfileStore(database))

@@ -60,6 +60,7 @@ import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB
+import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 import org.apache.pdfbox.rendering.PDFRenderer
 
@@ -156,10 +157,9 @@ class PdfExtractorTest {
     // ---- The mode the attempt was admitted with -------------------------------------------------------
 
     @Test
-    fun `a long but incorrect text layer is read by ocr when the attempt says to check and improve`() {
-        // Every page of this fixture carries a long, usable text layer, so fill-missing never renders it —
-        // which is what makes it the case the mode exists for: a text layer that is long is not a text
-        // layer that is right, and an attempt admitted to check and improve reads the page images anyway.
+    fun `check and improve keeps a clean text layer without reading it`() {
+        // A page with a clean text layer and no large picture says what it contains, so an attempt admitted
+        // to check and improve takes it at its word: nothing is rendered and the engine is never asked.
         val legacy = OcrSpy()
         val legacyEvents = collect(pdfExtractor(legacy), inputFor(fixture(TEXT_NAME), probe()), probe())
 
@@ -176,17 +176,19 @@ class PdfExtractorTest {
             probe(),
         )
 
-        assertEquals(listOf(1, 2, 3), rescan.readPages, "the rescan did not read every page image")
+        assertTrue(rescan.pages.isEmpty(), "the rescan read a clean text layer that has no large picture")
         assertEquals(
-            listOf("läst sida 1", "läst sida 2", "läst sida 3"),
+            units(legacyEvents).map { it.unit.extractedText },
             units(rescanEvents).map { it.unit.extractedText },
-            "the rescan's page text is the embedded layer it was asked to check rather than what it read",
         )
-        assertTrue(units(rescanEvents).all { it.unit.meanConfidence == null || it.unit.method == ExtractionMethod.OCR })
+        assertEquals(
+            listOf(ExtractionMethod.DIRECT_TEXT, ExtractionMethod.DIRECT_TEXT, ExtractionMethod.DIRECT_TEXT),
+            units(rescanEvents).map { it.unit.method },
+        )
     }
 
     @Test
-    fun `read all sends every text-layer page to the selected OCR engine`() {
+    fun `read all sends only the pages that need reading to the selected OCR engine`() {
         val spy = OcrSpy()
         val legacy = checkAndImprove()
         val readAll = legacy.copy(
@@ -194,43 +196,79 @@ class PdfExtractorTest {
             ocrAttempt = legacy.ocrAttempt?.copy(mode = OcrImportMode.READ_ALL),
         )
 
-        val events = collect(pdfExtractor(spy), inputFor(fixture(TEXT_NAME), probe(), settings = readAll), probe())
+        val units = units(
+            collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe(), settings = readAll), probe()),
+        )
 
-        assertEquals(listOf(1, 2, 3), spy.readPages)
-        assertEquals(listOf("läst sida 1", "läst sida 2", "läst sida 3"), units(events).map { it.unit.extractedText })
+        assertEquals(MIXED_SCANNED_PAGES, spy.readPages, "a page with a clean text layer was handed to the engine")
+        assertEquals(
+            MIXED_TEXT_PAGES.map { ExtractionMethod.DIRECT_TEXT } + MIXED_SCANNED_PAGES.map { ExtractionMethod.OCR },
+            units.map { it.unit.method },
+        )
+        units.filter { pageOf(it.key) in MIXED_SCANNED_PAGES }.forEach { unit ->
+            assertContains(unit.unit.extractedText, "läst")
+        }
+    }
+
+    @Test
+    fun `read all reads only the page without a text layer and keeps the other two as direct text`() {
+        // Page 1 and page 3 carry clean text and no picture, page 2 is a scan with no text at all: under
+        // READ_ALL only page 2 may be rendered and handed to the engine.
+        val source = writeDocument(
+            directory.resolve("three-pages.pdf"),
+            listOf(
+                MemoryPage(text = cleanText),
+                MemoryPage(scan = true),
+                MemoryPage(text = cleanText),
+            ),
+        )
+        val spy = OcrSpy()
+        val legacy = checkAndImprove()
+        val readAll = legacy.copy(
+            ocrMode = OcrImportMode.READ_ALL,
+            ocrAttempt = legacy.ocrAttempt?.copy(mode = OcrImportMode.READ_ALL),
+        )
+
+        val units = units(collect(pdfExtractor(spy), inputFor(source, probe(), settings = readAll), probe()))
+
+        assertEquals(listOf(2), spy.readPages, "only the page without a text layer may reach the engine")
+        assertEquals(listOf(1, 2, 3), units.map { pageOf(it.key) })
+        assertEquals(
+            listOf(ExtractionMethod.DIRECT_TEXT, ExtractionMethod.OCR, ExtractionMethod.DIRECT_TEXT),
+            units.map { it.unit.method },
+        )
+        assertContains(units.first().unit.extractedText, "Protokollet")
+        assertContains(units.last().unit.extractedText, "Protokollet")
+        assertEquals("läst sida 2", units[1].unit.extractedText)
     }
 
     @Test
     fun `check and improve hands over the page's own text beside what it read from the image`() {
-        // The mode's whole point: the page carries a text layer *and* its image was read, so one unit has to
-        // account for both readings — the engine's as the unit's text, the page's own beside it — because
-        // comparing the two and deciding between them is what an admitted check-and-improve attempt owes.
+        // The mode's whole point: the page carries a text layer *and* the engine read its image, so one unit
+        // has to account for both readings — the engine's as the unit's text, the page's own beside it. A
+        // text layer too short to count as usable is the case where the page is read, so the text is there
+        // to compare against while the image is still read.
+        val source = writeDocument(directory.resolve("short-text.pdf"), listOf(MemoryPage(text = listOf("Protokollet"))))
         val spy = OcrSpy()
 
         val units = units(
-            collect(
-                pdfExtractor(spy),
-                inputFor(fixture(TEXT_NAME), probe(), settings = checkAndImprove()),
-                probe(),
-            ),
+            collect(pdfExtractor(spy), inputFor(source, probe(), settings = checkAndImprove()), probe()),
         )
 
-        assertEquals(listOf("läst sida 1", "läst sida 2", "läst sida 3"), units.map { it.unit.extractedText })
-        assertEquals(
-            listOf(ExtractionMethod.OCR, ExtractionMethod.OCR, ExtractionMethod.OCR),
-            units.map { it.unit.method },
-        )
-        units.forEach { unit ->
-            val direct = assertNotNull(unit.unit.directText, "page ${pageOf(unit.key)} carried no text layer")
-            assertContains(direct, "Protokollet")
-            assertNotEquals(direct, unit.unit.extractedText, "the two readings of one page were conflated")
-        }
+        assertEquals(listOf(1), spy.readPages)
+        assertEquals(listOf(ExtractionMethod.OCR), units.map { it.unit.method })
+        val unit = units.single()
+        assertEquals("läst sida 1", unit.unit.extractedText)
+        val direct = assertNotNull(unit.unit.directText, "page 1 carried a text layer but none was handed over")
+        assertContains(direct, "Protokollet")
+        assertNotEquals(direct, unit.unit.extractedText, "the two readings of one page were conflated")
     }
 
     @Test
     fun `check and improve reports no direct text for a page that carries none`() {
         // A scanned page has no text layer to compare against, so there is no second reading to carry: the
         // engine's is the only one, and a baseline invented for it would be a comparison against nothing.
+        // A readable page is not read at all under check-and-improve, so it is direct text with no OCR reading.
         val spy = OcrSpy()
 
         val units = units(
@@ -240,13 +278,14 @@ class PdfExtractorTest {
                 probe(),
             ),
         )
-        val direct = units.associate { pageOf(it.key) to it.unit.directText }
+        val byPage = units.associateBy { pageOf(it.key) }
 
         MIXED_SCANNED_PAGES.forEach { page ->
-            assertNull(direct[page], "the scanned page $page was given a text layer it has not got")
+            assertNull(byPage.getValue(page).unit.directText, "the scanned page $page was given a text layer it has not got")
+            assertEquals(ExtractionMethod.OCR, byPage.getValue(page).unit.method)
         }
         MIXED_TEXT_PAGES.forEach { page ->
-            assertNotNull(direct[page], "the readable page $page lost its own text layer")
+            assertEquals(ExtractionMethod.DIRECT_TEXT, byPage.getValue(page).unit.method, "the readable page $page was read")
         }
     }
 
@@ -278,10 +317,11 @@ class PdfExtractorTest {
     fun `a page image read for review is kept as the attempt's evidence`() {
         // A rescan's pages are reviewed against the image they were read from, so those images outlive the
         // attempt. A fill-missing render is working material instead, which the test above the helpers
-        // asserts: it is deleted as soon as the page it belongs to is committed.
+        // asserts: it is deleted as soon as the page it belongs to is committed. The scanned pages of the
+        // mixed fixture are the pages a rescan actually reads.
         val spy = OcrSpy()
         val settings = checkAndImprove()
-        val input = inputFor(fixture(TEXT_NAME), probe(), settings = settings)
+        val input = inputFor(fixture(MIXED_NAME), probe(), settings = settings)
 
         collect(pdfExtractor(spy), input, probe())
 
@@ -327,9 +367,9 @@ class PdfExtractorTest {
         )
 
         assertEquals(
-            MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES,
+            MIXED_SCANNED_PAGES,
             spy.readPages,
-            "a page whose raster fits the bound was not read",
+            "a page whose raster fits the bound was not read, or a page with a clean text layer was",
         )
         assertEquals(
             listOf(MIXED_UNRENDERABLE_PAGE),
@@ -1126,6 +1166,13 @@ class PdfExtractorTest {
 
     private fun probe(): PermitProbeBoundary = PermitProbeBoundary()
 
+    /** A clean Swedish paragraph: long, usable and with no picture, so the page selector takes it at its word. */
+    private val cleanText: List<String> = listOf(
+        "Protokollet sammanfattar överföringarna i ärendet och redovisar samtliga transaktioner i",
+        "bilagan. Handlingarna är diarieförda och tillgängliga för granskning av den som har rätt",
+        "att ta del av dem enligt bestämmelserna om allmänna handlingar och offentlighet.",
+    )
+
     private fun collect(
         extractor: DocumentExtractor,
         input: ExtractionInput,
@@ -1225,7 +1272,7 @@ class PdfExtractorTest {
     }
 
     /**
-     * One page with a long, usable text layer of its own and a declared rotation.
+     * One scanned page (a full-page picture and no text layer) with a declared rotation, so it is read.
      *
      * Written by hand rather than added to the fixture generator: the committed fixtures are compared byte
      * for byte against what the generator writes, and a rotated page is a shape one test needs rather than a
@@ -1237,14 +1284,39 @@ class PdfExtractorTest {
             document.addPage(page)
             page.rotation = rotation
             PDPageContentStream(document, page).use { content ->
-                content.beginText()
-                content.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 12f)
-                content.newLineAtOffset(72f, 760f)
-                repeat(4) { line ->
-                    content.showText("Protokollet sammanfattar överföringarna i ärendet, rad $line")
-                    content.newLineAtOffset(0f, -18f)
+                val picture = LosslessFactory.createFromImage(document, scanImage())
+                content.drawImage(picture, 0f, 0f, PDRectangle.A4.width, PDRectangle.A4.height)
+            }
+            document.save(target.toFile())
+        }
+        return target
+    }
+
+    /** One page of an in-memory document: its text lines, and whether a full-page scan is drawn on it. */
+    private data class MemoryPage(val text: List<String> = emptyList(), val scan: Boolean = false)
+
+    /** Writes an in-memory A4 document with one page per [pages] entry, in order. */
+    private fun writeDocument(target: Path, pages: List<MemoryPage>): Path {
+        PDDocument().use { document ->
+            pages.forEach { spec ->
+                val page = PDPage(PDRectangle.A4)
+                document.addPage(page)
+                PDPageContentStream(document, page).use { content ->
+                    if (spec.text.isNotEmpty()) {
+                        content.beginText()
+                        content.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 12f)
+                        content.newLineAtOffset(72f, 760f)
+                        spec.text.forEach { line ->
+                            content.showText(line)
+                            content.newLineAtOffset(0f, -18f)
+                        }
+                        content.endText()
+                    }
+                    if (spec.scan) {
+                        val picture = LosslessFactory.createFromImage(document, scanImage())
+                        content.drawImage(picture, 0f, 0f, PDRectangle.A4.width, PDRectangle.A4.height)
+                    }
                 }
-                content.endText()
             }
             document.save(target.toFile())
         }

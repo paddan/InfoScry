@@ -338,6 +338,12 @@ export type SourceContentResponse = {
   truncated: boolean;
   /** The revision the text was read from; absent when the live reading was served. */
   revisionId?: string;
+  /** The unit before and after this one in the document; absent at the ends and on a revision-pinned read. */
+  previousId?: string;
+  nextId?: string;
+  /** This unit's 1-based place among [unitCount]; absent on a revision-pinned read. */
+  position?: number;
+  unitCount?: number;
 };
 
 export const SOURCE_PAGE_CHARS = 16_384;
@@ -989,7 +995,8 @@ export type ImportPreviewRequest = {
   method: string;
 };
 export type ImportPreview = {
-  files: { path: string; pages: number | null; reason: string | null }[];
+  /** `pages` is what will be read; `documentPages` is every page the file has, when it could be counted. */
+  files: { path: string; pages: number | null; reason: string | null; documentPages?: number | null }[];
   totalPages: number;
   atLeast: boolean;
   destination: string;
@@ -1365,6 +1372,8 @@ export type RescanPreview = {
   snapshot: OcrSettingsSnapshot;
   method?: string;
   pageTotal?: number | null;
+  /** Every page the document has; `pageTotal` is only the pages a rescan reads. */
+  documentPages?: number | null;
   externalPageUpperBound?: number | null;
   destinations: OcrNamedDestination[];
   costEstimate?: { amountUsd: number; basis: string } | null;

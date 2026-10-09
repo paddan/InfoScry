@@ -34,9 +34,9 @@ import kotlinx.serialization.json.Json
  *
  * The reuse rules are the point of this file. A transcription fingerprint decides whether committed
  * page text may be reused, and method/runtime changes must invalidate it. The pinned digests are the other
- * half: settings that name no OCR attempt
- * have to hash exactly as they did before OCR attempts existed, so checkpoints and queued jobs written
- * by the previous build keep matching.
+ * half: settings that name no OCR attempt have to keep the canonical format of extractor schema version 2,
+ * so checkpoints and queued jobs written in that format keep matching. Bumping the schema version changes
+ * the format on purpose and re-reads the pins.
  */
 class OcrSettingsTest {
 
@@ -67,15 +67,16 @@ class OcrSettingsTest {
 
     @Test
     fun `settings without an OCR attempt hash exactly as the previous build did`() {
-        // These two digests were read off this build before the canonical string gained its optional OCR
-        // block, and they are the whole promise of backward-compatible reuse: a checkpoint committed by
-        // the previous build must keep matching, or a paused import would repeat work it already did.
+        // These digests pin the format of the canonical fingerprint string as of extractor schema version 2.
+        // Settings that name no OCR attempt must keep producing them, so a checkpoint committed under that
+        // format keeps matching and a paused import does not repeat work it already did. A deliberate bump
+        // of EXTRACTOR_SCHEMA_VERSION legitimately changes these digests, and then the pins are re-read.
         assertEquals(
-            "ed56e322e8ada616fcd366931606965265098b877c996cc832865192542a84c3",
+            "9ebe614620143a313ca1f297801f64d5f64f739314d85b62d36a9cff371cdf99",
             ExtractionFingerprint.of("a".repeat(64), ExtractionSettings(ocrLanguages = "eng")).value,
         )
         assertEquals(
-            "1649c37017a927b0960b9e87434b7e0b227314ea03e13af805a7106adf4b4750",
+            "c9f544d65163a2e8e2b4aab87b6134e41eaf84520e657af2bbd15f087a88cb6c",
             ExtractionFingerprint.of(
                 "b".repeat(64),
                 ExtractionSettings(
@@ -136,7 +137,7 @@ class OcrSettingsTest {
         val decodedLegacy = ImportJobPayload.decode(legacy)
         assertNull(decodedLegacy.settings.ocrAttempt, "a payload written before OCR attempts names none")
         assertEquals(
-            "ed56e322e8ada616fcd366931606965265098b877c996cc832865192542a84c3",
+            "9ebe614620143a313ca1f297801f64d5f64f739314d85b62d36a9cff371cdf99",
             ExtractionFingerprint.of("a".repeat(64), decodedLegacy.settings).value,
         )
 

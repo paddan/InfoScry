@@ -124,9 +124,15 @@ preserved.
 ## Configure LLM profiles
 
 Open **Admin → LLM profiles** to create, edit or delete a profile. Presets cover
-OpenAI, Anthropic, Ollama, OpenRouter and Custom endpoints. **Fetch models** lists
-models and fills known context limits, output limits and prices; fill in unknown
-values manually.
+OpenAI, Anthropic, Ollama, OpenRouter and Custom endpoints. The form lists the
+selected provider's models by itself and fills known context limits, output
+limits and prices when you pick one; fill in unknown values manually.
+
+To let a profile read scanned pages, open it and choose **Check image reading**.
+This offers the profile for OCR and sends one test image to its endpoint. Only a
+profile that reads the image can be chosen as a reading method for a collection.
+Editing the profile afterwards makes it unchecked again until you repeat the
+check.
 
 A profile identifies the endpoint, model and environment-variable name for its
 API key. The server reads the key from its own environment; the value never
@@ -190,3 +196,13 @@ infoscry reindex --wait
 
 See the [CLI reference](cli.md) for filtering, JSON output and data-directory
 options, and [implementation status](implementation-status.md) for open checks.
+
+## Which pages are read
+
+A PDF page is read with the method you chose when it has no usable text layer,
+or when an embedded image covers at least a quarter of the page and the page's
+own text scores below 75 (a missing or garbled hidden text layer). Other pages
+keep their own text and are not rendered or sent anywhere. The start dialog
+counts only the pages that will be read, for example "12 of 48 pages will be
+read", and the cost and the external approval follow that count. A picture file
+is always one page and is always read.

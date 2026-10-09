@@ -26,21 +26,24 @@ The [OCR workflow redesign](specs/2026-10-08-ocr-workflow-redesign.md) replaces
 collection engine/profile/mode controls with one reading method confirmed at
 start. Every page is read and successful runs publish automatically, preserving
 text history and Restore. Stopped and legacy paused work is cleaned on startup.
-See the [redesign ticket record](tickets/ocr-workflow-redesign/STATUS.md) for
-current implementation and verification. Real providers and CoreML remain
-separate manual gates; fake tests do not establish OCR quality.
+Only pages that can need reading are read (see the spec's "Page selection"). The
+redesign's tickets are complete and were removed from `docs/` (see git history
+before the commit that adds [the follow-up plan](plans/2026-10-09-follow-ups.md));
+open work is in [the follow-up tickets](tickets/follow-ups/STATUS.md). Real
+providers and CoreML remain separate manual gates; fake tests do not establish
+OCR quality.
 
 ## Fixes from local testing
 
 The owner's first local test of the OCR work (2026-10-07) produced an
-[eight-ticket plan](plans/2026-10-07-local-testing-feedback.md). All eight are
+eight-ticket plan (since removed; see git history). All eight are
 implemented and merged to `main` (2026-10-08), each with a fake-provider
 browser scenario: measuring tool calling from Admin, a finished import's stage,
 the OCR settings in text history, OCR profiles with the LLM providers and
 image-capable models, skipping unsupported files, include/exclude extensions,
 per-collection ignore patterns, and retrying a document with a chosen OCR
-method. Owner decisions still open are listed in the
-[ticket status](tickets/local-testing-feedback/STATUS.md).
+method. Owner decisions still open are ticket
+[06](tickets/follow-ups/06-owner-decisions.md).
 
 ## Planned compact document list
 
@@ -110,7 +113,7 @@ HTTP rejection, empty evidence, research limits, repeated-call limits and
 cancellation recovery. They use a local fake provider. The Investigate report
 (removed from `docs/` once complete; see git history before commit `c9edfab`) records the details.
 
-**OCR:** the redesigned scenarios exercise OCR profiles and their provider catalog,
+**OCR:** the redesigned scenarios exercise the image-reading check on LLM profiles,
 language and default-method settings, explicit method selection, automatic
 publication, cancellation, restart after interruption, text history and guarded
 restoration. Eleven scenarios pass with fake engines and a local fake provider;

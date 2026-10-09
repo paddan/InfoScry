@@ -234,6 +234,8 @@ data class RescanPreview(
     val costUnavailableReason: String? = null,
     val externalAllowance: Int = 0,
     val expiresAt: String,
+    /** The pages the document has in total; [pageTotal] is only the pages a rescan reads. */
+    val documentPages: Int? = null,
 ) {
 
     init {

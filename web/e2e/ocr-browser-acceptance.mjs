@@ -1,5 +1,5 @@
 /**
- * The real-browser acceptance boundary for the OCR panels: OCR profiles, collection OCR settings, Scan again,
+ * The real-browser acceptance boundary for the OCR panels: image reading for LLM profiles, collection OCR settings, Scan again,
  * automatic publication, interruption recovery, and text history with restore.
  *
  * It drives the actual built SvelteKit reader in Chromium against a local InfoScry server whose page-reading
@@ -18,15 +18,12 @@ import { chromium } from 'playwright';
 const BASE_URL = process.env.BASE_URL;
 const SCENARIO = process.env.SCENARIO;
 const FACTS = JSON.parse(process.env.OCR_FACTS ?? '{}');
-const PRESENT_KEY_VARIABLE = process.env.OCR_PRESENT_KEY_VARIABLE ?? 'PATH';
 
 if (!BASE_URL) throw new Error('BASE_URL is required');
 if (!SCENARIO) throw new Error('SCENARIO is required');
 
 const PANEL = '#admin-panel-collections';
-const OCR_PANEL = '#admin-panel-ocr';
 const FILENAME = 'page.png';
-const HTML_NAME = '<b>Bold</b> <img src=x onerror="window.__ocrXss=true">';
 
 let activePage = null;
 
@@ -56,7 +53,7 @@ async function enterAdmin(page, tab) {
   await page.waitForSelector('#tab-admin', { timeout: 20_000 });
   await page.click('#tab-admin');
   await page.click(`#admin-tab-${tab}`);
-  const selector = tab === 'ocr' ? `${OCR_PANEL} .admin-panel` : `${PANEL} .collections-panel`;
+  const selector = tab === 'llm' ? '#admin-panel-llm .admin-panel' : `${PANEL} .collections-panel`;
   await page.waitForSelector(selector, { timeout: 20_000 });
 }
 
@@ -198,21 +195,7 @@ async function openSourceText(page) {
   return text;
 }
 
-/* ---- OCR profiles ---- */
-
-async function fillProfile(page, { name, model, endpoint, key }) {
-  await page.fill('#ocr-name', name);
-  await page.fill('#ocr-model', model);
-  await page.fill('#ocr-endpoint', endpoint);
-  await page.fill('#ocr-key', key);
-}
-
-const profileItem = (page, name) => page.locator(`${OCR_PANEL} ul.profiles li`).filter({ hasText: name });
-
-async function openProfileEditor(page, name) {
-  await profileItem(page, name).locator('button', { hasText: 'Edit' }).click();
-  await page.waitForSelector('#ocr-model', { timeout: 10_000 });
-}
+/* ---- OCR ---- */
 
 async function waitForScanFinished(page, fragment) {
   await waitForLatest(page, fragment, 90_000);
@@ -227,135 +210,31 @@ async function openHistory(page) {
   await page.waitForSelector(`${PANEL} ol[aria-label="Text versions"]`, { timeout: 20_000 });
 }
 
-/* ---- Text history reading, OCR profile presets and catalog, and the LLM choice (local-testing-feedback 03 and 04) ---- */
-
-const OCR_TAB = '#admin-tab-ocr';
-const LLM_TAB = '#admin-tab-llm';
-const NO_PROFILES = 'No OCR profiles yet.';
-const CATALOG_PLACEHOLDER = 'Choose a model…';
-
-/** The provider presets a form offers, without its placeholder. */
-async function presetLabels(page, prefix) {
-  return page.$$eval(`#${prefix}-preset option`, (options) =>
-    options.map((option) => option.textContent.trim()).filter((text) => text !== 'Pick a preset…'));
-}
-
-async function optionTexts(page, selector) {
-  return page.$$eval(selector, (options) => options.map((option) => option.textContent.trim()));
-}
-
-/** Opens Admin → OCR profiles on its new-profile form, whether or not the form was still open. */
-async function openOcrForm(page) {
-  await page.click(OCR_TAB);
-  await page.waitForSelector('#admin-panel-ocr', { state: 'visible', timeout: 10_000 });
-  const newOcr = page.locator(`${OCR_PANEL} button`, { hasText: 'New profile' });
-  // The panel may still be settling after the tab change, so the button is asked for again rather than once.
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    if (await page.locator('#ocr-preset').isVisible()) return;
-    if ((await newOcr.count()) > 0 && (await newOcr.isEnabled())) await newOcr.click();
-    try {
-      await page.waitForSelector('#ocr-preset', { state: 'visible', timeout: 3_000 });
-      return;
-    } catch {
-      // try again
-    }
-  }
-  fail('the OCR profile form did not open');
-}
-
-/** What the transcription select holds and what the profile list says, for a failure message. */
-async function describeTranscription(page) {
-  return page.evaluate(async () => {
-    const select = document.querySelector('#collection-ocr-transcription');
-    const options = select ? [...select.options].map((o) => `${o.value}|${o.textContent.trim()}|${o.selected}`) : [];
-    const profiles = await (await fetch('/api/ocr/profiles')).text();
-    return JSON.stringify({ options, profiles: profiles.slice(0, 1200) });
-  });
-}
 
 const scenarios = {
-  async profiles(browser) {
-    const { context, page } = await openAdmin(browser, 'ocr');
-    await page.waitForFunction(() => (document.querySelector('#admin-panel-ocr')?.textContent ?? '').includes('No OCR profiles yet.'), null, { timeout: 20_000 });
+  async 'llm-image-reading'(browser) {
+    // One LLM profile whose endpoint is a loopback fake that answers the synthetic image check.
+    const { page } = await openAdmin(browser, 'llm');
+    assert(await page.locator('#admin-tab-ocr').count() === 0, 'OCR profiles are no longer a separate admin section');
+    await page.waitForSelector('#admin-panel-llm select[aria-label="Profile"]', { timeout: 20_000 });
+    await page.waitForFunction(() => (document.querySelector('#admin-panel-llm')?.textContent ?? '').includes('Image reading for OCR: not checked'), null, { timeout: 20_000 });
 
-    // Create: listed with whether a key is present, never the key.
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'New profile' }).click();
-    await fillProfile(page, { name: 'Vision reader', model: 'vision-model', endpoint: 'https://example.invalid/v1', key: PRESENT_KEY_VARIABLE });
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'Create profile' }).click();
-    await page.waitForFunction(() => (document.querySelector('#admin-panel-ocr .flash')?.textContent ?? '').includes("'Vision reader' saved."), null, { timeout: 20_000 });
-    const created = squash(await profileItem(page, 'Vision reader').textContent());
-    assert(created.includes('External') && created.includes('Enabled') && created.includes('vision-model'), `the profile is listed with its scope and model, got ${created}`);
-    assert(created.includes('Image support not measured'), 'an unmeasured profile says so');
-    assert(created.includes(`${PRESENT_KEY_VARIABLE}: present in the server environment`), `the key variable is shown as present, got ${created}`);
-    const secret = process.env[PRESENT_KEY_VARIABLE] ?? '';
-    assert(secret.length > 3, 'the present-key variable must have a value for the check below to mean anything');
-    const everythingShown = (await page.textContent('body')) ?? '';
-    assert(!everythingShown.includes(secret), 'the value of a key variable must never reach the page');
-    const listing = await page.evaluate(async () => (await fetch('/api/ocr/profiles')).text());
-    assert(!listing.includes(secret), 'the profile API must never carry a key value');
+    // The check offers the profile for OCR and measures it with the test image.
+    await page.locator('#admin-panel-llm button', { hasText: 'Check image reading' }).click();
+    await page.waitForFunction(() => (document.querySelector('#admin-panel-llm')?.textContent ?? '').includes('Image reading for OCR: confirmed'), null, { timeout: 30_000 });
+    const confirmed = squash(await page.locator('#admin-panel-llm .flash').textContent());
+    assert(confirmed.includes('Image reading confirmed'), `the check reports success, got ${confirmed}`);
 
-    // A name that looks like markup, on a loopback endpoint that needs no key.
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'New profile' }).click();
-    await fillProfile(page, { name: HTML_NAME, model: 'second-model', endpoint: 'http://127.0.0.1:9/v1', key: '' });
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'Create profile' }).click();
-    await page.waitForFunction(() => document.querySelectorAll('#admin-panel-ocr ul.profiles li').length === 2, null, { timeout: 20_000 });
-    const literal = profileItem(page, 'Bold');
-    equal(squash(await literal.locator('strong').textContent()), HTML_NAME, 'a markup-like name is shown as typed');
-    equal(await page.locator(`${OCR_PANEL} ul.profiles b, ${OCR_PANEL} ul.profiles img`).count(), 0, 'a markup-like name builds no element');
-    await noScriptRan(page);
-    const second = squash(await literal.textContent());
-    assert(second.includes('Local'), `a loopback endpoint is local, got ${second}`);
-    assert(second.includes('No key configured'), `a profile with no key variable says so, got ${second}`);
-    assert(!second.includes('undefined'), `a missing field must not be printed, got ${second}`);
-
-    // A key variable the server does not have is reported missing, by name only.
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'New profile' }).click();
-    await fillProfile(page, { name: 'Absent key', model: 'third-model', endpoint: 'https://example.invalid/v1', key: 'INFOSCRY_ABSENT_OCR_KEY' });
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'Create profile' }).click();
-    await page.waitForFunction(() => document.querySelectorAll('#admin-panel-ocr ul.profiles li').length === 3, null, { timeout: 20_000 });
-    const third = squash(await profileItem(page, 'Absent key').textContent());
-    assert(third.includes('INFOSCRY_ABSENT_OCR_KEY: missing from the server environment'), `an absent variable is reported missing, got ${third}`);
-
-    // A second tab opens the editor on the saved revision while this one still holds the same one.
-    const other = await openPage(context, 'ocr');
-    await page.waitForFunction(() => document.querySelectorAll('#admin-panel-ocr ul.profiles li').length === 3, null, { timeout: 20_000 });
-    await other.waitForFunction(() => document.querySelectorAll('#admin-panel-ocr ul.profiles li').length === 3, null, { timeout: 20_000 });
-    await openProfileEditor(other, 'Vision reader');
-
-    // The first tab edits and saves: that is a new revision.
-    await openProfileEditor(page, 'Vision reader');
-    await page.fill('#ocr-model', 'edited-vision-model');
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'Save changes' }).click();
-    await page.waitForFunction(() => (document.querySelector('#admin-panel-ocr .flash')?.textContent ?? '').includes("'Vision reader' saved."), null, { timeout: 20_000 });
-    assert(squash(await profileItem(page, 'Vision reader').textContent()).includes('edited-vision-model'), 'the edit is listed');
-
-    // The second tab saves against the revision it loaded: refused, and its draft stays.
-    await other.fill('#ocr-model', 'stale-draft-model');
-    await other.locator(`${OCR_PANEL} button`, { hasText: 'Save changes' }).click();
-    await other.waitForSelector(`${OCR_PANEL} [role="alert"]`, { timeout: 20_000 });
-    const refusal = squash(await other.locator(`${OCR_PANEL} [role="alert"]`).textContent());
-    assert(refusal.includes('This profile was changed elsewhere, so nothing was saved.'), `the stale save says why, got ${refusal}`);
-    equal(await other.inputValue('#ocr-model'), 'stale-draft-model', 'the refused save keeps the draft');
-
-    // Reloading the latest keeps the draft and names what changed elsewhere.
-    await other.locator(`${OCR_PANEL} button`, { hasText: 'Reload latest' }).click();
-    await other.waitForFunction(() => (document.querySelector('#admin-panel-ocr .flash')?.textContent ?? '').includes('Your unsaved input is kept'), null, { timeout: 20_000 });
-    const flash = squash(await other.locator(`${OCR_PANEL} .flash`).textContent());
-    assert(flash.includes('model edited-vision-model'), `the message names what changed elsewhere, got ${flash}`);
-    equal(await other.inputValue('#ocr-model'), 'stale-draft-model', 'reloading the latest keeps the draft');
-    equal(await other.locator(`${OCR_PANEL} [role="alert"]`).count(), 0, 'the refusal is cleared once the latest is loaded');
-
-    // Saving now is the explicit overwrite.
-    await other.locator(`${OCR_PANEL} button`, { hasText: 'Save changes' }).click();
-    await other.waitForFunction(() => (document.querySelector('#admin-panel-ocr .flash')?.textContent ?? '').includes("'Vision reader' saved."), null, { timeout: 20_000 });
-
-    // A reload shows the saved state.
-    await reloadAdmin(page, 'ocr');
-    await page.waitForFunction(() => document.querySelectorAll('#admin-panel-ocr ul.profiles li').length === 3, null, { timeout: 20_000 });
-    assert(squash(await profileItem(page, 'Vision reader').textContent()).includes('stale-draft-model'), 'the overwrite survives a reload');
-    await noScriptRan(page);
+    // The profile is now a reading method a collection can choose, and it was not before the check.
+    const methods = await page.evaluate(async (collection) => {
+      const collections = await (await fetch('/api/collections')).json();
+      const id = collections.collections.find((entry) => entry.name === collection).id;
+      return (await (await fetch(`/api/collections/${id}/reading-methods`)).json()).methods;
+    }, 'Default');
+    const vision = methods.find((method) => method.label.includes('Vision reader'));
+    assert(vision !== undefined, `the profile is listed as a reading method, got ${JSON.stringify(methods)}`);
+    equal(vision.available, true, 'a profile that passed the image check can be chosen for OCR');
     noUnexpectedErrors(page);
-    noUnexpectedErrors(other);
   },
 
   async 'collection-settings'(browser) {
@@ -570,65 +449,6 @@ const scenarios = {
     const notes = squash(await versions(page).first().textContent());
     assert(notes.includes('No page needed OCR'), `a direct-text import says no page needed OCR, got ${notes}`);
     assert(!notes.includes('Tesseract'), `no engine is named for a text file that OCR never read, got ${notes}`);
-    noUnexpectedErrors(page);
-  },
-
-  async 'ocr-profile-catalog'(browser) {
-    const { page } = await openAdmin(browser, 'ocr');
-    await page.waitForFunction((text) => (document.querySelector('#admin-panel-ocr')?.textContent ?? '').includes(text), NO_PROFILES, { timeout: 20_000 });
-    const providerUrl = FACTS.providerUrl ?? '';
-    assert(/^http:\/\/127\.0\.0\.1:\d+$/.test(providerUrl), `the catalog is asked of a loopback fake, got ${providerUrl}`);
-
-    // The OCR form offers the presets the LLM form offers.
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'New profile' }).click();
-    await page.waitForFunction(() => document.querySelectorAll('#ocr-preset option').length > 1, null, { timeout: 20_000 });
-    const ocrPresets = await presetLabels(page, 'ocr');
-    await page.click(LLM_TAB);
-    await page.waitForSelector('#admin-panel-llm', { state: 'visible', timeout: 20_000 });
-    // With no LLM profile the panel opens its new-profile form itself (New is then disabled), so wait for the form.
-    const newLlm = page.locator('#admin-panel-llm button', { hasText: /^New$/ });
-    if (await newLlm.isEnabled()) await newLlm.click();
-    await page.waitForFunction(() => document.querySelectorAll('#pf-preset option').length > 1, null, { timeout: 20_000 });
-    const llmPresets = await presetLabels(page, 'pf');
-    equal(JSON.stringify(ocrPresets), JSON.stringify(llmPresets), 'the OCR form offers the same provider presets as the LLM form');
-    assert(ocrPresets.includes('OpenAI') && ocrPresets.includes('Custom OpenAI-compatible'), `the common presets are offered, got ${ocrPresets}`);
-
-    // A preset fills the connection; the endpoint is then pointed at the fake before any model list is asked for.
-    await openOcrForm(page);
-    await page.selectOption('#ocr-preset', { label: 'OpenAI' });
-    equal(await page.inputValue('#ocr-endpoint'), 'https://api.openai.com/v1', 'the OpenAI preset fills its endpoint');
-    equal(await page.inputValue('#ocr-key'), 'OPENAI_API_KEY', 'the OpenAI preset names its key variable, never a value');
-    await page.fill('#ocr-endpoint', providerUrl);
-    await page.fill('#ocr-key', '');
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'Fetch models' }).click();
-    await page.waitForFunction(() => document.querySelectorAll('#ocr-catalog option').length > 1, null, { timeout: 20_000 });
-    const ocrModels = await page.$$eval('#ocr-catalog option', (options) =>
-      options.filter((option) => option.value !== '').map((option) => ({ value: option.value, label: option.textContent.trim() })),
-    );
-    equal(
-      JSON.stringify(ocrModels.map((model) => model.value)),
-      JSON.stringify(['vendor/silent', 'vendor/vision']),
-      'the OCR form lists image-capable models and never offers a text-only model',
-    );
-    assert(ocrModels[0].label.includes('image support unknown'), `the unknown model is labelled, got ${ocrModels[0].label}`);
-
-    // An unknown model is labelled as such when chosen; the image-capable one saves.
-    await page.selectOption('#ocr-catalog', 'vendor/silent');
-    await page.waitForFunction(() => (document.querySelector('#admin-panel-ocr')?.textContent ?? '').includes('Image support unknown for this model'), null, { timeout: 10_000 });
-    await page.selectOption('#ocr-catalog', 'vendor/vision');
-    equal(await page.inputValue('#ocr-model'), 'vendor/vision', 'choosing a catalog model fills the model field');
-    await page.fill('#ocr-name', 'Vision reader');
-    await page.locator(`${OCR_PANEL} button`, { hasText: 'Create profile' }).click();
-    await page.waitForFunction(() => (document.querySelector('#admin-panel-ocr .flash')?.textContent ?? '').includes("'Vision reader' saved."), null, { timeout: 20_000 });
-    assert(squash(await profileItem(page, 'Vision reader').textContent()).includes('vendor/vision'), 'the saved profile carries the chosen model');
-
-    // The LLM form is not limited the same way: the text-only model is still listed there.
-    await page.click(LLM_TAB);
-    await page.selectOption('#pf-preset', { label: 'Custom OpenAI-compatible' });
-    await page.fill('#pf-endpoint', providerUrl);
-    await page.locator('#admin-panel-llm button', { hasText: 'Fetch models' }).click();
-    await page.waitForFunction(() => document.querySelectorAll('#pf-catalog option').length > 1, null, { timeout: 20_000 });
-    assert((await page.locator('#pf-catalog option').evaluateAll(options => options.map(option => option.value))).includes('vendor/text-only'), 'the LLM form still lists the text-only model');
     noUnexpectedErrors(page);
   },
 

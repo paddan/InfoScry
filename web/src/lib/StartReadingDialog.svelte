@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isUncheckedImageProfile, methodOptionLabel } from './ocrRescan';
   import { onDestroy, onMount, tick } from 'svelte';
   import { ApiError, listReadingMethods, previewImport, previewRescan, startImport, startRescan, type ImportPreview, type ImportStarted, type ReadingMethodOption, type RescanPreview, type RescanStarted } from './api';
 
@@ -33,6 +34,9 @@
 
   $: pageCount = preview === null ? null : 'totalPages' in preview ? preview.totalPages : preview.pageTotal ?? preview.externalPageUpperBound ?? null;
   $: shownAtLeast = preview !== null && 'atLeast' in preview && preview.atLeast;
+  $: documentPageCount = preview !== null && !('files' in preview) && typeof preview.documentPages === 'number' ? preview.documentPages : null;
+  // A rescan that keeps every page's text reads none; it may report no total, or a total of zero.
+  $: nothingToRead = preview !== null && (pageCount === 0 || (!('files' in preview) && (preview.pageTotal ?? 0) === 0 && documentPageCount !== null && documentPageCount > 0));
   $: selectedOption = methods.find((entry) => entry.method === selectedMethod);
   $: sendsExternally = selectedOption?.external ?? (preview !== null && 'external' in preview && Boolean(preview.external));
   $: destinationLabel = preview !== null && 'destination' in preview && preview.destination
@@ -87,11 +91,11 @@
     loadingMethods = true;
     try {
       const list = await listReadingMethods(collectionId);
-      methods = list.methods;
-      const preferred = list.methods.find((entry) => entry.method === list.default && entry.available);
-      selectedMethod = preferred?.method ?? list.methods.find((entry) => entry.available)?.method ?? '';
+      methods = list.methods.filter((entry) => !isUncheckedImageProfile(entry));
+      const preferred = methods.find((entry) => entry.method === list.default && entry.available);
+      selectedMethod = preferred?.method ?? methods.find((entry) => entry.available)?.method ?? '';
       if (selectedMethod) await updatePreview();
-      else if (list.methods.length === 0) error = 'No reading methods are available.';
+      else if (methods.length === 0) error = 'No reading methods are available.';
     } catch (failure) {
       error = describe(failure);
     } finally {
@@ -185,29 +189,38 @@
 
 <section class="backdrop" role="presentation">
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="start-reading-title" tabindex="-1" data-testid="start-reading-dialog" bind:this={dialogElement} onkeydown={containFocus}>
+    <div class="content">
     <h2 id="start-reading-title" tabindex="-1" bind:this={dialogHeading}>{request.kind === 'import' ? 'Start import' : 'Scan again'}</h2>
     {#if loadingMethods}<p role="status">Loading reading methods…</p>{/if}
     {#if !loadingMethods && methods.length > 0}
       <label for="reading-method">Reading method</label>
       <select id="reading-method" data-testid="reading-method" value={selectedMethod} onchange={chooseMethod} disabled={submitting || previewing || pendingStart !== null}>
         {#each methods as method (method.method)}
-          <option value={method.method} disabled={!method.available}>{method.label}{method.available ? '' : ` — unavailable: ${method.unavailableReason ?? 'Unavailable'}`}</option>
+          <option value={method.method} disabled={!method.available}>{methodOptionLabel(method)}</option>
         {/each}
       </select>
+      {#each methods.filter((entry) => !entry.available) as method (method.method)}
+        <p class="unavailable">{method.label}: {method.unavailableReason ?? 'Unavailable'}</p>
+      {/each}
     {/if}
     {#if previewing}<p role="status">Preparing page summary…</p>{/if}
     {#if preview !== null}
       <section class="summary" aria-label="Reading summary">
         {#if 'files' in preview}
-          <ul>{#each preview.files as file (file.path)}<li>{file.path}: {file.pages === null ? file.reason ?? 'page count unknown' : `${file.pages} pages`}</li>{/each}</ul>
+          <ul>{#each preview.files as file (file.path)}<li>{file.path}: {file.pages === null ? file.reason ?? 'page count unknown' : typeof file.documentPages === 'number' && file.documentPages > file.pages ? `${file.pages} of ${file.documentPages} pages will be read` : `${file.pages} pages`}</li>{/each}</ul>
         {/if}
-        <p>{shownAtLeast ? 'At least ' : ''}{pageCount ?? 'Unknown'} {pageCount === 1 ? 'page' : 'pages'} will be read.</p>
+        {#if nothingToRead}
+          <p>No page needs reading; the document keeps its text.</p>
+        {:else}
+          <p>{shownAtLeast ? 'At least ' : ''}{pageCount ?? 'Unknown'} {pageCount === 1 ? 'page' : 'pages'} will be read{#if !('files' in preview) && documentPageCount !== null && pageCount !== null && documentPageCount > pageCount}{' '}(of {documentPageCount} in the document){/if}.</p>
+        {/if}
         {#if unknownExternalTotal}<p>All pages in the listed files will be sent; total cost is unavailable because the page count is unknown.</p>{/if}
         <p>Destination: {destinationLabel}</p>
         {#if displayedCost}<p>{displayedCost}</p>{/if}
       </section>
     {/if}
     {#if error}<p role="alert">{error}</p>{/if}
+    </div>
     <div class="actions">
       <button type="button" class="primary" onclick={confirm} disabled={started || submitting || previewing || (pendingStart === null && (preview === null || !selectedOption?.available))}>{started ? 'Started' : submitting ? 'Starting…' : pendingStart !== null ? 'Retry same start' : confirmationLabel}</button>
       <button type="button" onclick={oncancel} disabled={submitting || pendingStart !== null}>Cancel</button>
@@ -217,11 +230,15 @@
 
 <style>
   .backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 1rem; background: #0009; }
-  .dialog { display: grid; gap: 0.7rem; width: min(34rem, 100%); max-height: 90vh; overflow: auto; padding: 1.2rem; border: 1px solid #454a4a; border-radius: 0.6rem; background: #202424; color: #f3f3f3; box-shadow: 0 1rem 3rem #0008; }
+  .dialog { display: flex; flex-direction: column; width: min(34rem, 100%); max-height: 90vh; overflow: hidden; padding: 0; border: 1px solid #454a4a; border-radius: 0.6rem; background: #202424; color: #f3f3f3; box-shadow: 0 1rem 3rem #0008; }
+  .content { display: grid; gap: 0.7rem; min-height: 0; overflow: auto; padding: 1.2rem; }
   h2, p, ul { margin: 0; }
   .summary { display: grid; gap: 0.35rem; padding-top: 0.65rem; border-top: 1px solid #454a4a; }
   .summary ul { padding-left: 1.2rem; max-height: 8rem; overflow: auto; }
-  .actions { display: flex; flex-wrap: wrap; justify-content: end; gap: 0.5rem; margin-top: 0.3rem; }
+  /* Outside the scrolling content, so Cancel stays in view however long the summary or the method names are. */
+  .actions { flex: none; display: flex; flex-wrap: wrap; justify-content: end; gap: 0.5rem; padding: 0.8rem 1.2rem; border-top: 1px solid #454a4a; }
   button, select { font: inherit; padding: 0.4rem 0.6rem; }
+  select { width: 100%; max-width: 100%; text-overflow: ellipsis; }
+  .unavailable { color: #b9bdbc; font-size: 0.82rem; }
   .primary { font-weight: 600; }
 </style>

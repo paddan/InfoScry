@@ -33,6 +33,11 @@ import infoscry.storage.PageApproval
 import infoscry.storage.RevisionPageText
 import infoscry.storage.RevisionState
 import infoscry.storage.SchemaMigrator
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.common.PDRectangle
+import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory
 import java.awt.Color
 import java.awt.image.BufferedImage
 import java.awt.image.DataBufferByte
@@ -450,7 +455,7 @@ class OcrEngineContractTest {
             extractInto(
                 PdfExtractor(PageOcrEngines(listOf(engine))),
                 inputFor(
-                    fixture("text.pdf"),
+                    scannedFixture(pages = 3),
                     settings,
                     documentId = document.id,
                     artifactRoot = archive.artifacts,
@@ -588,7 +593,7 @@ class OcrEngineContractTest {
             val sink = CandidateRevisionSink(archive.revisions, document.id, "RESCAN")
             val engine = RecordingEngine()
             val input = inputFor(
-                fixture("text.pdf"),
+                scannedFixture(pages = 3),
                 attemptSettings(mode = OcrImportMode.CHECK_AND_IMPROVE),
                 documentId = document.id,
                 artifactRoot = archive.artifacts,
@@ -638,7 +643,7 @@ class OcrEngineContractTest {
             val sink = CandidateRevisionSink(archive.revisions, document.id, "RESCAN")
             val engine = RecordingEngine()
             val input = inputFor(
-                fixture("text.pdf"),
+                scannedFixture(pages = 3),
                 attemptSettings(mode = OcrImportMode.CHECK_AND_IMPROVE),
                 documentId = document.id,
                 artifactRoot = archive.artifacts,
@@ -829,7 +834,7 @@ class OcrEngineContractTest {
                 PngPageRenderer.render(renderer, page, dpi, where)
             }
             val input = inputFor(
-                fixture("mixed.pdf"),
+                scannedFixture(pages = 4),
                 attemptSettings(mode = OcrImportMode.CHECK_AND_IMPROVE),
                 documentId = document.id,
                 artifactRoot = archive.artifacts,
@@ -879,7 +884,7 @@ class OcrEngineContractTest {
                 PngPageRenderer.render(renderer, page, dpi, where)
             }
             val input = inputFor(
-                fixture("mixed.pdf"),
+                scannedFixture(pages = 4),
                 attemptSettings(mode = OcrImportMode.CHECK_AND_IMPROVE),
                 documentId = document.id,
                 artifactRoot = archive.artifacts,
@@ -930,7 +935,7 @@ class OcrEngineContractTest {
                 PngPageRenderer.render(renderer, page, dpi, where)
             }
             val attemptInput = inputFor(
-                fixture("mixed.pdf"),
+                scannedFixture(pages = 4),
                 settings,
                 documentId = document.id,
                 artifactRoot = archive.artifacts,
@@ -960,7 +965,7 @@ class OcrEngineContractTest {
             extractInto(
                 PdfExtractor(PageOcrEngines(listOf(RecordingEngine()))),
                 inputFor(
-                    fixture("mixed.pdf"),
+                    scannedFixture(pages = 4),
                     settings,
                     documentId = document.id,
                     artifactRoot = archive.artifacts,
@@ -976,7 +981,7 @@ class OcrEngineContractTest {
             extractInto(
                 PdfExtractor(PageOcrEngines(listOf(RecordingEngine()))),
                 inputFor(
-                    fixture("mixed.pdf"),
+                    scannedFixture(pages = 4),
                     attemptSettings(mode = OcrImportMode.FILL_MISSING),
                     documentId = document.id,
                     artifactRoot = archive.artifacts,
@@ -1079,6 +1084,39 @@ class OcrEngineContractTest {
 
     private fun baselineFingerprint(document: Document): ExtractionFingerprint =
         ExtractionFingerprint.of(document.sha256, ExtractionSettings(ocrLanguages = "eng"))
+
+    /**
+     * A PDF of [pages] scanned pages: each is a picture over the whole page with no text layer, so every page
+     * is one the selector must read. Written under the managed area, as a real import would find it.
+     */
+    private fun scannedFixture(pages: Int): Path {
+        val target = directory.resolve("managed").resolve("scanned-$pages.pdf")
+        Files.createDirectories(target.parent)
+        PDDocument().use { document ->
+            repeat(pages) { index ->
+                val paper = PDPage(PDRectangle.A4)
+                document.addPage(paper)
+                val picture = LosslessFactory.createFromImage(document, scannedPicture(index + 1))
+                PDPageContentStream(document, paper).use { content ->
+                    content.drawImage(picture, 0f, 0f, PDRectangle.A4.width, PDRectangle.A4.height)
+                }
+            }
+            document.save(target.toFile())
+        }
+        return target
+    }
+
+    /** A picture with dark strokes on paper, varied by [page] so that each page's bytes differ. */
+    private fun scannedPicture(page: Int): BufferedImage {
+        val image = BufferedImage(600, 800, BufferedImage.TYPE_INT_RGB)
+        val graphics = image.createGraphics()
+        graphics.color = Color.WHITE
+        graphics.fillRect(0, 0, image.width, image.height)
+        graphics.color = Color.BLACK
+        repeat(12) { line -> graphics.fillRect(60, 60 + line * 50, 480 - page * 20, 14) }
+        graphics.dispose()
+        return image
+    }
 
     /** Copies a committed fixture into the managed area a real extraction would read from. */
     private fun fixture(name: String): Path {

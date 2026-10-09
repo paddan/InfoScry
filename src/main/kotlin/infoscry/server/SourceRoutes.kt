@@ -44,6 +44,19 @@ data class SourceContentResponse(
      */
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val qualityScore: Double? = null,
+    /**
+     * The unit before and after this one in the document, its 1-based place, and the unit count. They
+     * describe the live reading only; a read pinned to a revision names none, because the pages that
+     * revision held are not the ones the live document is browsed by.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val previousId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val nextId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val position: Int? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val unitCount: Int? = null,
 )
 
 /** Reader-only endpoints. Both identifiers are opaque IDs resolved inside the selected collection. */
@@ -114,6 +127,7 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                     if (requestedEnd - offset <= 1) requestedEnd + 1 else requestedEnd - 1
                 } else requestedEnd
                 val page = sourceText.substring(offset, end)
+                val neighbours = if (revisionPage == null) context.content.neighboursOf(documentId, ordinal) else null
                 call.respondJson(
                     HttpStatusCode.OK,
                     SourceContentResponse(
@@ -127,6 +141,10 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                         truncated = end < sourceText.length,
                         revisionId = revisionPage?.revisionId,
                         qualityScore = OcrQualityScorer.score(sourceText),
+                        previousId = neighbours?.previous?.value,
+                        nextId = neighbours?.next?.value,
+                        position = neighbours?.position,
+                        unitCount = neighbours?.total,
                     ),
                 )
             }

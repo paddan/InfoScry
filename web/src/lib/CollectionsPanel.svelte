@@ -45,8 +45,8 @@
   export let error: string | null;
   export let onSelect: (id: string) => void;
   export let onCollectionsChanged: (selectedId?: string) => Promise<void> | void;
-  /** Opens Admin → OCR profiles, so an empty profile list can point at where to create one. */
-  export let onOpenOcrProfiles: (() => void) | undefined = undefined;
+  /** Opens Admin → LLM profiles, where a profile is checked for image reading before OCR can use it. */
+  export let onOpenLlmProfiles: (() => void) | undefined = undefined;
   /**
    * Opens one managed document in the page's source viewer at the unit its detail named. The page owns
    * the viewer, so this forwards the two ids and keeps no viewer state of its own.
@@ -1379,7 +1379,7 @@
             </p>
           </form>
 
-          <CollectionOcrSettings collection={selected} onChanged={() => onCollectionsChanged()} {onOpenOcrProfiles} />
+          <CollectionOcrSettings collection={selected} onChanged={() => onCollectionsChanged()} {onOpenLlmProfiles} />
         </section>
 
         <section class="collection-deletion" aria-label={`Delete ${selected.name}`}>

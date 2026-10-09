@@ -23,8 +23,11 @@ import kotlinx.serialization.Serializable
  * The version of the extraction contract itself: how units are shaped, what a fingerprint means, and
  * what an extractor is allowed to skip. It is part of every fingerprint, so a change that makes old
  * output incomparable invalidates reuse instead of silently mixing two shapes in one index.
+ *
+ * Version "2" marks the PDF page selection rule: an all-pages reading now takes a page's own text where the
+ * text is clean, so pages committed under "1" are not reusable as the same reading.
  */
-const val EXTRACTOR_SCHEMA_VERSION = "1"
+const val EXTRACTOR_SCHEMA_VERSION = "2"
 
 /**
  * The largest text container an extractor will hold in memory in one piece.

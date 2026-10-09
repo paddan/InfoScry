@@ -284,6 +284,22 @@ class RescanJobHandler internal constructor(
                 stage.reportProgress(completed, pageImages.size)
                 continue
             }
+            if (!page.read) {
+                // The selector judged this page's published text trustworthy, so no engine sees it: the text is
+                // kept as the candidate's page and is not a failure. Nothing is dispatched, so no allowance is
+                // spent either.
+                stage.run(STAGE_COMMIT) {
+                    if (stageBaselineText(page, document, candidate, documentArtifactRoot)) committed++
+                    operations.recordProgress(
+                        operationId = operation.operationId,
+                        pageTotal = pageImages.size,
+                        committed = committed,
+                        failed = failed,
+                    )
+                }
+                stage.reportProgress(completed, pageImages.size)
+                continue
+            }
             val outcome = read(page, engine, snapshot)
             val stagedPage = outcome.reading?.let { reading ->
                 phases.acceptedPageOf(
@@ -299,28 +315,9 @@ class RescanJobHandler internal constructor(
                     )
                     committed++
                 } else {
-                    // A page with no usable reading keeps what the document publishes for it. That is staged
-                    // as a publishable page rather than left out, because leaving it out would drop published
-                    // text from the replacement; a page with no baseline keeps nothing, because there is
-                    // nothing to keep.
-                    page.baseline?.let { baselinePage ->
-                        revisions.appendPage(
-                            candidate,
-                            phases.draftOf(
-                                page = page,
-                                document = document,
-                                stagedPage = StagedCandidatePage(
-                                    text = baselinePage.extractedText,
-                                    approval = PageApproval.APPROVED,
-                                    confidence = baselinePage.meanConfidence,
-                                    artifactRelativePath = baselinePage.artifactRelativePath,
-                                    artifactSha256 = baselinePage.artifactSha256,
-                                ),
-                                documentArtifactRoot = documentArtifactRoot,
-                            ),
-                        )
-                        committed++
-                    }
+                    // A page with no usable reading keeps what the document publishes for it; see
+                    // stageBaselineText. A page with no baseline keeps nothing, because there is nothing to keep.
+                    if (stageBaselineText(page, document, candidate, documentArtifactRoot)) committed++
                     failed++
                 }
                 operations.recordProgress(
@@ -391,6 +388,37 @@ class RescanJobHandler internal constructor(
     }
 
     // ---- one page ----
+
+    /**
+     * Stages the text the document publishes for [page] as the candidate's page, and answers whether it did.
+     *
+     * A page with no baseline has nothing to keep and stages nothing. Used for pages with no usable reading and
+     * for pages a rescan does not read, so both keep their published text the same way.
+     */
+    private fun stageBaselineText(
+        page: RescanPage,
+        document: Document,
+        candidate: String,
+        documentArtifactRoot: Path,
+    ): Boolean {
+        val baselinePage = page.baseline ?: return false
+        revisions.appendPage(
+            candidate,
+            phases.draftOf(
+                page = page,
+                document = document,
+                stagedPage = StagedCandidatePage(
+                    text = baselinePage.extractedText,
+                    approval = PageApproval.APPROVED,
+                    confidence = baselinePage.meanConfidence,
+                    artifactRelativePath = baselinePage.artifactRelativePath,
+                    artifactSha256 = baselinePage.artifactSha256,
+                ),
+                documentArtifactRoot = documentArtifactRoot,
+            ),
+        )
+        return true
+    }
 
     /** What reading one page produced: a usable reading, or nothing this attempt may stage as text. */
     private data class PageRead(val reading: OcrPageResult?)

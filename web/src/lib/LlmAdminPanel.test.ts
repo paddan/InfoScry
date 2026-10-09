@@ -1,7 +1,7 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import LlmAdminPanel from './LlmAdminPanel.svelte';
-import type { LlmCatalog, LlmCatalogModel, LlmPreset, LlmProfile, LlmProfileProbe } from './api';
+import type { LlmCatalog, LlmCatalogModel, LlmPreset, LlmProfile, LlmProfileProbe, OcrProfile } from './api';
 
 const api = vi.hoisted(() => ({
   listLlmProfiles: vi.fn(),
@@ -12,6 +12,9 @@ const api = vi.hoisted(() => ({
   deleteLlmProfile: vi.fn(),
   setLlmDefault: vi.fn(),
   probeLlmProfile: vi.fn(),
+  listOcrProfiles: vi.fn(),
+  copyLlmProfileToOcr: vi.fn(),
+  probeOcrProfile: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -24,6 +27,9 @@ vi.mock('./api', () => ({
   deleteLlmProfile: api.deleteLlmProfile,
   setLlmDefault: api.setLlmDefault,
   probeLlmProfile: api.probeLlmProfile,
+  listOcrProfiles: api.listOcrProfiles,
+  copyLlmProfileToOcr: api.copyLlmProfileToOcr,
+  probeOcrProfile: api.probeOcrProfile,
 }));
 
 function preset(id: string, label: string, over: Partial<LlmPreset> = {}): LlmPreset {
@@ -76,6 +82,7 @@ describe('LLM admin panel', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     api.listLlmPresets.mockResolvedValue([]);
+    api.listOcrProfiles.mockResolvedValue([]);
   });
 
   afterEach(cleanup);
@@ -215,7 +222,6 @@ describe('LLM admin panel', () => {
     await screen.findByLabelText('Name');
 
     await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'OPENAI' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
 
     expect(await screen.findByRole('option', { name: 'gpt-4o — $2.5 in / $10 out per 1M tokens' })).toBeDefined();
     expect(screen.getByRole('option', { name: 'gpt-4o-mini — price unknown' })).toBeDefined();
@@ -224,6 +230,98 @@ describe('LLM admin panel', () => {
       'https://api.openai.com/v1',
       'OPENAI_API_KEY',
     );
+  });
+
+  it('does not ask the provider while the endpoint is being typed, only when the field is left', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast', { endpoint: 'https://api.example.test/v1' })],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.fetchLlmCatalog.mockResolvedValue({ live: true, models: [model('gpt-4o')] });
+
+    render(LlmAdminPanel);
+    await waitFor(() => expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(1));
+    const endpoint = screen.getByLabelText('Endpoint (base URL)');
+
+    // A real focus, as a person clicking into the field causes.
+    await act(async () => (endpoint as HTMLInputElement).focus());
+    await fireEvent.input(endpoint, { target: { value: 'https://api.exam' } });
+    // Longer than the fetch delay: a half-typed address must still not be asked.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(1);
+
+    await fireEvent.input(endpoint, { target: { value: 'https://api.other.test/v1' } });
+    await act(async () => (endpoint as HTMLInputElement).blur());
+    await waitFor(() => expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(2));
+    expect(api.fetchLlmCatalog).toHaveBeenLastCalledWith('OPENAI_COMPATIBLE', 'https://api.other.test/v1', 'OPENAI_API_KEY');
+  });
+
+  it('marks which listed models accept images and filters on it', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.fetchLlmCatalog.mockResolvedValue({
+      live: true,
+      models: [
+        model('vendor/vision', { imageInput: true }),
+        model('vendor/text', { imageInput: false }),
+        model('vendor/silent', { imageInput: null }),
+      ],
+    });
+
+    render(LlmAdminPanel);
+    expect(await screen.findByRole('option', { name: /vendor\/vision.*image/ })).toBeDefined();
+    expect(screen.getByRole('option', { name: /vendor\/text.*text only/ })).toBeDefined();
+    expect(screen.getByRole('option', { name: /vendor\/silent/ })).toBeDefined();
+
+    await fireEvent.click(screen.getByLabelText('Only models that accept images'));
+
+    expect(screen.getByRole('option', { name: /vendor\/vision/ })).toBeDefined();
+    expect(screen.queryByRole('option', { name: /vendor\/text/ })).toBeNull();
+    expect(screen.queryByRole('option', { name: /vendor\/silent/ })).toBeNull();
+  });
+
+  it('cannot filter on image input when the provider states none', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.fetchLlmCatalog.mockResolvedValue({ live: true, models: [model('gpt-4o'), model('gpt-4o-mini')] });
+
+    render(LlmAdminPanel);
+    await screen.findByRole('option', { name: /gpt-4o-mini/ });
+
+    expect((screen.getByLabelText('Only models that accept images') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText("This provider's model list does not say which models accept images.")).toBeDefined();
+  });
+
+  it('sorts the listed models by price with unknown prices last', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'fast')],
+      defaults: { ASK: 'p1', INVESTIGATE: null },
+    });
+    api.fetchLlmCatalog.mockResolvedValue({
+      live: true,
+      models: [
+        model('b-mid', { inputPricePerMillion: 1, outputPricePerMillion: 2 }),
+        model('a-unknown', { inputPricePerMillion: null, outputPricePerMillion: null, priceKnown: false }),
+        model('c-cheap', { inputPricePerMillion: 0.1, outputPricePerMillion: 0.2 }),
+        model('d-dear', { inputPricePerMillion: 5, outputPricePerMillion: 15 }),
+      ],
+    });
+    const order = () => screen.getAllByRole('option').map((option) => option.textContent ?? '')
+      .filter((text) => /^[a-d]-/.test(text)).map((text) => text.split(' ')[0]);
+
+    render(LlmAdminPanel);
+    await screen.findByRole('option', { name: /d-dear/ });
+    expect(order()).toEqual(['b-mid', 'a-unknown', 'c-cheap', 'd-dear']);
+
+    await fireEvent.change(screen.getByLabelText('Sort models'), { target: { value: 'price-asc' } });
+    expect(order()).toEqual(['c-cheap', 'b-mid', 'd-dear', 'a-unknown']);
+
+    await fireEvent.change(screen.getByLabelText('Sort models'), { target: { value: 'price-desc' } });
+    expect(order()).toEqual(['d-dear', 'b-mid', 'c-cheap', 'a-unknown']);
   });
 
   it('copies a chosen model and leaves the fields it does not know untouched', async () => {
@@ -239,7 +337,6 @@ describe('LLM admin panel', () => {
     render(LlmAdminPanel);
     await screen.findByLabelText('Name');
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
     await screen.findByLabelText('Model catalog');
     await fireEvent.change(screen.getByLabelText('Model catalog'), { target: { value: 'gpt-4o' } });
 
@@ -262,7 +359,6 @@ describe('LLM admin panel', () => {
     render(LlmAdminPanel);
     await screen.findByLabelText('Name');
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
     await screen.findByLabelText('Model catalog');
     await fireEvent.change(screen.getByLabelText('Model catalog'), { target: { value: 'gpt-4o' } });
 
@@ -279,7 +375,6 @@ describe('LLM admin panel', () => {
     render(LlmAdminPanel);
     await screen.findByLabelText('Name');
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
 
     expect(await screen.findByText('Could not fetch models — enter one manually.')).toBeDefined();
   });
@@ -308,7 +403,6 @@ describe('LLM admin panel', () => {
     render(LlmAdminPanel);
     await screen.findByLabelText('Name');
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
     expect(await screen.findByRole('option', { name: 'gpt-4o — price unknown' })).toBeDefined();
 
     await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'ANTHROPIC' } });
@@ -332,7 +426,6 @@ describe('LLM admin panel', () => {
     render(LlmAdminPanel);
     await screen.findByLabelText('Name');
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
     expect(await screen.findByRole('option', { name: 'gpt-4o — price unknown' })).toBeDefined();
 
     await fireEvent.input(screen.getByLabelText('Endpoint (base URL)'), {
@@ -368,13 +461,18 @@ describe('LLM admin panel', () => {
     render(LlmAdminPanel);
     await screen.findByLabelText('Name');
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+    // The profile's own connection is fetched as soon as it is shown.
+    await waitFor(() => expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(1));
     await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'ANTHROPIC' } });
     pending[0]?.({ live: true, models: [model('gpt-4o')] });
     await act(async () => {});
 
     expect(screen.queryByLabelText('Model catalog')).toBeNull();
-    expect((screen.getByRole('button', { name: 'Fetch models' }) as HTMLButtonElement).disabled).toBe(false);
+    // The new connection is fetched on its own, and only its answer is shown.
+    await waitFor(() => expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(2));
+    pending[1]?.({ live: true, models: [model('claude-sonnet')] });
+    expect(await screen.findByRole('option', { name: /claude-sonnet/ })).toBeDefined();
+    expect(screen.queryByRole('option', { name: /gpt-4o/ })).toBeNull();
   });
 
   it('keeps a newer fetch in flight when an older one settles late', async () => {
@@ -403,20 +501,20 @@ describe('LLM admin panel', () => {
     render(LlmAdminPanel);
     await screen.findByLabelText('Name');
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
+    await waitFor(() => expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(1));
     await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'ANTHROPIC' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
-    expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(api.fetchLlmCatalog).toHaveBeenCalledTimes(2));
 
+    // The older answer settles while the newer request is still in flight: it is dropped and the newer
+    // request keeps showing that it is fetching.
     pending[0]?.({ live: true, models: [model('gpt-4o')] });
     await act(async () => {});
+    expect(screen.queryByLabelText('Model catalog')).toBeNull();
+    expect(screen.getByText('Fetching models…')).toBeDefined();
 
-    expect((screen.getByRole('button', { name: /Fetch/ }) as HTMLButtonElement).disabled).toBe(true);
-
-    pending[1]?.({ live: true, models: [model('gpt-4o')] });
-    await act(async () => {});
-
-    expect((screen.getByRole('button', { name: /Fetch/ }) as HTMLButtonElement).disabled).toBe(false);
+    pending[1]?.({ live: true, models: [model('claude-sonnet')] });
+    expect(await screen.findByRole('option', { name: /claude-sonnet/ })).toBeDefined();
+    expect(screen.queryByText('Fetching models…')).toBeNull();
   });
 
   it('shows the measured tool-calling state of the selected profile', async () => {
@@ -474,5 +572,41 @@ describe('LLM admin panel', () => {
 
     expect(await screen.findByText("the LLM profile 'fast' is disabled; enable it before checking tool calling")).toBeTruthy();
     expect(screen.getByText('Tool calling: not measured')).toBeTruthy();
+  });
+  it('copies the profile for OCR, measures image reading and shows the stored result', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'vision')],
+      defaults: { ASK: 'p1', INVESTIGATE: 'p1' },
+    });
+    api.listOcrProfiles.mockResolvedValue([]);
+    const copy = { id: 'o1', sourceLlmProfileId: 'p1', imageCapabilityMeasured: null, imageCapabilityCheckedAt: null } as OcrProfile;
+    const measured = { ...copy, imageCapabilityMeasured: true, imageCapabilityCheckedAt: '2026-10-09T10:00:00Z' } as OcrProfile;
+    api.copyLlmProfileToOcr.mockResolvedValue(copy);
+    api.probeOcrProfile.mockResolvedValue({ profile: measured, supported: true });
+
+    render(LlmAdminPanel);
+    expect(await screen.findByText('Image reading for OCR: not checked')).toBeTruthy();
+    api.listOcrProfiles.mockResolvedValue([measured]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Check image reading' }));
+
+    expect(api.copyLlmProfileToOcr).toHaveBeenCalledWith('p1');
+    expect(api.probeOcrProfile).toHaveBeenCalledWith('o1');
+    expect(await screen.findByText('Image reading for OCR: confirmed (measured 2026-10-09T10:00:00Z)')).toBeTruthy();
+  });
+
+  it('shows the server message when a text-only model is refused for OCR', async () => {
+    api.listLlmProfiles.mockResolvedValue({
+      profiles: [profile('p1', 'text')],
+      defaults: { ASK: 'p1', INVESTIGATE: 'p1' },
+    });
+    api.listOcrProfiles.mockResolvedValue([]);
+    api.copyLlmProfileToOcr.mockRejectedValue(new Error('this model does not accept images'));
+
+    render(LlmAdminPanel);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Check image reading' }));
+
+    expect(await screen.findByText('this model does not accept images')).toBeTruthy();
+    expect(api.probeOcrProfile).not.toHaveBeenCalled();
+    expect(screen.getByText('Image reading for OCR: not checked')).toBeTruthy();
   });
 });

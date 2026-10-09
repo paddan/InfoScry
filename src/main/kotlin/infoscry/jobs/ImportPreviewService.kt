@@ -27,7 +27,14 @@ data class ImportPreviewRequest(
 )
 
 @Serializable
-data class ImportPreviewFile(val path: String, val pages: Int?, val reason: String?)
+data class ImportPreviewFile(
+    val path: String,
+    /** Pages that will be read, which is what the cost and the total are computed from. */
+    val pages: Int?,
+    val reason: String?,
+    /** Every page of the document, so a preview can show how many of them are read. */
+    val documentPages: Int? = null,
+)
 
 @Serializable
 data class ImportPreview(
@@ -58,11 +65,13 @@ class ImportPreviewService internal constructor(
         val method = catalog.require(request.collection, request.method)
         val selected = selectedFiles(request, ignorePatterns(request.collection))
         val filePreviews = selected.map { source ->
-            val pageCount = runCatching { pageCounter.pageCount(source.path) }.getOrNull()
+            val readablePages = runCatching { pageCounter.readablePageCount(source.path) }.getOrNull()
+            val documentPages = runCatching { pageCounter.pageCount(source.path) }.getOrNull()
             ImportPreviewFile(
                 path = source.path.toString(),
-                pages = pageCount,
-                reason = if (pageCount == null) "page count could not be read" else null,
+                pages = readablePages,
+                reason = if (readablePages == null) "page count could not be read" else null,
+                documentPages = documentPages,
             )
         }
         val totalPages = filePreviews.sumOf { it.pages ?: 0 }

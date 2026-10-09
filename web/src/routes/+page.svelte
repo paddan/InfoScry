@@ -4,7 +4,6 @@
   import HistoryColumn from '../lib/HistoryColumn.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
-  import OcrProfilesPanel from '../lib/OcrProfilesPanel.svelte';
   import CollectionsPanel from '../lib/CollectionsPanel.svelte';
   import {
     DEFAULT_INVESTIGATION_LIMITS,
@@ -61,7 +60,7 @@
   let query = '';
   let mode: SearchMode = 'HYBRID';
   let activeMode: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN' = 'SEARCH';
-  let adminTab: 'COLLECTIONS' | 'LLM' | 'OCR' = 'COLLECTIONS';
+  let adminTab: 'COLLECTIONS' | 'LLM' = 'COLLECTIONS';
   let mediaType = '';
   let pathContains = '';
   let textContains = '';
@@ -474,6 +473,15 @@
     }
   }
 
+  /** Moves the open source to the neighbouring unit of the same document, keeping the opener to return focus to. */
+  function openNeighbour(unitId: string | undefined): void {
+    if (unitId === undefined || selectedHit === null || loadingSource) return;
+    void openSource(
+      { ...selectedHit, unitId, text: '', highlighted: null, locator: null, locatorLabel: 'Extracted content', revisionId: undefined },
+      sourceOpener,
+    );
+  }
+
   async function loadMoreSource(): Promise<void> {
     if (selectedHit === null || source === null || loadingSource || !source.truncated) return;
     const generation = sourceGeneration;
@@ -565,7 +573,7 @@
   }
 
   function handleAdminTabKeydown(event: KeyboardEvent): void {
-    const tabs: ('COLLECTIONS' | 'LLM' | 'OCR')[] = ['COLLECTIONS', 'LLM', 'OCR'];
+    const tabs: ('COLLECTIONS' | 'LLM')[] = ['COLLECTIONS', 'LLM'];
     const current = tabs.indexOf(adminTab);
     let next = current;
     if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
@@ -846,10 +854,8 @@
           <span class="eyebrow">ADMINISTRATION</span>
           {#if adminTab === 'COLLECTIONS'}
             <p>Create or select a collection and add local files or folders to it. Choosing paths opens a native dialog on this machine.</p>
-          {:else if adminTab === 'LLM'}
-            <p>Configure the LLM profiles Ask and Investigate can use. API keys stay in environment variables.</p>
           {:else}
-            <p>Configure the image-reading profiles OCR can use. They are separate from Ask and Investigate. API keys stay in environment variables.</p>
+            <p>Configure the LLM profiles Ask, Investigate and OCR can use. A profile that passes the image check can also read scanned pages. API keys stay in environment variables.</p>
           {/if}
         </div>
       {:else}
@@ -966,14 +972,6 @@
             tabindex={adminTab === 'LLM' ? 0 : -1}
             onclick={() => (adminTab = 'LLM')}
           >LLM profiles</button>
-          <button
-            id="admin-tab-ocr"
-            role="tab"
-            aria-selected={adminTab === 'OCR'}
-            aria-controls="admin-panel-ocr"
-            tabindex={adminTab === 'OCR' ? 0 : -1}
-            onclick={() => (adminTab = 'OCR')}
-          >OCR profiles</button>
         </div>
         <div class="admin-panels">
           <div id="admin-panel-collections" role="tabpanel" aria-labelledby="admin-tab-collections" hidden={adminTab !== 'COLLECTIONS'}>
@@ -995,14 +993,11 @@
                 onDocumentDeleted={handleManagedDocumentDeleted}
                 onRetryDocument={retryManagedDocument}
                 onRetryAllDocuments={retryAllManagedDocuments}
-                onOpenOcrProfiles={() => (adminTab = 'OCR')}
+                onOpenLlmProfiles={() => (adminTab = 'LLM')}
               />
             {/if}
           </div>
           <div id="admin-panel-llm" role="tabpanel" aria-labelledby="admin-tab-llm" hidden={adminTab !== 'LLM'}><LlmAdminPanel /></div>
-          <div id="admin-panel-ocr" role="tabpanel" aria-labelledby="admin-tab-ocr" hidden={adminTab !== 'OCR'}>
-            {#if activeMode === 'ADMIN' && adminTab === 'OCR'}<OcrProfilesPanel />{/if}
-          </div>
         </div>
       </div>
 
@@ -1049,6 +1044,13 @@
       <div class="source-heading-row"><h2 id="source-heading">Source</h2><button type="button" aria-label="Close source viewer" onclick={closeSourceSheet}>×</button></div>
       <p class="meta">{selectedHit.locatorLabel}</p>
       <p><a href={originalHref(selectedHit)} target="_blank" rel="noopener noreferrer">Open original</a></p>
+      {#if savedExcerpt === null && source !== null && source.position !== undefined && source.unitCount !== undefined && source.unitCount > 1}
+        <nav class="source-pager" aria-label="Pages of this document">
+          <button type="button" onclick={() => openNeighbour(source?.previousId)} disabled={loadingSource || source.previousId === undefined}>Previous</button>
+          <span role="status">Page {source.position} of {source.unitCount}</span>
+          <button type="button" onclick={() => openNeighbour(source?.nextId)} disabled={loadingSource || source.nextId === undefined}>Next</button>
+        </nav>
+      {/if}
       {#if savedExcerpt !== null}
         <p class="meta" role="note">Revision unknown. This is the excerpt saved with the citation, not the document's current text.</p>
         <pre class="source-text">{savedExcerpt}</pre>
@@ -1088,6 +1090,7 @@
   :global(.meta) { color: #929997 !important; }
   :global([role="alert"]) { color: #f0a4a0 !important; }
   :global(#panel-ask section), :global(#panel-investigate section) { margin-top: 0; }
+  .source-pager { display: flex; align-items: center; gap: 0.75rem; margin: 0 0 0.75rem; }
   .app-shell { min-height: 100vh; display: grid; grid-template-columns: 258px minmax(0, 1fr); --history-column-width: 20rem; --source-column-width: clamp(28rem, 43vw, 58rem); }
   .sidebar { min-height: 100vh; display: flex; flex-direction: column; gap: 1.8rem; padding: 1.35rem 1rem 1rem; background: #181a1b; border-right: 1px solid #2a2d2e; }
   .brand { display: flex; align-items: center; gap: 0.7rem; color: #f1f0ed; text-decoration: none; font-size: 1.04rem; font-weight: 650; letter-spacing: -0.02em; padding: 0 0.3rem; }

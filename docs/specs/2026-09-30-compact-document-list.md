@@ -2,7 +2,7 @@
 
 Status: design agreed and documentation authorized on 2026-09-30.
 **Planned, not implemented.** See the [four-ticket plan](../tickets/compact-document-list/STATUS.md).
-This change can ship independently of the [OCR plan](2026-09-30-ocr-rescanning.md).
+This change ships independently of the OCR work.
 
 ## Problem and existing behavior
 

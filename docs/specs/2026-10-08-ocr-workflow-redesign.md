@@ -1,10 +1,9 @@
 # OCR workflow redesign: choose at start, read everything, no review
 
-Status: approved for implementation on 2026-10-08. Implementation and verification
-are recorded in the [ticket status](../tickets/ocr-workflow-redesign/STATUS.md). It supersedes the
-parts of [selectable OCR and rescanning](2026-09-30-ocr-rescanning.md) listed
-under "Superseded contracts". Where the two disagree, this document wins once
-approved; until then the older spec describes the shipped behavior.
+Status: implemented (2026-10-09); open follow-ups are in
+[the follow-up tickets](../tickets/follow-ups/STATUS.md). It superseded the
+2026-09-30 selectable-OCR-and-rescanning design, which was removed from `docs/`
+(see git history) together with the completed tickets.
 
 ## Why
 
@@ -29,8 +28,14 @@ The redesign gives one place to decide, one confirmation, and one result.
    dialog**. The reading method is chosen each time. The collection's default
    method pre-fills the dialog; the dialog is always shown and must be
    confirmed. Nothing starts silently on a default.
-3. **All pages are read** with the chosen method. There is no "fill missing"
-   versus "check and improve" mode, and no page limit to enter.
+3. **Every page that can need reading is read** with the chosen method. There
+   is no "fill missing" versus "check and improve" mode, and no page limit to
+   enter. A PDF page is read when it has no usable text layer, or when an
+   embedded image covers at least 25% of the page and the page's own text layer
+   scores below 75 on the text-quality heuristic; every other page keeps its own
+   text and is neither rendered for reading nor sent anywhere. The same
+   rule applies to every method and is used for the page count, the cost and
+   the approval shown in the dialog (amended 2026-10-09; see "Page selection").
 4. External sending is approved **once, in the dialog**, for all pages shown.
 5. There is **no reviewer** and no review step. A finished run replaces the
    document's text. The previous version stays in history and can be restored.
@@ -175,9 +180,7 @@ and keeping keys, questions and document text out of logs.
 | Candidate revision held for a person before publication | Publish when the run completes |
 | Scan again refused while a scan or pending review holds the document | Not applicable |
 
-Removal happens in steps after the new flow works: first the UI and routes stop
-offering the old flow, then the backend code and tickets 08d–08f, 11a and 11b
-are retired. Ticket and status documents are updated with each step.
+The old flow and its code have been removed.
 
 ## Verification
 
@@ -206,3 +209,34 @@ are retired. Ticket and status documents are updated with each step.
   whether a better estimate is wanted is not decided.
 - Whether Restore should also be offered right after a run (an *Undo* link on
   the Done status) is not decided.
+
+## Page selection (2026-10-09)
+
+Reading every page sent text-only pages to the model for nothing. A PDF page is
+selected for reading when either holds:
+
+- it has no usable text layer (`PdfPageCandidate.needsOcr`), or
+- one embedded image, placed on the page, covers at least 25% of the page area
+  (`PdfPageSelector.MIN_IMAGE_COVERAGE`) **and** the page's own text layer scores
+  below 75 (`PdfPageSelector.MIN_TEXT_LAYER_QUALITY`, the "good" band of
+  `OcrQualityScorer`). A searchable scan whose hidden text layer is clean, and a
+  digital page with a photo, therefore keep their text; a scan with a poor
+  hidden layer is read again.
+
+Image placement is measured from the page's content stream, including images
+inside form XObjects, as the area of the unit square under the current
+transformation matrix. Inline images are not measured.
+
+There is deliberately **no** test of whether an image contains text. A local
+OCR pre-check was rejected: it fails on handwriting, which is where an image
+model helps most, and a skipped page is silent. The rule only skips pages that
+cannot be scans of text, so a wrong guess costs a page read in vain rather than
+a page lost.
+
+- The preview counts the selected pages and says how many the document has.
+- Import: an unselected page becomes a direct-text unit, as before.
+- Rescan: an unselected page is staged from the published text without a
+  reading; a page with no published text is read anyway.
+- Pictures (png, jpeg, tiff) are one page and are always read.
+- The rule version is part of the extraction fingerprint, so pages committed
+  under all-pages reading are not reused as if they followed this rule.

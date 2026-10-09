@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { isUncheckedImageProfile, methodOptionLabel } from './ocrRescan';
   import { listReadingMethods, updateCollectionOcrSettings, type Collection, type ReadingMethodOption } from './api';
 
   export let collection: Collection;
   export let onChanged: () => Promise<void> | void;
-  export let onOpenOcrProfiles: (() => void) | undefined = undefined;
+  export let onOpenLlmProfiles: (() => void) | undefined = undefined;
 
   let language = '';
   let defaultMethod = '';
@@ -18,6 +19,8 @@
 
   $: if (collection.id !== boundId) void load(collection);
   $: hasValidDefaultMethod = defaultMethod === '' || methods.some((method) => method.method === defaultMethod);
+  // A stored default stays listed even if its profile is no longer checked, so the form shows what is saved.
+  $: visibleMethods = methods.filter((method) => !isUncheckedImageProfile(method) || method.method === defaultMethod);
   $: hasAvailableMethod = methods.some((method) => method.available);
 
   async function load(target: Collection): Promise<void> {
@@ -73,13 +76,16 @@
       {#if defaultMethod === ''}
         <option value="" disabled>{hasAvailableMethod ? 'Choose a reading method' : 'No reading method is available'}</option>
       {/if}
-      {#each methods as method (method.method)}
-        <option value={method.method} disabled={!method.available}>{method.label}{method.available ? '' : ` — unavailable: ${method.unavailableReason ?? 'Unavailable'}`}</option>
+      {#each visibleMethods as method (method.method)}
+        <option value={method.method} disabled={!method.available}>{methodOptionLabel(method)}</option>
       {/each}
     </select>
+    {#each visibleMethods.filter((method) => !method.available) as method (method.method)}
+      <p class="hint">{method.label}: {method.unavailableReason ?? 'Unavailable'}</p>
+    {/each}
   </div>
-  {#if onOpenOcrProfiles && methods.some((method) => method.method.startsWith('llm:'))}
-    <button type="button" onclick={onOpenOcrProfiles}>Manage OCR profiles</button>
+  {#if onOpenLlmProfiles}
+    <button type="button" onclick={onOpenLlmProfiles}>Manage LLM profiles</button>
   {/if}
   {#if loading}<p class="hint" role="status">Loading reading methods…</p>{/if}
   {#if error}<p role="alert">{error}</p>{/if}

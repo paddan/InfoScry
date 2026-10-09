@@ -30,7 +30,9 @@ describe('CollectionOcrSettings', () => {
     render(CollectionOcrSettings, { collection: collection(), onChanged: vi.fn() });
     expect(await screen.findByLabelText('OCR language')).toBeTruthy();
     expect(screen.getByLabelText('Default reading method')).toBeTruthy();
-    expect((await screen.findByRole('option', { name: /Surya — unavailable: Model is missing/ }) as HTMLOptionElement).disabled).toBe(true);
+    expect((await screen.findByRole('option', { name: 'Surya — unavailable' }) as HTMLOptionElement).disabled).toBe(true);
+    // The reason is beside the list, so a long sentence never widens the select.
+    expect(screen.getByText('Surya: Model is missing')).toBeTruthy();
     expect(screen.queryByLabelText(/engine|review|allowance|mode/i)).toBeNull();
   });
 

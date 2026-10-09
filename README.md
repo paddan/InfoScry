@@ -45,8 +45,9 @@ Implementation is in progress. The backend, CLI and web reader exist;
 Collections, Search and Investigate have browser acceptance against local test doubles.
 The [OCR workflow redesign](docs/specs/2026-10-08-ocr-workflow-redesign.md) adds a
 confirmed reading method for every import and rescan, reads every page and publishes
-a complete reading automatically while keeping previous text in history. Its new
-browser gate passes against local test doubles. Ask browser acceptance and the format-specific
+a complete reading automatically while keeping previous text in history. Its browser
+gate passes against local test doubles. Open follow-ups are listed in
+[docs/tickets/follow-ups](docs/tickets/follow-ups/STATUS.md). Ask browser acceptance and the format-specific
 source-viewer finish line remain open. See [implementation status](docs/implementation-status.md)
 for recorded checks.
 

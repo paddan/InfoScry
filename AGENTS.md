@@ -69,7 +69,7 @@ a real provider or GPU.
   operation: run it twice, interrupt it at each step and run it again.
 - OCR workflow (implemented 2026-10-09; real-provider/CoreML workflow gates remain open): the reading method (engine and profile as one
   choice) is confirmed in a start dialog on every import and rescan, with the
-  collection default only pre-filling it; all pages are read; external sending
+  collection default only pre-filling it; every page that can need reading is read (PDF pages with no usable text layer, or a large image and a poor text layer; see the spec); external sending
   is approved once in that dialog, never by a mid-run pause; there is no
   reviewer, and a finished run replaces the text with the previous version kept
   in history. See `docs/specs/2026-10-08-ocr-workflow-redesign.md`.

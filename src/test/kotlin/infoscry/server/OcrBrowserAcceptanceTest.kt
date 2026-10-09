@@ -48,6 +48,7 @@ import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrProfileRevisionDraft
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PageImage
+import infoscry.ocr.ImageLlmClient
 import infoscry.ocr.PageOcrEngine
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
@@ -63,6 +64,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -72,7 +74,10 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import org.junit.jupiter.api.Tag
 
 @Tag(EXTERNAL_TAG)
@@ -102,20 +107,23 @@ class OcrBrowserAcceptanceTest {
     // ---- Scenarios ----
 
     @Test
-    fun `OCR profiles are created, listed by key presence only, edited, and a stale edit keeps its draft`() {
-        startServer(tempDir.resolve("data"))
-        runScenario("profiles")
-
-        val profiles = context().ocrProfiles.list()
-        assertEquals(
-            setOf(PROFILE_NAME, HTML_PROFILE_NAME, "Absent key"),
-            profiles.map { it.name }.toSet(),
-            "the browser created exactly these three profiles",
-        )
-        val main = profiles.single { it.name == PROFILE_NAME }
-        assertEquals("stale-draft-model", main.revision.model, "the second tab's deliberate overwrite is the one that stands")
-        assertEquals(3, main.revision.sequence, "create, the first tab's edit and the deliberate overwrite are three revisions")
-        assertEquals(PRESENT_KEY_VARIABLE, main.revision.apiKeyEnvironmentVariable)
+    fun `an LLM profile is checked for image reading in the browser and then offered as a reading method`() {
+        val data = tempDir.resolve("data")
+        // The check sends the synthetic image to the profile's endpoint: a loopback fake answers it.
+        FakeOpenAiServer(listOf(FakeOpenAiResponse(body = imageProbeAnswer()))).use { vision ->
+            AppContext.open(data).use { context ->
+                context.collections.create("Default")
+                llmProfile(context, PROFILE_NAME, "vision-model", vision.url)
+            }
+            startServer(data)
+            runScenario("llm-image-reading")
+            // The form also lists the provider's models by itself, so the fake sees more than the one image check.
+            assertTrue(vision.handledRequests >= 1, "the provider received the image check")
+        }
+        val copy = context().ocrProfiles.list().single()
+        assertEquals(PROFILE_NAME + infoscry.ocr.LLM_COPY_NAME_SUFFIX, copy.name)
+        assertEquals(true, copy.revision.imageCapabilityMeasured, "the browser's check recorded a passed measurement")
+        assertNotNull(copy.sourceLlmProfileId, "the OCR profile is the copy of the LLM profile, not a separate one")
     }
 
     @Test
@@ -261,31 +269,7 @@ class OcrBrowserAcceptanceTest {
         runScenario("history-import-reading")
     }
 
-    @Test
-    fun `the OCR profile form offers the LLM presets and lists only models that may carry images, labelling unknown support`() {
-        startServer(tempDir.resolve("data"))
-        // The server asks the provider for its model list: a loopback fake lists a text-only, an unknown and an image model.
-        FakeOpenAiServer(
-            listOf(
-                FakeOpenAiResponse(
-                    statusCode = 200,
-                    body = """{"data":[
-                        {"id":"vendor/vision","architecture":{"input_modalities":["text","image"]}},
-                        {"id":"vendor/text-only","architecture":{"input_modalities":["text"]}},
-                        {"id":"vendor/silent"}]}""",
-                ),
-            ),
-        ).use { provider ->
-            facts = buildJsonObject { put("providerUrl", provider.url) }
-            runScenario("ocr-profile-catalog")
-            assertTrue(provider.handledRequests >= 2, "the OCR form and the LLM form each asked the fake provider")
-        }
-        val profile = context().ocrProfiles.list().single { it.name == "Vision reader" }
-        assertEquals("vendor/vision", profile.revision.model, "the image-capable model is the one the profile saved")
-        assertNull(profile.revision.apiKeyEnvironmentVariable, "no key variable was typed")
-    }
-
-    private fun llmProfile(context: AppContext, name: String, model: String): LlmProfile = context.llm.create(
+    private fun llmProfile(context: AppContext, name: String, model: String, endpoint: String): LlmProfile = context.llm.create(
         LlmProfile(
             id = UUID.randomUUID().toString(),
             name = name,
@@ -297,7 +281,7 @@ class OcrBrowserAcceptanceTest {
             outputPricePerMillion = 2.0,
             cacheReadPricePerMillion = 0.5,
             enabled = true,
-            endpoint = "http://127.0.0.1:9/v1",
+            endpoint = endpoint,
             apiKeyEnvironmentVariable = PRESENT_KEY_VARIABLE,
         ),
     )
@@ -539,7 +523,28 @@ class OcrBrowserAcceptanceTest {
         const val SCENARIO_TIMEOUT_NANOS = 240_000_000_000L
         const val PROFILE_NAME = "Vision reader"
         const val PICTURE_NAME = "page.png"
-        const val HTML_PROFILE_NAME = "<b>Bold</b> <img src=x onerror=\"window.__ocrXss=true\">"
+
+        /** The synthetic-image check's answer: a transcription the probe accepts. */
+        fun imageProbeAnswer(): String = buildJsonObject {
+            put("model", "vision-model-2026-02-01")
+            putJsonArray("choices") {
+                addJsonObject {
+                    put("finish_reason", "stop")
+                    putJsonObject("message") {
+                        put("role", "assistant")
+                        put(
+                            "content",
+                            buildJsonObject {
+                                put("unitId", ImageLlmClient.CAPABILITY_PROBE_UNIT_ID)
+                                put("ordinal", 0)
+                                put("text", "InfoScry image capability probe")
+                                putJsonArray("unreadable") { }
+                            }.toString(),
+                        )
+                    }
+                }
+            }
+        }.toString()
 
         /** A variable every process has, so the profile list can say "present" without the test setting any. */
         const val PRESENT_KEY_VARIABLE = "PATH"

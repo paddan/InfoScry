@@ -51,4 +51,23 @@ class PageCounterTest {
             Files.deleteIfExists(malformed)
         }
     }
+
+    @Test
+    fun `a pdf reports how many of its pages need reading`() {
+        val pdf = Files.createTempFile("page-counter-readable", ".pdf")
+        try {
+            // Two pages with no text layer and no image: each has no usable text, so each must be read.
+            PDDocument().use { document ->
+                document.addPage(PDPage())
+                document.addPage(PDPage())
+                document.save(pdf.toFile())
+            }
+            val counter = DefaultPageCounter { DefaultPageCounter.PDF_MEDIA_TYPE }
+
+            assertEquals(2, counter.pageCount(pdf))
+            assertEquals(2, counter.readablePageCount(pdf))
+        } finally {
+            Files.deleteIfExists(pdf)
+        }
+    }
 }
