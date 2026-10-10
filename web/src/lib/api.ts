@@ -594,7 +594,15 @@ export async function fetchLlmCatalog(
   }
   const catalog = (await readJson(response)) as LlmCatalog;
   // The server leaves an unknown field out, and the form tells "unknown" from "no" by comparing with null.
-  return { ...catalog, models: catalog.models.map((model) => ({ ...model, imageInput: model.imageInput ?? null })) };
+  return { ...catalog, models: catalog.models.map((model) => ({
+    ...model,
+    contextWindow: model.contextWindow ?? null,
+    maxOutputTokens: model.maxOutputTokens ?? null,
+    inputPricePerMillion: model.inputPricePerMillion ?? null,
+    outputPricePerMillion: model.outputPricePerMillion ?? null,
+    cacheReadPricePerMillion: model.cacheReadPricePerMillion ?? null,
+    imageInput: model.imageInput ?? null,
+  })) };
 }
 
 export async function createLlmProfile(profile: LlmProfileInput): Promise<LlmProfile> {

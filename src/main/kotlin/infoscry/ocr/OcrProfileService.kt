@@ -173,8 +173,12 @@ class OcrProfileService(
         return selected
     }
 
-    /** Whether the revision's named environment variable is set, without reading or returning its value. */
+    /** Whether the named variable is present; this is the meaning exposed by profile APIs. */
     fun keyAvailable(revision: OcrProfileRevision): Boolean = revision.keyAvailable(environment)
+
+    /** Whether the profile has a nonblank credential value suitable for dispatch. */
+    fun keyCredentialAvailable(revision: OcrProfileRevision): Boolean =
+        revision.apiKeyEnvironmentVariable?.let { environment(it)?.isNotBlank() == true } == true
 
     /**
      * Runs one profile's synthetic-image capability check and records what it measured.

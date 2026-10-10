@@ -378,6 +378,39 @@ describe('LLM admin panel', () => {
     expect(order()).toEqual(['d-dear', 'b-mid', 'c-cheap', 'a-unknown']);
   });
 
+  it('keeps token defaults when the catalog omits unknown metadata', async () => {
+    api.listLlmProfiles.mockResolvedValue({ profiles: [], defaults: { ASK: null, INVESTIGATE: null } });
+    api.listLlmPresets.mockResolvedValue([preset('OLLAMA', 'Ollama (local)', { endpoint: 'http://localhost:11434/v1' })]);
+    const listed = model('qwen3-vl:8b', { inputPricePerMillion: 0, outputPricePerMillion: 0 });
+    const { contextWindow, maxOutputTokens, ...omittedLimits } = listed;
+    api.fetchLlmCatalog.mockResolvedValue({ live: true, models: [omittedLimits] });
+    render(LlmAdminPanel);
+    await fireEvent.change(await screen.findByLabelText('Provider preset'), { target: { value: 'OLLAMA' } });
+    await screen.findByRole('option', { name: /qwen3-vl:8b/ });
+    await fireEvent.change(screen.getByLabelText('Model catalog'), { target: { value: 'qwen3-vl:8b' } });
+    expect((screen.getByLabelText('Context window (tokens)') as HTMLInputElement).value).toBe('128000');
+    expect((screen.getByLabelText('Max output tokens') as HTMLInputElement).value).toBe('4096');
+    await fireEvent.click(screen.getByRole('button', { name: 'Create profile' }));
+    expect(api.createLlmProfile).toHaveBeenCalledWith(expect.objectContaining({ contextWindow: 128000, maxOutputTokens: 4096 }));
+  });
+
+  it.each([
+    ['Context window (tokens)', '', 'positive whole numbers'],
+    ['Max output tokens', '0', 'positive whole numbers'],
+    ['Max output tokens', '1.5', 'positive whole numbers'],
+    ['Max output tokens', '500000', 'less than the context window'],
+    ['Max output tokens', '128000', 'less than the context window'],
+  ])('rejects invalid %s value %s before saving', async (field, value, message) => {
+    api.listLlmProfiles.mockResolvedValue({ profiles: [profile('p1', 'fast')], defaults: { ASK: null, INVESTIGATE: null } });
+    render(LlmAdminPanel);
+    const input = await screen.findByLabelText(field) as HTMLInputElement;
+    await fireEvent.input(input, { target: { value } });
+    await fireEvent.submit(input.closest('form')!);
+    expect(await screen.findByText(new RegExp(message))).toBeTruthy();
+    expect(api.updateLlmProfile).not.toHaveBeenCalled();
+    expect(api.createLlmProfile).not.toHaveBeenCalled();
+  });
+
   it('copies a chosen model and leaves the fields it does not know untouched', async () => {
     api.listLlmProfiles.mockResolvedValue({
       profiles: [profile('p1', 'fast', { contextWindow: 16_000 })],

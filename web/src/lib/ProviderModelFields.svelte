@@ -98,7 +98,7 @@
     if (order === 'name') return models;
     const direction = order === 'price-asc' ? 1 : -1;
     const known = (model: LlmCatalogModel): boolean =>
-      model.inputPricePerMillion !== null && model.outputPricePerMillion !== null;
+      model.inputPricePerMillion != null && model.outputPricePerMillion != null;
     return [...models].sort((a, b) => {
       if (known(a) !== known(b)) return known(a) ? -1 : 1;
       if (!known(a)) return a.id.localeCompare(b.id);
@@ -184,11 +184,11 @@
     if (!model) return;
     catalogId = id;
     draft.model = model.id;
-    if (model.contextWindow !== null) draft.contextWindow = model.contextWindow;
-    if (model.maxOutputTokens !== null) draft.maxOutputTokens = model.maxOutputTokens;
-    if (model.inputPricePerMillion !== null) draft.inputPricePerMillion = model.inputPricePerMillion;
-    if (model.outputPricePerMillion !== null) draft.outputPricePerMillion = model.outputPricePerMillion;
-    if (showCachePrice && model.cacheReadPricePerMillion !== null) {
+    if (model.contextWindow != null) draft.contextWindow = model.contextWindow;
+    if (model.maxOutputTokens != null) draft.maxOutputTokens = model.maxOutputTokens;
+    if (model.inputPricePerMillion != null) draft.inputPricePerMillion = model.inputPricePerMillion;
+    if (model.outputPricePerMillion != null) draft.outputPricePerMillion = model.outputPricePerMillion;
+    if (showCachePrice && model.cacheReadPricePerMillion != null) {
       draft.cacheReadPricePerMillion = model.cacheReadPricePerMillion;
     }
     catalogPriceUnknown = !model.priceKnown;
@@ -284,11 +284,11 @@
 </div>
 <div class="field">
   <label for="{idPrefix}-context">Context window (tokens)</label>
-  <input id="{idPrefix}-context" type="number" min="1" step="1" bind:value={draft.contextWindow} />
+  <input id="{idPrefix}-context" type="number" min="1" max="2147483647" step="1" required bind:value={draft.contextWindow} />
 </div>
 <div class="field">
   <label for="{idPrefix}-maxtokens">Max output tokens</label>
-  <input id="{idPrefix}-maxtokens" type="number" min="1" step="1" bind:value={draft.maxOutputTokens} />
+  <input id="{idPrefix}-maxtokens" type="number" min="1" max="2147483647" step="1" required bind:value={draft.maxOutputTokens} />
 </div>
 <div class="field">
   <label for="{idPrefix}-inprice">Input price (USD / 1M tokens)</label>

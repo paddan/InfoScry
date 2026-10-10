@@ -516,7 +516,9 @@ class RescanService(
     infoscry.ocr.PageOcrEngine?,
     /** Whether a page could be embedded at all; null means the pinned model is not installed. */
     private val embedderAvailable: () -> Boolean,
-    private val keyAvailable: (String?) -> Boolean = { variable -> variable == null || System.getenv(variable) != null },
+    private val keyAvailable: (String?) -> Boolean = { variable ->
+        variable != null && System.getenv(variable)?.isNotBlank() == true
+    },
     private val pages: RescanPageSource = RescanPageSource(),
     private val clock: () -> Instant = Instant::now,
 ) {

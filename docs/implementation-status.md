@@ -112,6 +112,26 @@ it. Independent Luna review found no actionable issues. `./gradlew check` passed
 in 4m27s with 131 JVM suites / 1,600 tests and 425 frontend tests, without
 failures/errors/skips. No real provider request was made for this correction.
 
+## Ollama availability and profile limits (2026-10-10)
+
+Catalog decoding now normalizes omitted nullable metadata, and model selection
+keeps existing form values for unknown fields. Saving rejects empty, non-integer
+or nonpositive token limits and output limits that leave no input room; shared
+store create/update enforces output < context for HTTP and CLI. Existing records
+remain readable and repairable. Local keyless OCR profiles are selectable after
+a passed image check. A named blank/missing credential remains unavailable;
+external endpoints require a configured, nonblank credential.
+
+Regression tests reproduced the omitted token fields, invalid form submissions,
+local method availability and invalid store writes before correction. After
+integration, 67 focused backend tests and all 432 frontend tests passed, with
+Svelte diagnostics at zero errors/warnings. Independent Luna frontend/backend
+reviews found no actionable issues. `./gradlew check` passed in 4m33s with
+131 JVM suites / 1,607 tests and 432 frontend tests, zero failures/errors/skips.
+Actual preview/admission tests cover local keyless use and loss of external
+credentials after preview. No real provider request or user database edit was
+made, and the running installed server still requires rebuild/restart.
+
 ## Recorded verification
 
 The previous README recorded a local 2026-09-24 run of `check`, `externalTest`

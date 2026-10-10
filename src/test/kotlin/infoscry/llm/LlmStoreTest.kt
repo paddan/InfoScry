@@ -79,6 +79,24 @@ class LlmStoreTest {
     }
 
     @Test
+    fun `create refuses output budget that leaves no room for input`() {
+        assertFailsWith<IllegalArgumentException> {
+            store.create(profile("no input room").copy(contextWindow = 100, maxOutputTokens = 100))
+        }
+    }
+
+    @Test
+    fun `update refuses output budget that leaves no room for input`() {
+        val original = profile("update budget")
+        store.create(original)
+
+        assertFailsWith<IllegalArgumentException> {
+            store.update(original.id, original.copy(contextWindow = 100, maxOutputTokens = 100))
+        }
+        assertEquals(4_096, store.findById(original.id)?.maxOutputTokens)
+    }
+
+    @Test
     fun `duplicate profile names are refused case-insensitively`() {
         store.create(profile("Claude"))
         assertFailsWith<DuplicateLlmProfileNameException> { store.create(profile("claude")) }

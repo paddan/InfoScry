@@ -23,7 +23,10 @@ class OcrReadingMethodCatalog(
                 ?.takeIf(String::isNotBlank) ?: "api endpoint"
             val reason = when {
                 !profile.enabled -> "This OCR profile is disabled."
-                !profiles.keyAvailable(revision) -> "Key variable ${revision.apiKeyEnvironmentVariable} is not set."
+                revision.scope == OcrEndpointScope.EXTERNAL && revision.apiKeyEnvironmentVariable == null ->
+                    "External OCR profiles need a key environment variable."
+                revision.apiKeyEnvironmentVariable != null && !profiles.keyCredentialAvailable(revision) ->
+                    "The key environment variable this OCR profile names is not set or is blank."
                 revision.imageCapabilityMeasured != true -> "This OCR profile has not passed its image check."
                 else -> null
             }

@@ -245,6 +245,9 @@ class LlmStore(private val database: Database) {
 
     fun create(profile: LlmProfile): LlmProfile {
         require(profile.id.isNotBlank()) { "an LLM profile needs an id" }
+        require(profile.maxOutputTokens < profile.contextWindow) {
+            "LLM profile output token limit must be below its context window to leave room for input"
+        }
         ValidEnvironmentVariableName.requireValid(profile.apiKeyEnvironmentVariable)
         require(!profile.model.isBlank()) { "LLM profiles need a model" }
         database.transaction { connection ->
@@ -286,6 +289,9 @@ class LlmStore(private val database: Database) {
     /** Updates editable profile fields while retaining the row identity and invalidating stale measurements. */
     fun update(id: String, profile: LlmProfile): LlmProfile? {
         require(id.isNotBlank()) { "an LLM profile needs an id" }
+        require(profile.maxOutputTokens < profile.contextWindow) {
+            "LLM profile output token limit must be below its context window to leave room for input"
+        }
         ValidEnvironmentVariableName.requireValid(profile.apiKeyEnvironmentVariable)
         require(profile.name.isNotBlank()) { "LLM profiles need a name" }
         require(profile.model.isNotBlank()) { "LLM profiles need a model" }

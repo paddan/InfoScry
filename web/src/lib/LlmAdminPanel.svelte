@@ -156,6 +156,16 @@
       error = 'Name and model are required.';
       return;
     }
+    const contextWindow = draft.contextWindow;
+    const maxOutputTokens = draft.maxOutputTokens;
+    if (![contextWindow, maxOutputTokens].every((value) => Number.isInteger(value) && value > 0 && value <= 2_147_483_647)) {
+      error = 'Context window and max output tokens must be positive whole numbers up to 2147483647.';
+      return;
+    }
+    if (maxOutputTokens >= contextWindow) {
+      error = 'Max output tokens must be less than the context window to leave room for input.';
+      return;
+    }
     saving = true;
     error = null;
     const payload: LlmProfileInput = {
@@ -163,8 +173,8 @@
       provider: draft.provider,
       endpoint: draft.endpoint.trim(),
       model,
-      contextWindow: Math.max(1, Math.round(Number(draft.contextWindow) || 0)),
-      maxOutputTokens: Math.max(1, Math.round(Number(draft.maxOutputTokens) || 0)),
+      contextWindow,
+      maxOutputTokens,
       inputPricePerMillion: Math.max(0, Number(draft.inputPricePerMillion) || 0),
       outputPricePerMillion: Math.max(0, Number(draft.outputPricePerMillion) || 0),
       cacheReadPricePerMillion: Math.max(0, Number(draft.cacheReadPricePerMillion) || 0),

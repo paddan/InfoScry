@@ -556,6 +556,47 @@ class OcrSettingsTest {
 
     }
     @Test
+    fun `local OCR profile without a key variable is available after its image check`() {
+        val local = profiles.create("Local keyless", draft(endpoint = "http://127.0.0.1:11434"), enabled = true)
+        store.recordImageCapability(local.revision.revisionId, true, "2026-10-10T10:00:00Z")
+
+        val availability = OcrReadingMethodCatalog(profiles).availability(CollectionId("unused"))
+            .single { it.method == ReadingMethod.Llm(local.id) }
+
+        assertTrue(availability.available)
+        assertNull(availability.unavailableReason)
+    }
+
+    @Test
+    fun `an explicitly named blank key variable makes an OCR profile unavailable`() {
+        val external = profiles.create(
+            "External blank key",
+            draft(endpoint = "https://api.example/v1", apiKeyEnvironmentVariable = "EMPTY_KEY"),
+            enabled = true,
+        )
+        store.recordImageCapability(external.revision.revisionId, true, "2026-10-10T10:00:00Z")
+        val blankKeyProfiles = OcrProfileService(store, { "" })
+
+        val availability = OcrReadingMethodCatalog(blankKeyProfiles).availability(CollectionId("unused"))
+            .single { it.method == ReadingMethod.Llm(external.id) }
+
+        assertFalse(availability.available)
+        assertContains(availability.unavailableReason.orEmpty(), "blank")
+    }
+
+    @Test
+    fun `external OCR profile without a key variable is unavailable for a credential reason`() {
+        val external = profiles.create("External keyless", draft(endpoint = "https://api.example/v1"), enabled = true)
+        store.recordImageCapability(external.revision.revisionId, true, "2026-10-10T10:00:00Z")
+
+        val availability = OcrReadingMethodCatalog(profiles).availability(CollectionId("unused"))
+            .single { it.method == ReadingMethod.Llm(external.id) }
+
+        assertFalse(availability.available)
+        assertContains(availability.unavailableReason.orEmpty(), "key environment variable")
+    }
+
+    @Test
     fun `a duplicate profile name is refused case-insensitively`() {
         profiles.create("Transcriber", draft(), enabled = true)
 

@@ -88,6 +88,15 @@ pages need reading, the dialog explains this and no rescan starts. A successful 
 the text and search entries automatically. **Text history** keeps previous
 versions and offers **Restore** without reading the pages again.
 
+When selecting a catalog model, unknown context/output limits keep the form's
+existing values. These are settings to verify for your model, not measured model
+limits. Both must be positive whole numbers, and max output tokens must be less
+than the context window to leave room for input. Empty values are rejected.
+
+A local Ollama endpoint without authentication needs no API key variable. After
+its image reading check passes, it can be selected for scanning. If you explicitly
+configure a key variable, it must contain a nonblank value.
+
 LLM reading allows up to 10 minutes per page, including receiving the full answer.
 The small image-capability check allows 60 seconds. A timed-out page is not
 automatically sent again, since the provider may already have billed the call.

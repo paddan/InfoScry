@@ -69,6 +69,21 @@ engine without its profile or the reverse. A method that cannot run now (tool
 missing, profile disabled, key variable unset, image check not passed) is
 listed with the reason and cannot be chosen.
 
+## Profile metadata and local credentials (2026-10-10)
+
+Unknown catalog metadata may be omitted on the wire. Selecting such a model
+keeps existing form values, including token limits and prices; missing values
+are normalized to unknown rather than converted to empty inputs or `1`.
+Creating or updating an LLM profile requires positive integer token limits and
+an output limit strictly below the context window, leaving room for input.
+Existing stored profiles remain readable so an invalid setting can be repaired.
+
+Local loopback endpoints without a configured API-key variable are available
+without credentials once their image check passes. A configured variable must
+have a nonblank value. External endpoints always require a configured,
+nonblank key variable. The method list follows the image client's dispatch
+rules and gives an actionable reason when credentials are missing.
+
 ## Start dialog
 
 Opened by *Import* (file or directory) and by *Scan again* on a document.

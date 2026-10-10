@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, continueInvestigation, createCollection, getCollectionDocumentSummary, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { fetchLlmCatalog, ApiError, continueInvestigation, createCollection, getCollectionDocumentSummary, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -216,5 +216,28 @@ describe('reading workflow requests', () => {
     }));
     await expect(startImport({ collection: 'c', paths: [], recursive: false, include: [], exclude: [], method: 'tesseract', previewHash: 'old', requestId: 'id' }))
       .rejects.toMatchObject({ code: 'PREVIEW_STALE' });
+  });
+});
+
+
+describe('model catalog metadata decoding', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it('normalizes omitted metadata while preserving stated limits and zero prices', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
+      String(input) === '/api/session' ? { csrfToken: 'test' } : {
+        live: true, models: [
+          { id: 'qwen3-vl:8b', priceKnown: false },
+          { id: 'known', contextWindow: 32000, maxOutputTokens: 4096, inputPricePerMillion: 0, outputPricePerMillion: 0, priceKnown: true, imageInput: true },
+        ],
+      }), { status: 200 })));
+    const result = await fetchLlmCatalog('OPENAI_COMPATIBLE', 'http://localhost:11434/v1', null);
+    expect(result.models[0]).toEqual({
+      id: 'qwen3-vl:8b', priceKnown: false, contextWindow: null, maxOutputTokens: null,
+      inputPricePerMillion: null, outputPricePerMillion: null, cacheReadPricePerMillion: null, imageInput: null,
+    });
+    expect(result.models[1]).toEqual({
+      id: 'known', contextWindow: 32000, maxOutputTokens: 4096, inputPricePerMillion: 0, outputPricePerMillion: 0,
+      cacheReadPricePerMillion: null, priceKnown: true, imageInput: true,
+    });
   });
 });
