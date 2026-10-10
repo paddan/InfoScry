@@ -104,7 +104,15 @@ internal object RestoreFixtures {
         pages: List<String>,
         unitIds: List<ContentUnitId>,
         approval: PageApproval = PageApproval.APPROVED,
+        locators: List<SourceLocation>? = null,
+        extractionMethods: List<ExtractionMethod?>? = null,
     ): String {
+        require(locators == null || locators.size == pages.size) {
+            "locators must match the candidate page count"
+        }
+        require(extractionMethods == null || extractionMethods.size == pages.size) {
+            "extraction methods must match the candidate page count"
+        }
         val revisionId = context.revisions.openCandidate(documentId, parentRevisionId, "TEST_REPLACEMENT")
         pages.forEachIndexed { ordinal, text ->
             context.revisions.appendPage(
@@ -112,10 +120,10 @@ internal object RestoreFixtures {
                 RevisionPageDraft(
                     ordinal = ordinal,
                     unitId = unitIds[ordinal],
-                    locator = SourceLocation.TextLines(ordinal + 1, ordinal + 1),
+                    locator = locators?.get(ordinal) ?: SourceLocation.TextLines(ordinal + 1, ordinal + 1),
                     extractedText = text,
                     searchText = text,
-                    extractionMethod = ExtractionMethod.OCR,
+                    extractionMethod = extractionMethods?.get(ordinal) ?: ExtractionMethod.OCR,
                     approval = approval,
                     chunks = listOf(
                         RevisionChunkDraft(

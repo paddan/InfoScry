@@ -1,19 +1,26 @@
 # 06 - Owner decisions carried over
 
-Open questions from the removed local-testing-feedback record. They need the
-owner, not code; each one changes behaviour.
+## Decisions (2026-10-09)
 
-1. Extension filter on individually chosen files: today the filter also applies to
-   files chosen one by one, not only to files found in a folder. Keep?
-2. `deepseek-chat` and `deepseek-reasoner` are marked text-only in
-   `src/main/resources/.../providers.json` without a cited source. Add a source or
-   remove the claim. A wrong "text-only" hides a model from OCR.
-3. Ignore patterns: matching ignores case, `[abc]` classes are unsupported
-   (brackets are literal), and a file chosen individually is matched by its own
-   name only, so `node_modules/` does not skip it. Acceptable?
-4. Collections created before ignore patterns existed start with an empty list, not
-   the defaults. Backfill the defaults?
-5. Page selection (new): is an image of at least 25% and a text score below 75 the
-   right rule, or should the thresholds be settings?
+The owner chose to retain the existing behaviour:
 
-Record each answer in this file and open a ticket for any that needs code.
+1. Extension filters apply both to individually chosen files and to files found in folders.
+2. Ignore matching remains case-insensitive. `[abc]` character classes are not supported (brackets are literal); an individually chosen file is matched by its own name only.
+3. Existing collections are not backfilled with default ignore patterns. The owner will reset the database; no existing-data migration or conversion is requested.
+4. Page selection keeps the fixed 25% image-coverage and 75 text-quality thresholds. No settings are added.
+
+## Model-capability claim
+
+Removed the unsourced `imageInput: false` claim for `deepseek-chat` and
+`deepseek-reasoner` from the curated catalog. Their capability is unknown unless
+live provider metadata says otherwise; unknown is not proof of image support,
+and the image-reading check is still required before an OCR method is usable.
+The current [official API introduction](https://api-docs.deepseek.com/en/)
+and [Vision guide](https://api-docs.deepseek.com/guides/vision/) describe image
+input for `deepseek-flash`; neither supplies a current text-only capability
+contract for the two legacy identifiers. Checked 2026-10-09.
+
+Verification: `LlmModelCatalogTest` first failed the unknown-capability assertion
+against the shipped false value, then passed after removing the claims. The
+focused run also passed `PageCounterTest`. The accumulated gate is recorded in
+[implementation status](../../implementation-status.md).

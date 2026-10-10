@@ -27,3 +27,13 @@ from mock results).
 ## Done when
 The results are written into `docs/implementation-status.md` with the date and
 what was run.
+
+## Automated coverage (2026-10-09)
+
+Added a real PDFBox-generated three-page PDF to `PageCounterTest`: two clean text
+pages and one full-page raster without a text layer. The production
+`DefaultPageCounter` reports three document pages and one page to read, through
+both media-type entry points. This test passed alongside `LlmModelCatalogTest`.
+This adds page-selection coverage; it does not establish OCR quality. The real
+PDF corpus, real image-model check and real-provider scan remain open. The
+conditional double-open optimization has not been justified by a timing result.

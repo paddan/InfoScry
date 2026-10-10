@@ -212,6 +212,12 @@ The old flow and its code have been removed.
 
 ## Page selection (2026-10-09)
 
+This section describes implemented automatic selection. The implemented
+[page-review extension](2026-10-09-workspace-and-page-review.md) adds an explicit
+page set that overrides this heuristic for manual rescans. See its
+[ticket status](../tickets/workspace-and-page-review/STATUS.md) for verification
+and the remaining manual gates.
+
 Reading every page sent text-only pages to the model for nothing. A PDF page is
 selected for reading when either holds:
 

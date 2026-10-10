@@ -1,6 +1,8 @@
 package infoscry.server
 
 import infoscry.EXTERNAL_TAG
+import infoscry.document.RestoreFixtures
+import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -9,6 +11,7 @@ import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
+import infoscry.embedding.TestDocumentEmbedder
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
 import infoscry.llm.LlmCapabilityProbe
@@ -16,11 +19,15 @@ import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
 import infoscry.storage.Instants
+import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.awt.Color
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -42,11 +49,16 @@ class InvestigateBrowserAcceptanceTest {
 
     private lateinit var dataDir: Path
     private lateinit var harness: ApiTestServer
+    private var citationDocumentId: DocumentId? = null
+    private var citationCollectionId: String? = null
+    private var citationUnitId: String? = null
+    private var citationRevisionId: String? = null
+    private var restoreRevisionId: String? = null
 
     @BeforeTest
     fun startServer() {
         dataDir = Files.createTempDirectory("infoscry-browser-acceptance")
-        harness = ApiTestServer(dataDir)
+        harness = ApiTestServer(dataDir, restoreEmbedder = { TestDocumentEmbedder() })
         // A new archive has no automatic Default, and every scenario here names one.
         harness.context.collections.create("Default")
     }
@@ -59,20 +71,46 @@ class InvestigateBrowserAcceptanceTest {
 
     @Test
     fun `a follow-up reuses retained evidence across reload and reopens with stable citations`() {
-        val unitId = addEvidenceUnit("Mira signed the note.")
+        val unitId = addEvidenceUnit("Mira signed the note.", withHistory = true)
         FakeOpenAiServer(
             listOf(
                 researchStream(unitId),
                 answerStream("Mira signed the note [S1]."),
                 FakeOpenAiResponse(body = titleCompletion("The signed note")),
+                // The live reader asks the configured profile for its model catalog before follow-up input.
+                FakeOpenAiResponse(body = """{"data":[{"id":"model"}]}"""),
                 answerStream("The note was signed [S1]."),
                 answerStream("A third answer [S1]."),
             ),
         ).use { fake ->
             createInvestigatorProfile(fake.url)
             setDefaultInvestigatorProfile()
-            runScenario("primary")
-            assertEquals(5, fake.handledRequests, "the retained-evidence flow needs no correction and no extra research")
+            runScenario(
+                "primary",
+                extraEnvironment = mapOf(
+                    "DOCUMENT_ID" to checkNotNull(citationDocumentId).value,
+                    "COLLECTION_ID" to checkNotNull(citationCollectionId),
+                    "CITATION_UNIT_ID" to checkNotNull(citationUnitId),
+                    "CITATION_REVISION_ID" to checkNotNull(citationRevisionId),
+                    "RESTORE_REVISION_ID" to checkNotNull(restoreRevisionId),
+                ),
+            )
+            val modelLists = fake.requests.filter { it.method == "GET" && it.path.endsWith("/models") }
+            assertEquals(1, modelLists.size, "the reader loads one configured model catalog")
+            assertEquals("", modelLists.single().body)
+            assertEquals(6, fake.handledRequests, "research, first answer, title, catalog GET, and two retained-evidence follow-ups")
+            assertEquals(
+                "The previous text belongs to the earlier reading.",
+                harness.context.revisions.pages(harness.context.revisions.activeRevisionId(checkNotNull(citationDocumentId))!!).single().extractedText,
+                "the browser restored the earlier text while the cited newer revision remained historical",
+            )
+            val storedCitationRevision = harness.context.database.read { connection ->
+                connection.prepareStatement("SELECT revision_id FROM evidence_ledger WHERE source_unit_id = ? LIMIT 1").use { query ->
+                    query.setString(1, checkNotNull(citationUnitId))
+                    query.executeQuery().use { rows -> check(rows.next()); rows.getString(1) }
+                }
+            }
+            assertEquals(citationRevisionId, storedCitationRevision, "the saved Investigate evidence stays pinned to its cited revision")
         }
     }
 
@@ -207,6 +245,8 @@ class InvestigateBrowserAcceptanceTest {
         val unitId = addEvidenceUnit("Mira signed the note.")
         FakeOpenAiServer(
             listOf(
+                // The LLM Admin draft explicitly fetches the model catalog from this fake before probing.
+                FakeOpenAiResponse(body = """{"data":[{"id":"model"}]}"""),
                 // The Admin check sends the text request first, then the forced ping tool call.
                 answerStream("ok"),
                 pingStream(),
@@ -217,10 +257,19 @@ class InvestigateBrowserAcceptanceTest {
         ).use { fake ->
             createInvestigatorProfile(fake.url, measured = false)
             setDefaultInvestigatorProfile()
-            runScenario("unmeasuredProfile")
+            runScenario("unmeasuredProfile", fake.url)
             // The refused question sends nothing to the provider, so the script above is consumed exactly by
             // the two probe requests and the question's research, answer and title.
-            assertEquals(5, fake.handledRequests, "two probe requests, then research, one answer and one title")
+            val completions = fake.requests.filter { it.method == "POST" && it.path.endsWith("/chat/completions") }
+            val modelLists = fake.requests.filter { it.method == "GET" && it.path.endsWith("/models") }
+            assertEquals(5, completions.size, "two probes, research, one answer and one title")
+            assertEquals(
+                1,
+                modelLists.size,
+                "draft catalog request data: ${fake.requests.joinToString { "${it.method} ${it.path} body=${it.body}" }}",
+            )
+            assertEquals("", modelLists.single().body, "the model-catalog GET carries no completion body")
+            assertEquals(6, fake.handledRequests, "five completion POSTs plus the separate Admin model-list GET")
             assertTrue(
                 harness.context.llm.findByName("investigator")!!.toolCallingSupported,
                 "the Admin check must persist the measured tool-calling state",
@@ -230,7 +279,7 @@ class InvestigateBrowserAcceptanceTest {
 
     // ---- Harness ----
 
-    private fun runScenario(name: String) {
+    private fun runScenario(name: String, catalogEndpoint: String? = null, extraEnvironment: Map<String, String> = emptyMap()) {
         val script = Paths.get(System.getProperty("user.dir"), "web", "e2e", "investigate-browser-acceptance.mjs")
         check(Files.exists(script)) { "browser acceptance script is missing: $script" }
         // The output goes to a file so the timeout below can expire before the output is read: a
@@ -243,6 +292,8 @@ class InvestigateBrowserAcceptanceTest {
             .apply {
                 environment()["BASE_URL"] = harness.url
                 environment()["SCENARIO"] = name
+                if (catalogEndpoint != null) environment()["CATALOG_ENDPOINT"] = catalogEndpoint
+                extraEnvironment.forEach { (key, value) -> environment()[key] = value }
             }
             .start()
         val finished = process.waitFor(180, TimeUnit.SECONDS)
@@ -345,8 +396,51 @@ class InvestigateBrowserAcceptanceTest {
     private fun titleCompletion(title: String): String =
         """{"choices":[{"message":{"role":"assistant","content":"$title"}}],"usage":{"prompt_tokens":9,"completion_tokens":3}}"""
 
-    private fun addEvidenceUnit(text: String): String {
+    private fun addEvidenceUnit(text: String, withHistory: Boolean = false): String {
         val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+        if (withHistory) {
+            val source = Files.createDirectories(dataDir.resolve("sources")).resolve("browser-acceptance.png")
+            val image = BufferedImage(640, 360, BufferedImage.TYPE_INT_RGB)
+            image.createGraphics().also { graphics ->
+                graphics.color = Color.WHITE
+                graphics.fillRect(0, 0, image.width, image.height)
+                graphics.color = Color.BLACK
+                graphics.font = java.awt.Font("SansSerif", java.awt.Font.PLAIN, 24)
+                graphics.drawString("Mira signed the note.", 40, 80)
+                graphics.dispose()
+            }
+            ImageIO.write(image, "png", source.toFile())
+            val document = harness.context.library.importFile(collection.id, source).document
+            val unitId = ContentUnitId.new()
+            val locator = SourceLocation.Image(source.fileName.toString())
+            val old = RestoreFixtures.stage(
+                harness.context,
+                document.id,
+                parentRevisionId = null,
+                pages = listOf("The previous text belongs to the earlier reading."),
+                unitIds = listOf(unitId),
+                locators = listOf(locator),
+                extractionMethods = listOf(ExtractionMethod.DIRECT_TEXT),
+            )
+            runBlocking { harness.context.revisionPublication.publish(document.id, null, old) }
+            val current = RestoreFixtures.stage(
+                harness.context,
+                document.id,
+                parentRevisionId = old,
+                pages = listOf(text),
+                unitIds = listOf(unitId),
+                locators = listOf(locator),
+                extractionMethods = listOf(ExtractionMethod.DIRECT_TEXT),
+            )
+            runBlocking { harness.context.revisionPublication.publish(document.id, old, current) }
+            citationDocumentId = document.id
+            citationCollectionId = collection.id.value
+            citationUnitId = unitId.value
+            citationRevisionId = current
+            restoreRevisionId = old
+            assertEquals(current, harness.context.revisions.activeRevisionId(document.id))
+            return unitId.value
+        }
         val documentId = DocumentId.new()
         val now = Instants.now()
         harness.context.documents.insert(
@@ -366,7 +460,7 @@ class InvestigateBrowserAcceptanceTest {
                 language = "en",
             ),
         )
-        return harness.context.content.commitExtractedUnit(
+        val unit = harness.context.content.commitExtractedUnit(
             documentId = documentId,
             fingerprint = ExtractionFingerprint.of(
                 "f".repeat(64),
@@ -381,6 +475,7 @@ class InvestigateBrowserAcceptanceTest {
                 method = ExtractionMethod.DIRECT_TEXT,
             ),
             artifactRoot = harness.context.paths.libraryDir,
-        ).unit.id.value
+        ).unit
+        return unit.id.value
     }
 }

@@ -22,3 +22,17 @@ unchanged copy) adds a history entry for nothing.
   their text gives `pageTotal` 0 and `documentPages` N, and the chosen behaviour.
 - Dialog test: the zero case, with the button state the decision requires.
 - Running the same start twice returns the same result (idempotence rule).
+
+## Implementation and focused verification (2026-10-09)
+
+A zero-read preview reports `pageTotal = 0` and the document's total pages.
+Repeated admission returns `RESCAN_NO_PAGES_TO_READ` before creating or replacing
+an operation, job or revision. The dialog explains that existing text is kept
+and disables confirmation. Imports with zero image-reading pages remain
+startable as “Import without image reading”.
+
+The backend regression first failed because admission created an operation; it
+then passed alongside existing admission/idempotence coverage. The dialog's
+rescan and zero-OCR import regressions failed before their fixes; all 13 focused
+dialog tests and typecheck passed. Accumulated verification is recorded in
+[implementation status](../../implementation-status.md).

@@ -48,3 +48,14 @@ the page contract (`RescanPage.image`) for a time and disk saving, not correctne
 Failing test first, then the focused passing tests, then `./gradlew check`.
 Ticket 05 is a manual gate on the owner's Mac and is not complete until it has been
 run there.
+
+## Execution decisions (2026-10-09)
+
+Implementation uses inexpensive subagents with coordinating review. Ticket 01
+uses the recommended no-operation behaviour for a zero-read rescan; imports
+without image reading remain startable. Ticket 04's conditional optimization was
+justified by the rendering measurement recorded in its ticket. Ticket 06 retains
+existing filter, ignore and page-selection behaviour. Ticket 07 is cancelled by
+the owner: no existing-data migration or conversion is wanted, and the owner will
+reset the database. Ticket 03 updates the fresh schema only. Current completion
+and verification boundaries are in [ticket status](../tickets/follow-ups/STATUS.md).

@@ -52,7 +52,7 @@ import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 
 /**
- * Reads every page of a published document and replaces its text through one candidate revision.
+ * Reads selected pages of a published document and replaces its text through one complete candidate revision.
  *
  * The attempt is deliberately not the import path with other settings. Four things are its own, and each is
  * why a rescan is a job type rather than a mode:
@@ -89,6 +89,12 @@ class RescanJobHandler internal constructor(
     private val pages: RescanPageSource = RescanPageSource(),
     /** A narrow seam for exercising cancellation after authority moved but before status finalization. */
     private val afterCandidatePublished: suspend (JobId) -> Unit = {},
+    /** A narrow seam for exercising recovery after a page checkpoint is durable. */
+    private val afterPageCommitted: suspend (JobId, Int) -> Unit = { _, _ -> },
+    /** A narrow seam for observing the resumed checkpoint before page iteration begins. */
+    private val afterInitialProgressReported: suspend (JobId) -> Unit = {},
+    /** A narrow seam immediately before publication changes the document's authoritative revision. */
+    private val beforeCandidatePublication: suspend (JobId) -> Unit = {},
 ) : JobHandler {
 
     /** What a staged reading becomes: the page it is decided to be, its passages, and the publication. */
@@ -177,6 +183,15 @@ class RescanJobHandler internal constructor(
                 "the document's managed copy is missing, or is not the file this archive recorded; it was not " +
                     "read, because managed copies are immutable and the recorded hash is what says so",
             )
+        if (document.sha256 != operation.managedSha256) {
+            fail(
+                stage,
+                operation,
+                OcrOperationStage.FAILED,
+                STALE_BASELINE,
+                "the document's managed bytes are not the ones this rescan previewed; preview and admit a new rescan",
+            )
+        }
         if (!pages.supports(document.mediaType)) {
             fail(
                 stage,
@@ -244,62 +259,76 @@ class RescanJobHandler internal constructor(
                 document = document,
                 managedPath = managedPath,
                 mediaType = document.mediaType,
-                attemptDirectory = documentArtifactRoot.resolve(RESCAN_PAGES_DIRECTORY),
+                // A candidate owns immutable page images; another operation must never replace them.
+                attemptDirectory = documentArtifactRoot.resolve(RESCAN_PAGES_DIRECTORY).resolve(candidate),
                 documentArtifactRoot = documentArtifactRoot,
                 baseline = baseline,
                 renderDpi = snapshot.renderDpi,
+                committedPages = revisions.pages(candidate).filter { it.producerRevisionId == candidate }.associateBy { it.ordinal },
+                selection = operation.selection,
             )
         }
-        // The pages an earlier attempt of this operation already staged count as this attempt's own starting
-        // point: the counter is derived from the candidate, so a resumed attempt never double-counts.
-        var committed = revisions.pages(candidate).size
+        val pagesToRead = pageImages.filter(RescanPage::read)
+        // Only selected pages belong in reading progress. The candidate also contains preserved text from
+        // clean pages, so its full size is not a reading count; restrict checkpoint recovery to selected pages.
+        var committed = pagesToRead.count { page ->
+            val image = requireNotNull(page.image)
+            revisions.page(candidate, page.ordinal)
+                ?.let { staged ->
+                    staged.producerRevisionId == candidate && staged.unitId.value == page.unitId &&
+                        staged.sourceImage?.sha256 == image.sha256
+                } == true
+        }
+        // A failure is not a checkpoint: every selected page the candidate did not successfully produce is
+        // retried below. Count failures in this attempt only, while successful candidate checkpoints remain
+        // durable and are carried into `committed` above.
         var failed = 0
         stage.run(STAGE_OCR) {
             operations.advance(operation.operationId, OcrOperationStage.OCR)
             updateDocumentStatus(operation, DocumentStatus.OCR)
             operations.recordProgress(
                 operationId = operation.operationId,
-                pageTotal = pageImages.size,
+                pageTotal = pagesToRead.size,
                 committed = committed,
-                failed = 0,
+                failed = failed,
             )
         }
-        stage.reportProgress(completed = 0, total = pageImages.size)
+        stage.reportProgress(completed = committed, total = pagesToRead.size)
+        afterInitialProgressReported(job.id)
 
         // ---- phase 1: read, one page at a time ----
         // Everything this phase can refuse — an engine this build cannot use, a provider that will not answer,
         // a baseline the document moved past — ends the operation with the code that says so and the remedy a
         // person can act on. A per-page failure is *not* one of them: it is recorded against the page and the
         // rest of the document is still read.
-        var completed = 0
+        var completed = committed
         try {
         for (page in pageImages) {
-            completed++
-            stage.reportCurrentItem(pageName(completed, pageImages.size))
-            val alreadyStaged = revisions.page(candidate, page.image.ordinal)
-                ?.let { staged -> staged.sourceImage?.sha256 == page.image.sha256 } == true
+            if (!page.read) {
+                // A selected-page total describes engine reads. Preserve clean text in the candidate without
+                // treating the preserved page as committed reading progress or as a failure.
+                val alreadyPreserved = revisions.page(candidate, page.ordinal)
+                    ?.let { staged -> staged.unitId.value == page.unitId } == true
+                if (!alreadyPreserved) {
+                    stage.run(STAGE_COMMIT) {
+                        stageBaselineText(page, document, candidate, documentArtifactRoot)
+                    }
+                }
+                continue
+            }
+            val image = requireNotNull(page.image)
+            val alreadyStaged = revisions.page(candidate, page.ordinal)
+                ?.let { staged ->
+                    staged.producerRevisionId == candidate && staged.unitId.value == page.unitId &&
+                        staged.sourceImage?.sha256 == image.sha256
+                } == true
             if (alreadyStaged) {
                 // These exact pixels were read under this operation's snapshot before: the staged reading is
                 // durable, and reading the page again would be paid for twice.
-                stage.reportProgress(completed, pageImages.size)
                 continue
             }
-            if (!page.read) {
-                // The selector judged this page's published text trustworthy, so no engine sees it: the text is
-                // kept as the candidate's page and is not a failure. Nothing is dispatched, so no allowance is
-                // spent either.
-                stage.run(STAGE_COMMIT) {
-                    if (stageBaselineText(page, document, candidate, documentArtifactRoot)) committed++
-                    operations.recordProgress(
-                        operationId = operation.operationId,
-                        pageTotal = pageImages.size,
-                        committed = committed,
-                        failed = failed,
-                    )
-                }
-                stage.reportProgress(completed, pageImages.size)
-                continue
-            }
+            completed++
+            stage.reportCurrentItem(pageName(completed, pagesToRead.size))
             val outcome = read(page, engine, snapshot)
             val stagedPage = outcome.reading?.let { reading ->
                 phases.acceptedPageOf(
@@ -311,7 +340,7 @@ class RescanJobHandler internal constructor(
                 if (stagedPage != null) {
                     revisions.appendPage(
                         candidate,
-                        phases.draftOf(page, document, stagedPage, documentArtifactRoot),
+                        phases.draftOf(page, document, stagedPage, documentArtifactRoot, producerRevisionId = candidate),
                     )
                     committed++
                 } else {
@@ -322,12 +351,13 @@ class RescanJobHandler internal constructor(
                 }
                 operations.recordProgress(
                     operationId = operation.operationId,
-                    pageTotal = pageImages.size,
+                    pageTotal = pagesToRead.size,
                     committed = committed,
                     failed = failed,
                 )
             }
-            stage.reportProgress(completed, pageImages.size)
+            afterPageCommitted(job.id, page.ordinal)
+            stage.reportProgress(completed, pagesToRead.size)
         }
 
         } catch (failed: RescanAttemptFailedException) {
@@ -363,6 +393,7 @@ class RescanJobHandler internal constructor(
             operations.advance(operation.operationId, OcrOperationStage.INDEXING)
             updateDocumentStatus(operation, DocumentStatus.INDEXING)
         }
+        beforeCandidatePublication(job.id)
         if (phases.publishCandidate(operation, candidate, stage)) {
             afterCandidatePublished(job.id)
             stage.run(STAGE_RECORD) {
@@ -405,16 +436,19 @@ class RescanJobHandler internal constructor(
         revisions.appendPage(
             candidate,
             phases.draftOf(
-                page = page,
+                // A failed/skipped read preserves the old pixels as well as the old text and producer.
+                page = page.copy(image = null, read = false),
                 document = document,
                 stagedPage = StagedCandidatePage(
                     text = baselinePage.extractedText,
+                    extractionMethod = baselinePage.extractionMethod,
                     approval = PageApproval.APPROVED,
                     confidence = baselinePage.meanConfidence,
                     artifactRelativePath = baselinePage.artifactRelativePath,
                     artifactSha256 = baselinePage.artifactSha256,
                 ),
                 documentArtifactRoot = documentArtifactRoot,
+                producerRevisionId = baselinePage.producerRevisionId,
             ),
         )
         return true
@@ -442,10 +476,11 @@ class RescanJobHandler internal constructor(
         engine: PageOcrEngine,
         snapshot: OcrSettingsSnapshot,
     ): PageRead = try {
-        val reading = engine.transcribe(page.image, snapshot)
+        val image = requireNotNull(page.image)
+        val reading = engine.transcribe(image, snapshot)
         if (reading.text.isBlank() || reading.errorCode != null) {
             LOGGER.atInfo()
-                .addKeyValue(ORDINAL_FIELD, page.image.ordinal)
+                .addKeyValue(ORDINAL_FIELD, page.ordinal)
                 .addKeyValue(CODE_FIELD, reading.errorCode ?: OcrPageResult.EMPTY_READING_CODE)
                 .log("a page came back without a usable reading; the document keeps its published text for it")
             PageRead(null)
@@ -470,7 +505,7 @@ class RescanJobHandler internal constructor(
             refused.message ?: "the image-model provider refused this page",
         )
     } catch (failure: IOException) {
-        LOGGER.atWarn().addKeyValue(ORDINAL_FIELD, page.image.ordinal).setCause(failure)
+        LOGGER.atWarn().addKeyValue(ORDINAL_FIELD, page.ordinal).setCause(failure)
             .log("a page could not be read; the document keeps its published text for it")
         PageRead(null)
     }

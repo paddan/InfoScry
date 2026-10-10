@@ -1543,7 +1543,7 @@ internal fun AppContext.seedCollectionWithId(id: String, name: String) {
  * attempts against it. Either import opens and closes the data directory, so a second call is a restart
  * in the sense that matters: a new process over the same durable state.
  */
-internal class Harness(val directory: Path) : AutoCloseable {
+internal class Harness(val directory: Path, seedCollection: Boolean = true) : AutoCloseable {
 
     /** The files a test imports. Separate from [dataDir], so importing a directory cannot sweep the archive. */
     val sourcesDir: Path = Files.createDirectories(directory.resolve("sources"))
@@ -1554,7 +1554,9 @@ internal class Harness(val directory: Path) : AutoCloseable {
         // A new archive has no automatic Default collection, and every import here names `default`
         // explicitly — its managed library path is `library/default/...` too. Seed the row a person
         // would have created, keeping that fixed id so the payloads and assertions can name it.
-        AppContext.open(dataDir).use { context -> context.seedCollectionWithId("default", "Default") }
+        if (seedCollection) {
+            AppContext.open(dataDir).use { context -> context.seedCollectionWithId("default", "Default") }
+        }
     }
 
     fun writeText(name: String, content: String): Path {

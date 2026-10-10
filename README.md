@@ -42,14 +42,25 @@ which may be an external service.
 ## Project status
 
 Implementation is in progress. The backend, CLI and web reader exist;
-Collections, Search and Investigate have browser acceptance against local test doubles.
+Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
 The [OCR workflow redesign](docs/specs/2026-10-08-ocr-workflow-redesign.md) adds a
-confirmed reading method for every import and rescan, reads every page and publishes
+confirmed reading method for every import and rescan, reads selected pages and publishes
 a complete reading automatically while keeping previous text in history. Its browser
 gate passes against local test doubles. Open follow-ups are listed in
-[docs/tickets/follow-ups](docs/tickets/follow-ups/STATUS.md). Ask browser acceptance and the format-specific
-source-viewer finish line remain open. See [implementation status](docs/implementation-status.md)
+[docs/tickets/follow-ups](docs/tickets/follow-ups/STATUS.md). Document paging, selective
+rescanning and historical Ask citations have browser coverage; the format-specific
+source-viewer finish line remains open. See [implementation status](docs/implementation-status.md)
 for recorded checks.
+
+The [workspace and page review plan](docs/plans/2026-10-09-workspace-and-page-review.md)
+is implemented: common views use the available width, and the compact
+document list has live filename search, inline details and session view memory.
+The adaptive source view preserves context and supports narrow-screen Back.
+PDF/image review shows exact-revision images beside extracted text, including
+historical PDF page and image citations. Live review can mark pages and confirm an exact
+page set and reading method for rescanning. Stopped selected-page runs can resume
+from committed pages. Integrated browser verification passed 42 scenarios; the
+final accumulated check passed 1,598 JVM and 425 frontend tests.
 
 Real OCR providers and real CoreML are separate manual gates. Before treating the
 redesigned OCR workflow as verified on a real archive, check local Tesseract/Surya,

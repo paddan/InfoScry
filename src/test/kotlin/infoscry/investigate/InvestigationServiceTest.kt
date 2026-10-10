@@ -384,6 +384,7 @@ class InvestigationServiceTest {
         assertEquals("revision-4", entry.revisionId, "the ledger stores the revision with the evidence at write time")
         val done = events.filterIsInstance<InvestigateEvent.Done>().single()
         assertEquals(listOf<String?>("revision-4"), done.evidence.map { it.revisionId })
+        assertEquals(listOf(documentId.value), done.evidence.map { it.documentId }, "citations retain the source unit's owning document")
     }
 
     @Test

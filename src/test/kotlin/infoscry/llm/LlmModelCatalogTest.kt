@@ -232,13 +232,16 @@ class LlmModelCatalogTest {
                 LlmProvider.OPENAI_COMPATIBLE, "https://api.openai.com/v1", entries("""{"data":[{"id":"gpt-4o"}]}"""),
             ).single().imageInput,
         )
-        assertEquals(
-            false,
-            catalog.normalize(
-                LlmProvider.OPENAI_COMPATIBLE, "https://api.deepseek.com/v1",
-                entries("""{"data":[{"id":"deepseek-chat"}]}"""),
-            ).single().imageInput,
-        )
+        for (model in listOf("deepseek-chat", "deepseek-reasoner")) {
+            assertEquals(
+                null,
+                catalog.normalize(
+                    LlmProvider.OPENAI_COMPATIBLE, "https://api.deepseek.com/v1",
+                    entries("""{"data":[{"id":"$model"}]}"""),
+                ).single().imageInput,
+                "legacy DeepSeek ids have no supported current image-capability claim",
+            )
+        }
         assertEquals(
             null,
             catalog.normalize(

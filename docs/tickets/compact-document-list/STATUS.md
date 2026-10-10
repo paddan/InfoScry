@@ -2,7 +2,7 @@
 
 > **For agentic workers:** Use superpowers:executing-plans for inline work, or superpowers:subagent-driven-development if the user chooses delegation. Criteria remain unchecked until verified.
 
-**Goal:** Keep Collections focused on overview/import while making document management compact and accessible.
+**Goal:** Make import/reading outcomes easy to check, with a compact full-width document list leading into page review.
 
 **Architecture:** Add a collection-wide status aggregate to existing thin routes. Keep listing APIs intact; a parent-owned in-memory state map drives an expandable, bounded document table with debounced search and inline details.
 
@@ -11,8 +11,12 @@
 **Spec:** [Compact document list](../../specs/2026-09-30-compact-document-list.md).
 
 Design and documentation authorized on 2026-09-30. Ticket 01 was implemented on
-2026-10-07; tickets 02–04 have not started.
-The existing OCR plan is separate; none of these tickets depends on OCR work.
+2026-10-07; ticket 02 is implemented and reviewed following the owner's execution
+instruction on 2026-10-09. Tickets 03–04 are implemented and reviewed; browser
+acceptance completed 2026-10-10, with human/provider/GPU gates still open.
+Refined 2026-10-09 alongside the [wide workspace and page review plan](../../plans/2026-10-09-workspace-and-page-review.md).
+That plan's ticket 01 supplies the shared wide workspace before ticket 02 here.
+Manual page rescanning is separate and does not block shipping the compact list.
 
 ## Global constraints
 
@@ -22,26 +26,26 @@ The existing OCR plan is separate; none of these tickets depends on OCR work.
 - English product copy, ordinary accessible HTML/CSS; no new UI library or separate page.
 - Keep 50-row pagination, filename-only search and existing Retry/deletion semantics.
 - Session memory only; reload resets to collapsed. No durable user-preference storage.
-- Planned OCR review is not an implemented status; do not display fictitious counts.
+- No pending OCR review/approval stage; counts use existing statuses only.
 
 ## Tickets
 
 | Ticket | Blocked by | State |
 |---|---|---|
 | 01 — Collection-wide summary | None | Implemented |
-| [02 — Collapse, bounded layout and session memory](02-collapse-and-session.md) | 01 | Not started |
-| [03 — Live search and inline details](03-live-search-and-details.md) | 02 | Not started |
-| [04 — Browser acceptance and documentation](04-acceptance.md) | 03 | Not started |
+| [02 — Collapse, bounded layout and session memory](02-collapse-and-session.md) | 01; workspace/page-review 01 | Implemented |
+| [03 — Live search and inline details](03-live-search-and-details.md) | 02 | Implemented |
+| [04 — Browser acceptance and documentation](04-acceptance.md) | 03 | Implemented |
 
 Work the verified dependency frontier. Tickets share CollectionsPanel; do not
-infer authorization for parallel edits. This is deliberately four reviewable
-slices rather than separate tasks for every control. No code changes, installs,
+infer authorization for parallel edits. This remains four reviewable slices; the separate companion tickets own the
+workspace, page comparison and explicit-page OCR contracts. No code changes, installs,
 commits or pushes are authorized by the documentation itself.
 
 ## Shared interfaces and test examples
 
 Ticket 01 adds `getCollectionDocumentSummary(collectionId)` returning
-`{ total: number, byStatus: Record<DocumentStatus, number> }` in `api.ts`.
+`{ total: number, byStatus: Record<DocumentStatusName, number> }` in `api.ts`.
 Use the existing frontend status union; resolve its exact exported type name
 when editing rather than create a second incompatible enum. Ticket 02 defines
 `DocumentListViewState` in `documentListViewState.ts` with the exact fields in
@@ -87,9 +91,11 @@ and other manual gates remain open.
 ## Current evidence
 
 Ticket 01 is implemented and its commands, counts and red evidence are in the
-verification record below. Tickets 02–04 are unstarted: no browser acceptance has
-run for this feature, and the existing Ask/source-viewer and manual accessibility
-gates remain open.
+verification record below. Ticket 02 passed its final accumulated gate with 1,585
+JVM and 358 frontend tests, and independent review is clean. Ticket 03 is in
+implemented with a final gate of 1,585 JVM / 382 frontend tests and clean review;
+04 passed 16 browser scenarios and final gate 1,585 JVM / 383 frontend tests.
+The existing Ask/source-viewer and human accessibility gates remain open.
 
 ## Verification record
 

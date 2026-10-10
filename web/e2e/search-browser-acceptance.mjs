@@ -56,27 +56,37 @@ try {
 
   // The source occupies the right-hand reading area while Search stays legible on the left.
   await page.locator('.result').first().click();
-  await page.waitForSelector('.source-sheet');
+  await page.waitForSelector('.source-pane');
   const desktopLayout = await page.evaluate(() => {
-    const source = document.querySelector('.source-sheet').getBoundingClientRect();
-    const content = document.querySelector('.mode-panels').getBoundingClientRect();
+    const source = document.querySelector('.source-pane').getBoundingClientRect();
+    const content = document.querySelector('.workspace-context').getBoundingClientRect();
     return { sourceLeft: source.left, sourceRight: source.right, sourceWidth: source.width, contentRight: content.right };
   });
-  assert(desktopLayout.sourceWidth > 600, 'desktop source preview should be wide enough to read');
+  assert(desktopLayout.sourceWidth > 480 && desktopLayout.sourceWidth <= 560,
+    `desktop source preview should occupy the readable 30–35rem split pane, got ${desktopLayout.sourceWidth}px`);
   assert(desktopLayout.contentRight < desktopLayout.sourceLeft, 'Search and preview should occupy separate columns');
-  assert.equal(desktopLayout.sourceRight, 1600);
-  await page.getByRole('button', { name: 'Close source viewer' }).click();
+  assert(desktopLayout.sourceRight <= 1600 && 1600 - desktopLayout.sourceRight <= 32,
+    `the split preview should preserve the app's 24px right gutter, got ${1600 - desktopLayout.sourceRight}px`);
+  await page.locator('.source-pane button[aria-label="Close source viewer"]').click();
 
   await page.setViewportSize({ width: 1050, height: 900 });
   await page.locator('.result').first().click();
   const compactLayout = await page.evaluate(() => {
-    const source = document.querySelector('.source-sheet').getBoundingClientRect();
+    const source = document.querySelector('.source-pane').getBoundingClientRect();
     const sidebar = document.querySelector('.sidebar').getBoundingClientRect();
     return { sourceLeft: source.left, sourceRight: source.right, sidebarRight: sidebar.right };
   });
-  assert.equal(compactLayout.sourceLeft, compactLayout.sidebarRight, 'compact preview should preserve the workspace sidebar');
-  assert.equal(compactLayout.sourceRight, 1050);
-  await page.getByRole('button', { name: 'Close source viewer' }).click();
+  assert(compactLayout.sourceLeft >= compactLayout.sidebarRight && compactLayout.sourceLeft - compactLayout.sidebarRight <= 24,
+    `compact preview should preserve a bounded gutter after the workspace sidebar, got ${compactLayout.sourceLeft - compactLayout.sidebarRight}px`);
+  assert(compactLayout.sourceRight <= 1050 && 1050 - compactLayout.sourceRight <= 24,
+    `compact preview should stay inside the viewport with a bounded right gutter, got ${1050 - compactLayout.sourceRight}px`);
+  const compactLayoutMode = await page.locator('.source-workspace').getAttribute('data-layout');
+  if (compactLayoutMode === 'narrow') {
+    await page.locator('.source-pane button[aria-label="Back to results"]').click();
+    await page.locator('.workspace-context').waitFor({ state: 'visible' });
+  } else {
+    await page.locator('.source-pane button[aria-label="Close source viewer"]').click();
+  }
   await page.setViewportSize({ width: 1600, height: 900 });
 
   await page.fill('#path-contains', '');

@@ -45,6 +45,9 @@ class OcrRoutesTest {
     private suspend fun preview(method: String = "tesseract"): HttpResponse =
         harness.request(HttpMethod.Post, "$prefix/preview", """{"method":"$method"}""", Credential.CSRF)
 
+    private suspend fun previewBody(body: String): HttpResponse =
+        harness.request(HttpMethod.Post, "$prefix/preview", body, Credential.CSRF)
+
     private suspend fun previewId(method: String = "tesseract"): String {
         val response = preview(method)
         assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
@@ -76,6 +79,78 @@ class OcrRoutesTest {
     }
 
     @Test
+    fun `preview returns its normalized explicit selection and admission freezes it on the operation`() = runBlocking {
+        val response = previewBody("""{"method":"tesseract","selection":{"mode":"explicit","ordinals":[0,0]}}""")
+        val body = response.bodyAsText()
+
+        assertEquals(HttpStatusCode.OK, response.status, body)
+        assertContains(body, "\"selection\":{\"mode\":\"explicit\",\"ordinals\":[0]}")
+        val previewId = Regex(""""previewId":"([^"]+)"""").find(body)!!.groupValues[1]
+
+        val first = admit(previewId, "selection-request")
+        val replay = admit(previewId, "selection-request")
+
+        assertEquals(HttpStatusCode.Accepted, first.status, first.bodyAsText())
+        assertContains(first.bodyAsText(), "\"selection\":{\"mode\":\"explicit\",\"ordinals\":[0]}")
+        assertEquals(operationId(first), operationId(replay))
+        assertContains(replay.bodyAsText(), "\"selection\":{\"mode\":\"explicit\",\"ordinals\":[0]}")
+    }
+
+    @Test
+    fun `empty and out of range explicit selections are rejected before preview admission`() = runBlocking {
+        val empty = previewBody("""{"method":"tesseract","selection":{"mode":"explicit","ordinals":[]}}""")
+        val outside = previewBody("""{"method":"tesseract","selection":{"mode":"explicit","ordinals":[1]}}""")
+        val negative = previewBody("""{"method":"tesseract","selection":{"mode":"explicit","ordinals":[-1]}}""")
+        val fractional = previewBody("""{"method":"tesseract","selection":{"mode":"explicit","ordinals":[0.5]}}""")
+
+        assertEquals(HttpStatusCode.BadRequest, empty.status, empty.bodyAsText())
+        assertEquals(HttpStatusCode.BadRequest, outside.status, outside.bodyAsText())
+        assertEquals(HttpStatusCode.BadRequest, negative.status, negative.bodyAsText())
+        assertEquals(HttpStatusCode.BadRequest, fractional.status, fractional.bodyAsText())
+    }
+
+    @Test
+    fun `an explicit preview is rejected when the managed document hash changes before admission`() = runBlocking {
+        val response = previewBody(
+            """{"method":"tesseract","selection":{"mode":"explicit","ordinals":[0]}}""",
+        )
+        val previewId = Regex(""""previewId":"([^"]+)"""").find(response.bodyAsText())!!.groupValues[1]
+        harness.context.database.transaction { connection ->
+            connection.prepareStatement("UPDATE documents SET sha256 = ? WHERE id = ?").use { statement ->
+                statement.setString(1, "c".repeat(64))
+                statement.setString(2, picture.documentId.value)
+                assertEquals(1, statement.executeUpdate())
+            }
+        }
+
+        val admission = admit(previewId, "stale-hash-explicit")
+
+        assertEquals(HttpStatusCode.Conflict, admission.status, admission.bodyAsText())
+        assertContains(admission.bodyAsText(), "STALE_RESCAN_PREVIEW")
+        assertEquals(emptyList(), harness.context.ocrOperations.operations(picture.documentId))
+    }
+
+    @Test
+    fun `an explicit preview is rejected when the active base revision changes before admission`() = runBlocking {
+        val response = previewBody(
+            """{"method":"tesseract","selection":{"mode":"explicit","ordinals":[0]}}""",
+        )
+        val previewId = Regex(""""previewId":"([^"]+)"""").find(response.bodyAsText())!!.groupValues[1]
+        harness.context.database.transaction { connection ->
+            connection.prepareStatement("DELETE FROM document_active_revisions WHERE document_id = ?").use { statement ->
+                statement.setString(1, picture.documentId.value)
+                assertEquals(1, statement.executeUpdate())
+            }
+        }
+
+        val admission = admit(previewId, "stale-base-explicit")
+
+        assertEquals(HttpStatusCode.Conflict, admission.status, admission.bodyAsText())
+        assertContains(admission.bodyAsText(), "STALE_RESCAN_PREVIEW")
+        assertEquals(emptyList(), harness.context.ocrOperations.operations(picture.documentId))
+    }
+
+    @Test
     fun `a rescan is admitted durably and repeating its request returns the same operation`() = runBlocking {
         val previewId = previewId()
         val first = admit(previewId, "same-request")
@@ -95,13 +170,19 @@ class OcrRoutesTest {
         assertEquals(HttpStatusCode.Accepted, first.status, first.bodyAsText())
         val firstId = operationId(first)
 
-        val replacement = admit(previewId(), "second-request")
+        val explicitPreview = previewBody(
+            """{"method":"tesseract","selection":{"mode":"explicit","ordinals":[0]}}""",
+        )
+        val explicitPreviewId = Regex(""""previewId":"([^"]+)"""")
+            .find(explicitPreview.bodyAsText())!!.groupValues[1]
+        val replacement = admit(explicitPreviewId, "second-request")
         assertEquals(HttpStatusCode.Accepted, replacement.status, replacement.bodyAsText())
         val secondId = operationId(replacement)
 
         assertNotEquals(firstId, secondId)
         assertEquals("CANCELLED", harness.context.ocrOperations.operation(firstId)?.stage?.name)
         assertEquals(secondId, harness.context.ocrOperations.activeOperation(picture.documentId)?.operationId)
+        assertContains(replacement.bodyAsText(), "\"selection\":{\"mode\":\"explicit\",\"ordinals\":[0]}")
         assertEquals(originalRevision, harness.context.revisions.activeRevisionId(picture.documentId))
     }
 
@@ -121,13 +202,31 @@ class OcrRoutesTest {
         assertContains(replay.bodyAsText(), "\"stage\":\"CANCELLED\"")
         assertEquals(DocumentStatus.CANCELLED, harness.context.documents.get(picture.documentId)?.status)
         assertEquals(originalRevision, harness.context.revisions.activeRevisionId(picture.documentId))
+
+        val nextPreview = previewBody(
+            """{"method":"tesseract","selection":{"mode":"explicit","ordinals":[0]}}""",
+        )
+        assertEquals(HttpStatusCode.OK, nextPreview.status, nextPreview.bodyAsText())
+        val nextPreviewId = Regex(""""previewId":"([^"]+)"""")
+            .find(nextPreview.bodyAsText())!!.groupValues[1]
+        val nextStart = admit(nextPreviewId, "after-stopped-run")
+
+        assertEquals(HttpStatusCode.Accepted, nextStart.status, nextStart.bodyAsText())
+        assertContains(nextStart.bodyAsText(), "\"selection\":{\"mode\":\"explicit\",\"ordinals\":[0]}")
+        assertEquals(operationId(nextStart), harness.context.ocrOperations.activeOperation(picture.documentId)?.operationId)
     }
 
     @Test
     fun `reusing a request id for another preview is a conflict`() = runBlocking {
         assertEquals(HttpStatusCode.Accepted, admit(previewId(), "reused").status)
 
-        val conflicting = admit(previewId(), "reused")
+        val anotherMode = previewBody(
+            """{"method":"tesseract","selection":{"mode":"explicit","ordinals":[0]}}""",
+        )
+        val conflicting = admit(
+            Regex(""""previewId":"([^"]+)"""").find(anotherMode.bodyAsText())!!.groupValues[1],
+            "reused",
+        )
 
         assertEquals(HttpStatusCode.Conflict, conflicting.status, conflicting.bodyAsText())
         assertContains(conflicting.bodyAsText(), "OCR_REQUEST_CONFLICT")

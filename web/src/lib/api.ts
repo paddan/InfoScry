@@ -295,6 +295,8 @@ export type OcrProfileProbe = {
   supported: boolean;
   modelVersion: string | null;
   errorCode: string | null;
+  errorMessage?: string | null;
+  statusCode?: number | null;
 };
 
 export type LlmDefaults = { ASK: string | null; INVESTIGATE: string | null };
@@ -939,6 +941,59 @@ export async function readSource(
   return (await readJson(response)) as SourceContentResponse;
 }
 
+/** A bounded physical page read, pinned to one exact published reading when it has one. */
+export type PageReviewOptions = {
+  ordinal: number;
+  revision?: string;
+  offset?: number;
+  limit?: number;
+};
+
+export type PageReviewResponse = {
+  documentId: string;
+  unitId: string | null;
+  revisionId: string | null;
+  ordinal: number;
+  documentPages: number | null;
+  previousOrdinal: number | null;
+  nextOrdinal: number | null;
+  text: string;
+  offset: number;
+  totalChars: number;
+  truncated: boolean;
+  qualityScore: number | null;
+  readingMethod: string | null;
+  imageKind: 'ocr' | 'original' | 'none';
+};
+
+export async function getDocumentPageReview(
+  collectionId: string,
+  documentId: string,
+  options: PageReviewOptions,
+): Promise<PageReviewResponse> {
+  const params = new URLSearchParams({ ordinal: String(options.ordinal) });
+  if (options.revision !== undefined) params.set('revision', options.revision);
+  if (options.offset !== undefined) params.set('offset', String(options.offset));
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  const response = await fetch(`${pageReviewPath(collectionId, documentId)}?${params}`);
+  return (await readJson(response)) as PageReviewResponse;
+}
+
+/** Build the image request from the metadata's exact document/revision/page/kind tuple. */
+export function documentPageReviewImageUrl(
+  collectionId: string,
+  page: Pick<PageReviewResponse, 'documentId' | 'revisionId' | 'ordinal' | 'imageKind'>,
+): string | null {
+  if (page.imageKind === 'none') return null;
+  const params = new URLSearchParams({ ordinal: String(page.ordinal), kind: page.imageKind });
+  if (page.revisionId !== null) params.set('revision', page.revisionId);
+  return `${pageReviewPath(collectionId, page.documentId)}/image?${params}`;
+}
+
+function pageReviewPath(collectionId: string, documentId: string): string {
+  return `/api/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/page-review`;
+}
+
 /**
  * Ask the server to open the native pick dialog for files (`directory = false`) or one folder.
  * Returns the absolute paths the user chose, in pick order.
@@ -1370,6 +1425,7 @@ export type RescanPreview = {
   baseRevisionId?: string | null;
   managedHash: string;
   snapshot: OcrSettingsSnapshot;
+  selection: RescanSelection;
   method?: string;
   pageTotal?: number | null;
   /** Every page the document has; `pageTotal` is only the pages a rescan reads. */
@@ -1385,6 +1441,11 @@ export type RescanPreview = {
   previewHash?: string;
   expiresAt?: string;
 };
+
+/** A rescan reads the automatic default or exactly the canonical zero-based page ordinals. */
+export type RescanSelection =
+  | { mode: 'automatic' }
+  | { mode: 'explicit'; ordinals: number[] };
 
 export type RescanStarted = OcrOperation;
 
@@ -1415,6 +1476,8 @@ export type OcrOperation = {
   baseRevisionId?: string | null;
   candidateRevisionId?: string | null;
   snapshot: OcrSettingsSnapshot;
+  selection: RescanSelection;
+  managedSha256: string;
   stage: OcrOperationStage;
   pageTotal?: number | null;
   pagesCommitted: number;
@@ -1436,8 +1499,9 @@ export async function previewRescan(
   collectionId: string,
   documentId: string,
   method: string,
+  selection?: RescanSelection,
 ): Promise<RescanPreview> {
-  return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', { method })) as RescanPreview;
+  return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', { method, selection })) as RescanPreview;
 }
 
 export async function startRescan(
@@ -1487,6 +1551,18 @@ export async function cancelRescan(
 ): Promise<OcrOperation> {
   return (await mutate(
     `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/cancel`,
+    'POST',
+  )) as OcrOperation;
+}
+
+/** Repeat-safe request to continue a stopped scan using its admitted selection and checkpoints. */
+export async function resumeRescan(
+  collectionId: string,
+  documentId: string,
+  operationId: string,
+): Promise<OcrOperation> {
+  return (await mutate(
+    `${ocrPath(collectionId, documentId)}/operations/${encodeURIComponent(operationId)}/resume`,
     'POST',
   )) as OcrOperation;
 }

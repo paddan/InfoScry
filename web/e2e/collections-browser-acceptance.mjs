@@ -12,6 +12,8 @@
  * between a mark and the step that depends on it.
  */
 import { chromium } from 'playwright';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 
 const BASE_URL = process.env.BASE_URL;
 const SCENARIO = process.env.SCENARIO ?? 'collection-creation';
@@ -111,7 +113,7 @@ async function waitForManagedCollection(page, name) {
   );
 }
 
-async function selectCollection(page, name) {
+async function selectCollection(page, name, legacyControls = true) {
   await page.locator(`${PANEL} .collection-list li button`, { hasText: name }).first().click();
   await waitForManagedCollection(page, name);
   // Selecting a collection starts its row and history reads; asserting on the panel before they answer
@@ -125,6 +127,17 @@ async function selectCollection(page, name) {
     null,
     { timeout: 30_000 },
   );
+  if (legacyControls) await openLegacyControls(page);
+}
+
+async function openLegacyControls(page) {
+  const documents = page.locator(`${PANEL} .document-overview > button`).first();
+  if (await documents.getAttribute('aria-expanded') === 'false') await documents.click();
+  for (const selector of ['.secondary-settings', '.import-history > details']) {
+    const disclosure = page.locator(`${PANEL} ${selector}`);
+    if (await disclosure.getAttribute('open') === null) await disclosure.locator('summary').click();
+  }
+  await page.waitForFunction(() => !(document.querySelector('#admin-panel-collections')?.textContent ?? '').includes('Loading documents…'));
 }
 
 async function createCollection(page, name) {
@@ -132,6 +145,7 @@ async function createCollection(page, name) {
   await page.fill('#new-collection-name', name);
   await page.locator(`${PANEL} .collection-form button[type="submit"]`).click();
   await waitForManagedCollection(page, name);
+  await openLegacyControls(page);
 }
 
 async function panelText(page) {
@@ -147,7 +161,7 @@ async function deletionLines(page) {
 async function confirmReading(page) {
   const dialog = page.getByTestId('start-reading-dialog');
   await dialog.waitFor({ state: 'visible', timeout: 20_000 });
-  const button = dialog.getByRole('button', { name: /^(Read|Send) (at least )?\d+ pages?/ });
+  const button = dialog.getByRole('button', { name: /^(Read|Send) (at least )?\d+ pages?|^Import without image reading$/ });
   await button.waitFor({ state: 'visible', timeout: 20_000 });
   await button.click();
   await dialog.waitFor({ state: 'detached', timeout: 20_000 });
@@ -210,13 +224,13 @@ async function importResults(page) {
 /* ---- The document table ---- */
 
 async function rows(page) {
-  return page.$$eval(`${PANEL} table.documents tbody tr`, (trs) =>
+  return page.$$eval(`${PANEL} table.documents tbody tr:not(.detail-row)`, (trs) =>
     trs.map((row) => {
       const cells = row.querySelectorAll('td, th');
       return {
         filename: cells[1].textContent.trim(),
-        status: cells[5].textContent.trim(),
-        progress: cells[6].textContent.trim(),
+        status: cells[2].textContent.trim(),
+        progress: cells[3].textContent.trim(),
       };
     }),
   );
@@ -227,6 +241,8 @@ async function rowOf(page, filename) {
 }
 
 async function waitForRow(page, filename, timeout = 60_000) {
+  const documents = page.locator(`${PANEL} .document-overview > button`).first();
+  if (await documents.count() && await documents.getAttribute('aria-expanded') === 'false') await documents.click();
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if ((await rowOf(page, filename)) !== null) return;
@@ -246,8 +262,8 @@ async function waitForRowGone(page, filename, timeout = 60_000) {
 
 /** A user's own refresh: submitting the (possibly empty) filename search re-reads the rows. */
 async function refreshRows(page) {
-  await page.locator(`${PANEL} .document-search button[type="submit"]`).click();
-  await page.waitForTimeout(150);
+  await page.locator('#document-search').press('Enter');
+  await page.waitForTimeout(200);
 }
 
 async function waitForStatus(page, filename, status, timeout = 90_000) {
@@ -269,7 +285,7 @@ async function pagingText(page) {
 /* ---- Details and the reader ---- */
 
 async function openDetails(page, filename) {
-  await page.locator(`${PANEL} table.documents tbody tr`, { hasText: filename }).locator('button', { hasText: 'Details' }).first().click();
+  await page.locator(`${PANEL} table.documents tbody tr:not(.detail-row)`, { hasText: filename }).locator('button', { hasText: 'Details' }).first().click();
   await page.waitForSelector(`${PANEL} .document-details`, { timeout: 20_000 });
   await page.waitForTimeout(150);
 }
@@ -288,14 +304,14 @@ async function detailFacts(page) {
 }
 
 async function closeDetails(page) {
-  await page.locator(`${PANEL} .document-details button`, { hasText: 'Close details' }).click();
+  await page.locator(`${PANEL} table.documents button[aria-expanded="true"]`).click();
   await page.waitForSelector(`${PANEL} .document-details`, { state: 'detached' });
 }
 
 /* ---- Import history ---- */
 
 async function importHistory(page) {
-  return page.$$eval(`${PANEL} .import-history > .table-scroll > table.imports tbody tr`, (trs) =>
+  return page.$$eval(`${PANEL} .import-history > details > .table-scroll > table.imports tbody tr`, (trs) =>
     trs.map((row) => {
       const cells = row.querySelectorAll('td, th');
       return {
@@ -308,7 +324,7 @@ async function importHistory(page) {
 }
 
 async function showFiles(page, rowIndex) {
-  await page.locator(`${PANEL} .import-history > .table-scroll > table.imports tbody tr`).nth(rowIndex).locator('button').click();
+  await page.locator(`${PANEL} .import-history > details > .table-scroll > table.imports tbody tr`).nth(rowIndex).locator('button').click();
   await page.waitForSelector(`${PANEL} .import-items`, { timeout: 20_000 });
   await page.waitForTimeout(200);
   return page.$$eval(`${PANEL} .import-items tbody tr`, (trs) =>
@@ -352,9 +368,252 @@ async function waitForDeleteOperation(operationId, timeout = 20_000) {
   fail('the collection deletion was not answered with an operation id');
 }
 
+/** Assert the focused control is wholly inside the unobscured table and browser viewport. */
+async function assertVisibleTableFocus(page, label) {
+  const geometry = await page.evaluate(() => {
+    const focused = document.activeElement;
+    const table = focused?.closest('.document-table-scroll');
+    if (!table) return { inTable: false };
+    const box = focused.getBoundingClientRect();
+    const viewport = table.getBoundingClientRect();
+    const headerBottom = table.querySelector('thead').getBoundingClientRect().bottom;
+    return {
+      inTable: true, focused: focused.textContent.trim(), top: box.top, bottom: box.bottom,
+      left: box.left, right: box.right, visibleTop: Math.max(headerBottom, viewport.top, 0),
+      visibleBottom: Math.min(viewport.bottom, innerHeight),
+      visibleLeft: Math.max(viewport.left, 0), visibleRight: Math.min(viewport.right, innerWidth),
+    };
+  });
+  console.log(`FOCUS ${label} ${JSON.stringify(geometry)}`);
+  assert(geometry.inTable && geometry.top >= geometry.visibleTop - 1 && geometry.bottom <= geometry.visibleBottom + 1
+    && geometry.left >= geometry.visibleLeft - 1 && geometry.right <= geometry.visibleRight + 1,
+  `${label}: focused control is obscured: ${JSON.stringify(geometry)}`);
+}
+
 /* ---- Scenarios ---- */
 
 const scenarios = {
+  /** C04 uses the actual parent-owned view state and measured DOM geometry, without legacy auto-open. */
+  async 'compact-list'(browser) {
+    const { page, consoleErrors } = await openAdmin(browser);
+    const evidenceDir = process.env.SCREENSHOT_DIR;
+    assert(evidenceDir, 'SCREENSHOT_DIR is required for compact-list evidence');
+    await mkdir(evidenceDir, { recursive: true });
+    let listReads = 0;
+    page.on('request', request => {
+      if (/\/documents\?/.test(request.url())) listReads++;
+    });
+    await selectCollection(page, 'Notes', false);
+    await page.getByRole('button', { name: '58 total', exact: true }).waitFor();
+    assert(await page.locator(`${PANEL} table.documents`).count() === 0, 'first visit must be collapsed');
+    assert(listReads === 0, 'collapsed first visit must not read document pages');
+
+    for (const width of [390, 1024, 1440, 1920]) {
+      await page.setViewportSize({ width, height: 900 });
+      const disclosure = page.locator(`${PANEL} .document-overview > button`).first();
+      assert(await disclosure.getAttribute('aria-expanded') === 'false', 'each viewport begins collapsed');
+      assert(await page.locator(`${PANEL} table.documents`).count() === 0, 'collapsed table is absent');
+      await page.getByRole('button', { name: 'Add documents', exact: true }).waitFor({ state: 'visible' });
+      for (const selector of ['.secondary-settings', '.import-history > details']) {
+        const details = page.locator(`${PANEL} ${selector}`);
+        await details.locator('summary').click();
+        assert(await details.getAttribute('open') !== null, `${selector} is reachable while documents are collapsed`);
+        await details.locator('summary').click();
+      }
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), `${width}px collapsed page must fit`);
+      await page.locator(`${PANEL} .document-overview`).scrollIntoViewIfNeeded();
+      const collapsedPath = join(evidenceDir, `compact-${width}-collapsed.png`);
+      await page.screenshot({ path: collapsedPath, fullPage: true });
+      console.log(`SCREENSHOT ${collapsedPath}`);
+      await disclosure.click();
+      await waitForRow(page, 'note-55.txt');
+      await page.selectOption('#document-sort', 'name-desc');
+      await page.waitForFunction(() => document.querySelector('table.documents tbody th')?.textContent === 'note-55.txt');
+      const trigger = page.locator('table.documents tbody tr:not(.detail-row)', { hasText: 'note-55.txt' }).getByRole('button', { name: 'Details', exact: true });
+      await trigger.press('Enter');
+      await page.locator('.document-details').waitFor();
+      await page.waitForTimeout(150);
+      await assertVisibleTableFocus(page, `${width}px immediately after keyboard opening`);
+      const facts = await detailFacts(page);
+      for (const key of ['Filename', 'Media type', 'Size', 'Imported']) assert(facts[key], `${width}px details exposes ${key}`);
+      const geometry = await page.evaluate(() => {
+        const panel = document.querySelector('#admin-panel-collections .collections-panel');
+        const scroll = document.querySelector('.document-table-scroll');
+        const table = scroll.querySelector('table');
+        const box = scroll.getBoundingClientRect();
+        const panelBox = panel.getBoundingClientRect();
+        return {
+          viewport: innerWidth, panelWidth: panelBox.width, scrollWidth: box.width,
+          tableWidth: table.getBoundingClientRect().width, clientHeight: scroll.clientHeight,
+          scrollHeight: scroll.scrollHeight, horizontalOverflow: scroll.scrollWidth - scroll.clientWidth,
+          pageOverflow: document.documentElement.scrollWidth - innerWidth,
+          controlsOutside: !scroll.contains(document.querySelector('.document-controls')),
+          pagerOutside: !scroll.contains(document.querySelector('.document-list .paging')),
+          detailsInside: scroll.contains(document.querySelector('.document-details')),
+          stickyHeader: getComputedStyle(table.querySelector('thead th')).position,
+        };
+      });
+      console.log(`GEOMETRY ${JSON.stringify(geometry)}`);
+      assert(geometry.scrollWidth >= geometry.panelWidth - 4, `${width}px list must fill the available panel width`);
+      assert(geometry.scrollHeight > geometry.clientHeight && geometry.clientHeight <= 541, `${width}px table must scroll within 60vh`);
+      assert(geometry.pageOverflow <= 2, `${width}px expanded page must fit`);
+      assert(geometry.controlsOutside && geometry.pagerOutside && geometry.detailsInside, 'controls/pager stay outside and details inside table scroll');
+      assert(geometry.stickyHeader === 'sticky', 'table header stays sticky');
+      const expandedPath = join(evidenceDir, `compact-${width}-expanded.png`);
+      await page.locator('.document-table-scroll').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: expandedPath, fullPage: true });
+      console.log(`SCREENSHOT ${expandedPath}`);
+      // Follow the real tab order into the details; do not force focus past an obstructed opener.
+      for (let step = 0; step < 5 && !(await page.evaluate(() => !!document.activeElement?.closest('.document-details'))); step++) {
+        await page.keyboard.press('Tab');
+      }
+      assert(await page.evaluate(() => !!document.activeElement?.closest('.document-details')), 'Tab reaches an inline detail control');
+      await page.keyboard.press('Escape');
+      assert(await page.locator('.detail-row').count() === 0, 'keyboard Escape closes inline details');
+      assert(await page.evaluate(() => document.activeElement?.textContent === 'Details'), 'keyboard close returns focus to Details');
+      await assertVisibleTableFocus(page, `${width}px after Escape`);
+      await page.getByRole('checkbox', { name: 'Select note-55.txt', exact: true }).check();
+      await disclosure.click();
+      await disclosure.click();
+      await waitForRow(page, 'note-55.txt');
+      assert(await page.locator('table.documents input:checked').count() === 0, 'collapse/reopen clears destructive selections');
+      assert(await page.locator('.document-details').count() === 0, 'collapse/reopen clears details');
+      await disclosure.click();
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.getByRole('button', { name: '58 total', exact: true }).click();
+    await waitForRow(page, 'note-55.txt');
+    assert(!(await rows(page)).some(row => row.status.startsWith('Failed')), 'name-desc first page hides both failed documents');
+    await page.getByRole('button', { name: 'Next page', exact: true }).click();
+    await waitForRow(page, 'fail-once-b.txt');
+    assert((await pagingText(page)).includes('Showing 51–58'), 'second page exposes the hidden documents');
+    await page.getByRole('checkbox', { name: 'Select fail-once-b.txt', exact: true }).check();
+    await page.click('#tab-search');
+    await enterAdmin(page);
+    await selectCollection(page, 'Notes', false);
+    await waitForRow(page, 'note-55.txt');
+    assert((await pagingText(page)).includes('Showing 1–50'), 'Admin return fetches page one rather than restoring offset');
+    assert(await page.locator('table.documents input:checked').count() === 0, 'navigation from a hidden page restores no selections');
+    await page.getByRole('button', { name: '2 failed', exact: true }).click();
+    await waitForRow(page, 'fail-once-a.txt');
+    assert((await rows(page)).length === 2 && (await rows(page)).every(row => row.status.startsWith('Failed')), 'collection summary opens the two hidden failed documents');
+    assert(await page.inputValue('#document-search') === '', 'summary clears filename');
+    await openDetails(page, 'fail-once-a.txt');
+    await page.locator(`${PANEL} .document-details button`, { hasText: /^Retry$/ }).click();
+    await waitForRowGone(page, 'fail-once-a.txt');
+    await page.getByRole('button', { name: '1 failed', exact: true }).waitFor();
+    await page.getByRole('button', { name: '58 total', exact: true }).click();
+    await waitForRow(page, 'note-55.txt');
+    await page.fill('#document-search', 'note-1');
+    await page.waitForFunction(() => document.querySelectorAll('table.documents tbody tr:not(.detail-row)').length === 10);
+    assert((await rows(page)).every(row => row.filename.startsWith('note-1')), 'live filename query applies without Enter');
+    await page.selectOption('#document-sort', 'name-asc');
+    await page.waitForFunction(() => document.querySelector('table.documents tbody th')?.textContent === 'note-10.txt');
+    await openDetails(page, 'note-10.txt');
+    await openDetails(page, 'note-11.txt');
+    assert(await page.locator('.detail-row').count() === 1, 'only one inline details row can open');
+    assert((await detailFacts(page)).Filename === 'note-11.txt', 'second Details replaces first');
+    await page.getByRole('checkbox', { name: 'Select note-11.txt', exact: true }).check();
+    await page.click('#tab-search');
+    await enterAdmin(page);
+    await selectCollection(page, 'Notes', false);
+    await waitForRow(page, 'note-10.txt');
+    assert(await page.inputValue('#document-search') === 'note-1' && await page.inputValue('#document-sort') === 'name-asc', 'Admin return restores query and sort');
+    assert(await page.locator('table.documents input:checked').count() === 0 && await page.locator('.detail-row').count() === 0, 'Admin return restores no selection/details');
+    await page.selectOption('#document-status', 'COMPLETE');
+    await selectCollection(page, 'Archive', false);
+    assert(await page.locator('table.documents').count() === 0, 'another collection starts collapsed independently');
+    await page.getByRole('button', { name: '2 total', exact: true }).click();
+    await waitForRow(page, 'keep-a.txt');
+    await page.fill('#document-search', 'keep-b');
+    await page.locator('#document-search').press('Enter');
+    await page.waitForFunction(() => document.querySelectorAll('table.documents tbody tr:not(.detail-row)').length === 1);
+    await page.selectOption('#document-sort', 'oldest');
+    await selectCollection(page, 'Notes', false);
+    await waitForRow(page, 'note-10.txt');
+    assert(await page.inputValue('#document-status') === 'COMPLETE', 'collection A restores its status filter');
+    assert(await page.inputValue('#document-search') === 'note-1', 'collection A restores its own query');
+    await selectCollection(page, 'Archive', false);
+    await waitForRow(page, 'keep-b.txt');
+    assert(await page.inputValue('#document-search') === 'keep-b' && await page.inputValue('#document-sort') === 'oldest', 'collection B restores independent choices');
+    await reloadAdmin(page);
+    await selectCollection(page, 'Notes', false);
+    assert(await page.locator('table.documents').count() === 0, 'browser reload resets expansion');
+    await page.locator(`${PANEL} .document-overview > button`).first().click();
+    assert(await page.inputValue('#document-search') === '' && await page.inputValue('#document-status') === '' && await page.inputValue('#document-sort') === 'newest', 'reload resets all session view choices');
+    assert(await page.locator('table.documents input:checked').count() === 0, 'reload never revives selected IDs');
+    await page.fill('#document-search', 'mixed-pages.png');
+    await page.waitForFunction(() => document.querySelectorAll('table.documents tbody tr:not(.detail-row)').length === 1);
+    await waitForRow(page, 'mixed-pages.png');
+    await openDetails(page, 'mixed-pages.png');
+    assert((await detailFacts(page)).Progress === '3/3 pages processed', 'generated multi-page document keeps honest progress');
+    assert((await page.locator(`${PANEL} input[aria-label="Select mixed-pages.png"]`).isChecked()) === false, 'review starts without a destructive document mark');
+    await page.locator(`${PANEL} .document-details button`, { hasText: 'Open document' }).click();
+    await page.locator('.page-review').waitFor({ timeout: 20_000 });
+    await page.locator('.page-review').getByText('Page 1 of 1', { exact: true }).waitFor({ timeout: 20_000 });
+    await page.locator('.page-review').getByText('This page image is unavailable.', { exact: true }).waitFor({ timeout: 20_000 });
+    assert((await page.locator('.page-review .review-text').textContent()).includes('Page 1 of the scanned acceptance fixture.'),
+      'page review opens the recorded text alongside the independently unavailable image');
+    await page.locator('.page-review').getByRole('button', { name: 'Mark page 1' }).click();
+    assert((await page.locator('.page-review [aria-label="Selected pages"]').textContent()).includes('Selected pages: 1'), 'the reader shows its session-only page mark');
+    await page.locator('.page-review button[aria-label="Back to documents"]').click();
+    await page.locator('.page-review').waitFor({ state: 'hidden', timeout: 20_000 });
+    assert(await page.inputValue('#document-search') === 'mixed-pages.png', 'Back retains the active collection query');
+    await waitForRow(page, 'mixed-pages.png');
+    assert(await page.locator(`${PANEL} input[type="checkbox"]:checked`).count() === 0, 'Back clears destructive document marks');
+    assert(await page.locator(`${PANEL} .document-details`).isVisible(), 'Back restores inline details');
+    assert((await page.locator(`${PANEL} .document-overview`).textContent()).includes('58 total'), 'Back retains the collection count');
+    await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Open document', null, { timeout: 10_000 });
+    await closeDetails(page);
+    await page.fill('#document-search', 'note-01');
+    await page.locator('#document-search').press('Enter');
+    await waitForRow(page, 'note-01.txt');
+    await deleteDocument(page, 'note-01.txt');
+    await waitForRowGone(page, 'note-01.txt');
+    await page.getByRole('button', { name: '57 total', exact: true }).waitFor();
+    assert(consoleErrors.filter(text => !text.includes('Failed to load resource')).length === 0, `unexpected errors: ${consoleErrors.join(' | ')}`);
+  },
+
+  async 'compact-progress-errors'(browser) {
+    const { page } = await openAdmin(browser);
+    await selectCollection(page, 'Notes', false);
+    await chooseAndImport(page, 'folder');
+    await waitForImportRunning(page);
+    // Reopen Admin so the standalone import form is gone: the persisted job drives active progress.
+    await page.click('#tab-search');
+    await enterAdmin(page);
+    await selectCollection(page, 'Notes', false);
+    const active = page.locator(`${PANEL} .active-imports`);
+    await active.waitFor({ state: 'visible' });
+    assert(await page.locator('table.documents').count() === 0, 'documents stay collapsed during import');
+    assert(await page.locator('.import-history > details').getAttribute('open') === null, 'history stays closed during import');
+    assert(await active.evaluate(node => !node.closest('details') && /of 3 files/.test(node.textContent)), 'active progress is readable outside history disclosure');
+    mark('compact-progress-observed');
+    await page.waitForFunction(() => !document.querySelector('#admin-panel-collections .active-imports'), null, { timeout: 60_000 });
+    await page.getByRole('button', { name: '3 total', exact: true }).waitFor();
+    const importsPattern = '**/api/collections/*/imports*';
+    await page.route(importsPattern, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'UNAVAILABLE', message: 'Acceptance history unavailable' } }) }));
+    await page.click('#tab-search');
+    await enterAdmin(page);
+    await selectCollection(page, 'Notes', false);
+    const error = page.locator(`${PANEL} .management > p[role="alert"]`);
+    await error.waitFor({ state: 'visible' });
+    assert(await error.evaluate(node => !node.closest('details')), 'history read error is outside disclosure');
+    assert(await page.locator('.import-history > details').getAttribute('open') === null, 'error does not require opening history');
+    await page.unroute(importsPattern);
+    const summaryPattern = '**/api/collections/*/documents/summary';
+    await page.route(summaryPattern, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'UNAVAILABLE', message: 'Acceptance counts unavailable' } }) }));
+    await page.click('#tab-search');
+    await enterAdmin(page);
+    await selectCollection(page, 'Notes', false);
+    await page.getByRole('button', { name: 'Retry document counts', exact: true }).waitFor();
+    assert(await page.getByRole('button', { name: '0 total', exact: true }).count() === 0, 'unavailable counts never fabricate zero');
+    await page.unroute(summaryPattern);
+    await page.getByRole('button', { name: 'Retry document counts', exact: true }).click();
+    await page.getByRole('button', { name: '3 total', exact: true }).waitFor();
+  },
+
   async 'external-import-dialog'(browser) {
     const { page, consoleErrors } = await openAdmin(browser);
     await selectCollection(page, 'Notes');
@@ -610,16 +869,18 @@ const scenarios = {
     assert(mixedFacts['Read by OCR'] === '2 pages', `two pages were read by a tool, got ${JSON.stringify(mixedFacts['Read by OCR'])}`);
     const detailsText = await page.textContent(`${PANEL} .document-details`);
     assert(detailsText.includes('counts every page of the document'), 'the page denominator must be explained rather than implied');
-    assert((await page.locator('#source-heading').count()) === 0, 'the reader must only open when it is asked to');
+    assert((await page.locator('.source-pane').count()) === 0, 'the reader pane must only open when it is asked to');
 
     // The reader opens at the first available unit of the document.
     await page.locator(`${PANEL} .document-details button`, { hasText: 'Open document' }).click();
-    await page.waitForSelector('#source-heading', { timeout: 20_000 });
-    await page.waitForSelector('pre.source-text', { timeout: 20_000 });
-    const opened = (await page.textContent('pre.source-text')) ?? '';
+    await page.locator('.page-review').waitFor({ timeout: 20_000 });
+    await page.locator('.page-review').getByText('Page 1 of 1', { exact: true }).waitFor({ timeout: 20_000 });
+    await page.locator('.page-review').getByText('This page image is unavailable.', { exact: true }).waitFor({ timeout: 20_000 });
+    await page.locator('.page-review').getByRole('tab', { name: 'Text' }).click();
+    const opened = (await page.locator('.page-review .review-text').textContent()) ?? '';
     assert(opened.includes('Page 1 of the scanned acceptance fixture.'), `the reader must show the first unit, got ${JSON.stringify(opened)}`);
-    await page.click('button[aria-label="Close source viewer"]');
-    await page.waitForSelector('#source-heading', { state: 'detached' });
+    await page.locator('.page-review button[aria-label="Back to documents"]').click();
+    await page.waitForSelector('.page-review', { state: 'detached' });
     await closeDetails(page);
 
     // A legacy document whose summary is all the archive has: the method is unknown, not zero, and the
@@ -746,19 +1007,19 @@ const scenarios = {
     await waitForRowGone(page, 'one.txt');
     assert((await pagingText(page)).includes('of 3 documents'), 'deleting one document must lower the count');
 
-    // A document open in the reader: the viewer closes once the removal is finished. The source sheet
-    // is modal, so the deletion reaches the panel the way another client's admitted deletion does.
-    await page.locator(`${PANEL} table.documents tbody tr`, { hasText: 'two.txt' }).locator('button', { hasText: 'Details' }).click();
+    // The source pane is nonmodal; return to the collection context before deleting the document.
+    await page.locator(`${PANEL} table.documents tbody tr:not(.detail-row)`, { hasText: 'two.txt' }).locator('button', { hasText: 'Details' }).click();
     await page.waitForSelector(`${PANEL} .document-details`, { timeout: 20_000 });
     await page.locator(`${PANEL} .document-details button`, { hasText: 'Open document' }).click();
     await page.waitForSelector('#source-heading', { timeout: 20_000 });
     await page.waitForSelector('pre.source-text', { timeout: 20_000 });
     const twoText = (await page.textContent('pre.source-text')) ?? '';
     assert(twoText.includes('Line 1 of two.txt.'), `the reader must show the deleted document's own text, got ${JSON.stringify(twoText)}`);
-    await page.evaluate(() => document.querySelector('#admin-panel-collections button[aria-label="Delete two.txt"]')?.click());
-    await page.waitForSelector('#delete-document-heading', { timeout: 20_000 });
+    await page.locator('.source-pane button[aria-label="Back to documents"], .source-pane button[aria-label="Back to results"], .source-pane button[aria-label="Close source viewer"]').first().click();
+    await page.locator(`${PANEL} button[aria-label="Delete two.txt"]`).click();
+    await page.getByRole('dialog').filter({ hasText: 'Delete two.txt?' }).waitFor({ state: 'visible', timeout: 20_000 });
     await page.locator(`${PANEL} .confirm-dialog button[type="submit"]`).click();
-    await page.waitForSelector('#source-heading', { state: 'detached', timeout: 30_000 });
+    await page.locator('.source-pane').waitFor({ state: 'hidden', timeout: 30_000 });
     await waitForRowGone(page, 'two.txt');
 
     // Several documents, from the page-scoped selection.
@@ -869,7 +1130,7 @@ const scenarios = {
     // survives a reload: the import history's own row.
     await page.waitForFunction(
       () => {
-        const rows = document.querySelectorAll('#admin-panel-collections .import-history > .table-scroll > table.imports tbody tr');
+        const rows = document.querySelectorAll('#admin-panel-collections .import-history > details > .table-scroll > table.imports tbody tr');
         return Array.from(rows).some((row) => /^(Complete|Failed|Cancelled)/.test((row.querySelectorAll('td, th')[1]?.textContent ?? '').trim()));
       },
       null,

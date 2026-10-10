@@ -17,3 +17,20 @@ open. Two flows added since have only unit tests.
 `./gradlew externalTest --tests 'infoscry.server.*BrowserAcceptanceTest'` passes
 with the new scenarios; the README status line about open browser gates is
 updated.
+
+## Implementation and verification (2026-10-09)
+
+`DocumentBrowserAcceptanceTest` and its Playwright script cover all three
+scenarios against the built reader and local server. The PDF fixture uses the
+production page selector; only page 3 reaches the fake reading engine, progress
+is one committed page of one selected page, and publication preserves all three
+unit IDs. The Ask scenario supersedes the cited revision before opening its
+persisted citation. Admin navigation checks both end boundaries and keyboard
+focus wrapping.
+
+The accumulated five-class browser gate passed 36 tests: Collections 14,
+OCR 10, Investigate 8, Search 1 and Document 3. Existing fixtures now accept
+imports without image reading and count the Admin model-list GET separately
+from completion POSTs. JavaScript syntax and whitespace checks passed. These
+tests use fake providers/engines and embeddings; real OCR and CoreML workflow
+gates remain open. See [implementation status](../../implementation-status.md).

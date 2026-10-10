@@ -13,6 +13,12 @@ import { chromium } from 'playwright';
 
 const BASE_URL = process.env.BASE_URL;
 const SCENARIO = process.env.SCENARIO ?? 'primary';
+const CATALOG_ENDPOINT = process.env.CATALOG_ENDPOINT;
+const DOCUMENT_ID = process.env.DOCUMENT_ID;
+const COLLECTION_ID = process.env.COLLECTION_ID;
+const CITATION_UNIT_ID = process.env.CITATION_UNIT_ID;
+const CITATION_REVISION_ID = process.env.CITATION_REVISION_ID;
+const RESTORE_REVISION_ID = process.env.RESTORE_REVISION_ID;
 if (!BASE_URL) throw new Error('BASE_URL is required');
 
 let activePage = null;
@@ -98,13 +104,156 @@ async function waitForHistoryTitle(page, title) {
 async function openSourceFromCitation(page) {
   const citation = page.locator('#panel-investigate button.citation').first();
   assert((await citation.count()) > 0, 'expected a citation button');
+  const pageRequests = [];
+  page.on('request', (request) => {
+    if (request.url().includes('/page-review') || request.url().includes('/sources/')) pageRequests.push(request.url());
+  });
   await citation.click();
-  await page.waitForSelector('#source-heading', { timeout: 10_000 });
-  await page.waitForSelector('pre.source-text', { timeout: 10_000 });
-  const text = (await page.textContent('pre.source-text')) ?? '';
-  assert(text.includes('Mira signed the note.'), `source viewer did not show the source text: ${JSON.stringify(text)}`);
-  await page.click('button[aria-label="Close source viewer"]');
-  await page.waitForSelector('#source-heading', { state: 'detached' });
+  await page.locator('.source-pane').waitFor({ state: 'visible', timeout: 10_000 });
+  await page.locator('.page-review, .source-pane .source-text').first().waitFor({ state: 'visible', timeout: 10_000 });
+  const reviewVisible = await page.locator('.page-review').isVisible();
+  assert(reviewVisible, `expected a known image citation to open page review, requests=${JSON.stringify(pageRequests)}`);
+  await page.waitForFunction(() => {
+    const image = document.querySelector('.page-review .image-pane img');
+    return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0;
+  }, null, { timeout: 10_000 });
+  const metadata = pageRequests.find((url) => url.includes('/page-review?'));
+  const image = pageRequests.find((url) => url.includes('/page-review/image?'));
+  assert(metadata && new URL(metadata).searchParams.get('revision') === CITATION_REVISION_ID,
+    `historical metadata stays pinned to cited revision: ${JSON.stringify(pageRequests)}`);
+  assert(image && new URL(image).searchParams.get('revision') === CITATION_REVISION_ID &&
+      new URL(image).searchParams.get('ordinal') === '0' && new URL(image).searchParams.get('kind') === 'original',
+    `historical image stays paired to cited revision and ordinal: ${JSON.stringify(pageRequests)}`);
+  const metadataResponse = await page.evaluate(async (url) => ({ status: (await fetch(url)).status, body: await (await fetch(url)).json() }), metadata);
+  const imageResponse = await page.evaluate(async (url) => (await fetch(url)).status, image);
+  assert(metadataResponse.status === 200 && imageResponse === 200,
+    `historical page pair returned metadata=${metadataResponse.status} image=${imageResponse}`);
+  const pageMetadata = metadataResponse.body;
+  assert(pageMetadata.revisionId === CITATION_REVISION_ID && pageMetadata.ordinal === 0,
+    `page review metadata stays pinned to the cited image revision: ${JSON.stringify(pageMetadata)}`);
+  await page.locator('.page-review').getByText('Page 1 of 1', { exact: true }).waitFor({ timeout: 10_000 });
+  const text = (await page.locator('.page-review .review-text').textContent()) ?? '';
+  assert(text.includes('Mira signed the note.'), `page review did not show the cited revision text: ${JSON.stringify(text)}`);
+  assert(await page.locator('.page-review [aria-label="Refresh to latest reading"]').count() === 0,
+    'historical citation does not offer a live reading refresh');
+  console.log(`historical Investigate citation: locator=image revision=${pageMetadata.revisionId} metadata=${metadataResponse.status} image=${imageResponse} ordinal=0`);
+}
+
+async function restoreCitationToOlderReading(page) {
+  assert(DOCUMENT_ID && COLLECTION_ID && CITATION_REVISION_ID && RESTORE_REVISION_ID, 'primary needs a revisable citation fixture');
+  const csrfResponse = await page.request.get(`${BASE_URL}/api/session`);
+  assert(csrfResponse.ok(), `session request returned ${csrfResponse.status()}`);
+  const csrf = (await csrfResponse.json()).csrfToken;
+  const restoreResponse = await page.request.post(
+    `${BASE_URL}/api/collections/${COLLECTION_ID}/documents/${DOCUMENT_ID}/ocr/restore`,
+    {
+      headers: { 'Content-Type': 'application/json', 'X-InfoScry-Csrf': csrf },
+      data: {
+        requestId: 'investigate-browser-historical-citation-restore',
+        expectedRevisionId: CITATION_REVISION_ID,
+        restoreRevisionId: RESTORE_REVISION_ID,
+      },
+    },
+  );
+  assert(restoreResponse.status() === 202, `restore returned ${restoreResponse.status()}: ${await restoreResponse.text()}`);
+  const restore = await restoreResponse.json();
+  assert(restore.phase === 'PUBLISHED' && restore.restoredFromRevisionId === RESTORE_REVISION_ID,
+    `restore did not publish the older text: ${JSON.stringify(restore)}`);
+  const historyResponse = await page.request.get(
+    `${BASE_URL}/api/collections/${COLLECTION_ID}/documents/${DOCUMENT_ID}/ocr/revisions?offset=0&limit=20`,
+  );
+  assert(historyResponse.ok(), `revision history returned ${historyResponse.status()}`);
+  const history = await historyResponse.json();
+  assert(history.activeRevisionId === restore.newRevisionId && history.activeRevisionId !== CITATION_REVISION_ID,
+    'the citation revision must be historical before its source is opened');
+  assert(history.revisions.some((revision) => revision.revisionId === CITATION_REVISION_ID && !revision.active),
+    'the cited revision must still appear as a superseded history entry');
+}
+
+async function assertInvestigateMainGeometry(page) {
+  for (const width of [390, 1024, 1440, 1920]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const geometry = await page.evaluate(() => {
+      const answer = document.querySelector('#panel-investigate .answer');
+      const history = document.querySelector('.history-column');
+      const layout = document.querySelector('.content-layout');
+      const rect = (node) => {
+        const box = node.getBoundingClientRect();
+        return { left: box.left, right: box.right, width: box.width, clientWidth: node.clientWidth, scrollWidth: node.scrollWidth };
+      };
+      return { answer: rect(answer), history: rect(history), layout: rect(layout), historyExpanded: !history.classList.contains('collapsed') };
+    });
+    assert(geometry.answer.width >= 240 && geometry.answer.scrollWidth <= geometry.answer.clientWidth + 1,
+      `${width}px Investigate answer should remain readable without internal overflow: ${JSON.stringify(geometry.answer)}`);
+    assert(geometry.answer.left >= 0 && geometry.answer.right <= width,
+      `${width}px Investigate answer stays inside the viewport: ${JSON.stringify(geometry.answer)}`);
+    assert(geometry.history.width > 0 && geometry.history.left >= 0 && geometry.history.right <= width,
+      `${width}px history remains on-screen: ${JSON.stringify(geometry.history)}`);
+    assert(geometry.layout.scrollWidth <= geometry.layout.clientWidth + 1,
+      `${width}px answer/history layout has no horizontal overflow: ${JSON.stringify(geometry.layout)}`);
+    const accessibleHistoryControl = geometry.historyExpanded
+      ? await page.getByRole('button', { name: 'The signed note', exact: true }).isVisible()
+      : await page.getByRole('button', { name: 'Expand Conversation history', exact: true }).isVisible();
+    assert(accessibleHistoryControl, `${width}px conversation history has a reachable entry or expand control`);
+  }
+}
+
+async function assertInvestigateSourceGeometry(page) {
+  for (const width of [390, 1024, 1440, 1920]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    if (!(await page.locator('.source-pane').isVisible())) {
+      await page.locator('.workspace-context').waitFor({ state: 'visible' });
+      const reopen = page.locator('.workspace-context button.reopen-source');
+      if (await reopen.isVisible()) await reopen.click({ timeout: 10_000 });
+      else await page.locator('#panel-investigate button.citation').first().click();
+    }
+    await page.locator('.source-pane').waitFor({ state: 'visible' });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const geometry = await page.evaluate(() => {
+      const source = document.querySelector('.source-pane');
+      const context = document.querySelector('.workspace-context');
+      const workspace = document.querySelector('.source-workspace');
+      const sourceBox = source.getBoundingClientRect();
+      const contextBox = context.getBoundingClientRect();
+      return {
+        layout: workspace.dataset.layout,
+        mode: workspace.dataset.mode,
+        source: { left: sourceBox.left, right: sourceBox.right, width: sourceBox.width, clientWidth: source.clientWidth, scrollWidth: source.scrollWidth },
+        context: { right: contextBox.right, hidden: context.hidden },
+      };
+    });
+    assert(geometry.source.width > 300 && geometry.source.right <= width && geometry.source.left >= 0,
+      `${width}px historical source remains visible and bounded: ${JSON.stringify(geometry)}`);
+    assert(geometry.source.scrollWidth <= geometry.source.clientWidth + 1,
+      `${width}px historical source text has no horizontal overflow: ${JSON.stringify(geometry.source)}`);
+    if (geometry.layout === 'split') {
+      assert(geometry.mode === 'split' && geometry.source.width > 350 && geometry.source.width <= 560 && geometry.context.right < geometry.source.left,
+        `${width}px split view keeps a readable source beside separate context: ${JSON.stringify(geometry)}`);
+    } else {
+      assert(await page.locator('.source-pane button[aria-label="Back to results"]').isVisible(),
+        `${width}px narrow source exposes its Back control`);
+      await page.locator('.source-pane button[aria-label="Back to results"]').click();
+      await page.locator('.workspace-context').waitFor({ state: 'visible' });
+      assert(await page.locator('#panel-investigate .answer').isVisible(), `${width}px Back restores the answer context`);
+      assert(await page.locator('.workspace-context button.reopen-source').isVisible(), `${width}px Back exposes Open selected source`);
+    }
+    if (geometry.layout === 'split') {
+      await page.locator('.source-pane button[aria-label="Close source viewer"]').click();
+      await page.locator('.source-pane').waitFor({ state: 'hidden' });
+    }
+  }
+  if (!(await page.locator('.source-pane').isVisible())) {
+    const reopen = page.locator('.workspace-context button.reopen-source');
+    if (await reopen.isVisible()) await reopen.click();
+  }
+  if (await page.locator('.source-pane button[aria-label="Back to results"]').isVisible()) {
+    await page.locator('.source-pane button[aria-label="Back to results"]').click();
+  } else if (await page.locator('.source-pane button[aria-label="Close source viewer"]').isVisible()) {
+    await page.locator('.source-pane button[aria-label="Close source viewer"]').click();
+  }
+  await page.locator('.source-pane').waitFor({ state: 'hidden' });
 }
 
 const scenarios = {
@@ -114,7 +263,10 @@ const scenarios = {
     await submit(page, 'Who signed the note?', { answer: 'Mira signed the note' });
     await waitForHistoryTitle(page, 'The signed note');
     assert((await answerTexts(page)).length === 1, 'the first question must expose one answer');
+    await restoreCitationToOlderReading(page);
+    await assertInvestigateMainGeometry(page);
     await openSourceFromCitation(page);
+    await assertInvestigateSourceGeometry(page);
 
     await submit(page, 'When was it signed?', { answer: 'The note was signed' });
     assert((await answerTexts(page)).length === 2, 'the follow-up must add one answer');
@@ -254,6 +406,27 @@ const scenarios = {
     await page.click('#tab-admin');
     await page.click('#admin-tab-llm');
     await page.waitForSelector('select[aria-label="Profile"]', { timeout: 20_000 });
+    // The catalog belongs to an editable draft. Open a new draft, point it at the deterministic local
+    // fake, and choose its listed model so the test exercises the live catalog and suggested name.
+    assert(CATALOG_ENDPOINT, 'CATALOG_ENDPOINT must point at this test’s local fake provider');
+    await page.getByRole('button', { name: 'New', exact: true }).click();
+    const catalogResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/llm/catalog' && url.searchParams.get('endpoint') === CATALOG_ENDPOINT;
+    }, { timeout: 20_000 });
+    await page.fill('#pf-endpoint', CATALOG_ENDPOINT);
+    await page.locator('#pf-model').focus();
+    const catalogResponse = await catalogResponsePromise;
+    assert(catalogResponse.status() === 200, `live catalog request returned ${catalogResponse.status()}`);
+    const catalogBody = await catalogResponse.json();
+    assert(catalogBody.models?.some((model) => model.id === 'model'), `catalog response did not list the fake model: ${JSON.stringify(catalogBody)}`);
+    console.log(`catalog UI request: GET /api/llm/catalog status=${catalogResponse.status()} endpoint=${new URL(catalogResponse.url()).searchParams.get('endpoint')} modelCount=${catalogBody.models.length}`);
+    await page.locator('#pf-catalog').waitFor({ timeout: 20_000 });
+    const listedModel = await page.locator('#pf-catalog option:not([disabled])').first().getAttribute('value');
+    assert(listedModel, 'the live model catalog must offer at least one model');
+    await page.selectOption('#pf-catalog', listedModel);
+    assert((await page.inputValue('#pf-name')).includes(listedModel), 'choosing a catalog model suggests its name');
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await page.click('button:has-text("Check tool calling")');
     await page.waitForFunction(
       () => Array.from(document.querySelectorAll('[role="status"]')).some((node) => (node.textContent ?? '').includes('Tool calling: supported')),

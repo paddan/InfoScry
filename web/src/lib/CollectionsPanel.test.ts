@@ -13,6 +13,7 @@ import {
   type ImportHistoryPage,
   type ImportItemApiView,
   type RetryAdmission,
+  type RetryAttempt,
 } from './api';
 
 const api = vi.hoisted(() => ({
@@ -21,6 +22,7 @@ const api = vi.hoisted(() => ({
   enqueueImport: vi.fn(),
   getJob: vi.fn(),
   getImportItems: vi.fn(),
+  getCollectionDocumentSummary: vi.fn(),
   listCollectionDocuments: vi.fn(),
   listCollectionImports: vi.fn(),
   getCollectionDocument: vi.fn(),
@@ -71,6 +73,7 @@ vi.mock('./api', async (importOriginal) => ({
   enqueueImport: api.enqueueImport,
   getJob: api.getJob,
   getImportItems: api.getImportItems,
+  getCollectionDocumentSummary: api.getCollectionDocumentSummary,
   listCollectionDocuments: api.listCollectionDocuments,
   listCollectionImports: api.listCollectionImports,
   getCollectionDocument: api.getCollectionDocument,
@@ -175,6 +178,7 @@ function props(over: Partial<ComponentProps<typeof CollectionsPanel>> = {}): Com
     onSelect: vi.fn(),
     onCollectionsChanged: vi.fn(),
     onOpenDocument: vi.fn(),
+    onOpenPageReview: vi.fn(),
     onCollectionDeleted: vi.fn(),
     onDocumentDeleted: vi.fn(),
     onRetryDocument: vi.fn(async () => ({ accepted: true as const, jobId: 'job-1' })),
@@ -183,9 +187,33 @@ function props(over: Partial<ComponentProps<typeof CollectionsPanel>> = {}): Com
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+/** Legacy table/settings/history scenarios explicitly start with those sections open. */
+function renderExpandedPanel(_component: typeof CollectionsPanel, input: ComponentProps<typeof CollectionsPanel>) {
+  const view = render(CollectionsPanel, {
+    ...input, documentViewState: { expanded: true, filename: '', status: '', sort: 'newest' },
+  });
+  for (const disclosure of view.container.querySelectorAll('details')) disclosure.open = true;
+  return view;
+}
+
 describe('collections panel', () => {
+  it('exposes the shared work-area hook without constraining collection actions', async () => {
+    render(CollectionsPanel, props());
+    const panel = screen.getByRole('region', { name: 'Collection administration' });
+    expect(panel.classList.contains('workspace-area')).toBe(true);
+    expect(await within(panel).findByRole('button', { name: 'Create collection' })).toBeTruthy();
+  });
+
   beforeEach(() => {
     vi.resetAllMocks();
+    api.getCollectionDocumentSummary.mockResolvedValue({ total: 75, byStatus: { FAILED: 2, COMPLETE: 73 } });
     api.listCollectionDocuments.mockResolvedValue(page([]));
     api.listCollectionImports.mockResolvedValue(history([]));
     api.getCollectionIgnorePatterns.mockResolvedValue(['.DS_Store', '*.tmp']);
@@ -205,10 +233,593 @@ describe('collections panel', () => {
     api.startRescan.mockResolvedValue({ operationId: 'op-2' });
   });
 
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  describe('live filename search and inline details', () => {
+    async function openList(over: Partial<ComponentProps<typeof CollectionsPanel>> = {}) {
+      api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1'), documentRow('doc-2')], 51));
+      api.getCollectionDocument.mockImplementation(async (_collectionId, id) => ({
+        document: documentRow(id), sourceId: `source-${id}`, retryEligible: false,
+      }));
+      const view = renderExpandedPanel(CollectionsPanel, props({
+        collections: [collection('Nightfall', 51), collection('Other', 1)], selectedId: 'nightfall', ...over,
+      }));
+      await screen.findByRole('table');
+      return view;
+    }
+
+    async function advance(ms: number) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    }
+
+    it('debounces rapid typing for 300ms after the last input and clearing uses the same delay', async () => {
+      await openList();
+      vi.useFakeTimers();
+      const input = screen.getByLabelText('Search filenames');
+      await fireEvent.input(input, { target: { value: 'q' } });
+      await advance(100);
+      await fireEvent.input(input, { target: { value: 'qu' } });
+      await advance(100);
+      await fireEvent.input(input, { target: { value: '  quarterly  ' } });
+      await advance(299);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(1);
+      await advance(1);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2);
+      expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ q: 'quarterly', offset: 0 }));
+      await fireEvent.input(input, { target: { value: '' } });
+      await advance(299);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2);
+      await advance(1);
+      expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ q: '' }));
+    });
+
+    it('Enter flushes once and removes the Search button', async () => {
+      await openList();
+      vi.useFakeTimers();
+      const input = screen.getByLabelText('Search filenames');
+      await fireEvent.input(input, { target: { value: 'invoice' } });
+      await fireEvent.keyDown(input, { key: 'Enter' });
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2);
+      expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ q: 'invoice' }));
+      await advance(300);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole('button', { name: 'Search' })).toBeNull();
+    });
+
+    it('defers IME input and Enter until composition ends', async () => {
+      await openList();
+      vi.useFakeTimers();
+      const input = screen.getByLabelText('Search filenames');
+      await fireEvent.input(input, { target: { value: 'before' } });
+      await fireEvent.compositionStart(input);
+      await fireEvent.input(input, { target: { value: '日本' } });
+      await fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+      await advance(600);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(1);
+      await fireEvent.compositionEnd(input);
+      await advance(299);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(1);
+      await advance(1);
+      expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ q: '日本' }));
+    });
+
+    it('rejects an old response during the debounce interval', async () => {
+      const old = deferred<DocumentsPage>();
+      api.listCollectionDocuments.mockReturnValueOnce(old.promise).mockResolvedValue(page([documentRow('new')]));
+      renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+      vi.useFakeTimers();
+      await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'new' } });
+      await act(async () => { old.resolve(page([documentRow('obsolete')])); });
+      expect(screen.queryByText('obsolete.pdf')).toBeNull();
+      await advance(300);
+      expect(screen.getByText('new.pdf')).toBeTruthy();
+    });
+
+    it.each([['Status', 'FAILED', 'status'], ['Sort', 'name-desc', 'sort']])(
+      '%s immediately consumes the latest trimmed input without a scheduled duplicate', async (label, value, field) => {
+        await openList();
+        vi.useFakeTimers();
+        await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: '  final  ' } });
+        await fireEvent.change(screen.getByLabelText(label), { target: { value } });
+        expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ q: 'final', [field]: value, offset: 0 }));
+        await advance(300);
+        expect(api.listCollectionDocuments).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each(['collapse', 'hide', 'switch', 'unmount'])('cancels pending input on %s and saves it for its originating collection', async (action) => {
+      const changed = vi.fn();
+      const view = await openList({ onDocumentViewStateChange: changed });
+      vi.useFakeTimers();
+      await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'pending' } });
+      expect(changed).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ filename: 'pending' }));
+      if (action === 'collapse') await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+      if (action === 'hide') await view.rerender({ visible: false });
+      if (action === 'switch') await view.rerender({ selectedId: 'other', documentViewState: undefined });
+      if (action === 'unmount') view.unmount();
+      await advance(300);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(1);
+      if (action === 'switch') {
+        await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+        expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('other', expect.objectContaining({ q: '' }));
+        await view.rerender({ selectedId: 'nightfall', documentViewState: { expanded: true, filename: 'pending', status: '', sort: 'newest' } });
+      } else if (action === 'collapse') {
+        await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+      } else if (action === 'hide') {
+        await view.rerender({ visible: true });
+      } else return;
+      expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ q: 'pending', offset: 0 }));
+    });
+
+    it('renders one full-width detail row directly after its document, with metadata and the reader action', async () => {
+      const onOpenPageReview = vi.fn();
+      await openList({ onOpenPageReview });
+      const row = screen.getByRole('row', { name: /doc-1.pdf/ });
+      expect(within(row).queryByText('application/pdf')).toBeNull();
+      expect(within(row).queryByText('1 KB')).toBeNull();
+      expect(within(row).queryByText('2026-09-21')).toBeNull();
+      const trigger = within(row).getByRole('button', { name: 'Details' });
+      await fireEvent.click(trigger);
+      const details = await screen.findByRole('region', { name: 'Document details' });
+      expect(details.closest('tr')).toBe(row.nextElementSibling);
+      expect(details.closest('td')?.getAttribute('colspan')).toBe('6');
+      expect(screen.getByRole('region', { name: 'Document table' }).contains(details)).toBe(true);
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+      expect(within(details).getByText('application/pdf')).toBeTruthy();
+      expect(within(details).getByText('1 KB')).toBeTruthy();
+      expect(within(details).getByText('2026-09-21')).toBeTruthy();
+      await fireEvent.click(within(details).getByRole('button', { name: 'Open document' }));
+      expect(onOpenPageReview).toHaveBeenCalledWith('doc-1', expect.any(HTMLElement));
+      const second = screen.getByRole('row', { name: /doc-2.pdf/ });
+      await fireEvent.click(within(second).getByRole('button', { name: 'Details' }));
+      const next = await screen.findByRole('region', { name: 'Document details' });
+      expect(screen.getAllByRole('region', { name: 'Document details' })).toHaveLength(1);
+      expect(next.closest('tr')).toBe(second.nextElementSibling);
+    });
+
+    it('closing details returns keyboard focus to its trigger and the trigger also toggles them', async () => {
+      await openList();
+      const trigger = within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' });
+      await fireEvent.click(trigger);
+      const close = within(await screen.findByRole('region', { name: 'Document details' })).getByRole('button', { name: 'Close details' });
+      close.focus();
+      await fireEvent.click(close);
+      expect(document.activeElement).toBe(trigger);
+      await fireEvent.click(trigger);
+      await screen.findByRole('region', { name: 'Document details' });
+      await fireEvent.click(trigger);
+      expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull();
+    });
+
+    it('scrolls only the bounded table enough to reveal details below its sticky header', async () => {
+      await openList();
+      const table = screen.getByRole('region', { name: 'Document table' });
+      const bounds = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 500, width: 500, x: 0, y: top, toJSON() {} });
+      vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+        if (this === table) return bounds(100, 500);
+        if (this.tagName === 'THEAD') return bounds(100, 140);
+        if (this.classList.contains('document-details')) return bounds(400 - table.scrollTop, 600 - table.scrollTop);
+        return bounds(0, 0);
+      });
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' }));
+      await screen.findByRole('region', { name: 'Document details' });
+      await waitFor(() => expect(table.scrollTop).toBe(100));
+      expect(window.scrollY).toBe(0);
+      vi.restoreAllMocks();
+    });
+
+    it('keeps a focused opener below the sticky header for tall details and reveals it after Escape', async () => {
+      await openList();
+      const table = screen.getByRole('region', { name: 'Document table' });
+      const trigger = within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' });
+      const bounds = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 500, width: 500, x: 0, y: top, toJSON() {} });
+      vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+        if (this === table) return bounds(100, 500);
+        if (this.tagName === 'THEAD') return bounds(100, 140);
+        if (this === trigger) return bounds(350 - table.scrollTop, 380 - table.scrollTop);
+        if (this.classList.contains('document-details')) return bounds(400 - table.scrollTop, 1000 - table.scrollTop);
+        return bounds(0, 0);
+      });
+      trigger.focus();
+      await fireEvent.click(trigger);
+      const details = await screen.findByRole('region', { name: 'Document details' });
+      await waitFor(() => expect(table.scrollTop).toBeGreaterThan(0));
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getBoundingClientRect().top).toBeGreaterThanOrEqual(140);
+      expect(details.getBoundingClientRect().top).toBeLessThan(500);
+      // The reader can scroll deeper into a tall detail and close from there.
+      table.scrollTop = 500;
+      const close = within(details).getByRole('button', { name: 'Close details' });
+      close.focus();
+      await fireEvent.keyDown(close, { key: 'Escape' });
+      await waitFor(() => expect(table.scrollTop).toBe(210));
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getBoundingClientRect().top).toBe(140);
+      expect(window.scrollY).toBe(0);
+      vi.restoreAllMocks();
+    });
+
+    it('renders hostile filenames and detail errors as text and Escape closes with focus restored', async () => {
+      const view = await openList();
+      api.listCollectionDocuments.mockResolvedValue(page([documentRow('hostile', { originalFilename: '<img src=x onerror=alert(1)>.pdf' })]));
+      await fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'oldest' } });
+      const row = await screen.findByRole('row', { name: /<img src=x/ });
+      const trigger = within(row).getByRole('button', { name: 'Details' });
+      api.getCollectionDocument.mockRejectedValue(new ApiError('NOT_FOUND', '<script>unsafe()</script>'));
+      await fireEvent.click(trigger);
+      const details = await screen.findByRole('region', { name: 'Document details' });
+      await waitFor(() => expect(within(details).getByRole('alert').textContent).toBe('<script>unsafe()</script>'));
+      expect(view.container.querySelector('img, script')).toBeNull();
+      const close = within(details).getByRole('button', { name: 'Close details' });
+      close.focus();
+      await fireEvent.keyDown(close, { key: 'Escape' });
+      expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    });
+
+    it('leaves details open when Escape belongs to the nested reading dialog', async () => {
+      api.previewRescan.mockResolvedValue({ previewId: 'preview-rescan', documentId: 'doc-1', managedHash: 'hash',
+        snapshot: { engine: 'tesseract', mode: 'AUTO', language: 'eng' }, documentPages: 1,
+        pageTotal: 1, destinations: [], method: 'tesseract', external: false, destination: 'this machine',
+        estimatedCostUsd: null, costBasis: null, previewHash: 'hash' });
+      await openList();
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' }));
+      const details = await screen.findByRole('region', { name: 'Document details' });
+      await fireEvent.click(within(details).getByRole('button', { name: 'Scan again' }));
+      const dialog = await within(details).findByRole('dialog');
+      await fireEvent.keyDown(dialog, { key: 'Escape' });
+      expect(screen.getByRole('region', { name: 'Document details' })).toBe(details);
+      expect(within(details).queryByRole('dialog')).toBeNull();
+    });
+
+    it('closes details and destructive selection immediately on input and on pagination', async () => {
+      await openList();
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' }));
+      await screen.findByRole('region', { name: 'Document details' });
+      await fireEvent.click(screen.getByLabelText('Select doc-1.pdf'));
+      await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'new' } });
+      expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull();
+      expect((screen.getByRole('button', { name: 'Delete selected' }) as HTMLButtonElement).disabled).toBe(true);
+      await fireEvent.keyDown(screen.getByLabelText('Search filenames'), { key: 'Enter' });
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-2.pdf/ })).getByRole('button', { name: 'Details' }));
+      await screen.findByRole('region', { name: 'Document details' });
+      await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+      expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull();
+    });
+
+    it('closes an obsolete detail and ignores its pending response when a refresh removes its row', async () => {
+      await openList();
+      const pending = deferred<Awaited<ReturnType<typeof import('./api').getCollectionDocument>>>();
+      api.getCollectionDocument.mockReturnValue(pending.promise);
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' }));
+      api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-2')]));
+      await fireEvent.click(screen.getByRole('button', { name: 'Retry all eligible documents' }));
+      await waitFor(() => expect(screen.queryByText('Loading details…')).toBeNull());
+      await act(async () => { pending.resolve({ document: documentRow('doc-1'), sourceId: 'old-source', retryEligible: false }); });
+      expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull();
+    });
+
+    it('keeps keyboard focus visible when a refresh removes the document whose details had focus', async () => {
+      await openList();
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' }));
+      const details = await screen.findByRole('region', { name: 'Document details' });
+      within(details).getByRole('button', { name: 'Close details' }).focus();
+      api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-2')]));
+      await fireEvent.click(screen.getByRole('button', { name: 'Retry all eligible documents' }));
+      await waitFor(() => expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull());
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Documents' }));
+    });
+
+    it('keeps focus on a visible control when deletion finishes while its details have focus', async () => {
+      await openList();
+      const pending = deletion({ kind: 'DOCUMENT', documentIds: ['doc-1'] });
+      api.deleteDocuments.mockResolvedValue({ operationId: 'op-1', collectionId: 'nightfall', documentIds: ['doc-1'], phase: 'PREPARED' });
+      api.getDeletion.mockResolvedValue(pending);
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' }));
+      const details = await screen.findByRole('region', { name: 'Document details' });
+      vi.useFakeTimers();
+      await fireEvent.click(screen.getByRole('button', { name: 'Delete doc-1.pdf' }));
+      await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete document' }));
+      within(details).getByRole('button', { name: 'Close details' }).focus();
+      api.getDeletion.mockResolvedValue({ ...pending, phase: 'DONE', terminal: true });
+      api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-2')]));
+      await advance(2000);
+      expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Documents' }));
+    });
+
+    it.each(['input', 'page', 'detail'])('does not reopen or replace details when a delayed Retry is accepted after a new %s intent', async (intent) => {
+      const admission = deferred<RetryAttempt>();
+      const onRetryDocument = vi.fn(() => admission.promise);
+      await openList({ onRetryDocument });
+      api.getCollectionDocument.mockImplementation(async (_collectionId, id) => ({
+        document: documentRow(id, { status: 'FAILED' }), sourceId: `source-${id}`, retryEligible: true,
+      }));
+      api.getJob.mockResolvedValue({ id: 'accepted-retry', type: 'RETRY', state: 'RUNNING',
+        createdAt: '', updatedAt: '', completed: 0, total: 1, cancelRequested: false });
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' }));
+      const details = await screen.findByRole('region', { name: 'Document details' });
+      await fireEvent.click(await within(details).findByRole('button', { name: 'Retry' }));
+      expect(onRetryDocument).toHaveBeenCalledWith('doc-1', { requestId: expect.any(String) });
+      vi.useFakeTimers();
+      if (intent === 'input') await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'new' } });
+      if (intent === 'page') await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+      if (intent === 'detail') {
+        await fireEvent.click(within(screen.getByRole('row', { name: /doc-2.pdf/ })).getByRole('button', { name: 'Details' }));
+        expect(within(screen.getByRole('region', { name: 'Document details' })).getByText('doc-2.pdf')).toBeTruthy();
+      }
+      await act(async () => { admission.resolve({ accepted: true, jobId: 'accepted-retry' }); });
+      // Acceptance still completes the original server operation once; only its obsolete UI continuation is dropped.
+      expect(onRetryDocument).toHaveBeenCalledTimes(1);
+      expect(api.cancelRescan).not.toHaveBeenCalled();
+      if (intent === 'detail') {
+        const current = screen.getByRole('region', { name: 'Document details' });
+        expect(within(current).getByText('doc-2.pdf')).toBeTruthy();
+        expect(within(current).queryByText('doc-1.pdf')).toBeNull();
+        expect(api.getCollectionDocument).toHaveBeenCalledTimes(2);
+      } else {
+        expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull();
+        expect(api.getCollectionDocument).toHaveBeenCalledTimes(1);
+      }
+      // In particular, the input case has not reached its 300 ms trailing request yet.
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(intent === 'page' ? 2 : 1);
+    });
+
+    it.each(['before B starts', 'while B is pending'])('admits Retry B after switching details and keeps its request owned when A resolves %s', async (completion) => {
+      const first = deferred<RetryAttempt>();
+      const second = deferred<RetryAttempt>();
+      const onRetryDocument = vi.fn((id: string) => id === 'doc-1' ? first.promise : second.promise);
+      await openList({ onRetryDocument });
+      api.getCollectionDocument.mockImplementation(async (_collectionId, id) => ({
+        document: documentRow(id, { status: 'FAILED' }), sourceId: `source-${id}`, retryEligible: true,
+      }));
+      api.getJob.mockImplementation(async (id) => ({ id, type: 'RETRY', state: 'RUNNING',
+        createdAt: '', updatedAt: '', completed: 0, total: 1, cancelRequested: false }));
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-1.pdf/ })).getByRole('button', { name: 'Details' }));
+      await fireEvent.click(await within(screen.getByRole('region', { name: 'Document details' })).findByRole('button', { name: 'Retry' }));
+      await fireEvent.click(within(screen.getByRole('row', { name: /doc-2.pdf/ })).getByRole('button', { name: 'Details' }));
+      const detailsB = screen.getByRole('region', { name: 'Document details' });
+      if (completion === 'before B starts') await act(async () => { first.resolve({ accepted: true, jobId: 'retry-A' }); });
+      await fireEvent.click(await within(detailsB).findByRole('button', { name: 'Retry' }));
+      expect(onRetryDocument).toHaveBeenNthCalledWith(2, 'doc-2', { requestId: expect.any(String) });
+      if (completion === 'while B is pending') await act(async () => { first.resolve({ accepted: true, jobId: 'retry-A' }); });
+      expect(within(detailsB).getByText('doc-2.pdf')).toBeTruthy();
+      expect((within(detailsB).getByRole('button', { name: 'Retrying…' }) as HTMLButtonElement).disabled).toBe(true);
+      expect(within(detailsB).queryByRole('alert')).toBeNull();
+      expect(api.getCollectionDocument).toHaveBeenCalledTimes(2);
+      if (completion === 'while B is pending') {
+        // A normal collection refresh remounts B's controls; the panel must still own B's pending request.
+        await fireEvent.click(screen.getByRole('button', { name: 'Retry all eligible documents' }));
+        await fireEvent.click(await within(detailsB).findByRole('button', { name: 'Retry' }));
+        expect(onRetryDocument).toHaveBeenCalledTimes(2);
+        expect(within(detailsB).getByRole('alert').textContent).toBe('A retry is already running.');
+      }
+      await act(async () => { second.resolve({ accepted: true, jobId: 'retry-B' }); });
+      const current = screen.getByRole('region', { name: 'Document details' });
+      expect(await within(current).findByText('doc-2.pdf')).toBeTruthy();
+      expect(within(current).queryByText('doc-1.pdf')).toBeNull();
+      expect(onRetryDocument).toHaveBeenCalledTimes(2);
+      expect(api.getCollectionDocument).toHaveBeenLastCalledWith('nightfall', 'doc-2');
+      expect(api.cancelRescan).not.toHaveBeenCalled();
+    });
+  });
+
+  it('starts collapsed with collection-wide counts and no document page read', async () => {
+    render(CollectionsPanel, props({ collections: [collection('Nightfall', 75)], selectedId: 'nightfall' }));
+    expect(await screen.findByRole('button', { name: '75 total' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '2 failed' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Documents' }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByLabelText('Search filenames')).toBeNull();
+    expect(api.listCollectionDocuments).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Add documents' })).toBeTruthy();
+  });
+
+  it('opens exact summary shortcuts, clears filename and preserves sort', async () => {
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall',
+      documentViewState: { expanded: true, filename: 'invoice', status: 'FAILED', sort: 'name-asc' } }));
+    await screen.findByRole('button', { name: '75 total' });
+    await fireEvent.click(screen.getByRole('button', { name: '75 total' }));
+    await waitFor(() => expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', {
+      q: '', status: undefined, sort: 'name-asc', limit: 50, offset: 0,
+    }));
+    await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'other' } });
+    await fireEvent.click(screen.getByRole('button', { name: '2 failed' }));
+    await waitFor(() => expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', {
+      q: '', status: 'FAILED', sort: 'name-asc', limit: 50, offset: 0,
+    }));
+    expect((screen.getByLabelText('Search filenames') as HTMLInputElement).value).toBe('');
+  });
+
+  it.each([
+    ['QUEUED', 'Queued'], ['COPYING', 'Copying'], ['EXTRACTING', 'Extracting text'],
+    ['OCR', 'Reading with OCR'], ['CHUNKING', 'Building passages'], ['EMBEDDING', 'Embedding'], ['INDEXING', 'Indexing'],
+  ])('opens the exact %s ongoing status', async (status, label) => {
+    api.getCollectionDocumentSummary.mockResolvedValue({ total: 1, byStatus: { [status]: 1 } });
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    await fireEvent.click(await screen.findByRole('button', { name: `1 ${label}` }));
+    await waitFor(() => expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ status, q: '', offset: 0 })));
+    expect(screen.queryByText(/pending review|waiting for approval/i)).toBeNull();
+  });
+
+  it('keeps summary loading and failure distinct from zero and retries', async () => {
+    const pending = deferred<{ total: number; byStatus: Record<string, number> }>();
+    api.getCollectionDocumentSummary.mockReturnValueOnce(pending.promise);
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    expect(screen.getByText('Loading document counts…')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '0 total' })).toBeNull();
+    await act(async () => pending.reject(new Error('counts unavailable')));
+    expect(await screen.findByText('counts unavailable')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '0 total' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry document counts' }));
+    expect(await screen.findByRole('button', { name: '75 total' })).toBeTruthy();
+  });
+
+  it('invalidates late summary and document reads across collection changes and collapse', async () => {
+    const counts = deferred<{ total: number; byStatus: Record<string, number> }>();
+    const rows = deferred<DocumentsPage>();
+    api.getCollectionDocumentSummary.mockReturnValueOnce(counts.promise);
+    api.listCollectionDocuments.mockReturnValueOnce(rows.promise);
+    const initial = props({ collections: [collection('Nightfall'), collection('Archive')], selectedId: 'nightfall',
+      documentViewState: { expanded: true, filename: '', status: '', sort: 'newest' } });
+    const view = render(CollectionsPanel, initial);
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await act(async () => rows.resolve(page([documentRow('stale')])));
+    expect(screen.queryByText('stale.pdf')).toBeNull();
+    await view.rerender({ ...initial, selectedId: 'archive', documentViewState: undefined });
+    expect(await screen.findByRole('button', { name: '75 total' })).toBeTruthy();
+    await act(async () => counts.resolve({ total: 999, byStatus: {} }));
+    expect(screen.queryByRole('button', { name: '999 total' })).toBeNull();
+  });
+
+  it('clears hidden destructive selection and details while retaining input on collapse', async () => {
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('one')]));
+    const changed = vi.fn();
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall',
+      onDocumentViewStateChange: changed, documentViewState: { expanded: true, filename: '', status: '', sort: 'newest' } }));
+    await screen.findByText('one.pdf');
+    await fireEvent.click(screen.getByLabelText('Select one.pdf'));
+    await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'draft' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    expect(changed).toHaveBeenLastCalledWith('nightfall', { expanded: false, filename: 'draft', status: '', sort: 'newest' });
+    expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await screen.findByText('one.pdf');
+    expect((screen.getByLabelText('Select one.pdf') as HTMLInputElement).checked).toBe(false);
+    expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', expect.objectContaining({ q: 'draft', offset: 0 }));
+  });
+
+  it('pauses hidden polling and refetches counts and page one on return', async () => {
+    vi.useFakeTimers();
+    try {
+      api.getCollectionDocumentSummary.mockResolvedValue({ total: 1, byStatus: { OCR: 1 } });
+      const initial = props({ collections: [collection('Nightfall')], selectedId: 'nightfall',
+        documentViewState: { expanded: true, filename: '', status: '', sort: 'newest' } });
+      const view = render(CollectionsPanel, initial);
+      await act(async () => {});
+      await view.rerender({ ...initial, visible: false });
+      const counts = api.getCollectionDocumentSummary.mock.calls.length;
+      const pages = api.listCollectionDocuments.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(api.getCollectionDocumentSummary).toHaveBeenCalledTimes(counts);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(pages);
+      await view.rerender({ ...initial, visible: true });
+      await act(async () => {});
+      expect(api.getCollectionDocumentSummary).toHaveBeenCalledTimes(counts + 1);
+      expect(api.listCollectionDocuments).toHaveBeenCalledTimes(pages + 1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('shows active import progress and read failures outside all disclosures', async () => {
+    api.listCollectionImports.mockResolvedValue(history([importEntry('active', { state: 'RUNNING', filesCompleted: 2, filesTotal: 4 })]));
+    const view = render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    expect(await screen.findByRole('region', { name: 'Active imports' })).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText(/2.*4/)).toBeTruthy();
+    for (const disclosure of view.container.querySelectorAll('details')) expect(disclosure.open).toBe(false);
+    api.listCollectionImports.mockRejectedValueOnce(new Error('history unavailable'));
+    await view.rerender({ visible: false });
+    await view.rerender({ visible: true });
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'history unavailable');
+  });
+
+  it('refreshes collapsed idle counts after a newly started import and its terminal outcome', async () => {
+    api.pickPaths.mockResolvedValue(['/tmp/one.pdf']);
+    api.startImport.mockResolvedValue({ job: { id: 'new-import', state: 'COMPLETE', completed: 1, total: 1 } });
+    api.getImportItems.mockResolvedValue([]);
+    api.getCollectionDocumentSummary.mockResolvedValueOnce({ total: 0, byStatus: {} })
+      .mockResolvedValue({ total: 1, byStatus: { COMPLETE: 1 } });
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    await screen.findByRole('button', { name: '0 total' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add documents' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read 1 page with Tesseract' }));
+    expect(await screen.findByText('Import complete. 0 files.')).toBeTruthy();
+    expect(await screen.findByRole('button', { name: '1 total' })).toBeTruthy();
+    expect(api.getCollectionDocumentSummary).toHaveBeenCalledTimes(3);
+    expect(api.listCollectionDocuments).not.toHaveBeenCalled();
+  });
+
+  it('pauses an active import while hidden and resumes its terminal refresh without submitting again', async () => {
+    vi.useFakeTimers();
+    try {
+      api.pickPaths.mockResolvedValue(['/tmp/one.pdf']);
+      api.startImport.mockResolvedValue({ job: { id: 'new-import', state: 'RUNNING', completed: 0, total: 1 } });
+      api.getJob.mockResolvedValue({ id: 'new-import', state: 'RUNNING', completed: 0, total: 1 });
+      api.getImportItems.mockResolvedValue([]);
+      api.getCollectionDocumentSummary.mockResolvedValueOnce({ total: 0, byStatus: {} })
+        .mockResolvedValueOnce({ total: 1, byStatus: { OCR: 1 } })
+        .mockResolvedValueOnce({ total: 1, byStatus: { OCR: 1 } })
+        .mockResolvedValue({ total: 2, byStatus: { COMPLETE: 2 } });
+      const initial = props({ collections: [collection('Nightfall')], selectedId: 'nightfall' });
+      const view = render(CollectionsPanel, initial);
+      await act(async () => {});
+      await fireEvent.click(screen.getByRole('button', { name: 'Add documents' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+      await act(async () => {});
+      await fireEvent.click(screen.getByRole('button', { name: 'Read 1 page with Tesseract' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(api.getJob).toHaveBeenCalledTimes(1);
+      await view.rerender({ ...initial, visible: false });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(api.getJob).toHaveBeenCalledTimes(1);
+      expect(api.getImportItems).not.toHaveBeenCalled();
+      api.getJob.mockResolvedValue({ id: 'new-import', state: 'COMPLETE', completed: 1, total: 1 });
+      await view.rerender({ ...initial, visible: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(api.getJob).toHaveBeenCalledTimes(2);
+      expect(api.getJob).toHaveBeenLastCalledWith('new-import');
+      expect(api.startImport).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('Import complete. 0 files.')).toBeTruthy();
+      expect(screen.getByRole('button', { name: '2 total' })).toBeTruthy();
+      expect(api.getCollectionDocumentSummary).toHaveBeenCalledTimes(4);
+      expect(api.listCollectionDocuments).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('validates cached criteria and keeps them when secondary disclosures toggle', async () => {
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall',
+      documentViewState: { expanded: true, filename: 'draft', status: 'REVIEW', sort: 'invalid' } as never }));
+    await waitFor(() => expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', {
+      q: 'draft', status: undefined, sort: 'newest', limit: 50, offset: 0,
+    }));
+    await fireEvent.click(screen.getByText('Settings', { selector: 'summary' }));
+    await fireEvent.click(screen.getByText('Import history', { selector: 'summary' }));
+    expect((screen.getByLabelText('Search filenames') as HTMLInputElement).value).toBe('draft');
+    expect(screen.getByRole('button', { name: 'Documents' }).getAttribute('aria-expanded')).toBe('true');
+    expect(api.listCollectionDocuments).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a pending detail response when collapsed and reopens without details', async () => {
+    const pending = deferred<Awaited<ReturnType<typeof import('./api').getCollectionDocument>>>();
+    api.getCollectionDocument.mockReturnValueOnce(pending.promise);
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('one')]));
+    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall',
+      documentViewState: { expanded: true, filename: '', status: 'FAILED', sort: 'oldest' } }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    expect(screen.getByText('Loading details…')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await act(async () => pending.resolve({ document: documentRow('late'), sourceId: 'late-source' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    expect(screen.queryByRole('region', { name: 'Document details' })).toBeNull();
+    expect((screen.getByLabelText('Status') as HTMLSelectElement).value).toBe('FAILED');
+    expect((screen.getByLabelText('Sort') as HTMLSelectElement).value).toBe('oldest');
+  });
+
+  it('reconciles a followed deletion that completed while the panel was hidden', async () => {
+    const onCollectionDeleted = vi.fn();
+    api.listUnfinishedDeletions.mockResolvedValueOnce([deletion()]).mockResolvedValue([]);
+    api.getDeletion.mockResolvedValue(deletion({ phase: 'DONE', terminal: true }));
+    const initial = props({ collections: [collection('Nightfall')], selectedId: 'nightfall', onCollectionDeleted });
+    const view = render(CollectionsPanel, initial);
+    await screen.findByRole('region', { name: 'Deletions in progress' });
+    await view.rerender({ ...initial, visible: false });
+    await view.rerender({ ...initial, visible: true });
+    await waitFor(() => expect(onCollectionDeleted).toHaveBeenCalledWith('nightfall'));
+  });
 
   it('lists active collections with their document counts', () => {
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Default', 3), collection('Nightfall', 1)],
       selectedId: 'default',
     }));
@@ -220,7 +831,7 @@ describe('collections panel', () => {
   });
 
   it('offers the empty archive state with a create action', async () => {
-    render(CollectionsPanel, props());
+    renderExpandedPanel(CollectionsPanel, props());
 
     expect(await screen.findByText('No collections yet')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Create collection' }));
@@ -228,7 +839,7 @@ describe('collections panel', () => {
   });
 
   it('reports a collection listing failure instead of an empty archive', () => {
-    render(CollectionsPanel, props({ error: 'the archive is unavailable' }));
+    renderExpandedPanel(CollectionsPanel, props({ error: 'the archive is unavailable' }));
 
     expect(screen.getByRole('alert').textContent).toContain('the archive is unavailable');
     expect(screen.queryByText('No collections yet')).toBeNull();
@@ -238,7 +849,7 @@ describe('collections panel', () => {
     api.createCollection.mockResolvedValue({ ...collection('Default'), id: 'a-generated-id' });
     const onCollectionsChanged = vi.fn();
 
-    render(CollectionsPanel, props({ onCollectionsChanged }));
+    renderExpandedPanel(CollectionsPanel, props({ onCollectionsChanged }));
 
     expect(await screen.findByText('No collections yet')).toBeTruthy();
     expect(screen.getByText(/every import goes into the collection you choose/)).toBeTruthy();
@@ -255,7 +866,7 @@ describe('collections panel', () => {
   });
 
   it('explains the retired automatic Default and points at a rename and an exact-name deletion', async () => {
-    render(CollectionsPanel, props({ collections: [collection('Default', 1)], selectedId: 'default' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Default', 1)], selectedId: 'default' }));
 
     const notice = await screen.findByRole('region', { name: 'About the former Default collection' });
     expect(within(notice).getByText(/Earlier InfoScry versions created this collection automatically/)).toBeTruthy();
@@ -268,7 +879,7 @@ describe('collections panel', () => {
   });
 
   it('does not mistake a user-created collection named Default for the retired seed', () => {
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [{ ...collection('Default', 1), id: 'a-generated-id' }],
       selectedId: 'a-generated-id',
     }));
@@ -283,7 +894,7 @@ describe('collections panel', () => {
     api.createCollection.mockResolvedValue(collection('Nightfall'));
     const onCollectionsChanged = vi.fn();
 
-    render(CollectionsPanel, props({ collections: [collection('Default', 2)], selectedId: 'default', onCollectionsChanged }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Default', 2)], selectedId: 'default', onCollectionsChanged }));
     await fireEvent.click(screen.getByRole('button', { name: 'Create collection' }));
     await fireEvent.input(screen.getByLabelText('Name'), { target: { value: 'Nightfall' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Create' }));
@@ -300,7 +911,7 @@ describe('collections panel', () => {
     api.createCollection.mockRejectedValue(new ApiError('COLLECTION_NAME_TAKEN', 'a collection named Nightfall already exists'));
     const onCollectionsChanged = vi.fn();
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall', onCollectionsChanged }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall', onCollectionsChanged }));
     await fireEvent.click(screen.getByRole('button', { name: 'Create collection' }));
     await fireEvent.input(screen.getByLabelText('Name'), { target: { value: 'Nightfall' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Create' }));
@@ -316,7 +927,7 @@ describe('collections panel', () => {
     const onSelect = vi.fn();
     const onCollectionsChanged = vi.fn();
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Default', 2), collection('Nightfall', 0)],
       selectedId: 'default',
       onSelect,
@@ -334,7 +945,7 @@ describe('collections panel', () => {
       documentRow('doc-1'), documentRow('doc-2'), documentRow('doc-3'), documentRow('doc-4'),
     ]));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 4)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 4)], selectedId: 'nightfall' }));
 
     const area = screen.getByRole('region', { name: 'Manage Nightfall' });
     expect(area.textContent).toContain('4 documents');
@@ -344,7 +955,7 @@ describe('collections panel', () => {
   });
 
   it('shows the empty collection state and reveals the import controls', async () => {
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 0)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 0)], selectedId: 'nightfall' }));
 
     expect(await screen.findByText('No documents yet')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Add documents' }));
@@ -356,7 +967,7 @@ describe('collections panel', () => {
   });
 
   it('asks for a selection when the archive has collections but none is managed', () => {
-    render(CollectionsPanel, props({ collections: [collection('Default', 2)] }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Default', 2)] }));
 
     expect(screen.getByText('Select a collection to manage its documents.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Add documents' })).toBeNull();
@@ -364,7 +975,7 @@ describe('collections panel', () => {
     expect(api.listCollectionDocuments).not.toHaveBeenCalled();
   });
 
-  it('lists documents with their filename, media type, size, import date and readable status', async () => {
+  it('lists compact filename/status rows with metadata available in details', async () => {
     api.listCollectionDocuments.mockResolvedValue(page([
       documentRow('doc-1', {
         originalFilename: 'quarterly.pdf',
@@ -381,13 +992,15 @@ describe('collections panel', () => {
         status: 'NEEDS_TOOL',
       }),
     ]));
+    api.getCollectionDocument.mockResolvedValue({ document: documentRow('doc-1', {
+      originalFilename: 'quarterly.pdf', mediaType: 'application/pdf', sizeBytes: 2048,
+      createdAt: '2026-09-21T07:00:00Z', status: 'COMPLETE_WITH_WARNINGS',
+    }) });
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
 
     const quarterly = await screen.findByRole('row', { name: /quarterly\.pdf/ });
-    expect(within(quarterly).getByText('application/pdf')).toBeTruthy();
-    expect(within(quarterly).getByText('2 KB')).toBeTruthy();
-    expect(within(quarterly).getByText('2026-09-21')).toBeTruthy();
+    expect(within(quarterly).queryByText('application/pdf')).toBeNull();
     expect(within(quarterly).getByTestId('document-reading-status').textContent).toBe('Done');
     expect(within(screen.getByRole('row', { name: /notes\.txt/ })).getByTestId('document-reading-status').textContent).toMatch(/^Failed:/);
     expect(screen.getByText('Showing 1–2 of 2 documents')).toBeTruthy();
@@ -398,17 +1011,22 @@ describe('collections panel', () => {
       limit: 50,
       offset: 0,
     });
+    await fireEvent.click(within(quarterly).getByRole('button', { name: 'Details' }));
+    const details = await screen.findByRole('region', { name: 'Document details' });
+    expect(within(details).getByText('application/pdf')).toBeTruthy();
+    expect(within(details).getByText('2 KB')).toBeTruthy();
+    expect(within(details).getByText('2026-09-21')).toBeTruthy();
   });
 
   it('searches filenames from the first page and sends the trimmed term', async () => {
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1')]));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await screen.findByRole('table');
     // Sorting reloads the first page; the search keeps that order and adds the trimmed term.
     await fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'oldest' } });
     await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: '  quarterly  ' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await fireEvent.keyDown(screen.getByLabelText('Search filenames'), { key: 'Enter' });
 
     await waitFor(() => expect(api.listCollectionDocuments).toHaveBeenLastCalledWith('nightfall', {
       q: 'quarterly',
@@ -422,7 +1040,7 @@ describe('collections panel', () => {
   it('restricts the listing by status and order, always from the first page', async () => {
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1')], 51));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 51)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 51)], selectedId: 'nightfall' }));
     await screen.findByRole('table');
     expect((screen.getByRole('button', { name: 'Previous page' }) as HTMLButtonElement).disabled).toBe(true);
 
@@ -446,7 +1064,7 @@ describe('collections panel', () => {
     let finish!: (page: DocumentsPage) => void;
     api.listCollectionDocuments.mockImplementation(() => new Promise<DocumentsPage>((resolve) => { finish = resolve; }));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 0)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 0)], selectedId: 'nightfall' }));
 
     expect(screen.getByText('Loading documents…')).toBeTruthy();
     await act(async () => { finish(page([])); });
@@ -458,7 +1076,7 @@ describe('collections panel', () => {
   it('reports a failed listing instead of an empty collection', async () => {
     api.listCollectionDocuments.mockRejectedValue(new ApiError('INTERNAL_ERROR', 'the archive is unavailable'));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('the archive is unavailable');
@@ -471,10 +1089,10 @@ describe('collections panel', () => {
       .mockResolvedValueOnce(page([documentRow('doc-1')], 1))
       .mockResolvedValue(page([], 0));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await screen.findByRole('table');
     await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'nothing' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await fireEvent.keyDown(screen.getByLabelText('Search filenames'), { key: 'Enter' });
 
     expect(await screen.findByText('No documents match this search.')).toBeTruthy();
     expect(screen.queryByText('No documents yet')).toBeNull();
@@ -486,7 +1104,7 @@ describe('collections panel', () => {
       .mockImplementationOnce(() => new Promise<DocumentsPage>((resolve) => { finishOld = resolve; }))
       .mockResolvedValue(page([documentRow('doc-new', { originalFilename: 'new.pdf' })]));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
     await fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'oldest' } });
     expect(await screen.findByText('new.pdf')).toBeTruthy();
 
@@ -502,7 +1120,7 @@ describe('collections panel', () => {
       .mockImplementationOnce(() => new Promise<DocumentsPage>((resolve) => { finishFirst = resolve; }))
       .mockResolvedValue(page([documentRow('doc-two', { originalFilename: 'second.pdf' })]));
 
-    const { rerender } = render(CollectionsPanel, props({
+    const { rerender } = renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Default', 1), collection('Nightfall', 1)],
       selectedId: 'default',
     }));
@@ -522,13 +1140,14 @@ describe('collections panel', () => {
       document: documentRow('doc-1', {
         originalFilename: 'quarterly.pdf',
         status: 'FAILED',
+        mediaType: 'application/msword',
         errorCode: 'UNSUPPORTED_MEDIA_TYPE',
       }),
       errorMessage: 'the pipeline has no extractor for this kind of file',
       sourceId: 'unit-7',
     });
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onOpenDocument,
@@ -542,7 +1161,7 @@ describe('collections panel', () => {
     expect(within(details).getByTestId('document-reading-status').textContent).toContain('Failed:');
 
     await fireEvent.click(within(details).getByRole('button', { name: 'Open document' }));
-    expect(onOpenDocument).toHaveBeenCalledWith('doc-1', 'unit-7');
+    expect(onOpenDocument).toHaveBeenCalledWith('doc-1', 'unit-7', expect.any(HTMLElement));
   });
 
   it('reads every processing stage a document can be in, including the ones that stop for a tool', async () => {
@@ -564,7 +1183,7 @@ describe('collections panel', () => {
       stages.map(([status], index) => documentRow(`doc-${index}`, { status })),
     ));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', stages.length)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', stages.length)], selectedId: 'nightfall' }));
     await screen.findByRole('table');
 
     stages.forEach(([status, label], index) => {
@@ -591,7 +1210,7 @@ describe('collections panel', () => {
       warnings: ['the OCR tool ran but could not read part of this document; the rest of it was extracted'],
     });
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     const row = await screen.findByRole('row', { name: /doc-1\.pdf/ });
     expect(within(row).getByText('12/40 pages')).toBeTruthy();
 
@@ -621,7 +1240,7 @@ describe('collections panel', () => {
       }),
     ]));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     const row = await screen.findByRole('row', { name: /doc-1\.pdf/ });
 
     // A Word document's units are sections, and nothing announced a total, so there is no percentage and
@@ -648,7 +1267,7 @@ describe('collections panel', () => {
       progress: legacy,
     });
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await screen.findByRole('table');
     await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
 
@@ -673,7 +1292,7 @@ describe('collections panel', () => {
       progress: { unitKind: 'PAGE', totalUnits: 3, processedUnits: 3, failedUnits: 0, directTextUnits: 3, ocrUnits: 0 },
     });
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall', onOpenDocument: vi.fn() }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall', onOpenDocument: vi.fn() }));
     await screen.findByRole('table');
     await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
 
@@ -686,14 +1305,14 @@ describe('collections panel', () => {
 
   it('explains why a document without readable content cannot be opened', async () => {
     const onOpenDocument = vi.fn();
-    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1')]));
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { mediaType: 'application/msword' })]));
     api.getCollectionDocument.mockResolvedValue({
-      document: documentRow('doc-1', { status: 'QUEUED' }),
+      document: documentRow('doc-1', { status: 'QUEUED', mediaType: 'application/msword' }),
       errorMessage: null,
       sourceId: null,
     });
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onOpenDocument,
@@ -705,6 +1324,23 @@ describe('collections panel', () => {
     expect(within(details).getByText('This document has no readable content yet, so there is nothing to open.')).toBeTruthy();
     expect(within(details).queryByRole('button', { name: 'Open document' })).toBeNull();
     expect(onOpenDocument).not.toHaveBeenCalled();
+  });
+
+  it('opens a supported PDF for page review even when extraction has no unit yet', async () => {
+    const onOpenPageReview = vi.fn();
+    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'QUEUED' })]));
+    api.getCollectionDocument.mockResolvedValue({
+      document: documentRow('doc-1', { status: 'QUEUED' }), errorMessage: null, sourceId: null,
+    });
+    renderExpandedPanel(CollectionsPanel, props({
+      collections: [collection('Nightfall', 1)], selectedId: 'nightfall', onOpenPageReview,
+    }));
+    await screen.findByRole('table');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const details = await screen.findByRole('region', { name: 'Document details' });
+    await fireEvent.click(within(details).getByRole('button', { name: 'Open document' }));
+    expect(onOpenPageReview).toHaveBeenCalledWith('doc-1', expect.any(HTMLElement));
+    expect(within(details).queryByText('This document has no readable content yet, so there is nothing to open.')).toBeNull();
   });
 
   it('offers Retry for a document whose attempt stopped and refreshes the document after admission', async () => {
@@ -721,7 +1357,7 @@ describe('collections panel', () => {
       completed: 0, total: 1, cancelRequested: false,
     });
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryDocument,
@@ -757,7 +1393,7 @@ describe('collections panel', () => {
     });
     api.listOcrProfiles.mockResolvedValue([]);
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryDocument,
@@ -789,7 +1425,7 @@ describe('collections panel', () => {
       id: 'retry-job', type: 'RETRY', state: 'RUNNING', createdAt: '', updatedAt: '',
       completed: 0, total: 1, cancelRequested: false,
     });
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)], selectedId: 'nightfall', onRetryDocument,
     }));
     await screen.findByRole('table');
@@ -817,7 +1453,7 @@ describe('collections panel', () => {
     }));
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryAllDocuments,
@@ -842,7 +1478,7 @@ describe('collections panel', () => {
       retryEligible: true,
     });
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryDocument: vi.fn(async () => ({ accepted: false as const, reason: refusal })),
@@ -871,7 +1507,7 @@ describe('collections panel', () => {
       retryEligible: true,
     });
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryDocument: vi.fn(async () => {
@@ -902,7 +1538,7 @@ describe('collections panel', () => {
     }));
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })], 120));
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 120)],
       selectedId: 'nightfall',
       onRetryAllDocuments,
@@ -938,7 +1574,7 @@ describe('collections panel', () => {
   it('says nothing was eligible instead of counting a success', async () => {
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1')]));
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryAllDocuments: vi.fn(async () => ({ collectionId: 'nightfall', acceptedJobIds: [], rejected: [] })),
@@ -956,7 +1592,7 @@ describe('collections panel', () => {
     const reason = 'the embedding model is not installed, so a retry could not make this document searchable';
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryAllDocuments: vi.fn(async () => ({
@@ -980,7 +1616,7 @@ describe('collections panel', () => {
     const onRetryAllDocuments = vi.fn(() => new Promise<RetryAdmission>((resolve) => { finish = resolve; }));
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryAllDocuments,
@@ -1008,7 +1644,7 @@ describe('collections panel', () => {
   it('reports a failed collection-wide retry instead of claiming anything was queued', async () => {
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { status: 'FAILED' })]));
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 1)],
       selectedId: 'nightfall',
       onRetryAllDocuments: vi.fn(async () => {
@@ -1030,7 +1666,7 @@ describe('collections panel', () => {
       .mockResolvedValueOnce(page([documentRow('doc-1', { status: 'FAILED' })]))
       .mockResolvedValue(page([documentRow('doc-1', { status: 'QUEUED' })]));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     const row = await screen.findByRole('row', { name: /doc-1\.pdf/ });
     expect(within(row).getByTestId('document-reading-status').textContent).toMatch(/^Failed:/);
 
@@ -1041,7 +1677,7 @@ describe('collections panel', () => {
 
     // A reopened Admin keeps nothing from the click: the queued attempt is the server's own record.
     cleanup();
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     expect(within(await screen.findByRole('row', { name: /doc-1\.pdf/ })).getByTestId('document-reading-status').textContent).toContain('Reading');
     expect(screen.queryByText(/Retry queued/)).toBeNull();
   });
@@ -1054,7 +1690,7 @@ describe('collections panel', () => {
       retryEligible: false,
     });
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await screen.findByRole('table');
     await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
 
@@ -1065,7 +1701,7 @@ describe('collections panel', () => {
   it('reports a failed detail read and closes the details region', async () => {    api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1')]));
     api.getCollectionDocument.mockRejectedValue(new ApiError('NOT_FOUND', 'no document with id doc-1 exists in this collection'));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await screen.findByRole('table');
     await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
 
@@ -1089,7 +1725,7 @@ describe('collections panel', () => {
       importEntry('job-1', { state: 'COMPLETE', stage: 'index', currentItem: 'done.pdf', filesCompleted: 3, filesTotal: 3 }),
     ]));
 
-    const { unmount } = render(CollectionsPanel, props({
+    const { unmount } = renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 3)],
       selectedId: 'nightfall',
     }));
@@ -1112,7 +1748,7 @@ describe('collections panel', () => {
 
     // Navigating away and back reads the history from the server again instead of remembering a job.
     unmount();
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
     expect(await screen.findByRole('region', { name: 'Import history for Nightfall' })).toBeTruthy();
     expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
     expect(await screen.findByText('1 of 4 files')).toBeTruthy();
@@ -1124,7 +1760,7 @@ describe('collections panel', () => {
       importEntry('job-failed', { state: 'FAILED', stage: 'queue', errorCode: 'IMPORT_FAILED' }),
     ]));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 3)], selectedId: 'nightfall' }));
 
     const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
     await screen.findByText('2 of 2 files');
@@ -1136,7 +1772,7 @@ describe('collections panel', () => {
   });
 
   it('shows no imports yet for a collection that never imported anything', async () => {
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 0)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 0)], selectedId: 'nightfall' }));
 
     const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
     expect(await within(area).findByText('No imports yet')).toBeTruthy();
@@ -1146,7 +1782,7 @@ describe('collections panel', () => {
   it('pages through the history from the first page', async () => {
     api.listCollectionImports.mockResolvedValue(history([importEntry('job-1')], 51));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await screen.findByText('Showing 1–1 of 51 imports');
 
     await fireEvent.click(screen.getByRole('button', { name: 'Next imports' }));
@@ -1175,7 +1811,7 @@ describe('collections panel', () => {
       }),
     ]);
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await fireEvent.click(
       await screen.findByRole('button', { name: 'Show files for the import started 2026-09-21' }),
     );
@@ -1212,10 +1848,10 @@ describe('collections panel', () => {
   it('reports a failed history read, and a failed per-file read, without claiming an empty history', async () => {
     api.listCollectionImports.mockRejectedValue(new ApiError('INTERNAL_ERROR', 'the archive is unavailable'));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
 
     const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
-    expect((await within(area).findByRole('alert')).textContent).toContain('the archive is unavailable');
+    expect((await screen.findByRole('alert')).textContent).toContain('the archive is unavailable');
     expect(within(area).queryByText('No imports yet')).toBeNull();
   });
 
@@ -1223,7 +1859,7 @@ describe('collections panel', () => {
     api.listCollectionImports.mockResolvedValue(history([importEntry('job-1')]));
     api.getImportItems.mockRejectedValue(new ApiError('NOT_FOUND', 'no job with id job-1'));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await fireEvent.click(
       await screen.findByRole('button', { name: 'Show files for the import started 2026-09-21' }),
     );
@@ -1243,18 +1879,18 @@ describe('collections panel', () => {
           importEntry('job-1', { state: 'RUNNING', stage: 'extract', currentItem: 'second.pdf', filesCompleted: 1, filesTotal: 2 }),
         ]));
 
-      const { unmount } = render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+      const { unmount } = renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
       await act(async () => {});
       expect(api.listCollectionImports).toHaveBeenCalledTimes(1);
-      expect(screen.getByText('Copying · first.pdf')).toBeTruthy();
-      expect(screen.getByText('0 of 2 files')).toBeTruthy();
+      expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText('Copying · first.pdf')).toBeTruthy();
+      expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText(/0 of 2 files/)).toBeTruthy();
 
       // An unfinished import is read again from the server, which is what makes the row keep up with the
       // file being read — including after a reload, because nothing here is remembered in the browser.
       await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
       expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
-      expect(screen.getByText('Extracting · second.pdf')).toBeTruthy();
-      expect(screen.getByText('1 of 2 files')).toBeTruthy();
+      expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText('Extracting · second.pdf')).toBeTruthy();
+      expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText(/1 of 2 files/)).toBeTruthy();
       expect(screen.queryByText(/first\.pdf/)).toBeNull();
 
       unmount();
@@ -1272,7 +1908,7 @@ describe('collections panel', () => {
         .mockResolvedValueOnce(history([importEntry('job-1', { state: 'RUNNING', filesCompleted: 0, filesTotal: 2 })]))
         .mockResolvedValue(history([importEntry('job-1', { filesCompleted: 2, filesTotal: 2 })]));
 
-      render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+      renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
       await act(async () => {});
       await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
       expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
@@ -1287,7 +1923,7 @@ describe('collections panel', () => {
 
   it('does not expose approval controls for a completed import', async () => {
     api.listCollectionImports.mockResolvedValue(history([importEntry('job-1', { state: 'COMPLETE', filesCompleted: 1, filesTotal: 1 })]));
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     const area = await screen.findByRole('region', { name: 'Import history for Nightfall' });
     expect(await within(area).findByText('Complete')).toBeTruthy();
     expect(within(area).queryByText(/approval|review/i)).toBeNull();
@@ -1298,7 +1934,7 @@ describe('collections panel', () => {
     api.renameCollection.mockImplementation(() => new Promise<Collection>((resolve) => { finish = resolve; }));
     const onCollectionsChanged = vi.fn();
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 2)],
       selectedId: 'nightfall',
       onCollectionsChanged,
@@ -1328,7 +1964,7 @@ describe('collections panel', () => {
     );
     const onCollectionsChanged = vi.fn();
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall'), collection('Acme')],
       selectedId: 'nightfall',
       onCollectionsChanged,
@@ -1348,7 +1984,7 @@ describe('collections panel', () => {
   it('reports the server refusal of a blank name instead of pretending it was saved', async () => {
     api.renameCollection.mockRejectedValue(new ApiError('INVALID_REQUEST', 'collection name must not be blank'));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
 
     await fireEvent.input(await screen.findByLabelText('Collection name'), { target: { value: '   ' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
@@ -1359,7 +1995,7 @@ describe('collections panel', () => {
   });
 
   it('shows the selected collection language in OCR settings', async () => {
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
     expect((await screen.findByLabelText('OCR language') as HTMLInputElement).value).toBe('eng');
     expect(await screen.findByLabelText('Default reading method')).toBeTruthy();
     expect(api.listCollectionDocuments).toHaveBeenCalledTimes(1);
@@ -1367,7 +2003,7 @@ describe('collections panel', () => {
   });
 
   it('switches OCR settings with the selected collection', async () => {
-    const { rerender } = render(CollectionsPanel, props({
+    const { rerender } = renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Default'), { ...collection('Nightfall'), language: 'swe' }], selectedId: 'default',
     }));
     expect((await screen.findByLabelText('OCR language') as HTMLInputElement).value).toBe('eng');
@@ -1380,7 +2016,7 @@ describe('collections panel', () => {
     api.renameCollection.mockImplementation(() => new Promise<Collection>((resolve) => { finish = resolve; }));
     const onCollectionsChanged = vi.fn();
 
-    const { rerender } = render(CollectionsPanel, props({
+    const { rerender } = renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Default'), collection('Nightfall')],
       selectedId: 'default',
       onCollectionsChanged,
@@ -1407,7 +2043,7 @@ describe('collections panel', () => {
   it('shows the collection saved ignore patterns, one per line, in the settings', async () => {
     api.getCollectionIgnorePatterns.mockResolvedValue(['.DS_Store', '# mine', '*.tmp']);
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
 
     const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
     await waitFor(() => expect(field.value).toBe('.DS_Store\n# mine\n*.tmp'));
@@ -1417,7 +2053,7 @@ describe('collections panel', () => {
   it('saves the ignore patterns as lines and shows the list the server kept', async () => {
     api.updateCollectionIgnorePatterns.mockResolvedValue(['*.bak', '!keep.bak']);
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
 
     const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
     await waitFor(() => expect(field.disabled).toBe(false));
@@ -1434,7 +2070,7 @@ describe('collections panel', () => {
       new ApiError('INVALID_REQUEST', "ignore pattern '!': names nothing"),
     );
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
 
     const field = (await screen.findByLabelText('Ignored files')) as HTMLTextAreaElement;
     await waitFor(() => expect(field.disabled).toBe(false));
@@ -1450,7 +2086,7 @@ describe('collections panel', () => {
   it('cannot save before the saved list has been read', async () => {
     api.getCollectionIgnorePatterns.mockImplementation(() => new Promise<string[]>(() => {}));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
 
     const save = (await screen.findByRole('button', { name: 'Save ignored files' })) as HTMLButtonElement;
     expect(save.disabled).toBe(true);
@@ -1467,7 +2103,7 @@ describe('collections panel', () => {
       () => new Promise<string[]>((resolve) => { finishSave = resolve; }),
     );
 
-    const { rerender } = render(CollectionsPanel, props({
+    const { rerender } = renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Default'), collection('Nightfall')],
       selectedId: 'default',
     }));
@@ -1494,7 +2130,7 @@ describe('collections panel', () => {
       .mockImplementationOnce(() => new Promise<ImportHistoryPage>((resolve) => { finishFirst = resolve; }))
       .mockResolvedValue(history([importEntry('job-new', { filesCompleted: 2, filesTotal: 2 })]));
 
-    const { rerender } = render(CollectionsPanel, props({
+    const { rerender } = renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Default', 1), collection('Nightfall', 1)],
       selectedId: 'default',
     }));
@@ -1509,7 +2145,7 @@ describe('collections panel', () => {
   });
 
   it('confirms the exact name and sends nothing when the confirmation is declined', async () => {
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Delete collection' }));
 
@@ -1532,7 +2168,7 @@ describe('collections panel', () => {
   });
 
   it('contains Tab inside the open confirmation and returns focus to the opener when it closes', async () => {
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
 
     const opener = screen.getByRole('button', { name: 'Delete collection' });
     opener.focus();
@@ -1559,7 +2195,7 @@ describe('collections panel', () => {
   it('contains Tab inside the open delete-documents confirmation', async () => {
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1')]));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     const opener = await screen.findByRole('button', { name: 'Delete doc-1.pdf' });
     await fireEvent.click(opener);
 
@@ -1589,7 +2225,7 @@ describe('collections panel', () => {
       () => new Promise<DocumentDeletionAdmission>((resolve) => { finish = resolve; }),
     );
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Delete doc-1.pdf' }));
 
     const dialog = screen.getByRole('dialog', { name: 'Delete doc-1.pdf?' });
@@ -1621,7 +2257,7 @@ describe('collections panel', () => {
     const onCollectionDeleted = vi.fn();
     const onCollectionsChanged = vi.fn();
 
-    render(CollectionsPanel, props({
+    renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 2)],
       selectedId: 'nightfall',
       onCollectionDeleted,
@@ -1646,7 +2282,7 @@ describe('collections panel', () => {
       api.listUnfinishedDeletions.mockResolvedValue([deletion()]);
       const onCollectionDeleted = vi.fn();
 
-      render(CollectionsPanel, props({ collections: [collection('Default', 1)], onCollectionDeleted }));
+      renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Default', 1)], onCollectionDeleted }));
       await act(async () => {});
 
       expect(screen.getByText('Deleting Nightfall…')).toBeTruthy();
@@ -1665,7 +2301,7 @@ describe('collections panel', () => {
   it('reports an unsafe deletion state instead of claiming success', async () => {
     api.listUnfinishedDeletions.mockResolvedValue([deletion({ errorCode: 'UNSAFE_RECOVERY' })]);
 
-    render(CollectionsPanel, props({ collections: [collection('Default', 1)] }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Default', 1)] }));
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('could not be finished safely');
@@ -1678,7 +2314,7 @@ describe('collections panel', () => {
       new ApiError('CONFIRMATION_MISMATCH', 'the confirmation name does not match the collection name'),
     );
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Delete collection' }));
     await fireEvent.input(screen.getByLabelText('Type the collection name to confirm'), { target: { value: 'Nightfall' } });
     await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete collection' }));
@@ -1693,7 +2329,7 @@ describe('collections panel', () => {
   it('confirms one document by filename and collection and sends nothing when declined', async () => {
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1')]));
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Delete doc-1.pdf' }));
 
     const dialog = screen.getByRole('dialog', { name: 'Delete doc-1.pdf?' });
@@ -1724,7 +2360,7 @@ describe('collections panel', () => {
       const onDocumentDeleted = vi.fn();
       const onCollectionsChanged = vi.fn();
 
-      render(CollectionsPanel, props({
+      renderExpandedPanel(CollectionsPanel, props({
         collections: [collection('Nightfall', 1)],
         selectedId: 'nightfall',
         onDocumentDeleted,
@@ -1744,7 +2380,8 @@ describe('collections panel', () => {
       api.getDeletion.mockResolvedValue(
         deletion({ operationId: 'op-9', kind: 'DOCUMENT', documentIds: ['doc-1'], phase: 'DONE', terminal: true }),
       );
-      api.listCollectionDocuments.mockResolvedValue(page([]));
+      api.getCollectionDocumentSummary.mockResolvedValue({ total: 75, byStatus: { FAILED: 2, COMPLETE: 73 } });
+    api.listCollectionDocuments.mockResolvedValue(page([]));
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
 
@@ -1771,7 +2408,7 @@ describe('collections panel', () => {
       ]);
       const onDocumentDeleted = vi.fn();
 
-      render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], onDocumentDeleted }));
+      renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], onDocumentDeleted }));
       await act(async () => {});
 
       // The table is not showing the row, so the message names the collection rather than inventing a
@@ -1803,7 +2440,7 @@ describe('collections panel', () => {
       deletion({ operationId: 'op-9', kind: 'DOCUMENT', documentIds: ['doc-1', 'doc-2'] }),
     );
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 51)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 51)], selectedId: 'nightfall' }));
 
     // The page holds two of the collection's 51 documents, and select-all is named for exactly that.
     const selectAll = await screen.findByRole('checkbox', { name: 'Select all 2 documents on this page' });
@@ -1834,7 +2471,7 @@ describe('collections panel', () => {
   it('clears the checked rows when the filter, sort, page or collection changes', async () => {
     api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1'), documentRow('doc-2')], 51));
 
-    const { rerender } = render(CollectionsPanel, props({
+    const { rerender } = renderExpandedPanel(CollectionsPanel, props({
       collections: [collection('Nightfall', 51), collection('Default', 1)],
       selectedId: 'nightfall',
     }));
@@ -1873,7 +2510,7 @@ describe('collections panel', () => {
         deletion({ operationId: 'op-8', kind: 'DOCUMENT', documentIds: ['doc-other'] }),
       );
 
-      render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+      renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
       await act(async () => {});
       await fireEvent.click(screen.getByRole('checkbox', { name: 'Select all 2 documents on this page' }));
       expect(screen.getByText(/2 selected on this page/)).toBeTruthy();
@@ -1913,7 +2550,7 @@ describe('collections panel', () => {
       deletion({ operationId: 'op-9', kind: 'DOCUMENT', documentIds: ['doc-1', 'doc-2'] }),
     );
 
-    render(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
     await fireEvent.click(await screen.findByRole('checkbox', { name: 'Select all 2 documents on this page' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
 
@@ -1939,7 +2576,7 @@ describe('collections panel', () => {
       api.listCollectionDocuments.mockResolvedValue(page([documentRow('doc-1', { originalFilename: 'ledger.pdf' })]));
       api.getCollectionDocument.mockResolvedValue({ document: documentRow('doc-1', { originalFilename: 'ledger.pdf' }), errorMessage: null, sourceId: 'unit-1' });
       api.previewRescan.mockResolvedValue({ previewId: 'preview-1', documentId: 'doc-1', managedHash: 'hash', snapshot: {} as never, pageTotal: 12, externalPageUpperBound: 0, destinations: [], external: false });
-      render(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+      renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
       await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
       const details = await screen.findByRole('region', { name: 'Document details' });
       expect(within(details).getByTestId('document-reading-status').textContent).toContain('Done');

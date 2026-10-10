@@ -20,7 +20,7 @@
     "claude-opus-4-7": { "provider": "ANTHROPIC", "contextWindow": 1000000, "maxOutputTokens": 128000, "inputPricePerMillion": 5.0, "outputPricePerMillion": 25.0, "cacheReadPricePerMillion": 0.5, "imageInput": true },
     "claude-sonnet-4-6": { "provider": "ANTHROPIC", "contextWindow": 1000000, "maxOutputTokens": 128000, "inputPricePerMillion": 3.0, "outputPricePerMillion": 15.0, "cacheReadPricePerMillion": 0.3, "imageInput": true },
     "claude-haiku-4-5-20251001": { "provider": "ANTHROPIC", "contextWindow": 200000, "maxOutputTokens": 64000, "inputPricePerMillion": 1.0, "outputPricePerMillion": 5.0, "cacheReadPricePerMillion": 0.1, "imageInput": true },
-    "deepseek-chat": { "provider": "OPENAI_COMPATIBLE", "imageInput": false },
-    "deepseek-reasoner": { "provider": "OPENAI_COMPATIBLE", "imageInput": false }
+    "deepseek-chat": { "provider": "OPENAI_COMPATIBLE" },
+    "deepseek-reasoner": { "provider": "OPENAI_COMPATIBLE" }
   }
 }

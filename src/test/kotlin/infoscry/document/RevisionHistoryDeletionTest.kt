@@ -110,8 +110,9 @@ class RevisionHistoryDeletionTest {
         context.database.transaction { connection ->
             connection.prepareStatement(
                 "INSERT INTO ocr_rescan_previews (preview_id, collection_id, document_id, base_revision_id, " +
-                    "managed_sha256, snapshot, snapshot_hash, approval_required, created_at, expires_at) " +
-                    "VALUES ('preview-1', ?, ?, ?, ?, '{}', ?, 0, '2026-10-07T00:00:00Z', '2026-10-08T00:00:00Z')",
+                    "managed_sha256, snapshot, selection, snapshot_hash, approval_required, created_at, expires_at) " +
+                    "VALUES ('preview-1', ?, ?, ?, ?, '{}', '{\"mode\":\"automatic\",\"ordinals\":null}', ?, 0, " +
+                    "'2026-10-07T00:00:00Z', '2026-10-08T00:00:00Z')",
             ).use { statement ->
                 statement.setString(1, collection.value)
                 statement.setString(2, doomed.documentId.value)

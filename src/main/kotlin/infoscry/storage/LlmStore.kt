@@ -818,7 +818,23 @@ class LlmStore(private val database: Database) {
         }
 
         val evidence = connection.prepareStatement(
-            "SELECT evidence_id, source_unit_id, locator_json, excerpt, message_seq, revision_id FROM evidence_ledger WHERE conversation_id = ? ORDER BY evidence_id",
+            "SELECT e.evidence_id, e.source_unit_id, e.locator_json, e.excerpt, e.message_seq, e.revision_id, " +
+                "COALESCE(historical_document.id, current_document.id, unversioned_document.id) AS document_id " +
+                "FROM evidence_ledger e JOIN conversations c ON c.id = e.conversation_id " +
+                "LEFT JOIN content_units u ON u.id = e.source_unit_id " +
+                "LEFT JOIN documents current_document ON current_document.id = u.document_id " +
+                "AND current_document.collection_id = c.collection_id " +
+                "LEFT JOIN page_text_revisions p ON p.revision_id = e.revision_id AND p.unit_id = e.source_unit_id " +
+                "LEFT JOIN document_revisions r ON r.id = p.revision_id " +
+                "LEFT JOIN documents historical_document ON historical_document.id = r.document_id " +
+                "AND historical_document.collection_id = c.collection_id " +
+                "LEFT JOIN (SELECT p.unit_id, MIN(r.document_id) AS document_id " +
+                "FROM page_text_revisions p JOIN document_revisions r ON r.id = p.revision_id " +
+                "GROUP BY p.unit_id HAVING COUNT(DISTINCT r.document_id) = 1) unique_historical_unit " +
+                "ON unique_historical_unit.unit_id = e.source_unit_id AND e.revision_id IS NULL " +
+                "LEFT JOIN documents unversioned_document ON unversioned_document.id = unique_historical_unit.document_id " +
+                "AND unversioned_document.collection_id = c.collection_id " +
+                "WHERE e.conversation_id = ? ORDER BY e.evidence_id",
         ).use { statement ->
             statement.setString(1, conversationId)
             statement.executeQuery().use { results ->
@@ -834,6 +850,7 @@ class LlmStore(private val database: Database) {
                                 excerpt = results.getString("excerpt"),
                                 messageSeq = messageSeq,
                                 revisionId = results.getString("revision_id"),
+                                documentId = results.getString("document_id") ?: "",
                             ),
                         )
                     }

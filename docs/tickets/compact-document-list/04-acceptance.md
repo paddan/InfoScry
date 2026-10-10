@@ -1,6 +1,6 @@
 # 04: Browser acceptance and user documentation
 
-**Status:** Not started.
+**Status:** Implemented and independently reviewed 2026-10-10.
 **Blocked by:** 03.
 **Spec:** [Compact document list](../../specs/2026-09-30-compact-document-list.md).
 Read the [shared constraints and gates](STATUS.md) before starting.
@@ -13,12 +13,17 @@ Extend the real Collections browser flow with a multi-page fixture, bounded layo
 - `src/test/kotlin/infoscry/server/CollectionsBrowserAcceptanceTest.kt`
 - `docs/usage.md`
 - `docs/implementation-status.md`
+- Minimal `CollectionsPanel.svelte` / component-test corrections when actual
+  browser geometry reveals an acceptance failure, including sticky headers
+  obscuring focused detail controls. Keep focus visible after open and Escape.
 
 **Tests:** Extend CollectionsBrowserAcceptanceTest and its Playwright script with temporary redistributable fixtures/local fake extraction; no private data or real OCR required.
 
 ## Test-first steps
 
 - [ ] Add failing tests for these exact observable cases:
+  - At 390/1024/1440/1920px, the list uses available width, inline metadata remains
+    accessible and settings/history disclosures never hide active progress/errors.
   - At desktop and narrow viewports the collapsed table is absent, settings/import/history remain reachable and no document table causes page-width overflow.
   - Expanded table scrollHeight exceeds clientHeight for >50 documents while search/sort and pager sit outside that scrolling box; details stay inside it.
   - Hidden-page failed count opens matching documents; live search, sorting, details and existing Retry/Delete actions remain functional.
@@ -36,3 +41,27 @@ Extend the real Collections browser flow with a multi-page fixture, bounded layo
 ./gradlew check
 (cd web && npm run check && npm run build)
 ```
+
+## Verification record — 2026-10-10
+
+All 14 existing Collections browser scenarios and two new compact-list scenarios
+passed, using the full-class run plus targeted reruns after local test-oracle
+corrections and a focus fix. Generated fixtures cover hidden-page failures,
+live search/sort/details/Retry/Delete, Admin and A/B session return, reload reset,
+page/selection reset, active progress and summary errors. No private data or real
+providers were used.
+
+At 390/1024/1440/1920px, measured page overflow was zero. The 540px table area
+scrolls independently, with controls/pager outside it; 390px uses internal
+horizontal scrolling. Eight screenshots were inspected. A real browser RED
+showed the focused Details trigger behind the sticky header. Minimal table-local
+scroll correction now keeps it visible on open and after Escape; all eight focus
+geometry checks passed. Updated wide/narrow screenshots agree.
+
+Final focused panel tests: 124; full frontend: 19 files / 383 tests, Svelte zero
+errors/warnings, build passed. Final `./gradlew check` succeeded in 4m53s:
+130 JVM suites / 1,585 tests, zero failures/errors/skips, plus 383 frontend tests.
+Independent review and scoped fix1 review approved spec and quality.
+
+Human keyboard/screen-reader, real OCR/CoreML, native picker and the broader
+format-specific source-viewer finish line remain separate open gates.

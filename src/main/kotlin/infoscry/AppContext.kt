@@ -248,6 +248,12 @@ class AppContext private constructor(
         gate = revisionSnapshots,
     )
 
+    /** Exact revision-bound text and page images, available without OCR or embeddings. */
+    val pageReviewService: infoscry.document.PageReviewService = infoscry.document.PageReviewService(
+        paths = paths, documents = documents, revisions = revisions, library = library,
+        operations = ocrOperations, profileRevisionOf = { ocrProfiles.findRevision(it) },
+    )
+
     /**
      * Admitting, following, approving and cancelling a rescan of one document.
      *

@@ -43,6 +43,8 @@
   export let keyHint = 'Only the variable name is stored — never the key value.';
   /** Whether the saved profile's key is present, in words; null while there is no saved profile to ask about. */
   export let keyState: string | null = null;
+  /** Lets a new-profile form suggest its name when a catalog model is explicitly chosen. */
+  export let onModelSelected: ((modelId: string, providerLabel: string) => void) | undefined = undefined;
 
   let presetId = '';
   let fetchingModels = false;
@@ -191,6 +193,9 @@
     }
     catalogPriceUnknown = !model.priceKnown;
     catalogImageUnknown = imageOnly && model.imageInput === null;
+    const preset = presets.find((entry) => entry.provider === draft.provider
+      && entry.endpoint.replace(/\/+$/, '') === draft.endpoint.replace(/\/+$/, ''));
+    onModelSelected?.(model.id, preset?.label ?? (draft.provider === 'ANTHROPIC' ? 'Anthropic' : 'Custom'));
   }
 
   function modelOptionLabel(model: LlmCatalogModel): string {

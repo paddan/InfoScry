@@ -423,6 +423,32 @@ class CollectionsBrowserAcceptanceTest {
         )
     }
 
+    /** Compact-list C04: generated multi-document archive, a three-page fake, and hidden failures. */
+    @Test
+    fun `compact list geometry live queries and session choices survive navigation safely`() {
+        startServer("Notes", "Archive")
+        importThroughTheRoute("Notes", AcceptanceFixtures.folder(sourcesDir, "bulk"))
+        importThroughTheRoute("Notes", AcceptanceFixtures.files(sourcesDir,
+            "fail-once-a.txt", "fail-once-b.txt", "mixed-pages.png"))
+        importThroughTheRoute("Archive", AcceptanceFixtures.files(sourcesDir, "archive/keep-a.txt", "archive/keep-b.txt"))
+        runScenario("compact-list")
+        assertEquals(57, documentCount("Notes"), "one browser deletion removes exactly one generated document")
+        assertEquals(DocumentStatus.COMPLETE, findDocument("Notes", "fail-once-a.txt")!!.status)
+        assertEquals(DocumentStatus.FAILED, findDocument("Notes", "fail-once-b.txt")!!.status)
+        assertEquals(3, progressOf(findDocument("Notes", "mixed-pages.png")!!.id)!!.totalUnits)
+        assertEquals(2, documentCount("Archive"), "the other collection stays intact")
+        assertTrue(Files.exists(sourcesDir.resolve("bulk/note-01.txt")), "browser deletion leaves the external original intact")
+    }
+
+    @Test
+    fun `collapsed documents and history keep active import progress and read errors visible`() {
+        startServer("Notes")
+        picker.folder = AcceptanceFixtures.folder(sourcesDir, "held")
+        runScenario("compact-progress-errors") { mark -> if (mark == "compact-progress-observed") gate.release() }
+        assertEquals(JobState.COMPLETE, context().jobs.listImports(collectionId("Notes"), 1).single().state)
+        assertEquals(3, documentCount("Notes"))
+    }
+
     // ---- Server ----
 
     private fun startServer(vararg collections: String) = startServerOver(tempDir.resolve("data"), *collections)
@@ -496,6 +522,7 @@ class CollectionsBrowserAcceptanceTest {
                 environment()["BASE_URL"] = harness!!.url
                 environment()["SCENARIO"] = name
                 environment()["FIXTURES"] = sourcesDir.toString()
+                environment()["SCREENSHOT_DIR"] = Paths.get(System.getProperty("user.dir"), "build", "c04-browser-evidence").toString()
             }
             .start()
         val answered = LinkedHashSet<String>()
@@ -511,6 +538,7 @@ class CollectionsBrowserAcceptanceTest {
         answerMarks(outputFile, answered, onMark)
         val output = Files.readString(outputFile)
         outputFile.toFile().delete()
+        println(output)
         if (!finished) error("browser scenario '$name' timed out\n$output")
         check(process.exitValue() == 0) { "browser scenario '$name' failed:\n$output" }
     }

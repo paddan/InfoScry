@@ -386,7 +386,9 @@ class InvestigationToolsTest {
 
         val searched = assertIs<ToolResult.Success>(tools.execute("search_collection", """{"query":"q"}"""))
         assertEquals(listOf("revision-from-hit"), searched.evidence.map { it.revisionId }, "a hit names its own revision")
+        assertEquals(listOf(docA.value), searched.evidence.map { it.documentId }, "a hit retains its authoritative owning document")
         assertFalse(searched.payloadJson.contains("revision"), "provenance is for the ledger, not for the model: ${searched.payloadJson}")
+        assertFalse(searched.payloadJson.contains("documentId"), "citation routing metadata is not sent to the model")
 
         val read = assertIs<ToolResult.Success>(
             tools.execute("read_content_unit", """{"contentUnitId":"${unit.value}"}"""),
@@ -396,7 +398,9 @@ class InvestigationToolsTest {
             read.evidence.map { it.revisionId },
             "a unit read from the live reading is the document's active revision",
         )
+        assertEquals(listOf(docA.value), read.evidence.map { it.documentId })
         assertFalse(read.payloadJson.contains("revision"), read.payloadJson)
+        assertFalse(read.payloadJson.contains("documentId"), read.payloadJson)
 
         val adjacent = assertIs<ToolResult.Success>(
             tools.execute("read_adjacent_units", """{"contentUnitId":"${unit.value}","after":1}"""),

@@ -110,6 +110,8 @@ data class RevisionPageText(
     val artifactSha256: String?,
     val approval: PageApproval,
     val sourceImage: SourceImageProvenance? = null,
+    /** The successful reading that produced this page; null is unknown and is never inferred from equal bytes. */
+    val producerRevisionId: String? = null,
 )
 
 /**
@@ -135,6 +137,8 @@ data class RevisionPageDraft(
     val chunks: List<RevisionChunkDraft> = emptyList(),
     /** The extractor's key for this page, recorded so a resumed attempt can tell which pages it already staged. */
     val unitKey: String? = null,
+    /** Successful reads name their candidate; preserved pages inherit their baseline producer, including null. */
+    val producerRevisionId: String? = null,
 ) {
     init {
         require(ordinal >= 0) { "RevisionPageDraft.ordinal must not be negative, was $ordinal" }
@@ -271,6 +275,30 @@ class DocumentRevisionStore(private val database: Database, private val content:
                     }
                 }
             }
+        }
+    }
+
+    /** One producer's frozen reading, without loading every revision of its document. */
+    fun readingSnapshot(revisionId: String): OcrSettingsSnapshot? = database.read { connection ->
+        connection.prepareStatement("SELECT reading_snapshot FROM document_revisions WHERE id = ?").use { statement ->
+            statement.setString(1, revisionId)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) rows.getString("reading_snapshot")?.let(::decodeReading) else null
+            }
+        }
+    }
+
+    /** The closest recorded published page in one direction; the revision/ordinal primary key bounds this read. */
+    fun neighbourOrdinal(revisionId: String, ordinal: Int, previous: Boolean): Int? = database.read { connection ->
+        val comparison = if (previous) "<" else ">"
+        val order = if (previous) "DESC" else "ASC"
+        connection.prepareStatement(
+            "SELECT ordinal FROM page_text_revisions WHERE revision_id = ? AND ordinal $comparison ? " +
+                "AND approval = 'APPROVED' ORDER BY ordinal $order LIMIT 1",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            statement.setInt(2, ordinal)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getInt(1) else null }
         }
     }
 
@@ -448,6 +476,19 @@ class DocumentRevisionStore(private val database: Database, private val content:
             check(revision.state == RevisionState.CANDIDATE) {
                 "revision $revisionId is ${revision.state}, so it cannot be staged into"
             }
+            page.producerRevisionId?.let { producerId ->
+                val producer = connection.selectRevision(producerId)
+                require(producer?.documentId == revision.documentId) { "a page producer belongs to the same document" }
+                require(producerId == revisionId || producer.state == RevisionState.PUBLISHED || producer.state == RevisionState.SUPERSEDED) {
+                    "a preserved page producer must have been published"
+                }
+                if (producerId != revisionId) {
+                    val source = connection.selectPageText(producerId, page.ordinal)
+                    require(source != null && source.approval == PageApproval.APPROVED && source.unitId == page.unitId &&
+                        source.extractedText == page.extractedText && source.sourceImage == page.sourceImage &&
+                        source.extractionMethod == page.extractionMethod) { "a preserved page must match its recorded producer" }
+                }
+            }
             connection.deletePageChunks(revisionId, page.ordinal)
             connection.writePageText(revisionId, page, Instants.now())
             connection.writeChunks(revisionId, page)
@@ -614,7 +655,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 now,
                 readingSnapshot,
             )
-            connection.copyPublishedPages(id, documentId, now)
+            connection.copyPublishedPages(id, documentId, now, producerRevisionId = id.takeIf { readingSnapshot != null })
             connection.copyPublishedChunks(id, documentId, now)
             connection.upsertActiveRevision(documentId, id, now)
             connection.supersede(previous, documentId)
@@ -1025,19 +1066,22 @@ class DocumentRevisionStore(private val database: Database, private val content:
         }
     }
 
-    private fun Connection.copyPublishedPages(revisionId: String, documentId: DocumentId, now: String) {
+    private fun Connection.copyPublishedPages(
+        revisionId: String, documentId: DocumentId, now: String, producerRevisionId: String?,
+    ) {
         prepareStatement(
             "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, extracted_text, " +
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
-                "artifact_sha256, approval, created_at) " +
+                "artifact_sha256, approval, created_at, producer_revision_id) " +
                 "SELECT ?, ordinal, id, locator, extracted_text, search_text, NULL, extraction_method, " +
-                "mean_confidence, artifact_relative_path, artifact_sha256, ?, ? FROM content_units " +
+                "mean_confidence, artifact_relative_path, artifact_sha256, ?, ?, ? FROM content_units " +
                 "WHERE document_id = ?",
         ).use { statement ->
             statement.setString(1, revisionId)
             statement.setString(2, PageApproval.APPROVED.name)
             statement.setString(3, now)
-            statement.setString(4, documentId.value)
+            statement.setString(4, producerRevisionId)
+            statement.setString(5, documentId.value)
             statement.executeUpdate()
         }
     }
@@ -1068,11 +1112,11 @@ class DocumentRevisionStore(private val database: Database, private val content:
             "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, extracted_text, " +
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
                 "artifact_sha256, source_image_root, source_image_relative_path, source_image_sha256, " +
-                "source_image_width, source_image_height, source_image_render_version, approval, created_at) " +
+                "source_image_width, source_image_height, source_image_render_version, approval, created_at, producer_revision_id) " +
                 "SELECT ?, ordinal, unit_id, locator, extracted_text, search_text, text_sha256, " +
                 "extraction_method, mean_confidence, artifact_relative_path, artifact_sha256, " +
                 "source_image_root, source_image_relative_path, source_image_sha256, source_image_width, " +
-                "source_image_height, source_image_render_version, ?, ? FROM page_text_revisions " +
+                "source_image_height, source_image_render_version, ?, ?, producer_revision_id FROM page_text_revisions " +
                 "WHERE revision_id = ? AND approval = ?",
         ).use { statement ->
             statement.setString(1, revisionId)
@@ -1145,7 +1189,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
                 "artifact_sha256, source_image_root, source_image_relative_path, source_image_sha256, " +
                 "source_image_width, source_image_height, source_image_render_version, approval, " +
-                "created_at, unit_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "created_at, unit_key, producer_revision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (revision_id, ordinal) DO UPDATE SET unit_id = excluded.unit_id, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, text_sha256 = excluded.text_sha256, " +
@@ -1159,7 +1203,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "source_image_width = excluded.source_image_width, " +
                 "source_image_height = excluded.source_image_height, " +
                 "source_image_render_version = excluded.source_image_render_version, " +
-                "approval = excluded.approval, unit_key = excluded.unit_key",
+                "approval = excluded.approval, unit_key = excluded.unit_key, producer_revision_id = excluded.producer_revision_id",
         ).use { statement ->
             statement.setString(1, revisionId)
             statement.setInt(2, page.ordinal)
@@ -1198,6 +1242,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
             statement.setString(18, page.approval.name)
             statement.setString(19, now)
             statement.setString(20, page.unitKey)
+            statement.setString(21, page.producerRevisionId)
             statement.executeUpdate()
         }
     }
@@ -1265,6 +1310,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
         // Absent columns are one answer rather than six: a row written before source images were recorded,
         // and a page that was never read from an image, both say the same thing — no image was observed.
         sourceImage = toSourceImage(),
+        producerRevisionId = getString("producer_revision_id"),
     )
 
     /**
@@ -1350,7 +1396,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
             "SELECT revision_id, ordinal, unit_id, locator, extracted_text, search_text, text_sha256, " +
                 "extraction_method, mean_confidence, artifact_relative_path, artifact_sha256, approval, " +
                 "source_image_root, source_image_relative_path, source_image_sha256, source_image_width, " +
-                "source_image_height, source_image_render_version FROM page_text_revisions"
+                "source_image_height, source_image_render_version, producer_revision_id FROM page_text_revisions"
 
         const val SELECT_CHUNKS =
             "SELECT unit_ordinal, ordinal, text, start_offset, end_offset, token_count, token_start, " +

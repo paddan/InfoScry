@@ -40,6 +40,8 @@ data class ToolEvidence(
      * result the model receives is its own payload, and provenance belongs to the evidence ledger.
      */
     @Transient val revisionId: String? = null,
+    /** Owning document for the source unit, retained for citation routing but never sent to the model. */
+    @Transient val documentId: String = "",
 )
 
 /** The outcome of one tool call: either the exact JSON [payloadJson] the model receives, or a typed failure. */
@@ -122,7 +124,14 @@ class InvestigationTools(
             .filter { it.collectionId == collectionId } // never trust a hit to name our scope
             .take(limit)
             .map { hit ->
-                EvidenceItem(hit.unitId.value, hit.locator, hit.locatorLabel, escape(hit.text), revisionId = hit.revisionId)
+                EvidenceItem(
+                    hit.unitId.value,
+                    hit.locator,
+                    hit.locatorLabel,
+                    escape(hit.text),
+                    revisionId = hit.revisionId,
+                    documentId = hit.documentId.value,
+                )
             }
             .toMutableList()
         bounded(items, { size -> size - 1 }, nextEvidenceId) // drop the lowest-ranked hit only as a last resort
@@ -208,7 +217,14 @@ class InvestigationTools(
     }
 
     private fun itemOf(unit: ContentUnit, revisionId: String?): EvidenceItem =
-        EvidenceItem(unit.id.value, unit.locator, unit.locator.describe(), escape(unit.extractedText), revisionId = revisionId)
+        EvidenceItem(
+            unit.id.value,
+            unit.locator,
+            unit.locator.describe(),
+            escape(unit.extractedText),
+            revisionId = revisionId,
+            documentId = unit.documentId.value,
+        )
 
     /**
      * The revision [units] were read from, or null when that cannot be proven.
@@ -350,8 +366,9 @@ class InvestigationTools(
         var truncated: Boolean = false,
         var evidenceId: String = "",
         val revisionId: String? = null,
+        val documentId: String = "",
     ) {
-        val entry: ToolEvidence get() = ToolEvidence(evidenceId, sourceUnitId, locator, locatorLabel, text, truncated, revisionId)
+        val entry: ToolEvidence get() = ToolEvidence(evidenceId, sourceUnitId, locator, locatorLabel, text, truncated, revisionId, documentId)
     }
 
     /** Drops the farther of the two outer neighbours first, so the requested unit keeps its context. */

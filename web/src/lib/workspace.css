@@ -1,0 +1,23 @@
+/* Work areas use the available width; prose and short settings retain a readable measure. */
+.app-shell {
+  --workspace-gutter: clamp(1rem, 1.5vw, 1.5rem);
+  --workspace-prose-measure: 75ch;
+}
+
+.workspace-area {
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.workspace-area .hint,
+#panel-ask .answer,
+#panel-investigate .answer,
+#panel-ask .stored-question {
+  max-inline-size: var(--workspace-prose-measure, 75ch);
+  overflow-wrap: anywhere;
+}
+
+.workspace-area .field,
+.workspace-area fieldset {
+  min-inline-size: 0;
+}

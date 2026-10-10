@@ -4,6 +4,7 @@ import infoscry.AppContext
 import infoscry.domain.DocumentId
 import infoscry.ocr.OcrOperation
 import infoscry.ocr.ReadingMethod
+import infoscry.ocr.RescanSelection
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.document.RevisionHistoryEntry
 import infoscry.storage.RevisionRestoreRecord
@@ -27,6 +28,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class RescanPreviewRequest(
     val method: String,
+    val selection: RescanSelection? = null,
 )
 
 /** Admitting a previewed rescan. The request id is what makes a repeated POST one operation. */
@@ -161,6 +163,7 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                     collectionId = collectionId,
                     documentId = documentId,
                     method = method,
+                    selection = request.selection ?: RescanSelection.Automatic,
                 )
                 call.respondJson(HttpStatusCode.OK, preview)
             }

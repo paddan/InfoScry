@@ -16,6 +16,9 @@
   import { importProgressText } from './importProgress';
 
   export let collectionId: string;
+  export let visible = true;
+  /** Refresh collection counts/history after admission and after the job reaches a terminal state. */
+  export let onImportChanged: (collectionId: string) => void = () => {};
   /** The collection the paths are added to, shown so the destination is explicit before submission. */
   export let collectionName: string;
 
@@ -39,6 +42,24 @@
    */
   let endPollWait: (() => void) | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  let resumeVisibleWait: (() => void) | null = null;
+
+  $: updateVisibility(visible);
+
+  function updateVisibility(next: boolean): void {
+    if (next) resumeVisibleWait?.();
+    else endPollWait?.();
+  }
+
+  function waitUntilVisible(): Promise<void> {
+    if (visible) return Promise.resolve();
+    return new Promise((resolve) => {
+      resumeVisibleWait = () => {
+        resumeVisibleWait = null;
+        resolve();
+      };
+    });
+  }
 
   const TERMINAL_STATES: JobState[] = ['COMPLETE', 'FAILED', 'CANCELLED'];
 
@@ -124,6 +145,7 @@
   function readingStarted(run: ImportStarted | RescanStarted): void {
     dialogOpen = false;
     if (!('job' in run)) return;
+    onImportChanged(collectionId);
     void followImport(run.job);
   }
 
@@ -137,12 +159,17 @@
       job = initial;
       let current = initial;
       while (!isTerminal(current.state)) {
-        await sleep(1000);
+        if (visible) await sleep(1000);
+        if (generation !== importGeneration) return;
+        await waitUntilVisible();
         if (generation !== importGeneration) return;
         current = await getJob(current.id);
         if (generation !== importGeneration) return;
         job = current;
       }
+      await waitUntilVisible();
+      if (generation !== importGeneration) return;
+      onImportChanged(collectionId);
       const results = await getImportItems(current.id);
       if (generation !== importGeneration) return;
       items = results;
@@ -199,6 +226,7 @@
     // The generation stops any further work; ending the wait releases the loop sleeping on it.
     importGeneration += 1;
     endPollWait?.();
+    resumeVisibleWait?.();
   });
 </script>
 

@@ -41,6 +41,7 @@ import infoscry.ocr.PageDispatchIdentity
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageOcrEngine
 import infoscry.ocr.RescanPreview
+import infoscry.ocr.RescanSelection
 import infoscry.storage.PageApproval
 import infoscry.storage.RevisionState
 import infoscry.storage.StaleRescanPreviewException
@@ -58,6 +59,7 @@ import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -216,6 +218,10 @@ class RescanJobHandlerTest {
             assertEquals(OcrOperationStage.COMPLETE, result.operation.stage)
             assertNull(result.operation.errorCode)
             assertEquals(0, result.operation.pagesFailed, "a skipped page was counted as failed")
+            assertEquals(1, result.operation.pageTotal, "only the scanned page belongs in the operation total")
+            assertEquals(1, result.operation.pagesCommitted, "the preserved clean page was counted as read")
+            assertEquals(1, result.jobCompleted, "job progress counted the preserved clean page")
+            assertEquals(1, result.jobTotal, "job total included the preserved clean page")
 
             AppContext.open(harness.archiveDir).use { context ->
                 val baseline = context.revisions.pages(picture.baselineRevisionId)
@@ -225,6 +231,146 @@ class RescanJobHandlerTest {
                 assertEquals(cleanText, staged[0].extractedText, "the clean page did not keep its published text")
                 assertEquals(baseline[0].unitId, staged[0].unitId, "the clean page changed its identity")
                 assertEquals("the new reading of the scanned page", staged[1].extractedText)
+            }
+        }
+    }
+
+    @Test
+    fun `a three-page rescan renders only selected pages and preserves baseline provenance`() {
+        withHarness { harness ->
+            val picture = harness.importTwoCleanAndScannedPdf(
+                cleanTexts = listOf(
+                    "This first page has enough useful text to remain selected for preservation.",
+                    "This second page also has enough useful text to remain selected for preservation.",
+                ),
+                scannedText = "the published reading of the scanned page",
+            )
+            val engine = FakePageEngine(readings = listOf("the replacement reading"))
+
+            val result = harness.rescan(picture, engine = engine)
+
+            assertEquals(1, engine.calls)
+            AppContext.open(harness.archiveDir).use { context ->
+                val baseline = context.revisions.pages(picture.baselineRevisionId)
+                val candidate = context.revisions.pages(assertNotNull(result.operation.candidateRevisionId))
+                assertEquals(listOf(0, 1, 2), candidate.map { page -> page.ordinal })
+                assertEquals(baseline.map { page -> page.unitId }, candidate.map { page -> page.unitId })
+                assertEquals(
+                    baseline.take(2).map { page -> page.sourceImage },
+                    candidate.take(2).map { page -> page.sourceImage },
+                    "preserved pages must keep their actual source provenance",
+                )
+                assertEquals(
+                    baseline.take(2).map { page -> page.extractionMethod },
+                    candidate.take(2).map { page -> page.extractionMethod },
+                    "preserved pages must keep their actual extraction provenance",
+                )
+                assertNotNull(candidate[2].sourceImage, "the selected page must retain the image it was read from")
+                val renderedPages = Files.walk(
+                    context.paths.artifactsDir(CollectionId("default"), picture.documentId).resolve("rescan")
+                        .resolve(assertNotNull(result.operation.candidateRevisionId)).resolve("pages"),
+                ).use { paths -> paths.filter(Files::isRegularFile).count() }
+                assertEquals(1L, renderedPages, "preserved pages were rendered into the attempt")
+            }
+        }
+    }
+
+    @Test
+    fun `an explicit set overrides automatic text heuristics and dispatches only canonical pages`() {
+        withHarness { harness ->
+            val cleanTexts = listOf(
+                "This first page has enough useful text to remain selected for preservation.",
+                "This second page also has enough useful text to remain selected for preservation.",
+            )
+            val picture = harness.importTwoCleanAndScannedPdf(cleanTexts, "the published scanned page")
+            val selection = RescanSelection.explicit(listOf(2, 0, 2))
+            val preview = harness.previewOf(picture.documentId, selection)
+            assertEquals(listOf(0, 2), preview.selection.ordinals)
+            assertEquals(2, preview.pageTotal)
+            assertEquals(3, preview.documentPages)
+
+            val engine = FakePageEngine(readings = listOf("forced clean page", "selected scanned page"))
+            val result = harness.rescan(picture, engine, selection = selection)
+
+            assertEquals(listOf(0, 2), engine.pages.map { page -> page.ordinal })
+            assertEquals(2, result.operation.pageTotal)
+            assertEquals(selection.canonicalized(3), result.operation.selection)
+            AppContext.open(harness.archiveDir).use { context ->
+                val baseline = context.revisions.pages(picture.baselineRevisionId)
+                val candidate = context.revisions.pages(assertNotNull(result.operation.candidateRevisionId))
+                assertEquals("forced clean page", candidate[0].extractedText)
+                assertEquals(baseline[1].extractedText, candidate[1].extractedText)
+                assertEquals(baseline[1].unitId, candidate[1].unitId)
+                assertEquals(baseline[1].producerRevisionId, candidate[1].producerRevisionId)
+                assertEquals(baseline[1].sourceImage, candidate[1].sourceImage)
+                assertEquals("selected scanned page", candidate[2].extractedText)
+            }
+        }
+    }
+
+    @Test
+    fun `explicit selection reads one clean text page when automatic selection reads none`() {
+        withHarness { harness ->
+            val texts = listOf(
+                "The first page contains enough ordinary text for automatic reading to preserve it.",
+                "The second page contains enough ordinary text for automatic reading to preserve it.",
+                "The third page contains enough ordinary text for automatic reading to preserve it.",
+            )
+            val picture = harness.importCleanTextPdf(texts)
+            val automatic = harness.previewOf(picture.documentId)
+            val explicit = RescanSelection.explicit(listOf(1))
+            val selected = harness.previewOf(picture.documentId, explicit)
+            assertEquals(0, automatic.pageTotal)
+            assertEquals(1, selected.pageTotal)
+            assertEquals(3, selected.documentPages)
+
+            val engine = FakePageEngine(readings = listOf("explicit replacement"))
+            val result = harness.rescan(picture, engine, selection = explicit)
+            assertEquals(listOf(1), engine.pages.map { page -> page.ordinal })
+            assertEquals(1, result.operation.pageTotal)
+            AppContext.open(harness.archiveDir).use { context ->
+                val baseline = context.revisions.pages(picture.baselineRevisionId)
+                val candidate = context.revisions.pages(assertNotNull(result.operation.candidateRevisionId))
+                assertEquals("explicit replacement", candidate[1].extractedText)
+                listOf(0, 2).forEach { ordinal ->
+                    assertEquals(baseline[ordinal].extractedText, candidate[ordinal].extractedText)
+                    assertEquals(baseline[ordinal].unitId, candidate[ordinal].unitId)
+                    assertEquals(baseline[ordinal].producerRevisionId, candidate[ordinal].producerRevisionId)
+                    assertEquals(baseline[ordinal].sourceImage, candidate[ordinal].sourceImage)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `different selection sets and automatic mode keep checkpoints operation scoped`() {
+        withHarness { harness ->
+            val picture = harness.importTwoCleanAndScannedPdf(
+                cleanTexts = listOf(
+                    "This first page has enough useful text to preserve on automatic rescans.",
+                    "This second page has enough useful text to preserve on automatic rescans.",
+                ),
+                scannedText = "the existing scanned page",
+            )
+            val firstEngine = FakePageEngine(readings = listOf("first explicit reading"))
+            val first = harness.rescan(picture, firstEngine, selection = RescanSelection.explicit(listOf(0)))
+
+            val automaticEngine = FakePageEngine(readings = listOf("automatic scanned-page reading"))
+            val automaticPreview = harness.previewOf(picture.documentId)
+            assertEquals(1, automaticPreview.pageTotal)
+            val automatic = harness.rescan(picture, automaticEngine)
+
+            val lastEngine = FakePageEngine(readings = listOf("new explicit page-one reading"))
+            val last = harness.rescan(picture, lastEngine, selection = RescanSelection.explicit(listOf(1)))
+
+            assertEquals(listOf(0), firstEngine.pages.map { page -> page.ordinal })
+            assertEquals(listOf(2), automaticEngine.pages.map { page -> page.ordinal })
+            assertEquals(listOf(1), lastEngine.pages.map { page -> page.ordinal })
+            assertNotEquals(first.operation.candidateRevisionId, automatic.operation.candidateRevisionId)
+            assertNotEquals(automatic.operation.candidateRevisionId, last.operation.candidateRevisionId)
+            AppContext.open(harness.archiveDir).use { context ->
+                val active = context.revisions.pages(assertNotNull(context.revisions.activeRevisionId(picture.documentId)))
+                assertEquals("new explicit page-one reading", active[1].extractedText)
             }
         }
     }
@@ -247,6 +393,95 @@ class RescanJobHandlerTest {
                 second.operation.candidateRevisionId,
                 "a resume stages into the candidate the operation already records",
             )
+        }
+    }
+
+    @Test
+    fun `a resumed attempt counts the selected page staged before interruption only once`() {
+        withHarness { harness ->
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = "This clean page has a useful text layer from the original document.",
+                scannedText = "the original scan reading",
+            )
+            val firstEngine = FakePageEngine(readings = listOf("the replacement scan reading"))
+            val resumedEngine = FakePageEngine(readings = listOf("must not be used"))
+
+            val (interrupted, resumed) = harness.rescanThenResume(
+                picture,
+                firstEngine = firstEngine,
+                resumedEngine = resumedEngine,
+                afterPageCommit = { _, _ -> throw kotlinx.coroutines.CancellationException("simulate interruption") },
+                onResumedInitialProgress = { context, jobId ->
+                    harness.resumedInitialProgress += assertNotNull(context.jobs.get(jobId)).completed
+                },
+            )
+
+            assertEquals(1, firstEngine.calls, "the selected scan page was not read before interruption")
+            assertTrue(interrupted.failure is kotlinx.coroutines.CancellationException)
+            assertEquals(1, interrupted.operation.pageTotal)
+            assertEquals(1, interrupted.operation.pagesCommitted)
+            assertEquals(0, interrupted.operation.pagesFailed)
+
+            assertEquals(0, resumedEngine.calls, "resume reread a page already staged under this operation")
+            assertEquals(
+                OcrOperationStage.COMPLETE,
+                resumed.operation.stage,
+                "resume failed with ${resumed.operation.errorCode}: ${resumed.operation.errorMessage}; " +
+                    "thrown=${resumed.failure}",
+            )
+            assertEquals(1, resumed.operation.pageTotal)
+            assertEquals(1, resumed.operation.pagesCommitted)
+            assertEquals(0, resumed.operation.pagesFailed)
+            assertEquals(1, resumed.jobCompleted)
+            assertEquals(1, resumed.jobTotal)
+            assertEquals(
+                listOf(1),
+                harness.resumedInitialProgress,
+                "the first progress report on resume must include the already staged selected page",
+            )
+        }
+    }
+
+    @Test
+    fun `a failed read with unchanged raster is retried instead of reusing preserved baseline text`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "the published baseline")
+            // The importer does not have page-image provenance for this format. Seed one successful scan so
+            // the active baseline now carries the exact raster hash a later identical render will produce.
+            val seeded = harness.rescan(picture, FakePageEngine(readings = listOf("the published baseline")))
+            val baseline = AppContext.open(harness.archiveDir).use { context ->
+                context.revisions.pages(assertNotNull(seeded.activeRevisionId)).single()
+            }
+            val firstEngine = FakePageEngine(readings = listOf(""))
+            val resumedEngine = FakePageEngine(readings = listOf("the successful retry"))
+            val resumedProgress = mutableListOf<Int>()
+
+            val (interrupted, resumed) = harness.rescanThenResume(
+                picture,
+                firstEngine = firstEngine,
+                resumedEngine = resumedEngine,
+                afterPageCommit = { _, _ -> throw kotlinx.coroutines.CancellationException("simulate interruption") },
+                onResumedInitialProgress = { context, jobId ->
+                    resumedProgress += assertNotNull(context.jobs.get(jobId)).completed
+                },
+            )
+
+            assertTrue(
+                interrupted.failure is kotlinx.coroutines.CancellationException,
+                "the first attempt was not interrupted after preserving the failed baseline: ${interrupted.failure}",
+            )
+            assertEquals(1, firstEngine.calls)
+            assertEquals(1, resumedEngine.calls, "a failed page was mistaken for this operation's checkpoint")
+            assertEquals(listOf(0), resumedProgress, "a preserved failed page was counted as a successful checkpoint")
+            val candidatePage = assertNotNull(resumed.candidatePage)
+            assertEquals("the successful retry", candidatePage.extractedText)
+            assertEquals(resumed.operation.candidateRevisionId, candidatePage.producerRevisionId)
+            assertEquals(assertNotNull(baseline.sourceImage).sha256, assertNotNull(candidatePage.sourceImage).sha256,
+                "the retry must use the same raster as the failed preserved baseline")
+            assertEquals(OcrOperationStage.COMPLETE, resumed.operation.stage)
+            assertEquals(0, resumed.operation.pagesFailed, "the successful retry retained a stale page failure")
+            assertEquals(DocumentStatus.COMPLETE, resumed.documentStatus)
+            assertEquals("the successful retry", resumed.publishedText)
         }
     }
 
@@ -432,11 +667,13 @@ internal class FakePageEngine(
  * committed unit, its chunks and its first published revision are the archive's own records rather than rows
  * this harness wrote itself. Everything a rescan then does is compared against those.
  */
-internal class RescanHarness(private val directory: Path) : AutoCloseable {
+internal class RescanHarness(private val directory: Path, seedCollection: Boolean = true) : AutoCloseable {
 
-    private val harness: Harness = Harness(directory)
+    private val harness: Harness = Harness(directory, seedCollection)
 
     private val admissions = java.util.concurrent.atomic.AtomicInteger()
+
+    val resumedInitialProgress = mutableListOf<Int>()
 
     /** The archive itself, which is the directory a second process opens. */
     val archiveDir: Path get() = harness.dataDir
@@ -463,6 +700,8 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         val publishedText: String,
         val indexedChunks: Int,
         val documentStatus: infoscry.domain.DocumentStatus?,
+        val jobCompleted: Int,
+        val jobTotal: Int,
         val engine: FakePageEngine?,
         /** What the attempt threw, if anything, so a test can assert on how it stopped. */
         val failure: Throwable?,
@@ -508,11 +747,70 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         }
     }
 
+    /** A three-page PDF with two clean text layers and one page selected for image reading. */
+    fun importTwoCleanAndScannedPdf(cleanTexts: List<String>, scannedText: String): Picture {
+        require(cleanTexts.size == 2)
+        val file = harness.sourcesDir.resolve("two-clean-and-scanned.pdf")
+        PDDocument().use { pdf ->
+            cleanTexts.forEach { text ->
+                val clean = PDPage()
+                pdf.addPage(clean)
+                PDPageContentStream(pdf, clean).use { content ->
+                    content.beginText()
+                    content.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 12f)
+                    content.newLineAtOffset(72f, 700f)
+                    content.showText(text)
+                    content.endText()
+                }
+            }
+            pdf.addPage(PDPage())
+            pdf.save(file.toFile())
+        }
+        val run = harness.importDurably(listOf(file), PdfPageUnits(cleanTexts + scannedText))
+        val documentId = assertNotNull(run.items.single().documentId)
+        AppContext.open(harness.dataDir).use { context ->
+            val revisionId = assertNotNull(context.revisions.activeRevisionId(documentId))
+            val firstPage = context.revisions.pages(revisionId).first()
+            return Picture(documentId, revisionId, firstPage.unitId.value, file)
+        }
+    }
+
+    /** A PDF whose pages all satisfy the automatic text selector, so only explicit choice causes a read. */
+    fun importCleanTextPdf(texts: List<String>): Picture {
+        val file = harness.sourcesDir.resolve("three-clean-pages.pdf")
+        PDDocument().use { pdf ->
+            texts.forEach { text ->
+                val page = PDPage()
+                pdf.addPage(page)
+                PDPageContentStream(pdf, page).use { content ->
+                    content.beginText()
+                    content.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 12f)
+                    content.newLineAtOffset(72f, 700f)
+                    content.showText(text)
+                    content.endText()
+                }
+            }
+            pdf.save(file.toFile())
+        }
+        val run = harness.importDurably(listOf(file), PdfPageUnits(texts))
+        val documentId = assertNotNull(run.items.single().documentId)
+        AppContext.open(harness.dataDir).use { context ->
+            val revisionId = assertNotNull(context.revisions.activeRevisionId(documentId))
+            val firstPage = context.revisions.pages(revisionId).first()
+            return Picture(documentId, revisionId, firstPage.unitId.value, file)
+        }
+    }
+
     /** What a rescan preview answers for [documentId] when it is taken now, with the Surya method. */
-    fun previewOf(documentId: DocumentId): RescanPreview = AppContext.open(harness.dataDir).use { context ->
+    fun previewOf(
+        documentId: DocumentId,
+        selection: RescanSelection = RescanSelection.Automatic,
+    ): RescanPreview = AppContext.open(harness.dataDir).use { context ->
         writeSelection(context)
         runBlocking {
-            rescanServiceOf(context, FakePageEngine()).preview(CollectionId("default"), documentId, ReadingMethod.Surya)
+            rescanServiceOf(context, FakePageEngine()).preview(
+                CollectionId("default"), documentId, ReadingMethod.Surya, selection,
+            )
         }
     }
 
@@ -592,11 +890,43 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         picture: Picture,
         engine: FakePageEngine,
         embedder: DocumentEmbedder? = TestDocumentEmbedder(),
+        selection: RescanSelection = RescanSelection.Automatic,
         beforePageCommit: (suspend (AppContext, JobId) -> Unit)? = null,
         afterPublication: (suspend (AppContext, JobId) -> Unit)? = null,
+        afterPageCommit: (suspend (AppContext, Int) -> Unit)? = null,
     ): Attempt = AppContext.open(harness.dataDir).use { context ->
+            val operationId = admitFor(context, picture, selection)
+        runAttempt(context, operationId, engine, embedder, beforePageCommit, picture, afterPublication, afterPageCommit)
+    }
+
+    /** Simulates a worker interruption and a new worker resuming from the same durable operation row. */
+    fun rescanThenResume(
+        picture: Picture,
+        firstEngine: FakePageEngine,
+        resumedEngine: FakePageEngine,
+        afterPageCommit: suspend (AppContext, Int) -> Unit,
+        onResumedInitialProgress: suspend (AppContext, JobId) -> Unit,
+    ): Pair<Attempt, Attempt> = AppContext.open(harness.dataDir).use { context ->
         val operationId = admitFor(context, picture)
-        runAttempt(context, operationId, engine, embedder, beforePageCommit, picture, afterPublication)
+        val interrupted = runAttempt(
+            context,
+            operationId,
+            firstEngine,
+            TestDocumentEmbedder(),
+            beforePageCommit = null,
+            picture = picture,
+            afterPageCommit = afterPageCommit,
+        )
+        val resumed = runAttempt(
+            context,
+            operationId,
+            resumedEngine,
+            TestDocumentEmbedder(),
+            beforePageCommit = null,
+            picture = picture,
+            onInitialProgress = { jobId -> onResumedInitialProgress(context, jobId) },
+        )
+        interrupted to resumed
     }
 
     /** Another attempt of an operation the archive already holds. */
@@ -633,14 +963,23 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         }
 
     /** One admission against a preview taken against the selection the tests name. */
-    fun admitOnly(picture: Picture): OcrOperation = AppContext.open(harness.dataDir).use { context ->
-        admitOnly(context, picture)
+    fun admitOnly(
+        picture: Picture,
+        selection: RescanSelection = RescanSelection.Automatic,
+    ): OcrOperation = AppContext.open(harness.dataDir).use { context ->
+        admitOnly(context, picture, selection)
     }
 
-    fun admitOnly(context: AppContext, picture: Picture): OcrOperation {
+    fun admitOnly(
+        context: AppContext,
+        picture: Picture,
+        selection: RescanSelection = RescanSelection.Automatic,
+    ): OcrOperation {
         writeSelection(context)
         val service = rescanServiceOf(context, FakePageEngine())
-        val preview = runBlocking { service.preview(CollectionId("default"), picture.documentId, ReadingMethod.Surya) }
+        val preview = runBlocking {
+            service.preview(CollectionId("default"), picture.documentId, ReadingMethod.Surya, selection)
+        }
         return runBlocking {
             service.admitRescan(
                 collectionId = CollectionId("default"),
@@ -685,12 +1024,16 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
 
     // ---- internals ----
 
-    private fun admitFor(context: AppContext, picture: Picture): String {
+    private fun admitFor(
+        context: AppContext,
+        picture: Picture,
+        selection: RescanSelection = RescanSelection.Automatic,
+    ): String {
         writeSelection(context)
         val engine = FakePageEngine()
         val service = rescanServiceOf(context, engine)
         return runBlocking {
-            val preview = service.preview(CollectionId("default"), picture.documentId, ReadingMethod.Surya)
+            val preview = service.preview(CollectionId("default"), picture.documentId, ReadingMethod.Surya, selection)
             service.admitRescan(
                 collectionId = CollectionId("default"),
                 documentId = picture.documentId,
@@ -702,7 +1045,7 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         }
     }
 
-    private fun runAttempt(
+    internal fun runAttempt(
         context: AppContext,
         operationId: String,
         engine: FakePageEngine,
@@ -710,21 +1053,30 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
         beforePageCommit: (suspend (AppContext, JobId) -> Unit)?,
         picture: Picture,
         afterPublication: (suspend (AppContext, JobId) -> Unit)? = null,
+        afterPageCommit: (suspend (AppContext, Int) -> Unit)? = null,
+        onInitialProgress: (suspend (JobId) -> Unit)? = null,
+        useAdmittedJob: Boolean = false,
+        beforeCandidatePublication: (suspend (AppContext, JobId) -> Unit)? = null,
     ): Attempt {
-        val job = runBlocking {
-            context.jobs.enqueue(
-                type = JobType.RESCAN,
-                collectionId = CollectionId("default"),
-                payload = RescanJobPayload(
-                    collectionId = "default",
-                    documentId = picture.documentId.value,
-                    operationId = operationId,
-                ).encode(),
-                total = 1,
-            )
-        }
-        val claimed = assertNotNull(context.jobs.claim(job.id))
         val before = assertNotNull(context.ocrOperations.operation(operationId))
+        val claimed = runBlocking {
+            if (useAdmittedJob) {
+                val jobId = assertNotNull(before.jobId, "the admitted operation has a queued attempt")
+                assertNotNull(context.jobs.claim(JobId(jobId)), "the actual admitted job can be claimed")
+            } else {
+                val queued = context.jobs.enqueue(
+                    type = JobType.RESCAN,
+                    collectionId = CollectionId("default"),
+                    payload = RescanJobPayload(
+                        collectionId = "default",
+                        documentId = picture.documentId.value,
+                        operationId = operationId,
+                    ).encode(),
+                    total = 1,
+                )
+                assertNotNull(context.jobs.claim(queued.id))
+            }
+        }
         // The page is read first and the hook runs before the page is committed, which is the window a
         // cancellation request or a collection deletion has to be honoured in.
         val effective = if (beforePageCommit == null) {
@@ -747,6 +1099,9 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
             engineFor = { _, _, _ -> effective },
             profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
             afterCandidatePublished = { jobId -> afterPublication?.invoke(context, jobId) },
+            afterPageCommitted = { jobId, ordinal -> afterPageCommit?.invoke(context, ordinal) },
+            afterInitialProgressReported = { jobId -> onInitialProgress?.invoke(jobId) },
+            beforeCandidatePublication = { jobId -> beforeCandidatePublication?.invoke(context, jobId) },
         )
         val failure = runBlocking {
             runCatching {
@@ -793,12 +1148,14 @@ internal class RescanHarness(private val directory: Path) : AutoCloseable {
                 .orEmpty(),
             indexedChunks = context.index().chunkCount(CollectionId("default"), picture.documentId),
             documentStatus = context.documents.get(picture.documentId)?.status,
+            jobCompleted = context.jobs.get(claimed.id)?.completed ?: -1,
+            jobTotal = context.jobs.get(claimed.id)?.total ?: -1,
             engine = engine,
             failure = failure,
         )
     }
 
-    private fun rescanServiceOf(context: AppContext, engine: PageOcrEngine?): RescanService = RescanService(
+    internal fun rescanServiceOf(context: AppContext, engine: PageOcrEngine?): RescanService = RescanService(
         paths = context.paths,
         collections = context.collections,
         documents = context.documents,

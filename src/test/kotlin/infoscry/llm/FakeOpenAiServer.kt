@@ -38,6 +38,8 @@ internal class FakeOpenAiResponse(
     val onFirstFragment: (() -> Unit)? = null,
 )
 
+internal data class FakeOpenAiRequest(val method: String, val path: String, val body: String)
+
 internal class FakeOpenAiServer(
     private val script: List<FakeOpenAiResponse>,
 ) : AutoCloseable {
@@ -50,7 +52,7 @@ internal class FakeOpenAiServer(
     private val lastApiKey: AtomicReference<String?> = AtomicReference(null)
     private val lastRequestBody: AtomicReference<String?> = AtomicReference(null)
     private val lastHeaders: AtomicReference<Map<String, String>> = AtomicReference(emptyMap())
-    private val capturedRequestBodies: MutableList<String> = Collections.synchronizedList(mutableListOf())
+    private val capturedRequests: MutableList<FakeOpenAiRequest> = Collections.synchronizedList(mutableListOf())
 
     val url: String get() = "http://$LOOPBACK_HOST:${server.address.port}"
     val handledRequests: Int get() = handled.get()
@@ -60,7 +62,8 @@ internal class FakeOpenAiServer(
 
     /** One header of the last request, so a test can assert a protocol's own required header. */
     fun lastHeader(name: String): String? = lastHeaders.get()[name.lowercase(Locale.ROOT)]
-    val requestBodies: List<String> get() = synchronized(capturedRequestBodies) { capturedRequestBodies.toList() }
+    val requests: List<FakeOpenAiRequest> get() = synchronized(capturedRequests) { capturedRequests.toList() }
+    val requestBodies: List<String> get() = requests.map(FakeOpenAiRequest::body)
 
     init {
         server.createContext("/") { exchange -> serve(exchange) }
@@ -85,7 +88,7 @@ internal class FakeOpenAiServer(
             )
             val requestBody = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
             lastRequestBody.set(requestBody)
-            capturedRequestBodies.add(requestBody)
+            capturedRequests.add(FakeOpenAiRequest(exchange.requestMethod, exchange.requestURI.path, requestBody))
             val response = script[min(index, script.size - 1)]
             if (response.stream) {
                 streamResponse(exchange, response)

@@ -1,12 +1,12 @@
 <script lang="ts">
   import { isUncheckedImageProfile, methodOptionLabel } from './ocrRescan';
   import { onDestroy, onMount, tick } from 'svelte';
-  import { ApiError, listReadingMethods, previewImport, previewRescan, startImport, startRescan, type ImportPreview, type ImportStarted, type ReadingMethodOption, type RescanPreview, type RescanStarted } from './api';
+  import { ApiError, listReadingMethods, previewImport, previewRescan, startImport, startRescan, type ImportPreview, type ImportStarted, type ReadingMethodOption, type RescanPreview, type RescanSelection, type RescanStarted } from './api';
 
   export let collectionId: string;
   export let request:
     | { kind: 'import'; paths: string[]; recursive: boolean; include: string[]; exclude: string[] }
-    | { kind: 'rescan'; documentId: string };
+    | { kind: 'rescan'; documentId: string; selection?: RescanSelection };
   export let onstarted: (run: ImportStarted | RescanStarted) => void;
   export let oncancel: () => void;
 
@@ -36,7 +36,13 @@
   $: shownAtLeast = preview !== null && 'atLeast' in preview && preview.atLeast;
   $: documentPageCount = preview !== null && !('files' in preview) && typeof preview.documentPages === 'number' ? preview.documentPages : null;
   // A rescan that keeps every page's text reads none; it may report no total, or a total of zero.
-  $: nothingToRead = preview !== null && (pageCount === 0 || (!('files' in preview) && (preview.pageTotal ?? 0) === 0 && documentPageCount !== null && documentPageCount > 0));
+  $: nothingToRead = preview !== null && !('files' in preview) && (pageCount === 0 || ((preview.pageTotal ?? 0) === 0 && documentPageCount !== null && documentPageCount > 0));
+  $: importHasNoPagesToRead = preview !== null && 'files' in preview && pageCount === 0;
+  $: explicitPages = preview !== null && !('files' in preview) && preview.selection?.mode === 'explicit'
+    ? preview.selection.ordinals.map((ordinal) => ordinal + 1)
+    : request.kind === 'rescan' && request.selection?.mode === 'explicit'
+      ? request.selection.ordinals.map((ordinal) => ordinal + 1)
+      : null;
   $: selectedOption = methods.find((entry) => entry.method === selectedMethod);
   $: sendsExternally = selectedOption?.external ?? (preview !== null && 'external' in preview && Boolean(preview.external));
   $: destinationLabel = preview !== null && 'destination' in preview && preview.destination
@@ -44,7 +50,11 @@
     : selectedOption?.destination ?? 'this machine';
   $: unknownExternalTotal = preview !== null && 'files' in preview && preview.external && preview.atLeast;
   $: displayedCost = unknownExternalTotal ? null : costTextFor(preview);
-  $: confirmationLabel = buildConfirmLabel(pageCount, shownAtLeast, sendsExternally, destinationLabel, selectedOption);
+  $: confirmationLabel = nothingToRead
+    ? 'No pages to read'
+    : importHasNoPagesToRead
+      ? 'Import without image reading'
+      : buildConfirmLabel(pageCount, shownAtLeast, sendsExternally, destinationLabel, selectedOption, explicitPages);
 
   function costTextFor(current: Preview | null): string | null {
     if (current === null) return null;
@@ -58,10 +68,12 @@
     if (!entry) return '';
     return entry.method.startsWith('llm:') ? entry.label.replace(/^LLM:\s*/i, '') : entry.label;
   }
-  function buildConfirmLabel(count: number | null, atLeastCount: boolean, isExternal: boolean, target: string, method: ReadingMethodOption | undefined): string {
+  function buildConfirmLabel(count: number | null, atLeastCount: boolean, isExternal: boolean, target: string, method: ReadingMethodOption | undefined, pages: number[] | null): string {
     if (count === null || !method) return 'Confirm reading';
+    const pageScope = pages === null ? null : pages.length === 1 ? `page ${pages[0]}` : `pages ${pages.join(', ')}`;
     const quantity = `${atLeastCount ? 'at least ' : ''}${count} ${count === 1 ? 'page' : 'pages'}`;
-    if (isExternal) return `Send ${quantity} to ${target} with ${methodName(method)}`;
+    if (isExternal) return `Send ${pageScope ?? quantity} to ${target} with ${methodName(method)}`;
+    if (pageScope !== null) return `Read ${pageScope} with ${method.label}`;
     return `Read ${quantity} with ${method.label}`;
   }
   function describe(failure: unknown): string {
@@ -78,7 +90,9 @@
     try {
       const next = currentRequest.kind === 'import'
         ? await previewImport({ collection: collectionId, paths: currentRequest.paths, recursive: currentRequest.recursive, include: currentRequest.include, exclude: currentRequest.exclude, method: selectedMethod })
-        : await previewRescan(collectionId, currentRequest.documentId, selectedMethod);
+        : currentRequest.selection === undefined
+          ? await previewRescan(collectionId, currentRequest.documentId, selectedMethod)
+          : await previewRescan(collectionId, currentRequest.documentId, selectedMethod, currentRequest.selection);
       if (mine === generation) preview = next;
     } catch (failure) {
       if (mine === generation) error = describe(failure);
@@ -112,7 +126,7 @@
 
   async function confirm(): Promise<void> {
     if (submitLock || started) return;
-    if (pendingStart === null && (preview === null || !selectedOption?.available || selectedMethod === '')) return;
+    if (pendingStart === null && (preview === null || nothingToRead || !selectedOption?.available || selectedMethod === '')) return;
     submitLock = true;
     submitting = true;
     error = null;
@@ -163,6 +177,7 @@
 
   function containFocus(event: KeyboardEvent): void {
     if (event.key === 'Escape') {
+      event.stopPropagation();
       if (pendingStart === null && !submitting) oncancel();
       return;
     }
@@ -211,9 +226,12 @@
         {/if}
         {#if nothingToRead}
           <p>No page needs reading; the document keeps its text.</p>
+        {:else if importHasNoPagesToRead}
+          <p>No pages need image reading; the files will still be imported.</p>
         {:else}
           <p>{shownAtLeast ? 'At least ' : ''}{pageCount ?? 'Unknown'} {pageCount === 1 ? 'page' : 'pages'} will be read{#if !('files' in preview) && documentPageCount !== null && pageCount !== null && documentPageCount > pageCount}{' '}(of {documentPageCount} in the document){/if}.</p>
         {/if}
+        {#if explicitPages !== null}<p>Pages to read: {explicitPages.join(', ')}</p>{/if}
         {#if unknownExternalTotal}<p>All pages in the listed files will be sent; total cost is unavailable because the page count is unknown.</p>{/if}
         <p>Destination: {destinationLabel}</p>
         {#if displayedCost}<p>{displayedCost}</p>{/if}
@@ -222,7 +240,7 @@
     {#if error}<p role="alert">{error}</p>{/if}
     </div>
     <div class="actions">
-      <button type="button" class="primary" onclick={confirm} disabled={started || submitting || previewing || (pendingStart === null && (preview === null || !selectedOption?.available))}>{started ? 'Started' : submitting ? 'Starting…' : pendingStart !== null ? 'Retry same start' : confirmationLabel}</button>
+      <button type="button" class="primary" onclick={confirm} disabled={started || submitting || previewing || (pendingStart === null && (preview === null || nothingToRead || !selectedOption?.available))}>{started ? 'Started' : submitting ? 'Starting…' : pendingStart !== null ? 'Retry same start' : confirmationLabel}</button>
       <button type="button" onclick={oncancel} disabled={submitting || pendingStart !== null}>Cancel</button>
     </div>
   </div>

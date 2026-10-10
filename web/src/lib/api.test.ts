@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, continueInvestigation, createCollection, getCollectionDocumentSummary, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { ApiError, continueInvestigation, createCollection, getCollectionDocumentSummary, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -195,15 +195,17 @@ describe('reading workflow requests', () => {
     const request = { collection: 'c', paths: ['/a.pdf'], recursive: true, include: ['pdf'], exclude: [], method: 'surya' };
     await previewImport(request);
     await startImport({ ...request, previewHash: 'hash', requestId: 'request-1' });
-    await previewRescan('c', 'd/1', 'llm:p1');
+    await previewRescan('c', 'd/1', 'llm:p1', { mode: 'explicit', ordinals: [2, 4] });
     await startRescan('c', 'd/1', { previewId: 'p', requestId: 'request-2' });
+    await resumeRescan('c', 'd/1', 'operation/1');
 
     expect(calls).toEqual([
       { url: '/api/collections/a%2Fb/reading-methods', body: undefined },
       { url: '/api/imports/preview', body: request },
       { url: '/api/imports', body: { ...request, previewHash: 'hash', requestId: 'request-1' } },
-      { url: '/api/collections/c/documents/d%2F1/ocr/preview', body: { method: 'llm:p1' } },
+      { url: '/api/collections/c/documents/d%2F1/ocr/preview', body: { method: 'llm:p1', selection: { mode: 'explicit', ordinals: [2, 4] } } },
       { url: '/api/collections/c/documents/d%2F1/ocr/rescan', body: { previewId: 'p', requestId: 'request-2' } },
+      { url: '/api/collections/c/documents/d%2F1/ocr/operations/operation%2F1/resume', body: undefined },
     ]);
   });
 

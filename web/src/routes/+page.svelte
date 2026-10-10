@@ -1,9 +1,15 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
+  import '../lib/workspace.css';
   import AskPanel from '../lib/AskPanel.svelte';
   import HistoryColumn from '../lib/HistoryColumn.svelte';
+  import SourceWorkspace from '../lib/SourceWorkspace.svelte';
+  import PageReview from '../lib/PageReview.svelte';
+  import DocumentRescan from '../lib/DocumentRescan.svelte';
+  import StartReadingDialog from '../lib/StartReadingDialog.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
+  import type { DocumentListViewState } from '../lib/documentListViewState';
   import CollectionsPanel from '../lib/CollectionsPanel.svelte';
   import {
     DEFAULT_INVESTIGATION_LIMITS,
@@ -24,6 +30,7 @@
     listAsks,
     listCollections,
     listInvestigations,
+    listDocumentRevisions,
     listLlmProfilePrices,
     readSource,
     retryDocuments,
@@ -42,6 +49,7 @@
     type SearchFilters,
     type SearchMode,
     type SourceContentResponse,
+    type RescanStarted,
   } from '../lib/api';
 
   let collections: Collection[] = [];
@@ -60,6 +68,10 @@
   let query = '';
   let mode: SearchMode = 'HYBRID';
   let activeMode: 'SEARCH' | 'ASK' | 'INVESTIGATE' | 'ADMIN' = 'SEARCH';
+  let documentListViews = new Map<string, DocumentListViewState>();
+  function updateDocumentListView(collectionId: string, state: DocumentListViewState): void {
+    documentListViews = new Map(documentListViews).set(collectionId, state);
+  }
   let adminTab: 'COLLECTIONS' | 'LLM' = 'COLLECTIONS';
   let mediaType = '';
   let pathContains = '';
@@ -88,6 +100,28 @@
   /** The pending live search, cancelled whenever the query, mode or collection changes again. */
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let selectedHit: SearchHit | null = null;
+  let pageReviewDocument: {
+    collectionId: string;
+    documentId: string;
+    initialOrdinal: number;
+    revisionId?: string;
+    historical: boolean;
+  } | null = null;
+  let pageReviewIdentity = '';
+  let pageReviewPublishedRevisionId: string | null = null;
+  let pageReviewMarksReset = 0;
+  let pageScanRequest: { documentId: string; requestId: string; ordinals: number[] } | undefined;
+  let pageScanDialogOpen = false;
+  let startedRescan: { documentId: string; requestId: string; operation: RescanStarted } | undefined;
+  let pageScanSequence = 0;
+  // Component identity changes only when the citation target changes; notification or parent updates
+  // leave PageReview's current physical page and local zoom/tab state intact.
+  $: pageReviewIdentity = pageReviewDocument === null ? '' : JSON.stringify([
+    pageReviewDocument.collectionId,
+    pageReviewDocument.documentId,
+    pageReviewDocument.revisionId ?? null,
+    pageReviewDocument.initialOrdinal,
+  ]);
   let source: SourceContentResponse | null = null;
   let sourceText = '';
   /**
@@ -103,7 +137,24 @@
    * workspace selection: Admin can open a document in a collection the workspace is not showing.
    */
   let sourceCollectionId = '';
-  let sourceSheet: HTMLElement | null = null;
+  let workspaceHeading: HTMLElement | null = null;
+  let adminHeading: HTMLElement | null = null;
+  let workspaceNarrow = false;
+  let sourcePaneVisible = false;
+  let lastSourcePaneVisible = sourcePaneVisible;
+  let sourceVisibilityGeneration = 0;
+  let publicationLookupGeneration = 0;
+  $: if (sourcePaneVisible !== lastSourcePaneVisible) {
+    lastSourcePaneVisible = sourcePaneVisible;
+    sourceVisibilityGeneration += 1;
+  }
+  let historyShouldCollapse = false;
+  let historyCollapsed = false;
+  let historyExpandedAtNarrowWidth = false;
+  function toggleHistoryVisibility(): void {
+    if (historyShouldCollapse) historyExpandedAtNarrowWidth = !historyExpandedAtNarrowWidth;
+    else historyCollapsed = !historyCollapsed;
+  }
   let sourceOpener: HTMLElement | null = null;
   let investigateConversations: InvestigationSummary[] = [];
   let investigateConversationId: string | null = null;
@@ -438,12 +489,42 @@
    * read the live unit) opens the live unit as before.
    */
   function openEvidence(evidence: AskEvidence, hit: SearchHit): Promise<void> {
+    const ordinal = pageOrdinalFromLocator(evidence.locator);
+    if (typeof evidence.revisionId === 'string' && evidence.revisionId.length > 0 && ordinal !== null) {
+      sourceGeneration += 1;
+      selectedHit = { ...hit, revisionId: evidence.revisionId };
+      pageReviewDocument = {
+        collectionId: hit.collectionId,
+        documentId: hit.documentId,
+        initialOrdinal: ordinal,
+        revisionId: evidence.revisionId,
+        historical: true,
+      };
+      sourceOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      sourceCollectionId = hit.collectionId;
+      source = null;
+      sourceText = '';
+      savedExcerpt = null;
+      loadingSource = false;
+      sourceError = null;
+      return Promise.resolve();
+    }
     const saved = !evidence.revisionId && typeof evidence.excerpt === 'string' ? evidence.excerpt : null;
     return openSource({ ...hit, revisionId: evidence.revisionId }, null, saved);
   }
 
+  function pageOrdinalFromLocator(locator: unknown): number | null {
+    if (typeof locator !== 'object' || locator === null) return null;
+    const candidate = locator as { type?: unknown; page?: unknown; name?: unknown };
+    if (candidate.type === 'image' && typeof candidate.name === 'string' && candidate.name.trim().length > 0) return 0;
+    if ((candidate.type !== 'pdf_page' && candidate.type !== 'PdfPage') ||
+        typeof candidate.page !== 'number' || !Number.isInteger(candidate.page) || candidate.page < 1) return null;
+    return candidate.page - 1;
+  }
+
   async function openSource(hit: SearchHit, opener: HTMLElement | null = null, saved: string | null = null): Promise<void> {
     const generation = ++sourceGeneration;
+    pageReviewDocument = null;
     sourceOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     selectedHit = hit;
     sourceCollectionId = hit.collectionId;
@@ -453,15 +534,11 @@
     sourceError = null;
     if (saved !== null) {
       loadingSource = false;
-      await tick();
-      sourceSheet?.focus();
       return;
     }
     loadingSource = true;
     try {
       const pagePromise = readSource(sourceCollectionId, hit.unitId, 0, SOURCE_PAGE_CHARS, hit.revisionId);
-      await tick();
-      sourceSheet?.focus();
       const page = await pagePromise;
       if (generation !== sourceGeneration || hit.collectionId !== sourceCollectionId) return;
       source = page;
@@ -589,6 +666,7 @@
   function clearSelectedSource(): void {
     sourceGeneration += 1;
     selectedHit = null;
+    pageReviewDocument = null;
     source = null;
     sourceText = '';
     savedExcerpt = null;
@@ -598,43 +676,14 @@
     sourceCollectionId = '';
   }
 
-  function handleSourceKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeSourceSheet();
-    } else if (event.key === 'Tab') {
-      containSourceFocus(event);
-    }
-  }
-
-  /**
-   * Keep keyboard focus inside the sheet while it is open. The sheet is announced as modal, so focus
-   * must not reach the controls behind the backdrop; the sidebar stays visible, but keyboard and
-   * screen-reader navigation wait until the sheet is closed.
-   */
-  function containSourceFocus(event: KeyboardEvent): void {
-    if (sourceSheet === null) return;
-    const focusable = Array.from(sourceSheet.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'));
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement;
-    if (active === first && event.shiftKey) {
-      event.preventDefault();
-      last.focus();
-    } else if (active === last && !event.shiftKey) {
-      event.preventDefault();
-      first.focus();
-    } else if (active === sourceSheet || !sourceSheet.contains(active)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    }
-  }
-
   function closeSourceSheet(): void {
-    const opener = sourceOpener;
     clearSelectedSource();
-    if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+  }
+
+  function backFromNarrowSource(): void {
+    // Keep the reviewed physical page selected, but discard session marks before hiding its pane.
+    if (pageReviewDocument !== null && !pageReviewDocument.historical) pageReviewMarksReset += 1;
+    if (sourceOpener instanceof HTMLElement && sourceOpener.isConnected) sourceOpener.focus();
   }
 
   /**
@@ -643,6 +692,15 @@
    */
   function closeSourceSheetWithoutFocus(): void {
     clearSelectedSource();
+  }
+
+  async function backFromPageReview(): Promise<void> {
+    const opener = sourceOpener;
+    if (!pageScanDialogOpen) pageScanRequest = undefined;
+    clearSelectedSource();
+    await tick();
+    const target = opener?.isConnected ? opener : activeMode === 'ADMIN' ? adminHeading : workspaceHeading;
+    target?.focus();
   }
 
   function originalHref(hit: SearchHit): string {
@@ -673,7 +731,7 @@
    * Open one managed document from Admin at the first unit its detail named, in the collection Admin has
    * selected there. The panel supplies the two ids; the viewer and its state stay this page's.
    */
-  function openManagedDocument(documentId: string, sourceId: string): void {
+  function openManagedDocument(documentId: string, sourceId: string, opener: HTMLElement | null): void {
     void openSource({
       collectionId: managedCollectionId,
       documentId,
@@ -685,7 +743,71 @@
       locator: null,
       locatorLabel: 'Extracted content',
       matchedBy: [],
-    });
+    }, opener);
+  }
+
+  /** Opens a supported Admin document in its physical-page comparison, including blank/unread pages. */
+  function openManagedPageReview(documentId: string, opener: HTMLElement | null): void {
+    sourceGeneration += 1;
+    selectedHit = null;
+    pageReviewDocument = { collectionId: managedCollectionId, documentId, initialOrdinal: 0, historical: false };
+    pageReviewPublishedRevisionId = null;
+    if (!pageScanDialogOpen) pageScanRequest = undefined;
+    sourceOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    sourceCollectionId = managedCollectionId;
+    source = null;
+    sourceText = '';
+    savedExcerpt = null;
+    loadingSource = false;
+    sourceError = null;
+  }
+
+  function requestPageScan(ordinals: number[]): void {
+    if (pageReviewDocument === null || pageReviewDocument.historical || ordinals.length === 0) return;
+    pageScanRequest = { documentId: pageReviewDocument.documentId, requestId: String(++pageScanSequence), ordinals: [...ordinals] };
+    pageScanDialogOpen = true;
+  }
+
+  function pageScanStarted(run: RescanStarted): void {
+    const request = pageScanRequest;
+    if (request === undefined) return;
+    pageScanDialogOpen = false;
+    pageScanRequest = undefined;
+    startedRescan = { documentId: request.documentId, requestId: request.requestId, operation: run };
+    if (run.stage === 'COMPLETE' && run.candidateRevisionId != null) {
+      documentReadingPublished(run.documentId, run.candidateRevisionId);
+    }
+  }
+
+  function cancelPageScanDialog(): void {
+    pageScanDialogOpen = false;
+    pageScanRequest = undefined;
+  }
+
+  async function documentReadingPublished(documentId: string, _candidateRevisionId: string): Promise<boolean> {
+    const review = pageReviewDocument;
+    if (review === null || review.historical || review.documentId !== documentId ||
+        review.collectionId !== managedCollectionId || !sourcePaneVisible) return false;
+    const sourceAtRequest = sourceGeneration;
+    const visibilityAtRequest = sourceVisibilityGeneration;
+    const lookup = ++publicationLookupGeneration;
+    try {
+      // An OCR operation is only a hint that publication may have changed. Restore can publish a
+      // new active revision without an OCR operation, so resolve the document's authoritative head.
+      const revisions = await listDocumentRevisions(review.collectionId, documentId, 0, 1);
+      if (lookup !== publicationLookupGeneration || sourceAtRequest !== sourceGeneration ||
+          visibilityAtRequest !== sourceVisibilityGeneration || !sourcePaneVisible) return false;
+      const current = pageReviewDocument;
+      if (current === null || current.historical || current.documentId !== documentId ||
+          current.collectionId !== review.collectionId || current.collectionId !== managedCollectionId) return false;
+      const activeRevisionId = revisions.activeRevisionId ?? revisions.revisions.find((revision) => revision.active)?.revisionId;
+      if (activeRevisionId == null) return false;
+      pageReviewPublishedRevisionId = activeRevisionId;
+      return true;
+    } catch {
+      // Keep the current reading pinned and let the publication owner retry on a later resync.
+      return false;
+    }
   }
 
   function describe(failure: unknown): string {
@@ -713,7 +835,7 @@
    * own, because the source route answers 404 once the unit is gone.
    */
   function handleManagedDocumentDeleted(collectionId: string, documentId: string): void {
-    if (sourceCollectionId !== collectionId || selectedHit?.documentId !== documentId) return;
+    if (sourceCollectionId !== collectionId || (selectedHit?.documentId !== documentId && pageReviewDocument?.documentId !== documentId)) return;
     closeSourceSheetWithoutFocus();
   }
 
@@ -755,6 +877,9 @@
    * lists and the Ask/Investigate histories are then re-read from the server.
    */
   async function handleManagedCollectionDeleted(collectionId: string): Promise<void> {
+    const remaining = new Map(documentListViews);
+    remaining.delete(collectionId);
+    documentListViews = remaining;
     if (sourceCollectionId === collectionId) closeSourceSheet();
     if (managedCollectionId === collectionId) managedCollectionId = '';
     const wasWorkspaceSelection = selectedCollectionId === collectionId;
@@ -906,15 +1031,31 @@
     <div class="sidebar-footer">Local archive <span class="status-dot"></span></div>
   </aside>
 
-  <main class="workspace">
+  <main class="workspace workspace-area">
     {#if activeMode !== 'ADMIN'}
       <header class="workspace-header">
-        <div><span class="eyebrow">{activeMode === 'SEARCH' ? 'DISCOVER' : activeMode === 'ASK' ? 'ANSWER' : 'EXPLORE'}</span><h1>{activeMode === 'INVESTIGATE' ? 'Investigate' : activeMode === 'ASK' ? 'Ask your archive' : 'Search your archive'}</h1></div>
+        <div><span class="eyebrow">{activeMode === 'SEARCH' ? 'DISCOVER' : activeMode === 'ASK' ? 'ANSWER' : 'EXPLORE'}</span><h1 bind:this={workspaceHeading} tabindex="-1">{activeMode === 'INVESTIGATE' ? 'Investigate' : activeMode === 'ASK' ? 'Ask your archive' : 'Search your archive'}</h1></div>
+      </header>
+    {:else}
+      <header class="workspace-header">
+        <div><span class="eyebrow">MANAGE</span><h1 bind:this={adminHeading} tabindex="-1">Administration</h1></div>
       </header>
     {/if}
 
   {#if !loadingCollections}
-    <div class="content-layout" class:with-history={activeMode === 'INVESTIGATE' || activeMode === 'ASK'}>
+    <SourceWorkspace
+      mode={pageReviewDocument === null || pageReviewDocument.historical ? 'split' : 'review'}
+      sourceSnippet={pageReviewDocument === null ? selectedHit?.locatorLabel ?? '' : 'Page comparison'}
+      sourceOpen={selectedHit !== null || pageReviewDocument !== null}
+      opener={sourceOpener}
+      fallbackFocus={activeMode === 'ADMIN' ? adminHeading : workspaceHeading}
+      bind:narrow={workspaceNarrow}
+      bind:sourceVisible={sourcePaneVisible}
+      bind:historyShouldCollapse
+      onClose={closeSourceSheet}
+      onBack={backFromNarrowSource}
+    >
+    <div class="content-layout" class:with-history={activeMode === 'INVESTIGATE' || activeMode === 'ASK'} class:history-collapsed={historyCollapsed || (historyShouldCollapse && !historyExpandedAtNarrowWidth)}>
     <div class="mode-panels">
       <div id="panel-search" role="tabpanel" aria-labelledby="tab-search" hidden={activeMode !== 'SEARCH'}>
       <div class="search-input-row">
@@ -982,6 +1123,9 @@
                 make every text lookup for a collection name ambiguous.
               -->
               <CollectionsPanel
+                visible={adminTab === 'COLLECTIONS'}
+                documentViewState={documentListViews.get(managedCollectionId)}
+                onDocumentViewStateChange={updateDocumentListView}
                 collections={collections}
                 selectedId={managedCollectionId}
                 loading={loadingCollections}
@@ -989,6 +1133,10 @@
                 onSelect={selectManagedCollection}
                 onCollectionsChanged={handleManagedCollectionsChanged}
                 onOpenDocument={openManagedDocument}
+                onOpenPageReview={openManagedPageReview}
+                {startedRescan}
+                onDocumentPublished={documentReadingPublished}
+                reviewedDocumentId={pageReviewDocument !== null && !pageReviewDocument.historical ? pageReviewDocument.documentId : undefined}
                 onCollectionDeleted={handleManagedCollectionDeleted}
                 onDocumentDeleted={handleManagedDocumentDeleted}
                 onRetryDocument={retryManagedDocument}
@@ -1016,6 +1164,8 @@
         onSelect={openInvestigationConversation}
         onNew={newInvestigationConversation}
         onDelete={deleteInvestigateConversation}
+        collapsed={historyCollapsed || (historyShouldCollapse && !historyExpandedAtNarrowWidth)}
+        onToggleCollapsed={toggleHistoryVisibility}
       />
     {:else if activeMode === 'ASK'}
       <HistoryColumn
@@ -1026,23 +1176,42 @@
         onSelect={openAskConversation}
         onNew={newAskConversation}
         onDelete={deleteAskConversation}
+        collapsed={historyCollapsed || (historyShouldCollapse && !historyExpandedAtNarrowWidth)}
+        onToggleCollapsed={toggleHistoryVisibility}
       />
     {/if}
     </div>
 
-  {#if selectedHit !== null}
-    <div class="source-backdrop" aria-hidden="true" onclick={closeSourceSheet}></div>
-    <div
-      bind:this={sourceSheet}
-      class="source-sheet"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="source-heading"
-      tabindex="-1"
-      onkeydown={handleSourceKeydown}
-    >
-      <div class="source-heading-row"><h2 id="source-heading">Source</h2><button type="button" aria-label="Close source viewer" onclick={closeSourceSheet}>×</button></div>
-      <p class="meta">{selectedHit.locatorLabel}</p>
+    <div slot="source">
+    {#if pageReviewDocument !== null}
+      {#key pageReviewIdentity}
+      <PageReview
+        collectionId={pageReviewDocument.collectionId}
+        documentId={pageReviewDocument.documentId}
+        initialOrdinal={pageReviewDocument.initialOrdinal}
+        revisionId={pageReviewDocument.revisionId}
+        publishedRevisionId={pageReviewPublishedRevisionId}
+        clearMarksSignal={pageReviewMarksReset}
+        historical={pageReviewDocument.historical}
+        narrow={workspaceNarrow}
+        onBack={backFromPageReview}
+        onScanPages={pageReviewDocument.historical ? undefined : requestPageScan}
+      />
+      {/key}
+      {#if !pageReviewDocument.historical}
+        <DocumentRescan
+          visible={sourcePaneVisible}
+          collectionId={pageReviewDocument.collectionId}
+          documentId={pageReviewDocument.documentId}
+          documentName="Selected document"
+          statusOnly
+          startedRescan={startedRescan?.documentId === pageReviewDocument.documentId
+            ? { requestId: startedRescan.requestId, operation: startedRescan.operation }
+            : undefined}
+          onPublished={documentReadingPublished}
+        />
+      {/if}
+    {:else if selectedHit !== null}
       <p><a href={originalHref(selectedHit)} target="_blank" rel="noopener noreferrer">Open original</a></p>
       {#if savedExcerpt === null && source !== null && source.position !== undefined && source.unitCount !== undefined && source.unitCount > 1}
         <nav class="source-pager" aria-label="Pages of this document">
@@ -1069,8 +1238,17 @@
           </button>
         {/if}
       {/if}
+    {/if}
     </div>
+    </SourceWorkspace>
   {/if}
+  {#if pageScanDialogOpen && pageScanRequest !== undefined}
+    <StartReadingDialog
+      collectionId={pageReviewDocument?.collectionId ?? managedCollectionId}
+      request={{ kind: 'rescan', documentId: pageScanRequest.documentId, selection: { mode: 'explicit', ordinals: pageScanRequest.ordinals } }}
+      onstarted={(run) => pageScanStarted(run as RescanStarted)}
+      oncancel={cancelPageScanDialog}
+    />
   {/if}
 </main>
 </div>
@@ -1090,8 +1268,8 @@
   :global(.meta) { color: #929997 !important; }
   :global([role="alert"]) { color: #f0a4a0 !important; }
   :global(#panel-ask section), :global(#panel-investigate section) { margin-top: 0; }
-  .source-pager { display: flex; align-items: center; gap: 0.75rem; margin: 0 0 0.75rem; }
-  .app-shell { min-height: 100vh; display: grid; grid-template-columns: 258px minmax(0, 1fr); --history-column-width: 20rem; --source-column-width: clamp(28rem, 43vw, 58rem); }
+  .source-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin: 0 0 0.75rem; }
+  .app-shell { min-height: 100vh; display: grid; grid-template-columns: 258px minmax(0, 1fr); }
   .sidebar { min-height: 100vh; display: flex; flex-direction: column; gap: 1.8rem; padding: 1.35rem 1rem 1rem; background: #181a1b; border-right: 1px solid #2a2d2e; }
   .brand { display: flex; align-items: center; gap: 0.7rem; color: #f1f0ed; text-decoration: none; font-size: 1.04rem; font-weight: 650; letter-spacing: -0.02em; padding: 0 0.3rem; }
   .brand-mark { display: grid; place-items: center; width: 1.85rem; height: 1.85rem; border-radius: 0.55rem; background: #c4a77d; color: #171817; font-family: Georgia, serif; font-size: 1.15rem; }
@@ -1123,17 +1301,16 @@
   .sidebar-note .limit-error { color: #e08c8c; }
   .sidebar-footer { display: flex; align-items: center; gap: 0.5rem; margin-top: auto; border-top: 1px solid #2d3131; padding: 1rem 0.35rem 0; color: #89908e; font-size: 0.76rem; }
   .status-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: #85ad87; box-shadow: 0 0 0 3px #85ad8720; }
-  .workspace { width: 100%; min-width: 0; padding: 2.1rem clamp(1.25rem, 4vw, 4.5rem); }
-  .app-shell.source-open .workspace { padding-right: calc(var(--source-column-width) + clamp(1.25rem, 4vw, 4.5rem)); }
-  .workspace-header { display: flex; align-items: end; justify-content: space-between; gap: 1rem; max-width: 78rem; margin: 0 auto 2rem; padding-bottom: 1.25rem; border-bottom: 1px solid #292d2d; }
+  .workspace { width: 100%; min-width: 0; padding: 2.1rem var(--workspace-gutter); }
+  .workspace-header { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin: 0 0 2rem; padding-bottom: 1.25rem; border-bottom: 1px solid #292d2d; }
   .workspace-header h1 { margin: 0.35rem 0 0; color: #f0efec; font-size: clamp(1.45rem, 2vw, 1.9rem); font-weight: 570; letter-spacing: -0.035em; }
-  .content-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; max-width: 78rem; margin: 0 auto; align-items: start; }
-  .content-layout.with-history { padding-right: calc(var(--history-column-width) + 1.5rem); }
-  .app-shell.source-open .content-layout.with-history { padding-right: 0; }
+  .content-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; margin: 0; align-items: start; }
+  .content-layout.with-history { grid-template-columns: minmax(0, 1fr) minmax(15rem, 20rem); }
+  .content-layout.with-history.history-collapsed { grid-template-columns: minmax(0, 1fr) 5.25rem; }
   .mode-panels { min-width: 0; }
   .mode-panels > div[role="tabpanel"] { margin: 0; min-width: 0; }
   .mode-panels [hidden] { display: none !important; }
-  .admin-tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid #2a2d2e; margin-bottom: 1.35rem; }
+  .admin-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; border-bottom: 1px solid #2a2d2e; margin-bottom: 1.35rem; }
   .admin-tabs [role="tab"] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 0.6rem 0.95rem; color: #929997; font-size: 0.88rem; margin-bottom: -1px; }
   .admin-tabs [role="tab"]:hover { color: #d5d8d6; }
   .admin-tabs [role="tab"][aria-selected="true"] { border-bottom-color: #c4a77d; color: #f3e6d1; font-weight: 600; }
@@ -1157,15 +1334,10 @@
   .ocr-quality.good { color: #85ad87; }
   .ocr-quality.fair { color: #c4a77d; }
   .ocr-quality.poor { color: #d89a8a; }
-  .source-backdrop { position: fixed; inset: 0 0 0 258px; background: rgba(16, 19, 21, 0.55); }
-  .source-sheet { position: fixed; top: 0; right: 0; bottom: 0; width: var(--source-column-width); overflow-y: auto; border-left: 1px solid #303535; background: #191c1d; padding: 1.25rem 1.35rem; box-shadow: -1.2rem 0 2.5rem rgba(0, 0, 0, 0.4); }
-  .source-heading-row { display: flex; align-items: center; justify-content: space-between; }
-  .source-heading-row h2 { margin-top: 0; }
-  #source-heading { margin-top: 0; }
   .source-text { max-height: calc(100vh - 14rem); overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; border: 1px solid #343939; border-radius: 0.45rem; background: #121515; padding: 0.9rem; font: 0.86rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
   [role="alert"] { color: #f0a4a0; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 82rem) { .app-shell.source-open .workspace { padding-right: clamp(1.25rem, 4vw, 4.5rem); } .source-sheet { left: 258px; width: auto; } }
-  @media (max-width: 54rem) { .app-shell { grid-template-columns: 1fr; } .sidebar { min-height: auto; gap: 1rem; padding: 0.8rem 1rem; border-right: 0; border-bottom: 1px solid #2a2d2e; } .sidebar-footer { display: none; } .sidebar-note, .search-settings { max-width: 38rem; } .mode-nav [role="tablist"] { display: flex; } .mode-nav [role="tab"] { flex: 1; justify-content: center; } .content-layout.with-history { padding-right: 0; } .source-backdrop { left: 0; } .source-sheet { left: 0; width: 100%; } }
-  @media (max-width: 36rem) { .workspace { padding: 1.3rem 1rem; } .workspace-header { align-items: start; margin-bottom: 1.2rem; } .search-input-row form { align-items: stretch; flex-direction: column; } .mode-nav [role="tab"] { gap: 0.35rem; padding: 0.55rem 0.35rem; font-size: 0.83rem; } }
+  @media (max-width: 62rem) { .content-layout.with-history { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 54rem) { .app-shell { grid-template-columns: 1fr; } .sidebar { min-height: auto; gap: 1rem; padding: 0.8rem 1rem; border-right: 0; border-bottom: 1px solid #2a2d2d; } .sidebar-footer { display: none; } .sidebar-note, .search-settings { max-width: 38rem; } .mode-nav [role="tablist"] { display: flex; } .mode-nav [role="tab"] { flex: 1; justify-content: center; } .content-layout.with-history { padding-right: 0; } }
+  @media (max-width: 36rem) { .workspace { padding: 1.3rem var(--workspace-gutter); } .workspace-header { align-items: start; margin-bottom: 1.2rem; } .search-input-row form { align-items: stretch; flex-direction: column; } .mode-nav [role="tab"] { gap: 0.35rem; padding: 0.55rem 0.35rem; font-size: 0.83rem; } }
 </style>

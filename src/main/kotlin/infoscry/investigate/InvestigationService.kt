@@ -151,6 +151,8 @@ data class EvidenceLedgerSnapshot(
     val messageSeq: Int? = null,
     /** The revision the excerpt was read from; null when that cannot be proven, which a viewer reports as unknown. */
     val revisionId: String? = null,
+    /** Owning document resolved from the source unit for this live turn; never part of provider evidence. */
+    val documentId: String = "",
 )
 
 data class LimitEventSnapshot(
@@ -581,7 +583,7 @@ class InvestigationService(
                         Evidence(
                             id = entry.evidenceId,
                             collectionId = collectionId.value,
-                            documentId = "",
+                            documentId = entry.documentId,
                             unitId = entry.sourceUnitId,
                             locator = kotlinx.serialization.json.Json.decodeFromString<SourceLocation>(entry.locatorJson),
                             locatorLabel = entry.locatorJson,
@@ -828,7 +830,7 @@ class InvestigationService(
                         Evidence(
                             id = entry.evidenceId,
                             collectionId = collectionId.value,
-                            documentId = "",
+                            documentId = entry.documentId,
                             unitId = entry.sourceUnitId,
                             locator = kotlinx.serialization.json.Json.decodeFromString<SourceLocation>(entry.locatorJson),
                             locatorLabel = entry.locatorJson,
@@ -955,6 +957,7 @@ class InvestigationService(
                                 locatorJson = locatorJson,
                                 excerpt = ev.text,
                                 revisionId = ev.revisionId,
+                                documentId = ev.documentId,
                             ))
                             roundEvidenceIds.add(ev.evidenceId)
                         }

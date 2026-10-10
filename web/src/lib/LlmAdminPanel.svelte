@@ -32,6 +32,7 @@
   let selectedId = '';
   let draft: LlmProfileInput = emptyDraft();
   let creating = false;
+  let nameEdited = false;
   let loading = true;
   let saving = false;
   let error: string | null = null;
@@ -127,9 +128,14 @@
 
   function startNew(): void {
     creating = true;
+    nameEdited = false;
     draft = emptyDraft();
     error = null;
     flash = null;
+  }
+
+  function suggestName(modelId: string, providerLabel: string): void {
+    if (creating && !nameEdited) draft.name = `${providerLabel}/${modelId}`;
   }
 
   function cancel(): void {
@@ -230,9 +236,14 @@
       const copy = await copyLlmProfileToOcr(selectedId);
       const result = await probeOcrProfile(copy.id);
       await reloadOcrCopies();
-      flash = result.supported
-        ? 'Image reading confirmed: this profile can be chosen as a reading method for OCR.'
-        : 'Image reading failed: this model did not read the test image, so OCR cannot use it.';
+      if (result.supported) {
+        flash = 'Image reading confirmed: this profile can be chosen as a reading method for OCR.';
+      } else {
+        const reason = result.errorMessage ?? 'Image support could not be confirmed.';
+        const status = result.statusCode != null && !reason.includes(`HTTP ${result.statusCode}`)
+          ? ` (HTTP ${result.statusCode})` : '';
+        error = `Image reading check failed: ${reason}${status}${result.errorCode ? ` [${result.errorCode}]` : ''}`;
+      }
     } catch (failure) {
       error = describe(failure);
     } finally {
@@ -295,7 +306,7 @@
   });
 </script>
 
-<section class="admin-panel" aria-label="LLM profile administration">
+<section class="admin-panel workspace-area" aria-label="LLM profile administration">
   {#if loading}
     <p role="status">Loading profiles…</p>
   {:else}
@@ -328,55 +339,62 @@
     {/if}
 
     <form onsubmit={save} class="profile-form">
-      <div class="field">
-        <label for="pf-name">Name</label>
-        <input id="pf-name" bind:value={draft.name} placeholder="e.g. DeepSeek fast" required />
-      </div>
-      <ProviderModelFields
-        bind:draft
-        idPrefix="pf"
-        {presets}
-        {presetError}
-        showCachePrice
-        nativeRequired
-        modelPlaceholder="e.g. deepseek-chat"
-        keyPlaceholder="e.g. OPENAI_API_KEY"
-        keyState={!creating && selectedProfile !== null
-          ? (selectedProfile.keyAvailable
-            ? '✓ the key is present in the server environment'
-            : '⚠ the key is missing from the server environment')
-          : null}
-      />
-      <div class="field check">
-        <label><input type="checkbox" bind:checked={draft.enabled} /> Enabled</label>
-      </div>
-
-      {#if !creating && selectedProfile !== null}
-        <div class="field tool-calling">
-          <p class="key-state" role="status">{toolCallingText(selectedProfile)}</p>
-          <div class="inline">
-            <button type="button" onclick={checkToolCalling} disabled={probing}>
-              {probing ? 'Checking…' : 'Check tool calling'}
-            </button>
+      <fieldset class="profile-settings">
+        <legend>Profile settings</legend>
+        <div class="profile-fields">
+          <div class="field">
+            <label for="pf-name">Name</label>
+            <input id="pf-name" bind:value={draft.name} oninput={() => { nameEdited = true; }} placeholder="e.g. DeepSeek fast" required />
           </div>
-          <p class="hint">
-            Sends two short requests to the saved profile, not to the values above. Investigate needs a supported profile.
-          </p>
-        </div>
-      {/if}
-
-      {#if !creating && selectedProfile !== null}
-        <div class="field tool-calling">
-          <p class="key-state" role="status">{imageReadingText(ocrCopy)}</p>
-          <div class="inline">
-            <button type="button" onclick={checkImageReading} disabled={checkingImages}>
-              {checkingImages ? 'Checking…' : 'Check image reading'}
-            </button>
+          {#key creating}
+            <ProviderModelFields
+              bind:draft
+              onModelSelected={suggestName}
+              idPrefix="pf"
+              {presets}
+              {presetError}
+              showCachePrice
+              nativeRequired
+              modelPlaceholder="e.g. deepseek-chat"
+              keyPlaceholder="e.g. OPENAI_API_KEY"
+              keyState={!creating && selectedProfile !== null
+                ? (selectedProfile.keyAvailable
+                  ? '✓ the key is present in the server environment'
+                  : '⚠ the key is missing from the server environment')
+                : null}
+            />
+          {/key}
+          <div class="field check">
+            <label><input type="checkbox" bind:checked={draft.enabled} /> Enabled</label>
           </div>
-          <p class="hint">
-            Sends a test image to the saved profile. Only a profile that reads it can be chosen for OCR; the image goes to this profile's endpoint.
-          </p>
         </div>
+      </fieldset>
+      {#if !creating && selectedProfile !== null}
+        <fieldset class="profile-checks">
+          <legend>Profile checks</legend>
+          <div class="field tool-calling">
+            <p class="key-state" role="status">{toolCallingText(selectedProfile)}</p>
+            <div class="inline">
+              <button type="button" onclick={checkToolCalling} disabled={probing}>
+                {probing ? 'Checking…' : 'Check tool calling'}
+              </button>
+            </div>
+            <p class="hint">
+              Sends two short requests to the saved profile, not to the values above. Investigate needs a supported profile.
+            </p>
+          </div>
+          <div class="field tool-calling">
+            <p class="key-state" role="status">{imageReadingText(ocrCopy)}</p>
+            <div class="inline">
+              <button type="button" onclick={checkImageReading} disabled={checkingImages}>
+                {checkingImages ? 'Checking…' : 'Check image reading'}
+              </button>
+            </div>
+            <p class="hint">
+              Sends a test image to the saved profile. Only a profile that reads it can be chosen for OCR; the image goes to this profile's endpoint.
+            </p>
+          </div>
+        </fieldset>
       {/if}
 
       <div class="actions">
@@ -423,11 +441,20 @@
 </section>
 
 <style>
-  .admin-panel { max-width: 44rem; }
+  .admin-panel { min-width: 0; container: llm-admin / inline-size; }
   .flash { color: #a9c7a6; }
-  .profile-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 0.55rem; align-items: end; margin-bottom: 1.25rem; }
-  .profile-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 1rem; }
-  .field { display: grid; gap: 0.35rem; align-content: start; }
+  .profile-bar { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: end; margin-bottom: 1.25rem; }
+  .profile-bar select { flex: 1 1 16rem; max-width: 32rem; }
+  .profile-form { display: grid; grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr); gap: 1rem; align-items: start; }
+  .profile-settings, .profile-checks { min-width: 0; margin: 0; border: 1px solid #303535; border-radius: 0.55rem; padding: 1rem; }
+  legend { padding: 0 0.35rem; color: #b8bcbb; font-size: 0.85rem; }
+  .profile-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 1rem; }
+  .profile-fields :global(.field) { min-width: 0; }
+  .profile-fields :global(input:not([type='checkbox'])), .profile-fields :global(select) { max-width: 32rem; }
+  .profile-fields :global(input[type='number']) { max-width: 14rem; }
+  .profile-checks { display: grid; gap: 1.25rem; }
+  .profile-checks .inline { display: flex; flex-wrap: wrap; gap: 0.55rem; }
+  .field { display: grid; min-width: 0; gap: 0.35rem; align-content: start; }
   .field.check { align-content: end; }
   .field.check label { display: flex; align-items: center; gap: 0.5rem; }
   .field.check input { accent-color: #c4a77d; }
@@ -447,17 +474,19 @@
     border-color: #515757;
   }
   .hint { margin: 0; color: #929997; font-size: 0.78rem; }
-  .actions { grid-column: 1 / -1; display: flex; gap: 0.55rem; margin-top: 0.2rem; }
+  .actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0.55rem; margin-top: 0.2rem; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
   button.primary:hover:not(:disabled) { background: #d4ba94; }
   button.danger { border-color: #6e3a37; color: #f0a4a0; }
   button.danger:hover:not(:disabled) { background: #3a2322; }
-  .defaults { margin-top: 1.75rem; padding-top: 1.25rem; border-top: 1px solid #2d3131; display: grid; gap: 0.9rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .defaults { margin-top: 1.75rem; padding-top: 1.25rem; border-top: 1px solid #2d3131; display: grid; gap: 0.9rem; grid-template-columns: repeat(2, minmax(0, 32rem)); }
   .defaults .eyebrow { grid-column: 1 / -1; }
   .defaults .hint { grid-column: 1 / -1; margin-bottom: -0.3rem; }
   .eyebrow { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; }
-  @media (max-width: 36rem) {
-    .profile-bar { grid-template-columns: minmax(0, 1fr) auto auto; }
-    .profile-form, .defaults { grid-template-columns: minmax(0, 1fr); }
+  @container llm-admin (max-width: 62rem) {
+    .profile-form { grid-template-columns: minmax(0, 1fr); }
+  }
+  @container llm-admin (max-width: 36rem) {
+    .profile-fields, .defaults { grid-template-columns: minmax(0, 1fr); }
   }
 </style>

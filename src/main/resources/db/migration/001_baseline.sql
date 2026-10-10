@@ -677,6 +677,7 @@ CREATE INDEX document_revisions_document ON document_revisions (document_id, cre
 --     "no image": zero, an empty reference or a guessed hash would each be a claim about pixels
 --     nobody looked at.
 CREATE TABLE page_text_revisions (
+    producer_revision_id        TEXT REFERENCES document_revisions (id),
     revision_id                 TEXT    NOT NULL REFERENCES document_revisions (id) ON DELETE CASCADE,
     ordinal                     INTEGER NOT NULL CHECK (ordinal >= 0),
     unit_id                     TEXT    NOT NULL CHECK (length(unit_id) > 0),
@@ -920,8 +921,10 @@ CREATE TABLE ocr_rescan_previews (
     base_revision_id          TEXT,
     managed_sha256            TEXT    NOT NULL CHECK (length(managed_sha256) = 64),
     snapshot                  TEXT    NOT NULL,
+    selection                 TEXT    NOT NULL,
     snapshot_hash             TEXT    NOT NULL CHECK (length(snapshot_hash) = 64),
-    page_total                INTEGER CHECK (page_total IS NULL OR page_total > 0),
+    page_total                INTEGER CHECK (page_total IS NULL OR page_total >= 0),
+    document_pages            INTEGER CHECK (document_pages IS NULL OR document_pages > 0),
     external_page_upper_bound INTEGER CHECK (external_page_upper_bound IS NULL OR external_page_upper_bound >= 0),
     approval_required         INTEGER NOT NULL CHECK (approval_required IN (0, 1)),
     cost_estimate             TEXT,
@@ -951,7 +954,9 @@ CREATE TABLE ocr_operations (
     current_job_id      TEXT    REFERENCES jobs (id) ON DELETE SET NULL,
     base_revision_id    TEXT,
     candidate_revision_id TEXT,
+    managed_sha256       TEXT    NOT NULL CHECK (length(managed_sha256) = 64),
     snapshot            TEXT    NOT NULL,
+    selection           TEXT    NOT NULL,
     snapshot_hash       TEXT    NOT NULL CHECK (length(snapshot_hash) = 64),
     stage               TEXT    NOT NULL CHECK (
         stage IN ('PREFLIGHT', 'AWAITING_APPROVAL', 'OCR', 'REVIEW', 'CHUNKING', 'EMBEDDING', 'INDEXING',
@@ -972,6 +977,7 @@ CREATE TABLE ocr_operations (
 
 CREATE INDEX ocr_operations_document ON ocr_operations (document_id, created_at);
 CREATE INDEX ocr_operations_job ON ocr_operations (current_job_id);
+CREATE INDEX ocr_operations_revision ON ocr_operations (document_id, candidate_revision_id);
 
 -- One document, one reading: at most one operation per document that still owns its reading, including
 -- one waiting for an external page scope and a COMPLETE one whose pages still await decisions. The

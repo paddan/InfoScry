@@ -10,6 +10,7 @@ import infoscry.ocr.OcrOperation
 import infoscry.ocr.OcrOperationStage
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.RescanPreview
+import infoscry.ocr.RescanSelection
 import infoscry.ocr.operationHash
 import java.sql.Connection
 import java.sql.PreparedStatement
@@ -92,9 +93,9 @@ class OcrOperationStore(private val database: Database) {
         database.transaction { connection ->
             connection.prepareStatement(
                 "INSERT INTO ocr_rescan_previews (preview_id, collection_id, document_id, base_revision_id, " +
-                    "managed_sha256, snapshot, snapshot_hash, page_total, external_page_upper_bound, " +
+                    "managed_sha256, snapshot, selection, snapshot_hash, page_total, document_pages, external_page_upper_bound, " +
                     "approval_required, cost_estimate, created_at, expires_at, overrides) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ).use { statement ->
                 statement.setString(1, preview.previewId)
                 statement.setString(2, collectionId)
@@ -102,24 +103,30 @@ class OcrOperationStore(private val database: Database) {
                 statement.setString(4, preview.baseRevisionId)
                 statement.setString(5, preview.managedHash)
                 statement.setString(6, SNAPSHOT_JSON.encodeToString(OcrSettingsSnapshot.serializer(), preview.snapshot))
-                statement.setString(7, preview.snapshotHash)
+                statement.setString(7, SELECTION_JSON.encodeToString(RescanSelection.serializer(), preview.selection))
+                statement.setString(8, preview.snapshotHash)
                 if (preview.pageTotal == null) {
-                    statement.setNull(8, java.sql.Types.INTEGER)
-                } else {
-                    statement.setInt(8, preview.pageTotal)
-                }
-                if (preview.externalPageUpperBound == null) {
                     statement.setNull(9, java.sql.Types.INTEGER)
                 } else {
-                    statement.setInt(9, preview.externalPageUpperBound)
+                    statement.setInt(9, preview.pageTotal)
+                }
+                if (preview.documentPages == null) {
+                    statement.setNull(10, java.sql.Types.INTEGER)
+                } else {
+                    statement.setInt(10, preview.documentPages)
+                }
+                if (preview.externalPageUpperBound == null) {
+                    statement.setNull(11, java.sql.Types.INTEGER)
+                } else {
+                    statement.setInt(11, preview.externalPageUpperBound)
                 }
                 // Keep the baseline column for older database schemas; new previews never advertise a
                 // mid-run pause.
-                statement.setInt(10, 0)
-                statement.setString(11, costEstimateJson)
-                statement.setString(12, Instants.now())
-                statement.setString(13, preview.expiresAt)
-                statement.setString(14, overridesJson)
+                statement.setInt(12, 0)
+                statement.setString(13, costEstimateJson)
+                statement.setString(14, Instants.now())
+                statement.setString(15, preview.expiresAt)
+                statement.setString(16, overridesJson)
                 statement.executeUpdate()
             }
         }
@@ -129,8 +136,8 @@ class OcrOperationStore(private val database: Database) {
     /** One preview as it was written, or null when no preview with that id exists. */
     fun preview(previewId: String): StoredPreview? = database.read { connection ->
         connection.prepareStatement(
-            "SELECT collection_id, document_id, base_revision_id, managed_sha256, snapshot, snapshot_hash, " +
-                "page_total, external_page_upper_bound, expires_at, overrides " +
+            "SELECT collection_id, document_id, base_revision_id, managed_sha256, snapshot, selection, snapshot_hash, " +
+                "page_total, external_page_upper_bound, document_pages, expires_at, overrides " +
                 "FROM ocr_rescan_previews WHERE preview_id = ?",
         ).use { statement ->
             statement.setString(1, previewId)
@@ -146,9 +153,11 @@ class OcrOperationStore(private val database: Database) {
         val baseRevisionId: String?,
         val managedSha256: String,
         val snapshot: OcrSettingsSnapshot,
+        val selection: RescanSelection,
         val snapshotHash: String,
         val pageTotal: Int?,
         val externalPageUpperBound: Int?,
+        val documentPages: Int?,
         val expiresAt: String,
     )
 
@@ -181,6 +190,8 @@ class OcrOperationStore(private val database: Database) {
         requestHash: String,
         pageTotal: Int?,
         jobId: String?,
+        selection: RescanSelection = RescanSelection.Automatic,
+        managedSha256: String = "0".repeat(64),
     ): OcrOperation = database.transaction { connection ->
         connection.selectRequestHash(collectionId, documentId, requestId)?.let { existingHash ->
             if (existingHash != requestHash) throw OcrRequestConflictException(requestId)
@@ -205,27 +216,29 @@ class OcrOperationStore(private val database: Database) {
         val now = Instants.now()
         connection.prepareStatement(
             "INSERT INTO ocr_operations (operation_id, collection_id, document_id, current_job_id, " +
-                "base_revision_id, candidate_revision_id, snapshot, snapshot_hash, stage, page_total, " +
+                "base_revision_id, candidate_revision_id, managed_sha256, snapshot, selection, snapshot_hash, stage, page_total, " +
                 "pages_committed, pages_failed, error_code, error_message, request_id, request_hash, " +
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?, ?)",
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?, ?)",
         ).use { statement ->
             statement.setString(1, id)
             statement.setString(2, collectionId)
             statement.setString(3, documentId.value)
             statement.setString(4, jobId)
             statement.setString(5, baseRevisionId)
-            statement.setString(6, SNAPSHOT_JSON.encodeToString(OcrSettingsSnapshot.serializer(), snapshot))
-            statement.setString(7, snapshotHashOf(snapshot))
-            statement.setString(8, OcrOperationStage.PREFLIGHT.name)
+            statement.setString(6, managedSha256)
+            statement.setString(7, SNAPSHOT_JSON.encodeToString(OcrSettingsSnapshot.serializer(), snapshot))
+            statement.setString(8, SELECTION_JSON.encodeToString(RescanSelection.serializer(), selection))
+            statement.setString(9, snapshotHashOf(snapshot))
+            statement.setString(10, OcrOperationStage.PREFLIGHT.name)
             if (pageTotal == null) {
-                statement.setNull(9, java.sql.Types.INTEGER)
+                statement.setNull(11, java.sql.Types.INTEGER)
             } else {
-                statement.setInt(9, pageTotal)
+                statement.setInt(11, pageTotal)
             }
-            statement.setString(10, requestId)
-            statement.setString(11, requestHash)
-            statement.setString(12, now)
-            statement.setString(13, now)
+            statement.setString(12, requestId)
+            statement.setString(13, requestHash)
+            statement.setString(14, now)
+            statement.setString(15, now)
             statement.executeUpdate()
         }
         connection.readOperationById(id)
@@ -269,6 +282,20 @@ class OcrOperationStore(private val database: Database) {
     fun activeOperation(documentId: DocumentId): OcrOperation? = database.read { connection ->
         connection.selectActiveOperation(documentId)
     }
+
+    /** The producer's snapshot only; serving a page never hydrates operation history or external accounting. */
+    fun readingSnapshotForRevision(documentId: DocumentId, revisionId: String): OcrSettingsSnapshot? =
+        database.read { connection ->
+            connection.prepareStatement(
+                "SELECT snapshot FROM ocr_operations WHERE document_id = ? AND candidate_revision_id = ? LIMIT 1",
+            ).use { statement ->
+                statement.setString(1, documentId.value)
+                statement.setString(2, revisionId)
+                statement.executeQuery().use { rows ->
+                    if (rows.next()) SNAPSHOT_JSON.decodeFromString(OcrSettingsSnapshot.serializer(), rows.getString(1)) else null
+                }
+            }
+        }
 
     /** One document's operations, newest first, for the details and history views. */
     fun operations(documentId: DocumentId): List<OcrOperation> = database.read { connection ->
@@ -711,7 +738,9 @@ class OcrOperationStore(private val database: Database) {
             jobId = getString("current_job_id"),
             baseRevisionId = getString("base_revision_id"),
             candidateRevisionId = getString("candidate_revision_id"),
+            managedSha256 = getString("managed_sha256"),
             snapshot = snapshot,
+            selection = SELECTION_JSON.decodeFromString(RescanSelection.serializer(), getString("selection")),
             stage = OcrOperationStage.valueOf(getString("stage")),
             pageTotal = getInt("page_total").takeIf { !wasNull() },
             pagesCommitted = getInt("pages_committed"),
@@ -737,9 +766,11 @@ class OcrOperationStore(private val database: Database) {
         baseRevisionId = getString("base_revision_id"),
         managedSha256 = getString("managed_sha256"),
         snapshot = SNAPSHOT_JSON.decodeFromString(OcrSettingsSnapshot.serializer(), getString("snapshot")),
+        selection = SELECTION_JSON.decodeFromString(RescanSelection.serializer(), getString("selection")),
         snapshotHash = getString("snapshot_hash"),
         pageTotal = getInt("page_total").takeIf { !wasNull() },
         externalPageUpperBound = getInt("external_page_upper_bound").takeIf { !wasNull() },
+        documentPages = getInt("document_pages").takeIf { !wasNull() },
         expiresAt = getString("expires_at"),
     )
 
@@ -792,11 +823,12 @@ class OcrOperationStore(private val database: Database) {
 
         private const val SELECT_OPERATION =
             "SELECT operation_id, collection_id, document_id, current_job_id, base_revision_id, " +
-                "candidate_revision_id, snapshot, snapshot_hash, stage, page_total, pages_committed, " +
+                "candidate_revision_id, managed_sha256, snapshot, selection, snapshot_hash, stage, page_total, pages_committed, " +
                 "pages_failed, pending_review_count, error_code, error_message, request_id, created_at, " +
                 "updated_at FROM ocr_operations"
 
         private val SNAPSHOT_JSON = Json { ignoreUnknownKeys = true }
+        private val SELECTION_JSON = Json { ignoreUnknownKeys = true }
 
         /**
          * The SQL form of "this operation holds its document", matching the schema's partial unique index.

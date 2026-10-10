@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ImportPreview, ReadingMethodList, RescanPreview } from './api';
+import type { ImportPreview, ReadingMethodList, RescanPreview, RescanSelection } from './api';
 import StartReadingDialog from './StartReadingDialog.svelte';
 import * as api from './api';
 
@@ -22,6 +22,7 @@ const importPreview: ImportPreview = {
 };
 const rescanPreview = (over: Partial<RescanPreview> = {}): RescanPreview => ({
   previewId: 'preview-1', documentId: 'doc-1', managedHash: 'hash', snapshot: {} as RescanPreview['snapshot'],
+  selection: { mode: 'automatic' },
   pageTotal: 48, externalPageUpperBound: 48, destinations: [], costEstimate: null, costUnavailableReason: null,
   ...over,
 });
@@ -125,12 +126,79 @@ describe('StartReadingDialog', () => {
     expect(summary.textContent?.replace(/\s+/g, ' ').trim()).toBe('12 pages will be read (of 48 in the document).');
   });
 
+  it('keeps the explicit page set when changing methods and confirms one-based pages', async () => {
+    const selection: RescanSelection = { mode: 'explicit', ordinals: [0, 6] };
+    vi.mocked(api.previewRescan).mockImplementation(async (_collection, _document, method, passedSelection) => rescanPreview({
+      method, selection: passedSelection ?? { mode: 'automatic' }, pageTotal: 2, documentPages: 48,
+      external: method === 'llm:p1', destination: method === 'llm:p1' ? 'api.example.com' : 'this machine',
+      costEstimate: method === 'llm:p1' ? { amountUsd: 0.04, basis: '2 pages' } : null,
+    }));
+    vi.mocked(api.listReadingMethods).mockResolvedValue({ default: 'surya', methods: [
+      methods.methods[1], { ...methods.methods[2], available: true, unavailableReason: null },
+    ] });
+    render(StartReadingDialog, {
+      collectionId: 'c', request: { kind: 'rescan', documentId: 'doc-1', selection },
+      onstarted: vi.fn(), oncancel: vi.fn(),
+    });
+    expect(await screen.findByRole('button', { name: 'Read pages 1, 7 with Surya' })).toBeTruthy();
+    await fireEvent.change(await screen.findByLabelText('Reading method'), { target: { value: 'llm:p1' } });
+    expect(await screen.findByRole('button', { name: 'Send pages 1, 7 to api.example.com with Cloud OCR' })).toBeTruthy();
+    expect(screen.getByText('Pages to read: 1, 7')).toBeTruthy();
+    expect(api.previewRescan).toHaveBeenLastCalledWith('c', 'doc-1', 'llm:p1', selection);
+  });
+
+  it('retries an uncertain explicit start with the same preview and request id', async () => {
+    vi.mocked(api.previewRescan).mockResolvedValue(rescanPreview({
+      selection: { mode: 'explicit', ordinals: [0, 6] }, pageTotal: 2, documentPages: 48,
+    }));
+    vi.mocked(api.startRescan).mockRejectedValueOnce(new Error('network timeout'))
+      .mockResolvedValueOnce({ operationId: 'op-1' } as api.RescanStarted);
+    render(StartReadingDialog, {
+      collectionId: 'c', request: { kind: 'rescan', documentId: 'doc-1', selection: { mode: 'explicit', ordinals: [0, 6] } },
+      onstarted: vi.fn(), oncancel: vi.fn(),
+    });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read pages 1, 7 with Surya' }));
+    expect(await screen.findByText(/Retry this exact start/)).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry same start' }));
+    await waitFor(() => expect(api.startRescan).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.startRescan).mock.calls[1]).toEqual(vi.mocked(api.startRescan).mock.calls[0]);
+    expect(api.previewRescan).toHaveBeenCalledTimes(1);
+  });
+
   it('says plainly when a rescan has no page to read', async () => {
     vi.mocked(api.previewRescan).mockResolvedValueOnce(rescanPreview({ pageTotal: null, externalPageUpperBound: null, documentPages: 3 }));
     render(StartReadingDialog, { collectionId: 'c', request: { kind: 'rescan', documentId: 'doc-1' }, onstarted: vi.fn(), oncancel: vi.fn() });
 
     expect(await screen.findByText('No page needs reading; the document keeps its text.')).toBeTruthy();
     expect(screen.queryByText(/Unknown pages/)).toBeNull();
+  });
+
+  it('shows zero pages and disables confirming a rescan when every page keeps its text', async () => {
+    vi.mocked(api.previewRescan).mockResolvedValueOnce(rescanPreview({ pageTotal: 0, externalPageUpperBound: 0, documentPages: 3 }));
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'rescan', documentId: 'doc-1' }, onstarted: vi.fn(), oncancel: vi.fn() });
+
+    expect(await screen.findByText('No page needs reading; the document keeps its text.')).toBeTruthy();
+    const confirm = screen.getByRole('button', { name: 'No pages to read' }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    await fireEvent.click(confirm);
+    expect(api.startRescan).not.toHaveBeenCalled();
+  });
+
+  it('still imports files when no page needs image reading', async () => {
+    vi.mocked(api.previewImport).mockResolvedValueOnce({
+      ...importPreview,
+      files: [{ path: '/data/digital.pdf', pages: 0, reason: null, documentPages: 1 }],
+      totalPages: 0,
+    });
+    const onstarted = vi.fn();
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/digital.pdf'], recursive: false, include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
+
+    expect(await screen.findByText('No pages need image reading; the files will still be imported.')).toBeTruthy();
+    const confirm = screen.getByRole('button', { name: 'Import without image reading' }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(api.startImport).toHaveBeenCalledTimes(1));
+    expect(onstarted).toHaveBeenCalledTimes(1);
   });
 
   it('replays the exact start body after a lost response and blocks method changes or closing', async () => {

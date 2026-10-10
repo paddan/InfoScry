@@ -3,6 +3,7 @@ package infoscry.ocr
 import infoscry.domain.DocumentId
 import java.security.MessageDigest
 import java.util.HexFormat
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
@@ -81,6 +82,47 @@ enum class OcrDispatchStage {
     REVIEW,
 }
 
+/** The frozen scope of a rescan; explicit ordinals are zero-based physical page positions. */
+@Serializable
+data class RescanSelection(
+    val mode: Mode = Mode.AUTOMATIC,
+    val ordinals: List<Int>? = null,
+) {
+    @Serializable
+    enum class Mode {
+        @SerialName("automatic") AUTOMATIC,
+        @SerialName("explicit") EXPLICIT,
+    }
+
+    fun canonicalized(documentPages: Int): RescanSelection {
+        require(documentPages > 0) { "a rescan selection needs a known positive page count" }
+        return when (mode) {
+            Mode.AUTOMATIC -> {
+                require(ordinals == null) { "automatic selection does not carry explicit ordinals" }
+                this
+            }
+            Mode.EXPLICIT -> {
+                val selected = requireNotNull(ordinals) { "explicit selection needs page ordinals" }
+                require(selected.isNotEmpty()) { "explicit selection needs at least one page" }
+                require(selected.all { it in 0 until documentPages }) {
+                    "explicit selection contains a page outside the document"
+                }
+                copy(ordinals = selected.distinct().sorted())
+            }
+        }
+    }
+
+    fun selects(ordinal: Int, automatic: Boolean): Boolean = when (mode) {
+        Mode.AUTOMATIC -> automatic
+        Mode.EXPLICIT -> ordinal in checkNotNull(ordinals)
+    }
+
+    companion object {
+        val Automatic = RescanSelection()
+        fun explicit(ordinals: List<Int>) = RescanSelection(Mode.EXPLICIT, ordinals)
+    }
+}
+
 /**
  * What an owner has sent externally, and what it is allowed to send.
  *
@@ -122,6 +164,8 @@ data class OcrOperation(
     val baseRevisionId: String? = null,
     val candidateRevisionId: String? = null,
     val snapshot: OcrSettingsSnapshot,
+    val selection: RescanSelection = RescanSelection.Automatic,
+    val managedSha256: String = "0".repeat(64),
     val stage: OcrOperationStage,
     val pageTotal: Int? = null,
     val pagesCommitted: Int = 0,
@@ -226,6 +270,7 @@ data class RescanPreview(
     val baseRevisionId: String? = null,
     val managedHash: String,
     val snapshot: OcrSettingsSnapshot,
+    val selection: RescanSelection = RescanSelection.Automatic,
     val snapshotHash: String,
     val pageTotal: Int? = null,
     val externalPageUpperBound: Int? = null,

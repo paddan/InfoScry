@@ -7,6 +7,8 @@ import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
+import infoscry.domain.JobId
+import infoscry.domain.JobState
 import infoscry.extract.PageCounter
 import infoscry.extract.DefaultPageCounter
 import infoscry.extract.PdfExtractor
@@ -28,6 +30,7 @@ import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.ReadingMethod
 import infoscry.ocr.ReadingMethodCatalog
 import infoscry.ocr.ReadingMethodUnavailableException
+import infoscry.ocr.RescanSelection
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageImageRenderer
 import infoscry.ocr.RescanPreview
@@ -39,6 +42,7 @@ import infoscry.storage.DocumentStore
 import infoscry.storage.JobStore
 import infoscry.storage.MutationCoordinator
 import infoscry.storage.OcrOperationConflictException
+import infoscry.storage.OcrAttemptInProgressException
 import infoscry.storage.OcrOperationStore
 import infoscry.storage.RevisionPageText
 import infoscry.storage.StaleRescanPreviewException
@@ -92,6 +96,9 @@ class RescanRefusalException(val code: String, message: String) : IllegalStateEx
         /** The document's pages cannot be embedded, so a replacement could never be published. */
         const val NO_EMBEDDER: String = "RESCAN_EMBEDDING_UNAVAILABLE"
 
+        /** Every page keeps its published text, so there is no rescan operation to start. */
+        const val NO_PAGES_TO_READ: String = "RESCAN_NO_PAGES_TO_READ"
+
         /** There is no unpublished, undecided candidate to discard. */
         const val NOTHING_TO_DISCARD: String = "RESCAN_NOTHING_TO_DISCARD"
 
@@ -107,13 +114,28 @@ class RescanRefusalException(val code: String, message: String) : IllegalStateEx
 }
 
 /**
- * One page image an attempt reads, with the reading it is compared against.
+ * One document page, with an image only when it is selected for reading.
  *
- * [baseline] is the page the document *publishes* at this ordinal, or null when it publishes no text there.
- * It is read once, when the attempt starts, and travels with the image so the comparison and the page's unit
- * identity are decided from one reading of the revision rather than from whatever it says later.
+ * [baseline] is the page the document publishes at this ordinal, or null when it publishes no text there.
+ * It is read once when the attempt starts. Preserved pages carry their stable ordinal and unit identity
+ * without rendering; selected pages also carry the image that their reading records.
  */
-data class RescanPage(val image: PageImage, val baseline: RevisionPageText?, val read: Boolean = true)
+data class RescanPage(
+    val ordinal: Int,
+    val unitId: String,
+    val image: PageImage?,
+    val baseline: RevisionPageText?,
+    val read: Boolean = true,
+) {
+
+    init {
+        require(ordinal >= 0) { "a rescan page has a non-negative ordinal, was $ordinal" }
+        require(unitId.isNotBlank()) { "a rescan page has a stable unit id" }
+        require(!read || image != null) { "a rescan page being read has an image" }
+        require(image == null || image.ordinal == ordinal) { "a rescan page image has its page's ordinal" }
+        require(image == null || image.unitId == unitId) { "a rescan page image has its page's stable unit id" }
+    }
+}
 
 /**
  * How many pages a managed document has, and how many of them a rescan reads.
@@ -178,12 +200,13 @@ class RescanPageSource(
         managedPath: Path,
         mediaType: String,
         baseline: Map<Int, RevisionPageText>,
+        selection: RescanSelection = RescanSelection.Automatic,
     ): PageCensus = when {
-        mediaType == PDF_MEDIA_TYPE -> pdfCensus(managedPath, baseline)
+        mediaType == PDF_MEDIA_TYPE -> pdfCensus(managedPath, baseline, selection)
         mediaType in PICTURE_MEDIA_TYPES -> {
             // A picture is one page and is always read; pageCount refuses a picture that is not there.
-            pageCount(managedPath, mediaType)
-            PageCensus(documentPages = ORDINAL_OF_THE_ONLY_PAGE + 1, pagesToRead = ORDINAL_OF_THE_ONLY_PAGE + 1)
+            val count = pageCount(managedPath, mediaType) ?: 1
+            PageCensus(documentPages = count, pagesToRead = selection.canonicalized(count).selects(0, true).let { if (it) 1 else 0 })
         }
         else -> throw RescanRefusalException(
             RescanRefusalException.PAGE_IMAGES_UNSUPPORTED,
@@ -191,13 +214,20 @@ class RescanPageSource(
         )
     }
 
-    private fun pdfCensus(managedPath: Path, baseline: Map<Int, RevisionPageText>): PageCensus {
+    private fun pdfCensus(
+        managedPath: Path,
+        baseline: Map<Int, RevisionPageText>,
+        selection: RescanSelection,
+    ): PageCensus {
         val pdf = openPdf(managedPath) ?: throw RescanRefusalException(
             RescanRefusalException.MANAGED_COPY_MISSING,
             PDF_NOT_OPENED_MESSAGE,
         )
         return pdf.use { container ->
-            val pagesToRead = (1..container.numberOfPages).count { page -> readsPage(container, page, baseline) }
+            val canonical = selection.canonicalized(container.numberOfPages)
+            val pagesToRead = (1..container.numberOfPages).count { page ->
+                canonical.selects(page - 1, readsPage(container, page, baseline))
+            }
             PageCensus(documentPages = container.numberOfPages, pagesToRead = pagesToRead)
         }
     }
@@ -210,11 +240,12 @@ class RescanPageSource(
         baseline[page - 1] == null || selector.shouldRead(container, page)
 
     /**
-     * Renders every page of [document]'s managed copy into [attemptDirectory].
+     * Renders the pages [document]'s managed copy needs read into [attemptDirectory].
      *
-     * Every page is rendered, including those a rescan does not read: a [RescanPage] carries its image for the
-     * reading's provenance and for the staged page's identity. Only [RescanPage.read] decides whether an engine
-     * is called.
+     * A page the rescan keeps carries only its stable ordinal and unit id; it has no image and does not create
+     * source-image provenance. A page that needs reading carries the rendered image used for its identity and
+     * provenance. [committedPages] contains this candidate's successful durable readings; verified rasters
+     * are reused on worker retry before rendering is attempted.
      *
      * @throws RescanRefusalException when the container cannot be opened, when its copy is not the bytes the
      *   archive recorded, or when a picture cannot be read within the raster bound.
@@ -227,6 +258,8 @@ class RescanPageSource(
         documentArtifactRoot: Path,
         baseline: Map<Int, RevisionPageText>,
         renderDpi: Int? = null,
+        committedPages: Map<Int, RevisionPageText> = emptyMap(),
+        selection: RescanSelection = RescanSelection.Automatic,
     ): List<RescanPage> = when {
         mediaType == PDF_MEDIA_TYPE -> pdfPages(
             document = document,
@@ -235,6 +268,8 @@ class RescanPageSource(
             documentArtifactRoot = documentArtifactRoot,
             baseline = baseline,
             renderDpi = renderDpi,
+            committedPages = committedPages,
+            selection = selection,
         )
 
         mediaType in PICTURE_MEDIA_TYPES -> listOf(
@@ -243,6 +278,7 @@ class RescanPageSource(
                 managedPath = managedPath,
                 documentArtifactRoot = documentArtifactRoot,
                 baseline = baseline,
+                selection = selection,
             ),
         )
 
@@ -259,6 +295,8 @@ class RescanPageSource(
         documentArtifactRoot: Path,
         baseline: Map<Int, RevisionPageText>,
         renderDpi: Int?,
+        committedPages: Map<Int, RevisionPageText>,
+        selection: RescanSelection,
     ): List<RescanPage> {
         val pdf = openPdf(managedPath)
             ?: throw RescanRefusalException(
@@ -271,32 +309,75 @@ class RescanPageSource(
             val directory = Files.createDirectories(attemptDirectory.resolve(PageImageRenderer.PAGES_DIRECTORY))
             (1..container.numberOfPages).map { page ->
                 val ordinal = page - 1
-                val image = try {
-                    renderer.render(
-                        document = container,
-                        page = page,
-                        requestedDpi = renderDpi,
-                        directory = directory,
-                        artifactRoot = documentArtifactRoot,
-                        documentId = document.id,
-                        // The page's identity is the one the document already published for it, and the
-                        // extractor's own key only where nothing was published.
-                        unitId = baseline[ordinal]?.unitId?.value ?: pdfPageKey(page),
+                val baselinePage = baseline[ordinal]
+                val unitId = baselinePage?.unitId?.value ?: pdfPageKey(page)
+                val read = selection.selects(ordinal, readsPage(container, page, baseline))
+                if (!read) {
+                    return@map RescanPage(
+                        ordinal = ordinal,
+                        unitId = unitId,
+                        image = null,
+                        baseline = baselinePage,
+                        read = false,
                     )
-                } catch (failure: IOException) {
-                    null
-                } ?: throw RescanRefusalException(
-                    RescanRefusalException.PAGE_RASTER_UNBOUNDED,
-                    "page $page of this document declares a size that cannot be rendered within the raster " +
-                        "bound this build reads at any legible resolution, so it was not read; a rescan cannot " +
-                        "produce an image for it",
-                )
+                }
+                val image = committedPages[ordinal]?.takeIf { it.unitId.value == unitId }
+                    ?.let { committed -> committedRaster(document, managedPath, documentArtifactRoot, directory, committed) }
+                    ?: try {
+                        renderer.render(
+                            document = container,
+                            page = page,
+                            requestedDpi = renderDpi,
+                            directory = directory,
+                            artifactRoot = documentArtifactRoot,
+                            documentId = document.id,
+                            // The page's identity is the one the document already published for it, and the
+                            // extractor's own key only where nothing was published.
+                            unitId = unitId,
+                        )
+                    } catch (failure: IOException) {
+                        null
+                    } ?: throw RescanRefusalException(
+                        RescanRefusalException.PAGE_RASTER_UNBOUNDED,
+                        "page $page of this document declares a size that cannot be rendered within the raster " +
+                            "bound this build reads at any legible resolution, so it was not read; a rescan cannot " +
+                            "produce an image for it",
+                    )
                 RescanPage(
+                    ordinal = ordinal,
+                    unitId = unitId,
                     image = image,
-                    baseline = baseline[ordinal],
-                    read = readsPage(container, page, baseline),
+                    baseline = baselinePage,
+                    read = true,
                 )
             }
+        }
+    }
+
+    /** A durable successful page can be resumed without writing over its recorded pixels. */
+    private fun committedRaster(
+        document: Document,
+        managedPath: Path,
+        artifactRoot: Path,
+        directory: Path,
+        page: RevisionPageText,
+    ): PageImage? {
+        val source = page.sourceImage ?: return null
+        // Only this candidate's own render namespace can be reused by its worker retry.
+        if (source.root != infoscry.domain.SourceImageRoot.ARTIFACTS ||
+            !artifactRoot.resolve(source.relativePath).normalize().startsWith(directory.normalize())) return null
+        return try {
+            PageImage.ofProvenance(document.id, page.unitId.value, page.ordinal, source, artifactRoot,
+                requireNotNull(managedPath.parent)).takeIf { image ->
+                image.width == source.width && image.height == source.height &&
+                    image.width != null && image.height != null &&
+                    image.width.toLong() * image.height <= maxRenderedPixels &&
+                    image.renderVersion == PageImage.RENDER_VERSION
+            }
+        } catch (_: IOException) {
+            null
+        } catch (_: IllegalStateException) {
+            null
         }
     }
 
@@ -305,6 +386,7 @@ class RescanPageSource(
         managedPath: Path,
         documentArtifactRoot: Path,
         baseline: Map<Int, RevisionPageText>,
+        selection: RescanSelection,
     ): RescanPage {
         val directory = managedPath.toAbsolutePath().normalize().parent
             ?: throw RescanRefusalException(
@@ -343,7 +425,14 @@ class RescanPageSource(
                     "process cannot bound",
             )
         }
-        return RescanPage(image = image, baseline = baseline[ORDINAL_OF_THE_ONLY_PAGE])
+        val unitId = baseline[ORDINAL_OF_THE_ONLY_PAGE]?.unitId?.value ?: PICTURE_KEY
+        return RescanPage(
+            ordinal = ORDINAL_OF_THE_ONLY_PAGE,
+            unitId = unitId,
+            image = image.takeIf { selection.selects(ORDINAL_OF_THE_ONLY_PAGE, true) },
+            baseline = baseline[ORDINAL_OF_THE_ONLY_PAGE],
+            read = selection.selects(ORDINAL_OF_THE_ONLY_PAGE, true),
+        )
     }
 
     private fun openPdf(managedPath: Path): PDDocument? = try {
@@ -444,6 +533,7 @@ class RescanService(
         collectionId: CollectionId,
         documentId: DocumentId,
         method: ReadingMethod,
+        selection: RescanSelection = RescanSelection.Automatic,
     ): RescanPreview {
         val collection = requireActiveCollection(collectionId)
         val document = requireDocument(collectionId, documentId)
@@ -460,7 +550,9 @@ class RescanService(
             managedCopyOf(document, paths.documentDir(collectionId, documentId)),
             document.mediaType,
             baseline,
+            selection,
         )
+        val frozenSelection = selection.canonicalized(census.documentPages)
         val pageTotal = census.pagesToRead
         val snapshot = snapshotFor(settings, externalPageLimit = if (method is ReadingMethod.Llm &&
             profileOf(method.profileId)?.revision?.scope == OcrEndpointScope.EXTERNAL
@@ -478,6 +570,7 @@ class RescanService(
             baseRevisionId = baselineRevisionId,
             managedHash = document.sha256,
             snapshot = snapshot,
+            selection = frozenSelection,
             snapshotHash = snapshotHash,
             pageTotal = pageTotal,
             externalPageUpperBound = upperBound,
@@ -573,6 +666,12 @@ class RescanService(
             requireSnapshotStillResolvable(preview.snapshot)
             requirePreviewStillCurrent(preview, collection)
             requireRescanable(document, preview.snapshot)
+            if (preview.pageTotal == 0) {
+                throw RescanRefusalException(
+                    RescanRefusalException.NO_PAGES_TO_READ,
+                    "No page needs reading; the document keeps its text.",
+                )
+            }
             // Signal a live worker before the store transaction closes its operation. The transaction below
             // still enforces replacement atomically, including a concurrent admission that wins this race.
             operations.activeOperation(documentId)?.let { previous ->
@@ -583,6 +682,8 @@ class RescanService(
                 documentId = documentId,
                 baseRevisionId = active,
                 snapshot = preview.snapshot,
+                selection = preview.selection,
+                managedSha256 = preview.managedSha256,
                 requestId = requestId,
                 requestHash = requestHash,
                 // A document whose pages all keep their published text reads none, which an operation cannot
@@ -619,12 +720,7 @@ class RescanService(
     suspend fun resume(collectionId: CollectionId, documentId: DocumentId, operationId: String): OcrOperation =
         mutations.withMutation {
             val operation = requireScopedOperation(collectionId, documentId, operationId)
-            when (operation.stage) {
-                OcrOperationStage.COMPLETE ->
-                    throw IllegalArgumentException("this operation is complete; there is nothing to resume")
-
-                else -> Unit
-            }
+            if (operation.stage == OcrOperationStage.COMPLETE || operation.hasLiveAttempt()) return@withMutation operation
             // The operation keeps the snapshot it was admitted with: a collection default edited since then does
             // not change a reading that is already running or waiting, so only its profile revisions are checked.
             requireActiveCollection(collectionId)
@@ -638,8 +734,21 @@ class RescanService(
                     throw OcrOperationConflictException(documentId, running.stage)
                 }
             }
-            resumeAttempt(operation)
+            try {
+                resumeAttempt(operation)
+            } catch (alreadyResumed: OcrAttemptInProgressException) {
+                // A repeated request can arrive after the first response was lost, including a concurrent
+                // request which passed the admission read at the same time. Its answer is the attempt that
+                // already owns this operation, never another queued job.
+                val current = requireScopedOperation(collectionId, documentId, operationId)
+                if (current.hasLiveAttempt()) current else throw alreadyResumed
+            }
         }
+
+    private fun OcrOperation.hasLiveAttempt(): Boolean {
+        val currentJobId = jobId ?: return false
+        return jobs.get(JobId(currentJobId))?.state in setOf(JobState.QUEUED, JobState.RUNNING)
+    }
 
     /**
      * Records a cancellation of one operation and interrupts the attempt that is running it.

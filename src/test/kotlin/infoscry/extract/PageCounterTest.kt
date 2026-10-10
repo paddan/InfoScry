@@ -1,5 +1,7 @@
 package infoscry.extract
 
+import java.awt.image.BufferedImage
+import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -7,6 +9,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 
 class PageCounterTest {
     @Test
@@ -70,4 +75,39 @@ class PageCounterTest {
             Files.deleteIfExists(pdf)
         }
     }
+    @Test
+    fun `mixed PDF keeps clean text pages and counts only the scanned page for reading`() {
+        val pdf = Files.createTempFile("page-counter-mixed", ".pdf")
+        try {
+            PDDocument().use { document ->
+                val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+                repeat(3) { ordinal ->
+                    val page = PDPage()
+                    document.addPage(page)
+                    if (ordinal == 1) {
+                        val image = LosslessFactory.createFromImage(document, BufferedImage(32, 32, BufferedImage.TYPE_INT_RGB))
+                        PDPageContentStream(document, page).use { stream ->
+                            stream.drawImage(image, 0f, 0f, page.mediaBox.width, page.mediaBox.height)
+                        }
+                    } else {
+                        PDPageContentStream(document, page).use { stream ->
+                            stream.beginText()
+                            stream.setFont(font, 12f)
+                            stream.newLineAtOffset(40f, 700f)
+                            stream.showText("Ordinary digital text remains readable and needs no image reading.")
+                            stream.endText()
+                        }
+                    }
+                }
+                document.save(pdf.toFile())
+            }
+            val counter = DefaultPageCounter { DefaultPageCounter.PDF_MEDIA_TYPE }
+            assertEquals(3, counter.pageCount(pdf))
+            assertEquals(1, counter.readablePageCount(pdf))
+            assertEquals(1, counter.readablePageCount(pdf, DefaultPageCounter.PDF_MEDIA_TYPE))
+        } finally {
+            Files.deleteIfExists(pdf)
+        }
+    }
+
 }

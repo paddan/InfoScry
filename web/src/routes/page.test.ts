@@ -11,12 +11,104 @@ import type { Collection } from '../lib/api';
 describe('app shell', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
   });
 
   // The DOM is shared between tests in this environment, so each one starts from an empty document.
   afterEach(() => {
     cleanup();
     window.localStorage.clear();
+  });
+
+  it('provides the shared workspace hook across mode changes without replacing navigation', async () => {
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+    render(Page);
+    await screen.findByText('Default');
+    const workspace = screen.getByRole('main');
+    expect(workspace.classList.contains('workspace-area')).toBe(true);
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    expect(screen.getByRole('main')).toBe(workspace);
+    expect(await screen.findByRole('tablist', { name: 'Administration section' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('tab', { name: 'Search' }));
+    expect(within(workspace).getByLabelText('Search query')).toBeTruthy();
+  });
+
+  it('restores collection-specific document choices across Admin navigation and resets on reload', async () => {
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall')] }) });
+    const view = render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Default 0 documents' }));
+    expect(screen.getByRole('button', { name: 'Documents' }).getAttribute('aria-expanded')).toBe('false');
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'draft' } });
+    await fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'FAILED' } });
+    await fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'name-desc' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Nightfall 0 documents' }));
+    expect(screen.getByRole('button', { name: 'Documents' }).getAttribute('aria-expanded')).toBe('false');
+    await fireEvent.click(screen.getByRole('button', { name: 'Default 0 documents' }));
+    expect((screen.getByLabelText('Search filenames') as HTMLInputElement).value).toBe('draft');
+    expect((screen.getByLabelText('Status') as HTMLSelectElement).value).toBe('FAILED');
+    expect((screen.getByLabelText('Sort') as HTMLSelectElement).value).toBe('name-desc');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Search' }));
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    expect((screen.getByLabelText('Search filenames') as HTMLInputElement).value).toBe('draft');
+    view.unmount();
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Default 0 documents' }));
+    expect(screen.getByRole('button', { name: 'Documents' }).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('removes deleted collection view choices before the same managed ID is seen again', async () => {
+    let deleted = false;
+    let reintroduced = false;
+    stubFetch({
+      list: () => jsonResponse({ collections: deleted && !reintroduced ? [collection('Default')] : [collection('Default'), collection('Nightfall')] }),
+      deleteCollection: () => { deleted = true; return jsonResponse({ deletion: {
+        operationId: 'gone', kind: 'COLLECTION', collectionId: 'nightfall', collectionName: 'Nightfall',
+        documentIds: [], phase: 'DONE', terminal: true, errorCode: null,
+      } }); },
+      rename: () => jsonResponse({ collection: collection('Default') }),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Nightfall 0 documents' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'must disappear' } });
+    await fireEvent.click(screen.getByText('Settings', { selector: 'summary' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete collection' }));
+    await fireEvent.input(screen.getByLabelText('Type the collection name to confirm'), { target: { value: 'Nightfall' } });
+    await fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete Nightfall?' })).getByRole('button', { name: 'Delete collection' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Nightfall 0 documents' })).toBeNull());
+    reintroduced = true;
+    await fireEvent.click(screen.getByRole('button', { name: 'Default 0 documents' }));
+    await fireEvent.click(screen.getByText('Settings', { selector: 'summary' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 0 documents' }));
+    expect(screen.getByRole('button', { name: 'Documents' }).getAttribute('aria-expanded')).toBe('false');
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    expect((screen.getByLabelText('Search filenames') as HTMLInputElement).value).toBe('');
+  });
+
+  it('lets Ask history collapse and reopen while preserving the selected conversation', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] }),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    const history = await screen.findByRole('navigation', { name: 'Ask history' });
+    expect(await within(history).findByRole('button', { name: 'The signer' })).toBeTruthy();
+
+    await fireEvent.click(within(history).getByRole('button', { name: 'Collapse Ask history' }));
+    expect(within(history).queryByRole('button', { name: 'The signer' })).toBeNull();
+    await fireEvent.click(within(history).getByRole('button', { name: 'Expand Ask history' }));
+    expect(await within(history).findByRole('button', { name: 'The signer' })).toBeTruthy();
+    expect(screen.getByRole('tabpanel', { name: 'Ask' })).toBeTruthy();
   });
 
   it('renders the InfoScry heading', () => {
@@ -88,11 +180,18 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 0 documents' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.input(screen.getByLabelText('Search filenames'), { target: { value: 'invoice' } });
+    await fireEvent.click(screen.getByText('Settings', { selector: 'summary' }));
     await fireEvent.input(screen.getByLabelText('Collection name'), { target: { value: 'Nightfall archive' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
 
     // The panel stays mounted through the reload, so the save reports itself instead of flashing a spinner.
     expect(await screen.findByText('Name saved.')).toBeTruthy();
+    expect((screen.getByLabelText('Search filenames') as HTMLInputElement).value).toBe('invoice');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Search' }));
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    expect((screen.getByLabelText('Search filenames') as HTMLInputElement).value).toBe('invoice');
     await act(async () => {});
     const options = within(screen.getByLabelText('Collection')).getAllByRole('option');
     expect(options.map((option) => option.textContent)).toEqual(['Default', 'Nightfall archive']);    // Renaming is not a workspace switch: the workspace keeps the collection it had, and Admin keeps
@@ -401,7 +500,7 @@ describe('app shell', () => {
     expect(screen.getByText('Page 9')).toBeTruthy();
   });
 
-  it('opens a managed document from Admin in the existing source viewer', async () => {
+  it('opens a managed PDF from Admin in the physical-page reader', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 2)] }),
       documents: () => jsonResponse({
@@ -432,24 +531,560 @@ describe('app shell', () => {
         sourceId: 'unit-9',
       }),
       source: () => jsonResponse(sourcePage('Managed document text', 0, 21)),
+      pageReview: (url) => {
+        const revision = new URL(url, window.location.origin).searchParams.get('revision') ?? 'revision-1';
+        return jsonResponse(pageReviewResponse({ revisionId: revision, text: `Reading ${revision}` }));
+      },
     });
 
     render(Page);
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 2 documents' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    const openDocument = await screen.findByRole('button', { name: 'Open document' });
+    await fireEvent.click(openDocument);
+
+    expect(await screen.findByRole('region', { name: 'Page review' })).toBeTruthy();
+    expect(await screen.findByText('Reading revision-1')).toBeTruthy();
+    // Admin opener keeps its managed collection and the reader requests one exact page tuple.
+    expect(calls.some((call) => call.url === '/api/collections/nightfall/documents/document-1/page-review?ordinal=0&limit=16384')).toBe(true);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to documents' }));
+    await waitFor(() => expect(document.activeElement).toBe(openDocument));
+  });
+
+  it('routes a page scan request from the Admin reader into the explicit preview dialog', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      documents: () => jsonResponse({ documents: [{
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }], total: 1 }),
+      document: () => jsonResponse({ document: {
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }, errorMessage: null, sourceId: 'unit-9' }),
+      pageReview: (url) => {
+        const revision = new URL(url, window.location.origin).searchParams.get('revision') ?? 'revision-1';
+        return jsonResponse(pageReviewResponse({ revisionId: revision, text: `Reading ${revision}` }));
+      },
+      readingMethods: () => jsonResponse({ default: 'surya', methods: [
+        { method: 'surya', label: 'Surya', destination: 'this machine', available: true, unavailableReason: null, external: false },
+      ] }),
+      rescanPreview: () => jsonResponse({
+        previewId: 'preview-1', documentId: 'document-1', managedHash: 'hash', snapshot: {},
+        selection: { mode: 'explicit', ordinals: [0] }, pageTotal: 1, documentPages: 1,
+        externalPageUpperBound: 1, destinations: [], costEstimate: null,
+      }),
+      startRescan: (_url, body) => jsonResponse({
+        operationId: 'op-1', collectionId: 'nightfall', documentId: 'document-1',
+        snapshot: {}, selection: { mode: 'explicit', ordinals: [0] }, managedSha256: 'hash', stage: 'COMPLETE',
+        candidateRevisionId: 'revision-2', pagesCommitted: 1, pagesFailed: 0,
+        external: { distinctPages: 0, calls: 0, allowance: 0 }, requestId: body.requestId,
+        createdAt: '', updatedAt: '',
+      }),
+      documentRevisions: () => jsonResponse({
+        revisions: [{ revisionId: 'revision-2', active: true, state: 'PUBLISHED', provenance: 'OCR', createdAt: '', pageCount: 2 }],
+        total: 2, activeRevisionId: 'revision-2',
+      }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    await screen.findByText('Reading revision-1');
+    expect(screen.getByTestId('document-rescan')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Scan this page again' }));
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Read page 1 with Surya' })).toBeTruthy();
+    const previewCall = calls.find((call) => call.url.endsWith('/documents/document-1/ocr/preview'));
+    expect(JSON.parse(String(previewCall?.init?.body))).toEqual({ method: 'surya', selection: { mode: 'explicit', ordinals: [0] } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Read page 1 with Surya' }));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/documents/document-1/ocr/rescan'))).toBe(true));
+    expect(await screen.findByRole('button', { name: 'Refresh to latest reading' }, { timeout: 3000 })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
+    expect(await screen.findByText('Reading revision-2')).toBeTruthy();
+    expect(calls.some((call) => call.url.includes('page-review?ordinal=0&revision=revision-2'))).toBe(true);
+  });
 
+  it('cancels the nested page-scan dialog without closing the reader or losing its selection', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      documents: () => jsonResponse({ documents: [{
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }], total: 1 }),
+      document: () => jsonResponse({ document: {
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }, errorMessage: null, sourceId: 'unit-9' }),
+      pageReview: (url) => {
+        const ordinal = Number(new URL(url, window.location.origin).searchParams.get('ordinal') ?? 0);
+        return jsonResponse(pageReviewResponse({
+          ordinal, documentPages: 2,
+          previousOrdinal: ordinal === 1 ? 0 : null,
+          nextOrdinal: ordinal === 0 ? 1 : null,
+        }));
+      },
+      readingMethods: () => jsonResponse({ default: 'surya', methods: [
+        { method: 'surya', label: 'Surya', destination: 'this machine', available: true, unavailableReason: null, external: false },
+      ] }),
+      rescanPreview: () => jsonResponse({
+        previewId: 'preview-1', documentId: 'document-1', managedHash: 'hash', snapshot: {},
+        selection: { mode: 'explicit', ordinals: [0, 1] }, pageTotal: 2, documentPages: 2,
+        externalPageUpperBound: 2, destinations: [], costEstimate: null,
+      }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    await screen.findByText('Page 1 of 2');
+    await fireEvent.click(screen.getByRole('button', { name: 'Mark page 1' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText('Page 2 of 2');
+    await fireEvent.click(screen.getByRole('button', { name: 'Mark page 2' }));
+    expect(screen.getByText('Selected pages: 1, 2')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Scan selected pages' }));
+    const dialog = await screen.findByRole('dialog');
+    await screen.findByRole('button', { name: 'Read pages 1, 2 with Surya' });
+    await fireEvent.keyDown(dialog, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('region', { name: 'Page review' })).toBeTruthy();
+    expect(screen.getByText('Page 2 of 2')).toBeTruthy();
+    expect(screen.getByText('Selected pages: 1, 2')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Mark page 2' }) as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('keeps the selected page through narrow Back and reopens without hidden marks', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      documents: () => jsonResponse({ documents: [{
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }], total: 1 }),
+      document: () => jsonResponse({ document: {
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }, errorMessage: null, sourceId: 'unit-9' }),
+      pageReview: (url) => {
+        const request = new URL(url, window.location.origin);
+        return jsonResponse(pageReviewResponse({
+          ordinal: Number(request.searchParams.get('ordinal') ?? 0), documentPages: 2,
+          previousOrdinal: request.searchParams.get('ordinal') === '1' ? 0 : null,
+          nextOrdinal: request.searchParams.get('ordinal') === '0' ? 1 : null,
+        }));
+      },
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    await fireEvent.click(await screen.findByRole('tab', { name: 'Text' }));
+    await screen.findByText('Managed document text');
+    await fireEvent.click(screen.getByRole('button', { name: 'Mark page 1' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText('Page 2 of 2')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Mark page 2' }));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to results' }));
+    expect(await screen.findByRole('button', { name: 'Open selected source' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Mark page 2' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Open selected source' }));
+    expect(await screen.findByText('Page 2 of 2')).toBeTruthy();
+    expect(screen.getByText('No pages selected')).toBeTruthy();
+  });
+
+  it('starts a fresh publication lookup after narrow Back and ignores the old result', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    let activeRevisionId = 'revision-1';
+    let resolveFirstLookup!: (response: Response) => void;
+    const firstLookup = new Promise<Response>((resolve) => { resolveFirstLookup = resolve; });
+    let resolveSecondLookup!: (response: Response) => void;
+    const secondLookup = new Promise<Response>((resolve) => { resolveSecondLookup = resolve; });
+    let revisionLookups = 0;
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      documents: () => jsonResponse({ documents: [{
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }], total: 1 }),
+      document: () => jsonResponse({ document: {
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }, errorMessage: null, sourceId: 'unit-9' }),
+      pageReview: (url) => {
+        const request = new URL(url, window.location.origin);
+        const revision = request.searchParams.get('revision') ?? 'revision-1';
+        return jsonResponse(pageReviewResponse({ revisionId: revision, text: `Reading ${revision}` }));
+      },
+      rescanOperations: () => jsonResponse({ operations: [{
+        operationId: 'operation-1', collectionId: 'nightfall', documentId: 'document-1', snapshot: {},
+        selection: { mode: 'automatic' }, managedSha256: 'hash', stage: 'COMPLETE', pageTotal: 1,
+        pagesCommitted: 1, pagesFailed: 0, candidateRevisionId: 'candidate-revision',
+        external: { distinctPages: 0, calls: 0, allowance: 0 }, requestId: 'request-1', createdAt: '', updatedAt: '',
+      }] }),
+      documentRevisions: () => {
+        revisionLookups += 1;
+        if (revisionLookups === 1) return firstLookup;
+        if (revisionLookups === 2) return secondLookup;
+        return jsonResponse({ revisions: [{ revisionId: activeRevisionId, active: true, state: 'PUBLISHED', provenance: 'RESTORE', createdAt: '', pageCount: 2 }], total: 2, activeRevisionId });
+      },
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    expect(await screen.findByText('Reading revision-1')).toBeTruthy();
+    await waitFor(() => expect(revisionLookups).toBe(1));
+    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to results' }));
+    expect(await screen.findByRole('button', { name: 'Open selected source' })).toBeTruthy();
+    activeRevisionId = 'revision-restored';
+    const operationLookupsBeforeReopen = calls.filter((call) => call.url.endsWith('/ocr/operations')).length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Open selected source' }));
+    await waitFor(() => expect(calls.filter((call) => call.url.endsWith('/ocr/operations')).length)
+      .toBeGreaterThan(operationLookupsBeforeReopen));
+    await waitFor(() => expect(revisionLookups).toBe(2));
+
+    // The first answer belongs to the hidden view and points back at its old R1 head.
+    await act(async () => {
+      resolveFirstLookup(jsonResponse({ revisions: [{ revisionId: 'revision-1', active: true, state: 'PUBLISHED', provenance: 'OCR', createdAt: '', pageCount: 2 }], total: 2, activeRevisionId: 'revision-1' }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(screen.getByText('Reading revision-1')).toBeTruthy();
+
+    await act(async () => {
+      resolveSecondLookup(jsonResponse({ revisions: [{ revisionId: activeRevisionId, active: true, state: 'PUBLISHED', provenance: 'RESTORE', createdAt: '', pageCount: 2 }], total: 2, activeRevisionId }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh to latest reading' })).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
+    expect(await screen.findByText('Reading revision-restored')).toBeTruthy();
+    expect(calls.some((call) => call.url.includes('page-review?') && call.url.includes('revision=candidate-revision'))).toBe(false);
+  });
+
+  it('retries a failed active-head lookup on the next visible resync', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    let activeRevisionId = 'revision-restored';
+    let revisionLookups = 0;
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      documents: () => jsonResponse({ documents: [{
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }], total: 1 }),
+      document: () => jsonResponse({ document: {
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }, errorMessage: null, sourceId: 'unit-9' }),
+      pageReview: (url) => {
+        const request = new URL(url, window.location.origin);
+        const revision = request.searchParams.get('revision') ?? 'revision-1';
+        return jsonResponse(pageReviewResponse({ revisionId: revision, text: `Reading ${revision}` }));
+      },
+      rescanOperations: () => jsonResponse({ operations: [{
+        operationId: 'operation-1', collectionId: 'nightfall', documentId: 'document-1', snapshot: {},
+        selection: { mode: 'automatic' }, managedSha256: 'hash', stage: 'COMPLETE', pageTotal: 1,
+        pagesCommitted: 1, pagesFailed: 0, candidateRevisionId: 'candidate-revision',
+        external: { distinctPages: 0, calls: 0, allowance: 0 }, requestId: 'request-1', createdAt: '', updatedAt: '',
+      }] }),
+      documentRevisions: () => {
+        revisionLookups += 1;
+        if (revisionLookups === 1) return jsonResponse({ error: { code: 'TEMPORARY_FAILURE', message: 'temporary failure' } }, 503);
+        return jsonResponse({ revisions: [{ revisionId: activeRevisionId, active: true, state: 'PUBLISHED', provenance: 'RESTORE', createdAt: '', pageCount: 2 }], total: 2, activeRevisionId });
+      },
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    expect(await screen.findByText('Reading revision-1')).toBeTruthy();
+    await waitFor(() => expect(revisionLookups).toBe(1));
+    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to results' }));
+    expect(await screen.findByRole('button', { name: 'Open selected source' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Open selected source' }));
+    await waitFor(() => expect(revisionLookups).toBe(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh to latest reading' })).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
+    expect(await screen.findByText('Reading revision-restored')).toBeTruthy();
+    expect(calls.some((call) => call.url.includes('page-review?') && call.url.includes('revision=candidate-revision'))).toBe(false);
+  });
+
+  it('shows page-scan progress in the reader and refreshes the exact published revision', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      documents: () => jsonResponse({ documents: [{
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }], total: 1 }),
+      document: () => jsonResponse({ document: {
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }, errorMessage: null, sourceId: 'unit-9' }),
+      pageReview: (url) => {
+        const request = new URL(url, window.location.origin);
+        const revision = request.searchParams.get('revision') ?? 'revision-1';
+        return jsonResponse(pageReviewResponse({
+          revisionId: revision, ordinal: Number(request.searchParams.get('ordinal') ?? 0), documentPages: 2,
+          text: `Reading ${revision}`,
+        }));
+      },
+      readingMethods: () => jsonResponse({ default: 'surya', methods: [
+        { method: 'surya', label: 'Surya', destination: 'this machine', available: true, unavailableReason: null, external: false },
+      ] }),
+      rescanPreview: () => jsonResponse({
+        previewId: 'preview-1', documentId: 'document-1', managedHash: 'hash', snapshot: {},
+        selection: { mode: 'explicit', ordinals: [0] }, pageTotal: 1, documentPages: 2,
+        externalPageUpperBound: 1, destinations: [], costEstimate: null,
+      }),
+      startRescan: (_url, body) => jsonResponse({
+        operationId: 'op-1', collectionId: 'nightfall', documentId: 'document-1', snapshot: {},
+        selection: { mode: 'explicit', ordinals: [0] }, managedSha256: 'hash', stage: 'OCR', pageTotal: 1,
+        pagesCommitted: 0, pagesFailed: 0, external: { distinctPages: 0, calls: 0, allowance: 0 },
+        requestId: body.requestId, createdAt: '', updatedAt: '',
+      }),
+      rescanOperation: () => jsonResponse({
+        operationId: 'op-1', collectionId: 'nightfall', documentId: 'document-1', snapshot: {},
+        selection: { mode: 'explicit', ordinals: [0] }, managedSha256: 'hash', stage: 'COMPLETE', pageTotal: 1,
+        candidateRevisionId: 'revision-2', pagesCommitted: 1, pagesFailed: 0,
+        external: { distinctPages: 0, calls: 0, allowance: 0 }, requestId: 'request-1', createdAt: '', updatedAt: '',
+      }),
+      documentRevisions: () => jsonResponse({
+        revisions: [{ revisionId: 'revision-2', active: true, state: 'PUBLISHED', provenance: 'OCR', createdAt: '', pageCount: 2 }],
+        total: 2, activeRevisionId: 'revision-2',
+      }),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    await screen.findByText('Reading revision-1');
+    await fireEvent.click(screen.getByRole('button', { name: 'Scan this page again' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read page 1 with Surya' }));
+    expect(await screen.findByText('Reading 0 of 1')).toBeTruthy();
+    expect(screen.getByText('Reading 0 of 1').closest('[hidden]')).toBeNull();
+    expect(screen.getAllByTestId('document-rescan')).toHaveLength(1);
+    expect(await screen.findByRole('button', { name: 'Refresh to latest reading' }, { timeout: 3000 })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
+    expect(await screen.findByText('Reading revision-2')).toBeTruthy();
+    expect(calls.some((call) => call.url.includes('page-review?ordinal=0&revision=revision-2'))).toBe(true);
+  });
+
+  it('resyncs the latest same-document publication instead of replaying a stale start after reopen', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      documents: () => jsonResponse({ documents: [{
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }], total: 1 }),
+      document: () => jsonResponse({ document: {
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }, errorMessage: null, sourceId: 'unit-9' }),
+      pageReview: (url) => {
+        const request = new URL(url, window.location.origin);
+        const revision = request.searchParams.get('revision') ?? latestRevision;
+        const ordinal = Number(request.searchParams.get('ordinal') ?? 0);
+        return jsonResponse(pageReviewResponse({
+          revisionId: revision, ordinal, documentPages: 2,
+          previousOrdinal: ordinal === 1 ? 0 : null, nextOrdinal: ordinal === 0 ? 1 : null,
+          text: `Reading ${revision}`,
+        }));
+      },
+      readingMethods: () => jsonResponse({ default: 'surya', methods: [
+        { method: 'surya', label: 'Surya', destination: 'this machine', available: true, unavailableReason: null, external: false },
+      ] }),
+      rescanPreview: (_url, body) => jsonResponse({
+        previewId: `preview-${startCount + 1}`, documentId: 'document-1', managedHash: 'hash', snapshot: {},
+        selection: (body as { selection?: { mode: 'automatic' | 'explicit'; ordinals?: number[] } }).selection ?? { mode: 'automatic' },
+        pageTotal: 1, documentPages: 1, externalPageUpperBound: 1, destinations: [], costEstimate: null,
+      }),
+      startRescan: (_url, body) => {
+        startCount += 1;
+        const revision = startCount === 1 ? 'revision-1' : 'revision-2';
+        latestRevision = revision;
+        latestOperation = {
+          operationId: `operation-${startCount}`, collectionId: 'nightfall', documentId: 'document-1', snapshot: {},
+          selection: startCount === 1 ? { mode: 'explicit', ordinals: [0] } : { mode: 'automatic' },
+          managedSha256: 'hash', stage: 'COMPLETE', pageTotal: 1, pagesCommitted: 1, pagesFailed: 0,
+          candidateRevisionId: revision, external: { distinctPages: 0, calls: 0, allowance: 0 },
+          requestId: body.requestId, createdAt: '', updatedAt: '',
+        };
+        return jsonResponse(latestOperation);
+      },
+      rescanOperations: () => jsonResponse({ operations: latestOperation === null ? [] : [latestOperation] }),
+      documentRevisions: () => jsonResponse({
+        revisions: [{ revisionId: latestRevision, active: true, state: 'PUBLISHED', provenance: 'OCR', createdAt: '', pageCount: 2 }],
+        total: 1, activeRevisionId: latestRevision,
+      }),
+    });
+    let latestRevision = 'revision-0';
+    let startCount = 0;
+    let latestOperation: Record<string, unknown> | null = null;
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    expect(await screen.findByText('Reading revision-0')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Scan this page again' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read page 1 with Surya' }));
+    await waitFor(() => expect(calls.some((call) => call.url.includes('/ocr/revisions?'))).toBe(true));
+    expect(await screen.findByRole('button', { name: 'Refresh to latest reading' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
+    expect(await screen.findByText('Reading revision-1')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to documents' }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Scan again' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read 1 page with Surya' }));
+    expect(startCount).toBe(2);
+    const callCountBeforeReopen = calls.length;
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    expect(await screen.findByText('Reading revision-2')).toBeTruthy();
+    await waitFor(() => expect(calls.slice(callCountBeforeReopen).some((call) => call.url.endsWith('/ocr/operations'))).toBe(true));
+
+    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(calls.slice(callCountBeforeReopen).some((call) => call.url.includes('page-review?') && call.url.includes('revision=revision-1'))).toBe(false);
+    await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(calls.some((call) => call.url.includes('page-review?ordinal=1&revision=revision-2&limit=16384'))).toBe(true));
+  });
+
+  it('does not offer an old OCR candidate after History Restore made a different revision active', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 1)] }),
+      documents: () => jsonResponse({ documents: [{
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }], total: 1 }),
+      document: () => jsonResponse({ document: {
+        id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf', originalFilename: 'quarterly.pdf',
+        sizeBytes: 2048, status: 'COMPLETE', createdAt: '', updatedAt: '',
+      }, errorMessage: null, sourceId: 'unit-9' }),
+      pageReview: (url) => {
+        const request = new URL(url, window.location.origin);
+        const revision = request.searchParams.get('revision') ?? activeRevisionId;
+        const ordinal = Number(request.searchParams.get('ordinal') ?? 0);
+        return jsonResponse(pageReviewResponse({
+          revisionId: revision, ordinal, documentPages: 2,
+          previousOrdinal: ordinal === 1 ? 0 : null, nextOrdinal: ordinal === 0 ? 1 : null,
+          text: `Reading ${revision}`,
+        }));
+      },
+      rescanOperations: () => jsonResponse({ operations: oldOcrOperation === null ? [] : [oldOcrOperation] }),
+      documentRevisions: () => jsonResponse({
+        revisions: [{ revisionId: activeRevisionId, active: true, state: 'PUBLISHED', provenance: 'RESTORE', createdAt: '', pageCount: 2 }],
+        total: 2, activeRevisionId,
+      }),
+    });
+    let activeRevisionId = 'revision-1';
+    let oldOcrOperation: Record<string, unknown> | null = null;
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    expect(await screen.findByText('Reading revision-1')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to documents' }));
+
+    // History Restore publishes a fresh active revision without creating another OCR operation.
+    oldOcrOperation = {
+      operationId: 'operation-old-ocr', collectionId: 'nightfall', documentId: 'document-1', snapshot: {},
+      selection: { mode: 'automatic' }, managedSha256: 'hash', stage: 'COMPLETE', pageTotal: 2,
+      pagesCommitted: 2, pagesFailed: 0, candidateRevisionId: 'revision-1',
+      external: { distinctPages: 0, calls: 0, allowance: 0 }, requestId: 'old-request', createdAt: '', updatedAt: '',
+    };
+    activeRevisionId = 'revision-restored';
+    const beforeReopen = calls.length;
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
+    expect(await screen.findByText('Reading revision-restored')).toBeTruthy();
+    // The old COMPLETE OCR operation still points to revision-1; that must not be offered
+    // as a new reading after Restore made revision-restored active.
+    await waitFor(() => expect(calls.slice(beforeReopen).some((call) => call.url.includes('/ocr/operations'))).toBe(true));
+    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(calls.slice(beforeReopen).some((call) => call.url.includes('/ocr/revisions?'))).toBe(true);
+    expect(calls.slice(beforeReopen).some((call) => call.url.includes('page-review?') && call.url.includes('revision=revision-1'))).toBe(false);
+    await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(calls.some((call) => call.url.includes('page-review?ordinal=1&revision=revision-restored&limit=16384'))).toBe(true));
+  });
+
+  it('returns focus to the visible Admin heading when the source opener is removed', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall', 2)] }),
+      documents: () => jsonResponse({
+        documents: [{
+          id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf',
+          originalFilename: 'quarterly.pdf', sizeBytes: 2048, status: 'COMPLETE',
+          createdAt: '2026-09-21T07:00:00Z', updatedAt: '2026-09-21T07:00:00Z',
+        }],
+        total: 2,
+      }),
+      document: () => jsonResponse({
+        document: {
+          id: 'document-1', collectionId: 'nightfall', mediaType: 'application/pdf',
+          originalFilename: 'quarterly.pdf', sizeBytes: 2048, status: 'COMPLETE',
+          createdAt: '2026-09-21T07:00:00Z', updatedAt: '2026-09-21T07:00:00Z',
+        },
+        errorMessage: null,
+        sourceId: 'unit-9',
+      }),
+      source: () => jsonResponse(sourcePage('Managed document text', 0, 21)),
+      pageReview: () => jsonResponse(pageReviewResponse()),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 2 documents' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+    const openDocument = await screen.findByRole('button', { name: 'Open document' });
+    await fireEvent.click(openDocument);
     expect(await screen.findByRole('heading', { name: 'Source' })).toBeTruthy();
-    expect(screen.getByText('Managed document text')).toBeTruthy();
-    // The viewer reads the collection Admin manages, not the workspace's own selected collection,
-    // and the managed original link names the same document.
-    expect(calls.some((call) => call.url === '/api/collections/nightfall/sources/unit-9?offset=0&limit=16384')).toBe(true);
-    const originalLink = screen.getByRole('link', { name: 'Open original' });
-    expect(originalLink.getAttribute('href')).toBe('/api/collections/nightfall/documents/document-1/original');
-    expect(originalLink.getAttribute('target')).toBe('_blank');
-    expect(originalLink.getAttribute('rel')).toContain('noopener');
+
+    openDocument.remove();
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to documents' }));
+
+    const adminHeading = screen.getByRole('heading', { name: 'Administration' });
+    await waitFor(() => expect(document.activeElement).toBe(adminHeading));
   });
 
   it('asks the server for every eligible document of the managed collection, not the displayed page', async () => {
@@ -475,6 +1110,7 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 61 documents' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Retry all eligible documents' }));
 
     // Collection-wide selection is the server's to make: the request names the collection and asks for every
@@ -528,6 +1164,7 @@ describe('app shell', () => {
         sourceId: 'unit-9',
       }),
       source: () => jsonResponse(sourcePage('Managed document text', 0, 21)),
+      pageReview: () => jsonResponse(pageReviewResponse()),
       deleteCollection: () => {
         deleted = true;
         return jsonResponse({ operationId: 'op-1', collectionId: 'nightfall', phase: 'PREPARED' }, 202);
@@ -538,10 +1175,13 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Documents' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
     expect(await screen.findByRole('heading', { name: 'Source' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Close source viewer' }));
 
+    await fireEvent.click(screen.getByText('Settings', { selector: 'summary' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Delete collection' }));
     await fireEvent.input(
       screen.getByLabelText('Type the collection name to confirm'),
@@ -600,6 +1240,7 @@ describe('app shell', () => {
 
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
+    await fireEvent.click(screen.getByText('Settings', { selector: 'summary' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Delete collection' }));
     await fireEvent.input(
       screen.getByLabelText('Type the collection name to confirm'),
@@ -641,6 +1282,7 @@ describe('app shell', () => {
     await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Nightfall 1 document' }));
 
+    await fireEvent.click(screen.getByText('Import history', { selector: 'summary' }));
     const history = await screen.findByRole('region', { name: 'Import history for Nightfall' });
     expect(await within(history).findByText('1 of 4 files')).toBeTruthy();
     // The history read names the collection Admin manages, and carries no source path or payload.
@@ -780,7 +1422,7 @@ describe('app shell', () => {
     expect(document.querySelector('script')).toBeNull();
   });
 
-  it('reserves a right-hand preview area while keeping Search visible beside the modal source viewer', async () => {
+  it('shows a nonmodal source beside Search and returns focus to the citation on close', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
       search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
@@ -793,13 +1435,41 @@ describe('app shell', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
 
-    const dialog = await screen.findByRole('dialog', { name: 'Source' });
-    expect(dialog.getAttribute('aria-modal')).toBe('true');
-    expect(dialog.getAttribute('aria-labelledby')).toBe('source-heading');
-    expect(dialog.getAttribute('tabindex')).toBe('-1');
+    const sourcePane = await screen.findByRole('region', { name: 'Source' });
+    expect(sourcePane.getAttribute('aria-modal')).toBeNull();
+    expect(sourcePane.getAttribute('aria-labelledby')).toBe('source-heading');
+    expect(document.querySelector('.source-backdrop')).toBeNull();
     expect(document.querySelector('.app-shell')?.classList.contains('source-open')).toBe(true);
     expect(screen.getByRole('list', { name: 'Search results' })).toBeTruthy();
     expect(await screen.findByText('Extracted page text')).toBeTruthy();
+    expect((screen.getByLabelText('Search query') as HTMLInputElement).value).toBe('tax records');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Close source viewer' }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Source' })).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /Default.*Page 12/s }));
+  });
+
+  it('offers Back in the narrow source layout and keeps the selected source available', async () => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
+
+    expect(await screen.findByRole('button', { name: 'Back to results' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to results' }));
+    expect(await screen.findByRole('button', { name: 'Open selected source' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Default.*Page 12/s }).getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open selected source' }));
+    expect(await screen.findByText('Extracted page text')).toBeTruthy();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
   });
 
   it('moves focus into the source sheet when it opens', async () => {
@@ -817,7 +1487,7 @@ describe('app shell', () => {
     result.focus();
     await fireEvent.click(result);
 
-    const dialog = await screen.findByRole('dialog', { name: 'Source' });
+    const dialog = await screen.findByRole('region', { name: 'Source' });
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
   });
 
@@ -835,12 +1505,12 @@ describe('app shell', () => {
     const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
     result.focus();
     await fireEvent.click(result);
-    const dialog = await screen.findByRole('dialog', { name: 'Source' });
+    const dialog = await screen.findByRole('region', { name: 'Source' });
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
 
     await fireEvent.keyDown(dialog, { key: 'Escape' });
 
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Source' })).toBeNull());
     expect(screen.getByRole('list', { name: 'Search results' })).toBeTruthy();
     expect(document.activeElement).toBe(result);
   });
@@ -859,15 +1529,35 @@ describe('app shell', () => {
     const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
     result.focus();
     await fireEvent.click(result);
-    await screen.findByRole('dialog', { name: 'Source' });
+    await screen.findByRole('region', { name: 'Source' });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Close source viewer' }));
 
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Source' })).toBeNull());
     expect(document.activeElement).toBe(result);
   });
 
-  it('closes the source sheet when clicking outside it on the backdrop', async () => {
+  it('returns focus to the active view heading when the source opener was removed', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
+      source: () => jsonResponse(sourcePage('Extracted page text', 0, 16)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
+    await fireEvent.click(result);
+    await screen.findByRole('region', { name: 'Source' });
+    result.remove();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Close source viewer' }));
+
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Search your archive' })));
+  });
+
+  it('keeps the workspace available without a backdrop while the source is open', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
       search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
@@ -879,17 +1569,14 @@ describe('app shell', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
 
     await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
-    await screen.findByRole('dialog', { name: 'Source' });
+    await screen.findByRole('region', { name: 'Source' });
 
-    const backdrop = document.querySelector('.source-backdrop') as HTMLElement | null;
-    expect(backdrop).not.toBeNull();
-    await fireEvent.click(backdrop as HTMLElement);
-
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    expect(document.querySelector('.source-backdrop')).toBeNull();
     expect(screen.getByRole('list', { name: 'Search results' })).toBeTruthy();
+    expect(screen.getByLabelText('Search query')).toBeTruthy();
   });
 
-  it('keeps keyboard focus inside the open source sheet', async () => {
+  it('does not trap keyboard focus in the nonmodal source pane', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
       search: () => jsonResponse({ hits: [hit('Default', 'Page 12')] }),
@@ -901,21 +1588,11 @@ describe('app shell', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
 
     await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
-    const dialog = await screen.findByRole('dialog', { name: 'Source' });
-    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
-    const closeButton = screen.getByRole('button', { name: 'Close source viewer' });
-
-    // Tab from the sheet itself enters its first control rather than the page behind the backdrop.
-    await fireEvent.keyDown(dialog, { key: 'Tab' });
-    expect(document.activeElement).toBe(closeButton);
-
-    const loadMore = await screen.findByRole('button', { name: 'Load more' });
-    loadMore.focus();
-    await fireEvent.keyDown(dialog, { key: 'Tab' });
-    expect(document.activeElement).toBe(closeButton);
-
-    await fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
-    expect(document.activeElement).toBe(loadMore);
+    const pane = await screen.findByRole('region', { name: 'Source' });
+    await waitFor(() => expect(pane.contains(document.activeElement)).toBe(true));
+    const eventWasNotCancelled = await fireEvent.keyDown(pane, { key: 'Tab' });
+    expect(eventWasNotCancelled).toBe(true);
+    expect(screen.getByLabelText('Search query')).toBeTruthy();
   });
 
   it('closes the source sheet without returning focus when the workspace mode changes by mouse', async () => {
@@ -933,12 +1610,12 @@ describe('app shell', () => {
     result.focus();
     const focusSpy = vi.spyOn(result, 'focus');
     await fireEvent.click(result);
-    await screen.findByRole('dialog', { name: 'Source' });
+    await screen.findByRole('region', { name: 'Source' });
     focusSpy.mockClear();
 
     await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
 
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Source' })).toBeNull());
     // The reader chose to navigate; the sheet must not move focus back to the opening citation.
     expect(focusSpy).not.toHaveBeenCalled();
     expect(screen.getByRole('tab', { name: 'Ask' }).getAttribute('aria-selected')).toBe('true');
@@ -958,11 +1635,11 @@ describe('app shell', () => {
     const result = await screen.findByRole('button', { name: /Default.*Page 12/s });
     result.focus();
     await fireEvent.click(result);
-    await screen.findByRole('dialog', { name: 'Source' });
+    await screen.findByRole('region', { name: 'Source' });
 
     await fireEvent.keyDown(screen.getByRole('tablist', { name: 'Workspace mode' }), { key: 'ArrowRight' });
 
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Source' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Source' })).toBeNull());
     expect(document.activeElement).not.toBe(result);
     expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Ask' }));
     expect(screen.getByRole('tab', { name: 'Ask' }).getAttribute('aria-selected')).toBe('true');
@@ -1514,20 +2191,24 @@ describe('app shell', () => {
       asks: () => jsonResponse({
         asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', 'revision-8')],
       }),
-      source: () => jsonResponse(sourcePage('Stored excerpt body', 0, 19)),
+      pageReview: () => jsonResponse(pageReviewResponse({ documentId: 'doc-1', ordinal: 3, revisionId: 'revision-8', text: 'Stored page body' })),
     });
     render(Page);
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+    const citation = await screen.findByRole('button', { name: 'Open source S1, Page 4' });
+    citation.focus();
+    await fireEvent.click(citation);
 
-    expect(await screen.findByText('Stored excerpt body')).toBeTruthy();
+    expect(await screen.findByText('Stored page body')).toBeTruthy();
     // A stored citation names the revision its excerpt was saved from; asking for it is what keeps an
     // old answer's source from being re-read as the document's current text.
-    expect(
-      calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=0&limit=16384&revision=revision-8'),
-    ).toBe(true);
+    expect(calls.some((call) => call.url === '/api/collections/default/documents/doc-1/page-review?ordinal=3&revision=revision-8&limit=16384')).toBe(true);
+    expect(screen.getByRole('img', { name: 'Original page image, page 4' }).getAttribute('src'))
+      .toBe('/api/collections/default/documents/doc-1/page-review/image?ordinal=3&kind=original&revision=revision-8');
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to documents' }));
+    await waitFor(() => expect(document.activeElement).toBe(citation));
   });
 
   it('shows a stored Ask excerpt with a revision-unknown label instead of fetching the live unit', async () => {
@@ -1560,7 +2241,7 @@ describe('app shell', () => {
       asks: () => jsonResponse({
         asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', 'revision-8', 'Saved excerpt')],
       }),
-      source: () => jsonResponse(sourcePage('Body of revision eight', 0, 22)),
+      pageReview: () => jsonResponse(pageReviewResponse({ documentId: 'doc-1', ordinal: 3, revisionId: 'revision-8', text: 'Body of revision eight' })),
     });
     render(Page);
     await screen.findByText('Default');
@@ -1569,8 +2250,73 @@ describe('app shell', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
 
     expect(await screen.findByText('Body of revision eight')).toBeTruthy();
-    expect(calls.some((call) => call.url.endsWith('&revision=revision-8'))).toBe(true);
+    expect(calls.some((call) => call.url === '/api/collections/default/documents/doc-1/page-review?ordinal=3&revision=revision-8&limit=16384')).toBe(true);
+    expect(screen.getByRole('img', { name: 'Original page image, page 4' })).toBeTruthy();
     expect(screen.queryByText(/Revision unknown/)).toBeNull();
+  });
+
+  it('opens successive historical PDF citations with each exact document, revision, and ordinal', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      ask: () => eventResponse([
+        { type: 'delta', text: 'Compare [S1] with [S2].' },
+        { type: 'citation', id: 'S1', valid: true },
+        { type: 'citation', id: 'S2', valid: true },
+        { type: 'done', text: 'Compare [S1] with [S2].', evidence: [
+          { id: 'S1', documentId: 'document-one', unitId: 'unit-one', locator: { type: 'pdf_page', page: 2 }, locatorLabel: 'Page 2', revisionId: 'revision-a', excerpt: 'First excerpt' },
+          { id: 'S2', documentId: 'document-two', unitId: 'unit-two', locator: { type: 'pdf_page', page: 7 }, locatorLabel: 'Page 7', revisionId: 'revision-b', excerpt: 'Second excerpt' },
+        ] },
+      ]),
+      pageReview: (url) => {
+        const match = url.match(/\/documents\/([^/]+)\/page-review/);
+        const params = new URL(url, 'http://localhost').searchParams;
+        const documentId = match?.[1] ?? 'missing-document';
+        const revisionId = params.get('revision') ?? 'missing-revision';
+        const ordinal = Number(params.get('ordinal'));
+        return jsonResponse(pageReviewResponse({
+          documentId, revisionId, ordinal, text: `Review ${documentId} ${revisionId} ordinal ${ordinal}`,
+        }));
+      },
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'Compare these pages' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 2' }));
+    expect(await screen.findByText('Review document-one revision-a ordinal 1')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Original page image, page 2' }).getAttribute('src'))
+      .toBe('/api/collections/default/documents/document-one/page-review/image?ordinal=1&kind=original&revision=revision-a');
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S2, Page 7' }));
+    expect(await screen.findByText('Review document-two revision-b ordinal 6')).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/default/documents/document-one/page-review?ordinal=1&revision=revision-a&limit=16384')).toBe(true);
+    expect(calls.some((call) => call.url === '/api/collections/default/documents/document-two/page-review?ordinal=6&revision=revision-b&limit=16384')).toBe(true);
+    expect(screen.getByRole('img', { name: 'Original page image, page 7' }).getAttribute('src'))
+      .toBe('/api/collections/default/documents/document-two/page-review/image?ordinal=6&kind=original&revision=revision-b');
+  });
+
+  it('keeps a known-revision citation without a page locator in the text source viewer', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({
+        asks: [askHistoryEntry(
+          'ask-1', 'The signer', 'Who signed it?', 'Mira signed it [S1].', 'revision-8', 'Saved section excerpt',
+          { type: 'WordSection', headingPath: ['Witnesses'], paragraphStart: 2, paragraphEnd: 3 },
+        )],
+      }),
+      source: () => jsonResponse(sourcePage('Body of the named section', 0, 24)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+
+    expect(await screen.findByText('Body of the named section')).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=0&limit=16384&revision=revision-8')).toBe(true);
+    expect(calls.some((call) => call.url.includes('/page-review?'))).toBe(false);
   });
 
   it('reopens an Ask citation that has neither a revision nor a saved excerpt from the live unit', async () => {
@@ -2015,6 +2761,14 @@ function sourcePage(text: string, offset: number, totalChars: number, truncated 
   };
 }
 
+function pageReviewResponse(over: Record<string, unknown> = {}) {
+  return {
+    documentId: 'document-1', unitId: 'unit-9', revisionId: 'revision-1', ordinal: 0,
+    documentPages: 1, previousOrdinal: null, nextOrdinal: null, text: 'Managed document text', offset: 0,
+    totalChars: 21, truncated: false, qualityScore: 90, readingMethod: 'Surya', imageKind: 'original', ...over,
+  };
+}
+
 function investigationSummary(id: string, title: string, question = title) {
   return { id, createdAt: '2026-09-26T10:00:00Z', question, title };
 }
@@ -2032,6 +2786,7 @@ function askHistoryEntry(
   answer = 'Mira signed it [S1].',
   revisionId?: string,
   excerpt?: string,
+  locator: unknown = { type: 'pdf_page', page: 4 },
 ) {
   return {
     id,
@@ -2043,7 +2798,7 @@ function askHistoryEntry(
       id: 'S1',
       documentId: 'doc-1',
       unitId: 'unit-1',
-      locator: {},
+      locator,
       locatorLabel: 'Page 4',
       ...(revisionId === undefined ? {} : { revisionId }),
       ...(excerpt === undefined ? {} : { excerpt }),
@@ -2097,6 +2852,7 @@ function stubFetch(overrides: {
   deletion?: (url: string) => Response | Promise<Response>;
   search?: (url: string) => Response | Promise<Response>;
   source?: (url: string) => Response | Promise<Response>;
+  pageReview?: (url: string) => Response | Promise<Response>;
   ask?: (signal?: AbortSignal) => Response | Promise<Response>;
   asks?: (url: string) => Response | Promise<Response>;
   investigations?: (url: string) => Response | Promise<Response>;
@@ -2106,6 +2862,12 @@ function stubFetch(overrides: {
   defaults?: (url: string) => Response | Promise<Response>;
   profiles?: (url: string) => Response | Promise<Response>;
   presets?: (url: string) => Response | Promise<Response>;
+  readingMethods?: (url: string) => Response | Promise<Response>;
+  rescanPreview?: (url: string, body: unknown) => Response | Promise<Response>;
+  startRescan?: (url: string, body: { requestId: string; [key: string]: unknown }) => Response | Promise<Response>;
+  rescanOperation?: (url: string) => Response | Promise<Response>;
+  rescanOperations?: (url: string) => Response | Promise<Response>;
+  documentRevisions?: (url: string) => Response | Promise<Response>;
   session?: () => Response;
 }) {
   const calls: { url: string; init?: RequestInit }[] = [];
@@ -2121,6 +2883,16 @@ function stubFetch(overrides: {
     if (url.endsWith('/api/collections')) {
       return (overrides.list ?? (() => jsonResponse({ collections: [] })))(url);
     }
+    if (url.includes('/reading-methods')) return (overrides.readingMethods ?? (() => jsonResponse({ default: 'surya', methods: [] })))(url);
+    if (url.endsWith('/ocr/preview') && init?.method === 'POST') {
+      return (overrides.rescanPreview ?? (() => jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404)))(url, JSON.parse(String(init.body)));
+    }
+    if (url.endsWith('/ocr/rescan') && init?.method === 'POST') {
+      return (overrides.startRescan ?? (() => jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404)))(url, JSON.parse(String(init.body)));
+    }
+    if (url.includes('/ocr/operations/')) return (overrides.rescanOperation ?? (() => jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404)))(url);
+    if (url.endsWith('/ocr/operations')) return (overrides.rescanOperations ?? (() => jsonResponse({ operations: [] })))(url);
+    if (url.includes('/ocr/revisions?')) return (overrides.documentRevisions ?? (() => jsonResponse({ revisions: [], total: 0, activeRevisionId: null })))(url);
     if (url.includes('/ocr-languages')) {
       return (overrides.ocrLanguages ?? (() => jsonResponse({ collection: collection('Nightfall') })))(url);
     }
@@ -2154,6 +2926,8 @@ function stubFetch(overrides: {
     if (url.endsWith('/documents/retry')) {
       return (overrides.retry ?? (() => jsonResponse({ collectionId: 'nightfall', acceptedJobIds: [], rejected: [] }, 202)))(url);
     }
+    if (url.endsWith('/documents/summary')) return jsonResponse({ total: 0, byStatus: {} });
+    if (url.includes('/page-review')) return (overrides.pageReview ?? (() => jsonResponse(pageReviewResponse())))(url);
     if (url.includes('/documents/')) {
       return (overrides.document ?? (() => jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404)))(url);
     }

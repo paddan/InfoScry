@@ -1,8 +1,11 @@
 # Compact document listing in Admin Collections
 
-Status: design agreed and documentation authorized on 2026-09-30.
-**Planned, not implemented.** See the [four-ticket plan](../tickets/compact-document-list/STATUS.md).
-This change ships independently of the OCR work.
+Status: design agreed 2026-09-30; refined with the owner 2026-10-09.
+Collection-wide summary and UI tickets 01–03 are implemented and reviewed;
+browser acceptance ticket 04 is implemented and reviewed as of 2026-10-10.
+See the [plan](../tickets/compact-document-list/STATUS.md) and the companion
+[wide workspace and page review design](2026-10-09-workspace-and-page-review.md).
+The compact list can ship before manual page rescanning.
 
 ## Problem and existing behavior
 
@@ -14,9 +17,9 @@ constrains horizontal overflow. Details currently appear below the whole table.
 `web/src/routes/+page.svelte` unmounts CollectionsPanel when leaving Admin, so
 component-local state alone cannot preserve a session across that navigation.
 
-The existing Collections spec remains the
-contract for import, Retry, deletion, selection and source opening. This spec
-changes presentation, search triggering and view-state lifetime only. Search
+Existing Collections behavior remains the contract for import, Retry, deletion
+and document selection. This spec changes presentation, search triggering and
+view-state lifetime; the companion spec adds page review and explicit-page OCR. Search
 remains literal case-insensitive filename matching, not document-content search.
 
 ## Agreed behavior
@@ -27,8 +30,10 @@ Show a compact Documents row, initially collapsed. Display the total count and
 nonzero attention counts for FAILED, NEEDS_TOOL, CANCELLED and
 COMPLETE_WITH_WARNINGS, labelled `failed`, `needs tool`, `cancelled`, `with warnings`.
 These exact status mappings are implementation defaults; do not silently group
-statuses into a filter the existing API cannot express. Pending OCR review is
-not implemented and must not appear as a zero count or active control yet.
+statuses into a filter the existing API cannot express. There is no pending OCR approval/review stage; do not invent a count or control.
+Also show nonzero ongoing-stage counts using the exact existing QUEUED, COPYING,
+EXTRACTING, OCR, CHUNKING, EMBEDDING and INDEXING statuses. Each shortcut filters
+one status, not a synthetic grouped status. Keep current readable status labels.
 
 The disclosure button toggles visibility without changing filters. The total
 count is a separate action that opens all documents, clearing filename and status
@@ -49,6 +54,17 @@ bulk actions and document details are inside the collapsed section.
 
 ### Expanded list
 
+Use the available workspace width. Place overview/import progress and documents
+before secondary settings and import history; make settings/history disclosures,
+with active progress/errors visible independently. Delete collection stays a
+labelled secondary settings action. Add documents stays directly reachable.
+
+Rows prioritize filename, reading status and live progress. Move media type,
+size and import date into inline details. Keep Details/Open document accessible
+and avoid duplicate row actions. Retain accessible deletion and whole-collection
+Retry, placing their explanation/actions in context rather than repeating long
+text per row. Do not replace useful metadata with decorative badges.
+
 Keep filename search, status and sorting above a bounded table scroll region.
 Keep pagination below the scroll region; preserve 50 rows per page and server-side
 filtering/sorting before pagination. Use `max-height: min(60vh, 36rem)` as a starting
@@ -59,8 +75,9 @@ cover focused controls. The controls remain outside the table's vertical scroll.
 
 One Details control expands a full-width row immediately after its document;
 opening another closes the first. Preserve loading/errors, status, Retry/Delete
-and Open document behavior. Open document still uses the parent-owned source
-reader. Keep the expanded detail visible by minimally scrolling within the table,
+and Open document behavior. Open document uses the parent-owned source reader; the companion plan upgrades
+it to a full-workspace page comparison. Keep the compact list independently
+shippable with the existing reader until that upgrade lands. Keep the expanded detail visible by minimally scrolling within the table,
 not jumping the whole page. Closing details restores focus to their trigger when
 needed; collapsing the section puts focus on its disclosure button if focus was
 inside. Do not retain invisible selected rows or hidden destructive actions.

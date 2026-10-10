@@ -112,6 +112,10 @@ async function selectCollection(page, name) {
     null,
     { timeout: 30_000 },
   );
+  const documents = page.locator(`${PANEL} .document-overview > button`).first();
+  if (await documents.count() && await documents.getAttribute('aria-expanded') === 'false') await documents.click();
+  const settings = page.locator(`${PANEL} .secondary-settings`);
+  if (await settings.count() && await settings.getAttribute('open') === null) await settings.locator('summary').click();
 }
 
 async function openDetails(page, filename) {
@@ -187,11 +191,20 @@ async function revisionCount(page) {
 
 async function openSourceText(page) {
   await page.locator(`${PANEL} .document-details button`, { hasText: 'Open document' }).click();
-  await page.waitForSelector('#source-heading', { timeout: 20_000 });
+  await page.waitForFunction(() => !!document.querySelector('.page-review') || !!document.querySelector('pre.source-text'), null, { timeout: 20_000 });
+  if (await page.locator('.page-review').count()) {
+    const textTab = page.locator('.page-review [role="tab"][aria-selected="false"]', { hasText: 'Text' });
+    if (await textTab.count()) await textTab.click();
+    await page.locator('.page-review pre.review-text').waitFor({ timeout: 20_000 });
+    const text = (await page.locator('.page-review pre.review-text').textContent()) ?? '';
+    await page.locator('.page-review button[aria-label="Back to documents"]').click();
+    await page.locator('.page-review').waitFor({ state: 'hidden' });
+    return text;
+  }
   await page.waitForSelector('pre.source-text', { timeout: 20_000 });
   const text = (await page.textContent('pre.source-text')) ?? '';
-  await page.click('button[aria-label="Close source viewer"]');
-  await page.waitForSelector('#source-heading', { state: 'detached' });
+  await page.locator('.source-pane button[aria-label="Back to results"], .source-pane button[aria-label="Close source viewer"]').first().click();
+  await page.locator('.source-pane').waitFor({ state: 'hidden' });
   return text;
 }
 

@@ -484,6 +484,25 @@ class OcrProfileRoutesTest {
     }
 
     @Test
+    fun `a provider refusal preserves the safe reason and HTTP status without echoing its body`() = runBlocking {
+        FakeOpenAiServer(listOf(FakeOpenAiResponse(statusCode = 402, body = "private-provider-body"))).use { vision ->
+            val created = harness.request(
+                HttpMethod.Post, "/api/ocr/profiles", credential = Credential.CSRF,
+                body = profileBody.replace("http://127.0.0.1:11434/v1", vision.url),
+            )
+            val id = profileIdOf(created)
+            val probed = harness.request(HttpMethod.Post, "/api/ocr/profiles/$id/probe", credential = Credential.CSRF)
+            assertEquals(HttpStatusCode.OK, probed.status)
+            val body = probed.bodyAsText()
+            assertContains(body, "\"supported\":false")
+            assertContains(body, "\"errorCode\":\"OCR_PROVIDER_REFUSED\"")
+            assertContains(body, "\"statusCode\":402")
+            assertContains(body, "\"errorMessage\":\"the provider refused the request (HTTP 402), so this page was not read\"")
+            assertFalse(body.contains("private-provider-body"))
+        }
+    }
+
+    @Test
     fun `a probe of an external profile is refused before anything leaves this machine`() = runBlocking {
         // The probe needs no dispatch permit (the synthetic image names no document), so the refusal here is the
         // missing credential: the variable is named but unset, which the route cannot change. Nothing is sent.
@@ -637,7 +656,10 @@ class OcrProfileRoutesTest {
             .jsonObject["profiles"]!!.jsonArray.map { it.jsonObject }
             .associateBy { it["name"]!!.jsonPrimitive.content }
         assertEquals("true", listed.getValue("Reader")["imageInput"]!!.jsonPrimitive.content)
-        assertEquals("false", listed.getValue("Chatter")["imageInput"]!!.jsonPrimitive.content)
+        assertTrue(
+            listed.getValue("Chatter")["imageInput"].let { it == null || it is kotlinx.serialization.json.JsonNull },
+            "the legacy DeepSeek id has no current curated image-capability contract",
+        )
         assertTrue(
             listed.getValue("Mystery")["imageInput"].let { it == null || it is kotlinx.serialization.json.JsonNull },
             "an uncatalogued model's image support is unknown, never assumed",
@@ -679,13 +701,36 @@ class OcrProfileRoutesTest {
     }
 
     @Test
-    fun `a text-only LLM profile cannot be selected for transcription or review and nothing is created`() = runBlocking {
+    fun `a legacy model with unknown image support can be copied but still needs the image check`() = runBlocking {
         val llm = llmProfile("Chatter", "deepseek-chat")
 
-        val refused = fromLlm(llm.id)
+        val created = fromLlm(llm.id)
 
-        assertEquals(HttpStatusCode.Conflict, refused.status, refused.bodyAsText())
-        assertContains(refused.bodyAsText(), "LLM_PROFILE_TEXT_ONLY")
+        assertEquals(HttpStatusCode.Created, created.status, created.bodyAsText())
+        val profile = harness.context.ocrProfiles.findById(profileIdOf(created))!!
+        assertEquals(null, profile.revision.imageCapabilityMeasured, "a newly copied profile remains unmeasured")
+        assertEquals(1, profileCount())
+    }
+
+    @Test
+    fun `a model explicitly marked text-only cannot be copied into an OCR profile`() = runBlocking {
+        val llm = llmProfile("Text only", "test-text-only")
+        val service = infoscry.ocr.OcrProfileService(
+            harness.context.ocrProfiles,
+            providerCatalog = infoscry.llm.ProviderCatalogData(
+                presets = emptyList(),
+                knownModels = mapOf(
+                    "test-text-only" to infoscry.llm.KnownModel(
+                        provider = infoscry.llm.LlmProvider.OPENAI_COMPATIBLE,
+                        imageInput = false,
+                    ),
+                ),
+            ),
+        )
+
+        kotlin.test.assertFailsWith<infoscry.ocr.TextOnlyLlmProfileException> {
+            service.copyOfLlmProfile(llm)
+        }
         assertEquals(0, profileCount())
     }
 

@@ -7,17 +7,28 @@
   export let loading = false;
   /** A live Investigate turn owns the selection; the rows, New and delete wait until done. */
   export let disabled = false;
+  export let collapsed = false;
+  export let onToggleCollapsed: () => void = () => {};
   export let onSelect: (id: string) => void;
   export let onNew: () => void;
   export let onDelete: (id: string) => void;
 </script>
 
-<nav class="history-column" aria-label={label}>
+<nav class="history-column" class:collapsed aria-label={label}>
   <div class="history-heading">
     <h2>{label}</h2>
-    <button type="button" class="new-conversation" onclick={onNew} disabled={disabled}>New conversation</button>
+    {#if collapsed}
+      <button type="button" aria-label={`Expand ${label}`} aria-expanded="false" onclick={onToggleCollapsed}>Show</button>
+    {:else}
+      <div class="history-actions">
+        <button type="button" aria-label={`Collapse ${label}`} aria-expanded="true" onclick={onToggleCollapsed}>Hide</button>
+        <button type="button" class="new-conversation" onclick={onNew} disabled={disabled}>New conversation</button>
+      </div>
+    {/if}
   </div>
-  {#if loading}
+  {#if collapsed}
+    <!-- A compact rail keeps the disclosure reachable while source space is tight. -->
+  {:else if loading}
     <p class="history-status" role="status">Loading conversations…</p>
   {:else if entries.length === 0}
     <p class="history-status">No conversations yet.</p>
@@ -50,11 +61,10 @@
 
 <style>
   .history-column {
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: var(--history-column-width, 20rem);
+    position: static;
+    width: auto;
+    min-width: 0;
+    max-height: calc(100vh - 2.5rem);
     display: flex;
     flex-direction: column;
     gap: 0.9rem;
@@ -70,6 +80,7 @@
     gap: 0.6rem;
     padding: 0 0.3rem;
   }
+  .history-actions { display: flex; align-items: center; gap: 0.35rem; }
   .history-heading h2 {
     margin: 0;
     color: #f0efec;
@@ -87,6 +98,9 @@
     cursor: pointer;
   }
   .history-heading button:hover { border-color: #656b68; background: #2d3232; }
+  .history-column.collapsed { width: 5.25rem; padding-right: 0.5rem; padding-left: 0.5rem; }
+  .history-column.collapsed .history-heading { display: grid; justify-content: center; gap: 0.45rem; }
+  .history-column.collapsed .history-heading h2 { width: 2rem; overflow: hidden; writing-mode: vertical-rl; transform: rotate(180deg); }
   .history-status { margin: 0; padding: 0 0.3rem; color: #929997; font-size: 0.85rem; }
   .history-list {
     display: grid;

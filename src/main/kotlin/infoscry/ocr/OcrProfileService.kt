@@ -19,6 +19,8 @@ data class OcrCapabilityMeasurement(
     val supported: Boolean,
     val modelVersion: String? = null,
     val errorCode: String? = null,
+    val errorMessage: String? = null,
+    val statusCode: Int? = null,
 )
 
 /** An LLM profile whose model the catalog states cannot read an image, so no OCR profile is made from it. */
@@ -201,7 +203,12 @@ class OcrProfileService(
                 // Nothing left this machine, so there is nothing to record: the caller has to fix the
                 // profile or the permit before a check can run at all.
                 if (!refused.dispatched) throw refused
-                OcrCapabilityMeasurement(supported = false, errorCode = refused.code)
+                OcrCapabilityMeasurement(
+                    supported = false,
+                    errorCode = refused.code,
+                    errorMessage = refused.message,
+                    statusCode = refused.statusCode,
+                )
             }
         }
         profiles.recordImageCapability(revision.revisionId, measurement.supported, Instants.now())

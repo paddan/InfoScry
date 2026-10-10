@@ -28,6 +28,7 @@ import java.nio.file.Path
  */
 internal data class StagedCandidatePage(
     val text: String,
+    val extractionMethod: ExtractionMethod?,
     val approval: PageApproval,
     val confidence: Double?,
     val artifactRelativePath: String?,
@@ -95,6 +96,7 @@ internal class CandidateRevisionPhases(
         return if (baseline != null && !baselineText.isNullOrBlank() && baselineText == reading.text) {
             StagedCandidatePage(
                 text = baselineText,
+                extractionMethod = ExtractionMethod.OCR,
                 approval = PageApproval.APPROVED,
                 confidence = baseline.meanConfidence,
                 artifactRelativePath = baseline.artifactRelativePath,
@@ -103,6 +105,7 @@ internal class CandidateRevisionPhases(
         } else {
             StagedCandidatePage(
                 text = reading.text,
+                extractionMethod = ExtractionMethod.OCR,
                 approval = PageApproval.APPROVED,
                 confidence = reading.meanConfidence,
                 artifactRelativePath = reading.artifactRelativePath,
@@ -117,15 +120,16 @@ internal class CandidateRevisionPhases(
         document: Document,
         stagedPage: StagedCandidatePage,
         documentArtifactRoot: Path,
+        producerRevisionId: String?,
     ): RevisionPageDraft {
         val normalised = TextNormalizer.normalize(stagedPage.text)
         return RevisionPageDraft(
-            ordinal = page.image.ordinal,
-            unitId = ContentUnitId(page.image.unitId),
+            ordinal = page.ordinal,
+            unitId = ContentUnitId(page.unitId),
             locator = locatorOf(page, document),
             extractedText = normalised.extracted,
             searchText = normalised.search,
-            extractionMethod = ExtractionMethod.OCR,
+            extractionMethod = stagedPage.extractionMethod,
             meanConfidence = stagedPage.confidence,
             artifactRelativePath = stagedPage.artifactRelativePath,
             artifactSha256 = stagedPage.artifactSha256,
@@ -134,8 +138,10 @@ internal class CandidateRevisionPhases(
             // are not interchangeable — a reference that resolved against the artifact root would name a file
             // outside it for a picture — and a reader shown the pixels a reading was made from needs both the
             // reference and the hash it verifies against.
-            sourceImage = provenanceOf(page.image, documentArtifactRoot),
+            sourceImage = page.image?.let { image -> provenanceOf(image, documentArtifactRoot) }
+                ?: page.baseline?.sourceImage,
             approval = stagedPage.approval,
+            producerRevisionId = producerRevisionId,
         )
     }
 
@@ -156,7 +162,7 @@ internal class CandidateRevisionPhases(
 
     private fun locatorOf(page: RescanPage, document: Document): SourceLocation =
         page.baseline?.locator ?: when (document.mediaType) {
-            RescanPageSource.PDF_MEDIA_TYPE -> SourceLocation.PdfPage(page.image.ordinal + 1)
+            RescanPageSource.PDF_MEDIA_TYPE -> SourceLocation.PdfPage(page.ordinal + 1)
             else -> SourceLocation.Image(document.originalFilename)
         }
 

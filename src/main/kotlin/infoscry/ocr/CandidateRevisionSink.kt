@@ -134,7 +134,7 @@ class CandidateRevisionSink(
             ).also { opened ->
                 candidate = opened
             }
-        revisions.appendPage(revision, pageFor(event, approval ?: PageApproval.APPROVED))
+        revisions.appendPage(revision, pageFor(event, approval ?: PageApproval.APPROVED).copy(producerRevisionId = revision))
         staged.getOrPut(documentId to fingerprint) { mutableSetOf() } += event.key
     }
 

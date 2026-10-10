@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import LlmAdminPanel from './LlmAdminPanel.svelte';
 import type { LlmCatalog, LlmCatalogModel, LlmPreset, LlmProfile, LlmProfileProbe, OcrProfile } from './api';
@@ -86,6 +86,25 @@ describe('LLM admin panel', () => {
   });
 
   afterEach(cleanup);
+
+  it('groups editable settings separately from saved-profile checks in the shared workspace', async () => {
+    api.listLlmProfiles.mockResolvedValue({ profiles: [profile('p1', 'fast')], defaults: { ASK: 'p1', INVESTIGATE: null } });
+    render(LlmAdminPanel);
+    await screen.findByLabelText('Name');
+    const settings = screen.getByRole('group', { name: 'Profile settings' });
+    expect(screen.getByRole('region', { name: 'LLM profile administration' }).classList.contains('workspace-area')).toBe(true);
+
+    expect(within(settings).getByLabelText('Name')).toBeTruthy();
+    expect(within(settings).getByLabelText('Context window (tokens)')).toBeTruthy();
+    const checks = screen.getByRole('group', { name: 'Profile checks' });
+    expect(within(checks).getByRole('button', { name: 'Check tool calling' })).toBeTruthy();
+    expect(within(checks).getByRole('button', { name: 'Check image reading' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'New' }));
+    expect(screen.queryByRole('group', { name: 'Profile checks' })).toBeNull();
+    expect(within(screen.getByRole('group', { name: 'Profile settings' })).getByLabelText('Name')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('group', { name: 'Profile checks' })).toBeTruthy();
+  });
 
   it('loads the profile list and populates the form with the selected profile', async () => {
     api.listLlmProfiles.mockResolvedValue({
@@ -197,6 +216,41 @@ describe('LLM admin panel', () => {
     expect((screen.getByLabelText('API key environment variable') as HTMLInputElement).value).toBe(
       'OPENAI_API_KEY',
     );
+  });
+
+  it('names a new profile from the provider and selected model until the name is edited', async () => {
+    api.listLlmProfiles.mockResolvedValue({ profiles: [], defaults: { ASK: null, INVESTIGATE: null } });
+    api.listLlmPresets.mockResolvedValue([preset('OPENROUTER', 'OpenRouter', { endpoint: 'https://openrouter.ai/api/v1' })]);
+    api.fetchLlmCatalog.mockResolvedValue({ live: true, models: [model('gpt-luna-latest'), model('gpt-luna-small')] });
+    render(LlmAdminPanel);
+    await fireEvent.change(await screen.findByLabelText('Provider preset'), { target: { value: 'OPENROUTER' } });
+    await screen.findByRole('option', { name: /gpt-luna-latest/ });
+    const name = screen.getByLabelText('Name') as HTMLInputElement;
+    const catalog = screen.getByLabelText('Model catalog');
+    await fireEvent.change(catalog, { target: { value: 'gpt-luna-latest' } });
+    expect(name.value).toBe('OpenRouter/gpt-luna-latest');
+    await fireEvent.change(catalog, { target: { value: 'gpt-luna-small' } });
+    expect(name.value).toBe('OpenRouter/gpt-luna-small');
+    await fireEvent.input(name, { target: { value: 'My OCR reader' } });
+    await fireEvent.change(catalog, { target: { value: 'gpt-luna-latest' } });
+    expect(name.value).toBe('My OCR reader');
+    // Starting another new profile clears the manual-name choice.
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'New' }));
+    expect((screen.getByLabelText('Provider preset') as HTMLSelectElement).value).toBe('');
+    await fireEvent.change(screen.getByLabelText('Provider preset'), { target: { value: 'OPENROUTER' } });
+    await screen.findByRole('option', { name: /gpt-luna-latest/ });
+    await fireEvent.change(screen.getByLabelText('Model catalog'), { target: { value: 'gpt-luna-latest' } });
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('OpenRouter/gpt-luna-latest');
+  });
+
+  it('keeps an existing profile name when another model is selected', async () => {
+    api.listLlmProfiles.mockResolvedValue({ profiles: [profile('p1', 'My reader', { endpoint: 'https://openrouter.ai/api/v1' })], defaults: { ASK: 'p1', INVESTIGATE: null } });
+    api.fetchLlmCatalog.mockResolvedValue({ live: true, models: [model('gpt-luna-latest')] });
+    render(LlmAdminPanel);
+    await screen.findByRole('option', { name: /gpt-luna-latest/ });
+    await fireEvent.change(screen.getByLabelText('Model catalog'), { target: { value: 'gpt-luna-latest' } });
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('My reader');
   });
 
   it('renders the fetched models and asks the catalog for the draft connection', async () => {
@@ -592,6 +646,27 @@ describe('LLM admin panel', () => {
     expect(api.copyLlmProfileToOcr).toHaveBeenCalledWith('p1');
     expect(api.probeOcrProfile).toHaveBeenCalledWith('o1');
     expect(await screen.findByText('Image reading for OCR: confirmed (measured 2026-10-09T10:00:00Z)')).toBeTruthy();
+  });
+
+  it.each([
+    { status: 402, code: 'OCR_PROVIDER_REFUSED', reason: 'the provider refused the request (HTTP 402), so this page was not read' },
+    { status: 302, code: 'OCR_REDIRECT_REFUSED', reason: 'the provider answered a redirect; the redirect was not followed' },
+  ])('shows the safe reason, HTTP $status and code for a failed image check', async ({ status, code, reason }) => {
+    api.listLlmProfiles.mockResolvedValue({ profiles: [profile('p1', 'vision')], defaults: { ASK: 'p1', INVESTIGATE: 'p1' } });
+    api.listOcrProfiles.mockResolvedValue([]);
+    const copy = { id: 'o1', sourceLlmProfileId: 'p1', imageCapabilityMeasured: false } as OcrProfile;
+    api.copyLlmProfileToOcr.mockResolvedValue(copy);
+    api.probeOcrProfile.mockResolvedValue({
+      profile: copy, supported: false, errorCode: code, statusCode: status, errorMessage: reason,
+    });
+    render(LlmAdminPanel);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Check image reading' }));
+    const failure = await screen.findByRole('alert');
+    expect(failure.textContent).toContain('Image reading check failed:');
+    expect(failure.textContent).toContain(reason);
+    expect(failure.textContent).toContain(`HTTP ${status}`);
+    expect(failure.textContent).toContain(code);
+    expect(screen.queryByText(/this model did not read the test image/)).toBeNull();
   });
 
   it('shows the server message when a text-only model is refused for OCR', async () => {

@@ -6,6 +6,8 @@
     deleteCollection,
     deleteDocuments,
     getCollectionDocument,
+    getCollectionDocumentSummary,
+    type CollectionDocumentSummary,
     getDeletion,
     getCollectionIgnorePatterns,
     getImportItems,
@@ -29,7 +31,9 @@
     type RetryOcrChoice,
     type RetryRejection,
     type UnitKindName,
+    type OcrOperation,
   } from './api';
+  import { restoreDocumentListViewState, type DocumentListViewState } from './documentListViewState';
   import CollectionOcrSettings from './CollectionOcrSettings.svelte';
   import DocumentRescan from './DocumentRescan.svelte';
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
@@ -39,6 +43,9 @@
   import { qualityLabel } from './ocrQuality';
   import { documentStatus } from './documentStatus';
 
+  export let visible = true;
+  export let documentViewState: DocumentListViewState | undefined = undefined;
+  export let onDocumentViewStateChange: (collectionId: string, state: DocumentListViewState) => void = () => {};
   export let collections: Collection[];
   export let selectedId: string;
   export let loading: boolean;
@@ -49,9 +56,15 @@
   export let onOpenLlmProfiles: (() => void) | undefined = undefined;
   /**
    * Opens one managed document in the page's source viewer at the unit its detail named. The page owns
-   * the viewer, so this forwards the two ids and keeps no viewer state of its own.
+   * the viewer; this forwards the ids and the action button so focus can return to a live opener.
    */
-  export let onOpenDocument: (documentId: string, sourceId: string) => void;
+  export let onOpenDocument: (documentId: string, sourceId: string, opener: HTMLElement | null) => void;
+  /** Opens a supported PDF/image in the full page comparison, even when extraction has no content unit. */
+  export let onOpenPageReview: (documentId: string, opener: HTMLElement | null) => void = () => {};
+  export let startedRescan: { documentId: string; requestId: string; operation: OcrOperation } | undefined = undefined;
+  export let onDocumentPublished: ((documentId: string, revisionId: string) => void) | undefined = undefined;
+  /** A live page review moves this document's sole poll owner into the visible source pane. */
+  export let reviewedDocumentId: string | undefined = undefined;
   /**
    * Tells the page that a collection finished deleting, so it can close the viewer it had open on it,
    * clear workspace results bound to it, and refresh the lists it owns. The panel does not reach into
@@ -174,6 +187,20 @@
    */
   let settingsGeneration = 0;
 
+  let expanded = false;
+  let disclosureButton: HTMLButtonElement;
+  let documentsSection: HTMLElement;
+  let panelVisible = true;
+  let summary: CollectionDocumentSummary | null = null;
+  let summaryLoading = false;
+  let summaryError: string | null = null;
+  let summaryGeneration = 0;
+  const SUMMARY_STATUSES: { status: DocumentStatusName; label: string }[] = [
+    { status: 'FAILED', label: 'failed' }, { status: 'NEEDS_TOOL', label: 'needs tool' },
+    { status: 'CANCELLED', label: 'cancelled' }, { status: 'COMPLETE_WITH_WARNINGS', label: 'with warnings' },
+    ...(['QUEUED', 'COPYING', 'EXTRACTING', 'OCR', 'CHUNKING', 'EMBEDDING', 'INDEXING'] as DocumentStatusName[])
+      .map((status) => ({ status, label: STATUS_LABELS[status] })),
+  ];
   let documents: DocumentApiRow[] = [];
   let documentsTotal = 0;
   let documentsLoading = false;
@@ -181,6 +208,8 @@
   let documentsError: string | null = null;
   let filenameInput = '';
   let filenameQuery = '';
+  let filenameTimer: ReturnType<typeof setTimeout> | null = null;
+  let composingFilename = false;
   let statusFilter: DocumentStatusName | '' = '';
   let sort: DocumentSort = 'newest';
   let offset = 0;
@@ -199,8 +228,11 @@
   let detailLoading = false;
   let detailError: string | null = null;
   let detailGeneration = 0;
-  /** One retry at a time, because it is one attempt per document and the button is per document too. */
-  let retrySubmitting = false;
+  let detailDocumentId: string | null = null;
+  let detailOpener: HTMLButtonElement | null = null;
+  let detailSection: HTMLElement;
+  /** The request that owns the current detail's submission state; older requests release only themselves. */
+  let retrySubmission: { collectionId: string | null; documentId: string } | null = null;
 
   /**
    * The collection-wide retry: one submission at a time, what the server answered, and the documents it
@@ -265,7 +297,112 @@
   $: selected = collections.find((collection) => collection.id === selectedId) ?? null;
   // The listing follows the selected collection, so a selection change cannot page through the previous
   // collection's term, filter and page.
-  $: if (selectedId !== listingCollectionId) startListing(selectedId);
+  $: if (selectedId !== listingCollectionId) startListing(selectedId, documentViewState);
+  $: saveViewState(listingCollectionId, selectedId, expanded, filenameInput, statusFilter, sort);
+  $: changeVisibility(visible);
+
+  function saveViewState(collectionId: string | null, currentId: string, expanded: boolean, filename: string,
+    status: DocumentStatusName | '', sort: DocumentSort): void {
+    if (collectionId && collectionId === currentId) onDocumentViewStateChange(collectionId, { expanded, filename, status, sort });
+  }
+
+  function invalidateDocumentReads(): void {
+    cancelFilenameSearch();
+    composingFilename = false;
+    documentsGeneration += 1;
+    documentsLoading = false;
+    documentsLoaded = false;
+    documents = [];
+    documentsError = null;
+    clearSelection();
+    closeDetails();
+    if (!documentDeleteSubmitting) deletingDocuments = null;
+  }
+
+  function toggleDocuments(): void {
+    if (expanded) {
+      if (documentsSection?.contains(document.activeElement)) disclosureButton?.focus();
+      expanded = false;
+      invalidateDocumentReads();
+    } else {
+      expanded = true;
+      filenameQuery = filenameInput.trim();
+      offset = 0;
+      void loadDocuments();
+    }
+  }
+
+  function openSummaryStatus(status: DocumentStatusName | ''): void {
+    cancelFilenameSearch();
+    composingFilename = false;
+    expanded = true;
+    filenameInput = '';
+    filenameQuery = '';
+    statusFilter = status;
+    offset = 0;
+    clearSelection();
+    closeDetails();
+    void loadDocuments();
+  }
+
+  async function loadSummary(): Promise<void> {
+    if (!visible || !selected) return;
+    const collectionId = selected.id;
+    const generation = ++summaryGeneration;
+    summaryLoading = true;
+    summaryError = null;
+    try {
+      const loaded = await getCollectionDocumentSummary(collectionId);
+      if (generation !== summaryGeneration) return;
+      summary = loaded;
+      scheduleImportRefresh();
+    } catch (failure) {
+      if (generation !== summaryGeneration) return;
+      summary = null;
+      summaryError = describe(failure);
+    } finally {
+      if (generation === summaryGeneration) summaryLoading = false;
+    }
+  }
+
+  function changeVisibility(next: boolean): void {
+    if (panelVisible === next) return;
+    panelVisible = next;
+    if (!next) {
+      invalidateDocumentReads();
+      summaryGeneration += 1;
+      importsGeneration += 1;
+      itemsGeneration += 1;
+      deletionsGeneration += 1;
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
+      refreshTimer = null;
+      if (deletionTimer !== null) clearTimeout(deletionTimer);
+      deletionTimer = null;
+    } else {
+      offset = 0;
+      filenameQuery = filenameInput.trim();
+      void loadSummary();
+      void loadDocuments();
+      void loadImports();
+      void resumeDeletions();
+    }
+  }
+
+  async function resumeDeletions(): Promise<void> {
+    // A followed operation may have finished while hidden and disappeared from the unfinished read.
+    if (deletions.length > 0) await pollDeletions();
+    if (visible) await loadDeletions();
+  }
+
+  function importChanged(collectionId: string): void {
+    if (!visible || selectedId !== collectionId) return;
+    void refreshCollectionDocuments();
+    void loadImports();
+  }
+
+  async function refreshCollectionDocuments(): Promise<void> {
+    await Promise.all([loadDocuments(), loadSummary()]);
+  }
 
   function countLabel(count: number): string {
     return `${count} document${count === 1 ? '' : 's'}`;
@@ -338,16 +475,23 @@
   }
 
   /**
-   * A newly selected collection starts at its first page, with no term, filter, history, detail or
-   * checked row kept: its rows are a different set of documents.
+   * Restore only this collection's view choices; rows, history, details and checked IDs start fresh.
    */
-  function startListing(collectionId: string): void {
+  function startListing(collectionId: string, cached?: DocumentListViewState): void {
     listingCollectionId = collectionId;
     startSettings(collectionId);
-    filenameInput = '';
-    filenameQuery = '';
-    statusFilter = '';
-    sort = 'newest';
+    const restored = restoreDocumentListViewState(cached);
+    expanded = restored.expanded;
+    addingDocuments = false;
+    filenameInput = restored.filename;
+    filenameQuery = restored.filename.trim();
+    statusFilter = restored.status;
+    sort = restored.sort;
+    invalidateDocumentReads();
+    summaryGeneration += 1;
+    summary = null;
+    summaryError = null;
+    summaryLoading = false;
     offset = 0;
     documents = [];
     documentsTotal = 0;
@@ -360,6 +504,7 @@
     retryAllRejected = [];
     retryAllError = null;
     startImports();
+    void loadSummary();
     void loadDocuments();
   }
 
@@ -453,7 +598,9 @@
    */
   async function loadDocuments(): Promise<void> {
     const collection = selected;
-    if (collection === null) {
+    // Refreshes during a pending edit must not issue or publish the previous applied query.
+    if (filenameTimer !== null || composingFilename) return;
+    if (!visible || !expanded || collection === null) {
       documentsLoading = false;
       return;
     }
@@ -470,6 +617,7 @@
       });
       if (generation !== documentsGeneration) return;
       documents = page.documents;
+      if (detailDocumentId !== null && !documents.some((row) => row.id === detailDocumentId)) closeDetails();
       documentsTotal = page.total;
       documentsLoaded = true;
       // A refresh is not a selection: an id this page no longer shows leaves the checked set, and one it
@@ -482,6 +630,7 @@
       documentsLoaded = false;
       documentsError = describe(failure);
       clearSelection();
+      closeDetails();
     } finally {
       if (generation === documentsGeneration) documentsLoading = false;
     }
@@ -492,8 +641,30 @@
    * another row do not stay either. A term, a status filter and an order all change which rows exist, so
    * the previously checked ones are not the ones the reader is looking at any more.
    */
-  function searchDocuments(event: SubmitEvent): void {
-    event.preventDefault();
+  function cancelFilenameSearch(): void {
+    if (filenameTimer !== null) clearTimeout(filenameTimer);
+    filenameTimer = null;
+  }
+
+  function filenameIntentChanged(): void {
+    cancelFilenameSearch();
+    // Invalidate on intent, not when its delayed request eventually begins.
+    documentsGeneration += 1;
+    documentsLoading = false;
+    offset = 0;
+    clearSelection();
+    closeDetails();
+    if (!composingFilename && visible && expanded) {
+      filenameTimer = setTimeout(() => {
+        filenameTimer = null;
+        applyFilename();
+      }, 300);
+    }
+  }
+
+  function applyFilename(): void {
+    cancelFilenameSearch();
+    if (composingFilename) return;
     filenameQuery = filenameInput.trim();
     offset = 0;
     clearSelection();
@@ -501,11 +672,14 @@
     void loadDocuments();
   }
 
+  function filenameKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' || event.isComposing || composingFilename) return;
+    event.preventDefault();
+    applyFilename();
+  }
+
   function changeFilter(): void {
-    offset = 0;
-    clearSelection();
-    closeDetails();
-    void loadDocuments();
+    applyFilename();
   }
 
   function changePage(delta: number): void {
@@ -551,8 +725,9 @@
 
   async function openDetails(documentId: string): Promise<void> {
     const collection = selected;
-    if (collection === null) return;
+    if (!visible || !expanded || collection === null) return;
     const generation = ++detailGeneration;
+    detailDocumentId = documentId;
     detail = null;
     detailError = null;
     detailLoading = true;
@@ -568,12 +743,76 @@
     }
   }
 
+  function toggleDetails(documentId: string, event: MouseEvent): void {
+    if (detailDocumentId === documentId) {
+      closeDetails();
+      return;
+    }
+    detailOpener = event.currentTarget as HTMLButtonElement;
+    void openDetails(documentId);
+  }
+
+  /** Keep focus local when a focused detail disappears; focusing must not scroll the whole page. */
   function closeDetails(): void {
+    if (detailSection?.contains(document.activeElement)) {
+      const rowStillVisible = documents.some((row) => row.id === detailDocumentId);
+      const target = rowStillVisible && detailOpener?.isConnected ? detailOpener : disclosureButton;
+      target?.focus({ preventScroll: true });
+      // Removing a tall detail changes the scroll bounds. Reveal the restored trigger afterwards.
+      void tick().then(() => { if (target?.isConnected) revealTableControl(target); });
+    }
     detailGeneration += 1;
+    detailDocumentId = null;
+    detailOpener = null;
     detail = null;
     detailError = null;
     detailLoading = false;
-    retrySubmitting = false;
+    retrySubmission = null;
+  }
+
+  function detailKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && event.target instanceof Element && detailSection?.contains(event.target)
+      && !event.target.closest('[role="dialog"]')) {
+      event.stopPropagation();
+      closeDetails();
+    }
+  }
+
+  /** Bring a focused row control below the sticky header without scrolling the whole page. */
+  function revealTableControl(control: HTMLElement): void {
+    const table = control.closest<HTMLElement>('.document-table-scroll');
+    if (!table) return;
+    const viewport = table.getBoundingClientRect();
+    const top = table.querySelector('thead')?.getBoundingClientRect().bottom ?? viewport.top;
+    const bounds = control.getBoundingClientRect();
+    if (bounds.top < top) table.scrollTop += bounds.top - top;
+    else if (bounds.bottom > viewport.bottom) table.scrollTop += bounds.bottom - viewport.bottom;
+    if (bounds.left < viewport.left) table.scrollLeft += bounds.left - viewport.left;
+    else if (bounds.right > viewport.right) table.scrollLeft += bounds.right - viewport.right;
+  }
+
+  /** Reveal only within the bounded table, including after loading changes the detail's size. */
+  function revealDetails(node: HTMLElement, _loading: boolean) {
+    async function reveal() {
+      await tick();
+      if (!node.isConnected) return;
+      const table = node.closest<HTMLElement>('.document-table-scroll');
+      if (!table) return;
+      const viewport = table.getBoundingClientRect();
+      const top = table.querySelector('thead')?.getBoundingClientRect().bottom ?? viewport.top;
+      const bounds = node.getBoundingClientRect();
+      const available = viewport.bottom - top;
+      let delta = bounds.top < top || bounds.height > available ? bounds.top - top
+        : Math.max(0, bounds.bottom - viewport.bottom);
+      // A tall detail cannot fit with its row. Keep the focused opener visible while revealing
+      // as much of the detail as fits, rather than putting keyboard focus behind the header.
+      if (document.activeElement === detailOpener && detailOpener?.isConnected && table.contains(detailOpener)) {
+        delta = Math.min(delta, detailOpener.getBoundingClientRect().top - top);
+      }
+      table.scrollTop += delta;
+    }
+    void reveal();
+    return { update() { void reveal(); } };
   }
 
   /**
@@ -584,19 +823,34 @@
    * server actually queued rather than the one the click hoped for.
    */
   async function retryDocument(entry: DocumentDetail | null, options?: RetryOcrChoice): Promise<RetryAttempt> {
-    if (entry === null || retrySubmitting) return { accepted: false, reason: 'A retry is already running.' };
+    if (entry === null) return { accepted: false, reason: 'A retry is already running.' };
     const documentId = entry.document.id;
-    retrySubmitting = true;
+    const collectionId = listingCollectionId;
+    if (retrySubmission?.collectionId === collectionId && retrySubmission?.documentId === documentId) {
+      return { accepted: false, reason: 'A retry is already running.' };
+    }
+    const submission = { collectionId, documentId };
+    const listGeneration = documentsGeneration;
+    let ownedDetailGeneration = detailGeneration;
+    const sameIntent = () => visible && expanded && selectedId === collectionId &&
+      listingCollectionId === collectionId && detailDocumentId === documentId &&
+      detailGeneration === ownedDetailGeneration && documentsGeneration === listGeneration;
+    retrySubmission = submission;
     try {
       const attempt = await onRetryDocument(documentId, options);
-      if (!attempt.accepted) return attempt;
-      await openDetails(documentId);
-      await loadDocuments();
+      // Server admission survives navigation; only the still-current view may refresh its details.
+      if (!attempt.accepted || !sameIntent()) return attempt;
+      if (collectionId === null) return attempt;
+      ownedDetailGeneration = ++detailGeneration;
+      const refreshed = await getCollectionDocument(collectionId, documentId);
+      if (!sameIntent()) return attempt;
+      detail = refreshed;
+      await refreshCollectionDocuments();
       return attempt;
     } catch (failure) {
       throw failure;
     } finally {
-      retrySubmitting = false;
+      if (retrySubmission === submission) retrySubmission = null;
     }
   }
 
@@ -604,8 +858,25 @@
     const current = detail;
     if (current === null) return undefined;
     await openDetails(current.document.id);
-    await loadDocuments();
+    await refreshCollectionDocuments();
     return detail?.document;
+  }
+
+  async function refreshPublishedDocument(documentId: string, revisionId: string): Promise<void> {
+    onDocumentPublished?.(documentId, revisionId);
+    if (visible && detail?.document.id === documentId) {
+      const generation = ++detailGeneration;
+      const collectionId = selected?.id;
+      if (collectionId !== undefined) {
+        try {
+          const refreshed = await getCollectionDocument(collectionId, documentId);
+          if (generation === detailGeneration && visible && detailDocumentId === documentId) detail = refreshed;
+        } catch (failure) {
+          if (generation === detailGeneration && visible && detailDocumentId === documentId) detailError = describe(failure);
+        }
+      }
+      await refreshCollectionDocuments();
+    }
   }
 
   /**
@@ -627,7 +898,7 @@
       const admission = await onRetryAllDocuments();
       retryAllRejected = admission.rejected;
       retryAllMessage = retryAllSummary(admission);
-      await loadDocuments();
+      await refreshCollectionDocuments();
       if (detail !== null) await openDetails(detail.document.id);
     } catch (failure) {
       retryAllError = describe(failure);
@@ -673,9 +944,18 @@
   }
 
   /** The detail read named the first unit a reader can open; the page opens it. */
-  function openDocument(entry: DocumentDetail | null): void {
-    if (entry === null || entry.sourceId === null || entry.sourceId === undefined) return;
-    onOpenDocument(entry.document.id, entry.sourceId);
+  function openDocument(entry: DocumentDetail | null, opener: HTMLElement | null): void {
+    if (entry === null) return;
+    if (isPageReviewable(entry.document.mediaType)) {
+      onOpenPageReview(entry.document.id, opener);
+      return;
+    }
+    if (entry.sourceId === null || entry.sourceId === undefined) return;
+    onOpenDocument(entry.document.id, entry.sourceId, opener);
+  }
+
+  function isPageReviewable(mediaType: string): boolean {
+    return mediaType === 'application/pdf' || ['image/png', 'image/jpeg', 'image/tiff'].includes(mediaType.toLowerCase());
   }
 
   /**
@@ -706,7 +986,7 @@
    */
   async function loadImports(): Promise<void> {
     const collection = selected;
-    if (collection === null) {
+    if (!visible || collection === null) {
       importsLoading = false;
       return;
     }
@@ -739,10 +1019,14 @@
    * schedules nothing: polling ends as soon as there is nothing left to watch.
    */
   function scheduleImportRefresh(): void {
-    if (refreshTimer !== null || !imports.some(isWatchedImport)) return;
+    const ongoing = summary !== null && SUMMARY_STATUSES.some(({ status }) =>
+      !['FAILED', 'NEEDS_TOOL', 'CANCELLED', 'COMPLETE_WITH_WARNINGS'].includes(status) && summary!.byStatus[status] > 0);
+    if (!visible || refreshTimer !== null || (!imports.some(isWatchedImport) && !ongoing)) return;
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
       void loadImports();
+      void loadSummary();
+      void loadDocuments();
     }, IMPORT_REFRESH_MILLIS);
   }
 
@@ -905,6 +1189,7 @@
    * the admission.
    */
   async function loadDeletions(): Promise<void> {
+    if (!visible) return;
     const generation = ++deletionsGeneration;
     try {
       const unfinished = await listUnfinishedDeletions();
@@ -923,6 +1208,7 @@
    * a deletion that finished: the operations stay listed with what will happen to them.
    */
   function scheduleDeletionRefresh(): void {
+    if (!visible) return;
     if (deletionTimer !== null || deletions.length === 0) return;
     deletionTimer = setTimeout(() => {
       deletionTimer = null;
@@ -964,14 +1250,18 @@
   async function forgetFinished(deletion: DeletionOperation): Promise<void> {
     if (deletion.kind === 'DOCUMENT') {
       const targeted = new Set(deletion.documentIds);
-      if (detail !== null && targeted.has(detail.document.id)) closeDetails();
+      if (detailDocumentId !== null && targeted.has(detailDocumentId)) {
+        // Its trigger is about to leave the table too; return focus to the disclosure instead.
+        detailOpener = null;
+        closeDetails();
+      }
       // A removed row is not a pending selection either, whether it was sent from here or admitted before
       // a reload; the refresh below then keeps the rest of the checked rows honest.
       selectedDocumentIds = new Set([...selectedDocumentIds].filter((id) => !targeted.has(id)));
       for (const documentId of deletion.documentIds) await onDocumentDeleted(deletion.collectionId, documentId);
       // The count the collection list shows changed, and so may the page the reader is on.
       await onCollectionsChanged();
-      if (listingCollectionId === deletion.collectionId) await loadDocuments();
+      if (listingCollectionId === deletion.collectionId) await refreshCollectionDocuments();
       return;
     }
     forgetCollection(deletion.collectionId);
@@ -981,6 +1271,10 @@
   /** A deleted collection's rows, details and history cannot be shown again: they went with it. */
   function forgetCollection(collectionId: string): void {
     if (listingCollectionId !== collectionId) return;
+    summaryGeneration += 1;
+    summary = null;
+    summaryError = null;
+    invalidateDocumentReads();
     documents = [];
     documentsTotal = 0;
     documentsLoaded = false;
@@ -1215,13 +1509,19 @@
    * shown again rather than forgotten with the browser's memory.
    */
   onMount(() => {
-    void loadDeletions();
+    if (visible) void loadDeletions();
   });
 
   onDestroy(() => {
+    cancelFilenameSearch();
     // Unmounting ends the history's and the deletion's polling and drops any answer still on its way: a
     // timer left behind would keep reading a panel that nobody shows, and a late response would fill
     // state nobody reads.
+    documentsGeneration += 1;
+    detailGeneration += 1;
+    summaryGeneration += 1;
+    settingsGeneration += 1;
+    itemsGeneration += 1;
     importsGeneration += 1;
     if (refreshTimer !== null) clearTimeout(refreshTimer);
     refreshTimer = null;
@@ -1231,7 +1531,9 @@
   });
 </script>
 
-<section class="collections-panel" aria-label="Collection administration">
+<svelte:window onkeydown={detailKeydown} />
+
+<section class="collections-panel workspace-area" aria-label="Collection administration">
   {#if loading}
     <p role="status">Loading collections…</p>
   {:else if error !== null}
@@ -1327,6 +1629,314 @@
           <p class="selected-name">{selected.name}</p>
           <p class="hint">{countLabel(selected.documentCount)}</p>
         </div>
+        <div>
+          <button type="button" aria-expanded={addingDocuments} onclick={() => (addingDocuments = true)}>
+            Add documents
+          </button>
+        </div>
+        {#if addingDocuments}
+          {#key selected.id}
+            <ImportPanel collectionId={selected.id} collectionName={selected.name} onImportChanged={importChanged} {visible} />
+          {/key}
+        {/if}
+
+        <div class="document-overview">
+          <button type="button" bind:this={disclosureButton} aria-expanded={expanded} aria-controls="collection-documents" onclick={toggleDocuments}>Documents</button>
+          {#if summaryError !== null}
+            <p role="alert">{summaryError}</p>
+            <button type="button" onclick={() => void loadSummary()}>Retry document counts</button>
+          {:else if summary === null}
+            <span role="status">{summaryLoading ? 'Loading document counts…' : 'Document counts unavailable'}</span>
+          {:else}
+            <button type="button" onclick={() => openSummaryStatus('')}>{summary.total} total</button>
+            {#each SUMMARY_STATUSES as shortcut (shortcut.status)}
+              {#if summary.byStatus[shortcut.status] > 0}
+                <button type="button" onclick={() => openSummaryStatus(shortcut.status)}>{summary.byStatus[shortcut.status]} {shortcut.label}</button>
+              {/if}
+            {/each}
+          {/if}
+        </div>
+        {#if importsError !== null}<p role="alert">{importsError}</p>{/if}
+        {#if imports.some(isWatchedImport)}
+          <section class="active-imports" aria-label="Active imports">
+            {#each imports.filter(isWatchedImport) as entry (entry.id)}
+              <p>{JOB_STATE_LABELS[entry.state]} · {fileCountLabel(entry.filesCompleted, entry.filesTotal)}</p>
+              <p class="hint">{stageCell(entry)}</p>
+            {/each}
+          </section>
+        {/if}
+        {#if expanded}
+          <section id="collection-documents" class="document-list" aria-label="Documents" bind:this={documentsSection}>
+        <div class="document-controls">
+          <div class="document-search">
+            <div class="field">
+              <label for="document-search">Search filenames</label>
+              <input id="document-search" bind:value={filenameInput} placeholder="Filename contains…"
+                oninput={filenameIntentChanged} onkeydown={filenameKeydown}
+                oncompositionstart={() => { composingFilename = true; filenameIntentChanged(); }}
+                oncompositionend={() => { composingFilename = false; filenameIntentChanged(); }} />
+            </div>
+          </div>
+          <div class="field">
+            <label for="document-status">Status</label>
+            <select id="document-status" bind:value={statusFilter} onchange={changeFilter}>
+              <option value="">Any status</option>
+              {#each Object.entries(STATUS_LABELS) as [value, label] (value)}
+                <option {value}>{label}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="field">
+            <label for="document-sort">Sort</label>
+            <select id="document-sort" bind:value={sort} onchange={changeFilter}>
+              {#each SORTS as option (option.value)}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+          </div>
+        </div>
+
+        <section class="collection-retry" aria-label={`Retry documents in ${selected.name}`}>
+          <span class="eyebrow">RETRY</span>
+          <p class="hint" id="retry-all-scope">
+            Retry all reads every failed, cancelled or tool-blocked document in {selected.name} again from the
+            copies InfoScry holds. It covers the whole collection, across every page: the search term, status
+            filter, sort order and current page do not restrict which documents it selects. Completed
+            documents, and documents that only have warnings, are left alone.
+          </p>
+          <div class="actions">
+            <button
+              type="button"
+              aria-describedby="retry-all-scope"
+              disabled={retryAllSubmitting}
+              onclick={() => void retryAll()}
+            >
+              {retryAllSubmitting ? 'Retrying…' : 'Retry all eligible documents'}
+            </button>
+          </div>
+          {#if retryAllMessage !== null}<p role="status">{retryAllMessage}</p>{/if}
+          {#if retryAllError !== null}<p role="alert">{retryAllError}</p>{/if}
+          {#if retryAllRejected.length > 0}
+            <ul class="retry-refusals">
+              {#each retryRefusals() as refusal (refusal.reason)}
+                <li>{refusal.label}</li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+
+        {#if documentsLoading && !documentsLoaded}
+          <p role="status">Loading documents…</p>
+        {:else if documentsError !== null}
+          <p role="alert">{documentsError}</p>
+        {:else if documents.length === 0}
+          {#if filenameQuery === '' && statusFilter === ''}
+            <p>No documents yet</p>
+          {:else}
+            <p>No documents match this search.</p>
+          {/if}
+        {:else}
+          <div class="table-scroll document-table-scroll" role="region" aria-label="Document table">
+            <table class="documents">
+              <caption>Documents in {selected.name}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select all ${documents.length} ${documents.length === 1 ? 'document' : 'documents'} on this page`}
+                      checked={allOnPageSelected()}
+                      onchange={toggleAllOnPage}
+                    />
+                  </th>
+                  <th scope="col">Filename</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Progress</th>
+                  <th scope="col">Details</th>
+                  <th scope="col">Delete</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each documents as row (row.id)}
+                  {@const quality = qualityLabel(row.qualityScore)}
+                  {@const reading = documentStatus(row)}
+                  <tr>
+                    <td class="select-cell">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${row.originalFilename}`}
+                        checked={selectedDocumentIds.has(row.id)}
+                        onchange={(event) => toggleSelected(row, (event.currentTarget as HTMLInputElement).checked)}
+                      />
+                    </td>
+                    <th scope="row">{row.originalFilename}</th>
+                    <td><span data-testid="document-reading-status">{reading.label}</span></td>
+                    <td>
+                      {progressLabel(row.progress)}
+                      {#if quality !== null}<span class="ocr-quality {quality.level}">{quality.text}</span>{/if}
+                    </td>
+                    <td>
+                      <button type="button" aria-expanded={detailDocumentId === row.id}
+                        aria-controls="inline-document-details" onclick={(event) => toggleDetails(row.id, event)}>Details</button>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        aria-label={`Delete ${row.originalFilename}`}
+                        onclick={() => void openDocumentDeleteDialog([row])}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                  {#if detailDocumentId === row.id}
+                    <tr class="detail-row">
+                      <td colspan="6">
+                        <section id="inline-document-details" class="document-details" aria-label="Document details"
+                          bind:this={detailSection} use:revealDetails={detailLoading}>
+                          <span class="eyebrow">DOCUMENT DETAILS</span>
+                          {#if detailLoading}
+                            <p role="status">Loading details…</p>
+                          {:else if detailError !== null}
+                            <p role="alert">{detailError}</p>
+                          {:else if detail !== null}
+                            <dl>
+                              <dt>Filename</dt>
+                              <dd>{detail.document.originalFilename}</dd>
+                              <dt>Media type</dt>
+                              <dd>{detail.document.mediaType}</dd>
+                              <dt>Size</dt>
+                              <dd>{formatSize(detail.document.sizeBytes)}</dd>
+                              <dt>Imported</dt>
+                              <dd>{formatDate(detail.document.createdAt)}</dd>
+                            </dl>
+                            {#if detail.progress !== null && detail.progress !== undefined}
+                              <dl class="progress">
+                                <dt>Progress</dt>
+                                <dd>{progressSentence(detail.progress, detail.document.status)}</dd>
+                                {#if detail.progress.processedUnits > 0}
+                                  <dt>Read directly</dt>
+                                  <dd>{methodCount(detail.progress.directTextUnits, detail.progress)}</dd>
+                                  <dt>Read by OCR</dt>
+                                  <dd>{methodCount(detail.progress.ocrUnits, detail.progress)}</dd>
+                                {/if}
+                                {#if detail.progress.failedUnits > 0}
+                                  <dt>Units that could not be read</dt>
+                                  <dd>{detail.progress.failedUnits}</dd>
+                                {/if}
+                              </dl>
+                              {#if needsOcrScopeHint(detail.progress, detail.document.status)}
+                                <p class="hint">
+                                  The denominator counts every {unitLabel(detail.progress.unitKind, 1)} of the document, not only the
+                                  ones that needed OCR.
+                                </p>
+                              {/if}
+                            {/if}
+                            {#if detail.errorMessage !== null && detail.errorMessage !== undefined}
+                              <p role="alert">{detail.errorMessage}</p>
+                            {/if}
+                            {#if detail.warnings !== undefined && detail.warnings.length > 0}
+                              <ul class="warnings">
+                                {#each detail.warnings as warning (warning)}
+                                  <li>{warning}</li>
+                                {/each}
+                              </ul>
+                            {/if}
+                            {#if (detail.sourceId === null || detail.sourceId === undefined) && !isPageReviewable(detail.document.mediaType)}
+                              <p>This document has no readable content yet, so there is nothing to open.</p>
+                            {:else}
+                              <div class="actions">
+                                <button type="button" class="primary" onclick={(event) => openDocument(detail, event.currentTarget as HTMLElement)}>Open document</button>
+                              </div>
+                            {/if}
+                            {#if detail.retryEligible}
+                              <p class="hint">
+                                Retry resumes this document from the copy InfoScry holds, using the settings of its failed
+                                reading and keeping the parts already read successfully.
+                              </p>
+                            {/if}
+                          {/if}
+                          {#if detail !== null}
+                            {#key `${selected.id}:${detail.document.id}`}
+                              {#if reviewedDocumentId !== detail.document.id}
+                                <DocumentRescan
+                                  {visible}
+                                  collectionId={selected.id}
+                                  documentId={detail.document.id}
+                                  documentName={detail.document.originalFilename}
+                                  document={detail.document}
+                                  retryEligible={detail.retryEligible}
+                                  onRetry={(options) => retryDocument(detail, options)}
+                                  onRetryFinished={refreshRetriedDocument}
+                                  startedRescan={startedRescan?.documentId === detail.document.id ? { requestId: startedRescan.requestId, operation: startedRescan.operation } : undefined}
+                                  onPublished={refreshPublishedDocument}
+                                />
+                              {/if}
+                              <OcrHistoryPanel
+                                collectionId={selected.id}
+                                documentId={detail.document.id}
+                                documentName={detail.document.originalFilename}
+                              />
+                            {/key}
+                          {/if}
+                          <div class="actions">
+                            <button type="button" onclick={closeDetails}>Close details</button>
+                          </div>
+                        </section>
+                      </td>
+                    </tr>
+                  {/if}
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          <div class="bulk-actions">
+            <p class="hint" id="document-selection-scope">
+              Select all checks only the {documents.length} {documents.length === 1 ? 'document' : 'documents'}
+              on this page; documents on other pages stay unchecked.
+              {#if selectedDocumentIds.size > 0}
+                {selectedDocumentIds.size} selected on this page.
+              {/if}
+            </p>
+            <div class="actions">
+              <button
+                type="button"
+                class="primary"
+                disabled={selectedDocumentIds.size === 0}
+                onclick={() => void openDocumentDeleteDialog(selectedDocuments())}
+              >
+                Delete selected
+              </button>
+              <button type="button" disabled={selectedDocumentIds.size === 0} onclick={clearSelection}>
+                Clear selection
+              </button>
+            </div>
+          </div>
+          <div class="paging">
+            <p class="hint">
+              Showing {offset + 1}–{offset + documents.length} of {documentsTotal}
+              {documentsTotal === 1 ? 'document' : 'documents'}
+            </p>
+            <div class="actions">
+              <button type="button" disabled={offset === 0 || documentsLoading || filenameTimer !== null || composingFilename} onclick={() => changePage(-1)}>
+                Previous page
+              </button>
+              <button
+                type="button"
+                disabled={offset + PAGE_SIZE >= documentsTotal || documentsLoading || filenameTimer !== null || composingFilename}
+                onclick={() => changePage(1)}
+              >
+                Next page
+              </button>
+            </div>
+          </div>
+        {/if}
+
+          </section>
+        {/if}
+
+        <details class="secondary-settings">
+          <summary>Settings</summary>
         <section class="collection-settings" aria-label={`Settings for ${selected.name}`}>
           <span class="eyebrow">SETTINGS</span>
 
@@ -1393,287 +2003,15 @@
           </div>
         </section>
 
-        <div>
-          <button type="button" aria-expanded={addingDocuments} onclick={() => (addingDocuments = true)}>
-            Add documents
-          </button>
-        </div>
-        {#if addingDocuments}
-          {#key selected.id}
-            <ImportPanel collectionId={selected.id} collectionName={selected.name} />
-          {/key}
-        {/if}
-
-        <div class="document-controls">
-          <form class="document-search" onsubmit={searchDocuments}>
-            <div class="field">
-              <label for="document-search">Search filenames</label>
-              <input id="document-search" bind:value={filenameInput} placeholder="Filename contains…" />
-            </div>
-            <button type="submit">Search</button>
-          </form>
-          <div class="field">
-            <label for="document-status">Status</label>
-            <select id="document-status" bind:value={statusFilter} onchange={changeFilter}>
-              <option value="">Any status</option>
-              {#each Object.entries(STATUS_LABELS) as [value, label] (value)}
-                <option {value}>{label}</option>
-              {/each}
-            </select>
-          </div>
-          <div class="field">
-            <label for="document-sort">Sort</label>
-            <select id="document-sort" bind:value={sort} onchange={changeFilter}>
-              {#each SORTS as option (option.value)}
-                <option value={option.value}>{option.label}</option>
-              {/each}
-            </select>
-          </div>
-        </div>
-
-        <section class="collection-retry" aria-label={`Retry documents in ${selected.name}`}>
-          <span class="eyebrow">RETRY</span>
-          <p class="hint" id="retry-all-scope">
-            Retry all reads every failed, cancelled or tool-blocked document in {selected.name} again from the
-            copies InfoScry holds. It covers the whole collection, across every page: the search term, status
-            filter, sort order and current page do not restrict which documents it selects. Completed
-            documents, and documents that only have warnings, are left alone.
-          </p>
-          <div class="actions">
-            <button
-              type="button"
-              aria-describedby="retry-all-scope"
-              disabled={retryAllSubmitting}
-              onclick={() => void retryAll()}
-            >
-              {retryAllSubmitting ? 'Retrying…' : 'Retry all eligible documents'}
-            </button>
-          </div>
-          {#if retryAllMessage !== null}<p role="status">{retryAllMessage}</p>{/if}
-          {#if retryAllError !== null}<p role="alert">{retryAllError}</p>{/if}
-          {#if retryAllRejected.length > 0}
-            <ul class="retry-refusals">
-              {#each retryRefusals() as refusal (refusal.reason)}
-                <li>{refusal.label}</li>
-              {/each}
-            </ul>
-          {/if}
-        </section>
-
-        {#if documentsLoading && !documentsLoaded}
-          <p role="status">Loading documents…</p>
-        {:else if documentsError !== null}
-          <p role="alert">{documentsError}</p>
-        {:else if documents.length === 0}
-          {#if filenameQuery === '' && statusFilter === ''}
-            <p>No documents yet</p>
-          {:else}
-            <p>No documents match this search.</p>
-          {/if}
-        {:else}
-          <div class="table-scroll">
-            <table class="documents">
-              <caption>Documents in {selected.name}</caption>
-              <thead>
-                <tr>
-                  <th scope="col">
-                    <input
-                      type="checkbox"
-                      aria-label={`Select all ${documents.length} ${documents.length === 1 ? 'document' : 'documents'} on this page`}
-                      checked={allOnPageSelected()}
-                      onchange={toggleAllOnPage}
-                    />
-                  </th>
-                  <th scope="col">Filename</th>
-                  <th scope="col">Media type</th>
-                  <th scope="col">Size</th>
-                  <th scope="col">Imported</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Progress</th>
-                  <th scope="col">Details</th>
-                  <th scope="col">Delete</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each documents as row (row.id)}
-                  {@const quality = qualityLabel(row.qualityScore)}
-                  {@const reading = documentStatus(row)}
-                  <tr>
-                    <td class="select-cell">
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${row.originalFilename}`}
-                        checked={selectedDocumentIds.has(row.id)}
-                        onchange={(event) => toggleSelected(row, (event.currentTarget as HTMLInputElement).checked)}
-                      />
-                    </td>
-                    <th scope="row">{row.originalFilename}</th>
-                    <td>{row.mediaType}</td>
-                    <td>{formatSize(row.sizeBytes)}</td>
-                    <td>{formatDate(row.createdAt)}</td>
-                    <td><span data-testid="document-reading-status">{reading.label}</span></td>
-                    <td>
-                      {progressLabel(row.progress)}
-                      {#if quality !== null}<span class="ocr-quality {quality.level}">{quality.text}</span>{/if}
-                    </td>
-                    <td>
-                      <button type="button" onclick={() => void openDetails(row.id)}>Details</button>
-                      {#if reading.nextAction !== null}
-                        <button type="button" aria-label={`${reading.nextAction === 'scan' ? 'Scan again' : reading.nextAction === 'retry' ? 'Retry' : 'Cancel and start over'} ${row.originalFilename}`} onclick={() => void openDetails(row.id)}>
-                          {reading.nextAction === 'scan' ? 'Scan again' : reading.nextAction === 'retry' ? 'Retry' : 'Cancel and start over'}
-                        </button>
-                      {/if}
-                    </td>
-                    <td>
-                      <button
-                        type="button"
-                        aria-label={`Delete ${row.originalFilename}`}
-                        onclick={() => void openDocumentDeleteDialog([row])}
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-          <div class="bulk-actions">
-            <p class="hint" id="document-selection-scope">
-              Select all checks only the {documents.length} {documents.length === 1 ? 'document' : 'documents'}
-              on this page; documents on other pages stay unchecked.
-              {#if selectedDocumentIds.size > 0}
-                {selectedDocumentIds.size} selected on this page.
-              {/if}
-            </p>
-            <div class="actions">
-              <button
-                type="button"
-                class="primary"
-                disabled={selectedDocumentIds.size === 0}
-                onclick={() => void openDocumentDeleteDialog(selectedDocuments())}
-              >
-                Delete selected
-              </button>
-              <button type="button" disabled={selectedDocumentIds.size === 0} onclick={clearSelection}>
-                Clear selection
-              </button>
-            </div>
-          </div>
-          <div class="paging">
-            <p class="hint">
-              Showing {offset + 1}–{offset + documents.length} of {documentsTotal}
-              {documentsTotal === 1 ? 'document' : 'documents'}
-            </p>
-            <div class="actions">
-              <button type="button" disabled={offset === 0 || documentsLoading} onclick={() => changePage(-1)}>
-                Previous page
-              </button>
-              <button
-                type="button"
-                disabled={offset + PAGE_SIZE >= documentsTotal || documentsLoading}
-                onclick={() => changePage(1)}
-              >
-                Next page
-              </button>
-            </div>
-          </div>
-        {/if}
-
-        {#if detailLoading || detailError !== null || detail !== null}
-          <section class="document-details" aria-label="Document details">
-            <span class="eyebrow">DOCUMENT DETAILS</span>
-            {#if detailLoading}
-              <p role="status">Loading details…</p>
-            {:else if detailError !== null}
-              <p role="alert">{detailError}</p>
-            {:else if detail !== null}
-              <dl>
-                <dt>Filename</dt>
-                <dd>{detail.document.originalFilename}</dd>
-                <dt>Media type</dt>
-                <dd>{detail.document.mediaType}</dd>
-                <dt>Size</dt>
-                <dd>{formatSize(detail.document.sizeBytes)}</dd>
-                <dt>Imported</dt>
-                <dd>{formatDate(detail.document.createdAt)}</dd>
-              </dl>
-              {#if detail.progress !== null && detail.progress !== undefined}
-                <dl class="progress">
-                  <dt>Progress</dt>
-                  <dd>{progressSentence(detail.progress, detail.document.status)}</dd>
-                  {#if detail.progress.processedUnits > 0}
-                    <dt>Read directly</dt>
-                    <dd>{methodCount(detail.progress.directTextUnits, detail.progress)}</dd>
-                    <dt>Read by OCR</dt>
-                    <dd>{methodCount(detail.progress.ocrUnits, detail.progress)}</dd>
-                  {/if}
-                  {#if detail.progress.failedUnits > 0}
-                    <dt>Units that could not be read</dt>
-                    <dd>{detail.progress.failedUnits}</dd>
-                  {/if}
-                </dl>
-                {#if needsOcrScopeHint(detail.progress, detail.document.status)}
-                  <p class="hint">
-                    The denominator counts every {unitLabel(detail.progress.unitKind, 1)} of the document, not only the
-                    ones that needed OCR.
-                  </p>
-                {/if}
-              {/if}
-              {#if detail.errorMessage !== null && detail.errorMessage !== undefined}
-                <p role="alert">{detail.errorMessage}</p>
-              {/if}
-              {#if detail.warnings !== undefined && detail.warnings.length > 0}
-                <ul class="warnings">
-                  {#each detail.warnings as warning (warning)}
-                    <li>{warning}</li>
-                  {/each}
-                </ul>
-              {/if}
-              {#if detail.sourceId === null || detail.sourceId === undefined}
-                <p>This document has no readable content yet, so there is nothing to open.</p>
-              {:else}
-                <div class="actions">
-                  <button type="button" class="primary" onclick={() => openDocument(detail)}>Open document</button>
-                </div>
-              {/if}
-              {#if detail.retryEligible}
-                <p class="hint">
-                  Retry resumes this document from the copy InfoScry holds, using the settings of its failed
-                  reading and keeping the parts already read successfully.
-                </p>
-              {/if}
-            {/if}
-            {#if detail !== null}
-              {#key `${selected.id}:${detail.document.id}`}
-                <DocumentRescan
-                  collectionId={selected.id}
-                  documentId={detail.document.id}
-                  documentName={detail.document.originalFilename}
-                  document={detail.document}
-                  retryEligible={detail.retryEligible}
-                  onRetry={(options) => retryDocument(detail, options)}
-                  onRetryFinished={refreshRetriedDocument}
-                />
-                <OcrHistoryPanel
-                  collectionId={selected.id}
-                  documentId={detail.document.id}
-                  documentName={detail.document.originalFilename}
-                />
-              {/key}
-            {/if}
-            <div class="actions">
-              <button type="button" onclick={closeDetails}>Close details</button>
-            </div>
-          </section>
-        {/if}
+        </details>
 
         <section class="import-history" aria-label={`Import history for ${selected.name}`}>
-          <span class="eyebrow">IMPORT HISTORY</span>
+          <details>
+            <summary>Import history</summary>
           {#if importsLoading && !importsLoaded}
             <p class="hint">Loading imports…</p>
           {:else if importsError !== null}
-            <p role="alert">{importsError}</p>
+            <p>Import history unavailable.</p>
           {:else if imports.length === 0}
             <p>No imports yet</p>
           {:else}
@@ -1773,6 +2111,7 @@
               {/if}
             </section>
           {/if}
+          </details>
         </section>
       </section>
     {/if}
@@ -1860,7 +2199,7 @@
 </section>
 
 <style>
-  .collections-panel { max-width: 52rem; display: grid; gap: 1.25rem; align-content: start; }
+  .collections-panel { min-width: 0; display: grid; gap: 1.25rem; align-content: start; }
   .empty-archive { display: grid; gap: 0.75rem; justify-items: start; padding: 1.1rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; }
   .empty-archive p { margin: 0; }
   .legacy-default { display: grid; gap: 0.5rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
@@ -1872,21 +2211,21 @@
   .collection-list li button.active { color: #f3e6d1; font-weight: 600; }
   .collection-list li button.active .name { text-decoration: underline; text-underline-offset: 0.25em; }
   .collection-list .count { color: #929997; font-size: 0.8rem; font-weight: 400; }
-  .collection-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 1rem; padding: 1rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; }
+  .collection-form { display: grid; grid-template-columns: repeat(2, minmax(0, 32rem)); gap: 0.9rem 1rem; padding: 1rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; }
   .collection-form .eyebrow { grid-column: 1 / -1; }
   .collection-form [role='alert'] { grid-column: 1 / -1; }
-  .field { display: grid; gap: 0.35rem; align-content: start; }
+  .field { display: grid; min-width: 0; gap: 0.35rem; align-content: start; }
   label { color: #b8bcbb; font-size: 0.82rem; }
   input:not([type='checkbox']) { min-width: 0; border: 1px solid #383d3e; border-radius: 0.48rem; background: #202324; padding: 0.62rem 0.72rem; color: #e8e9e7; }
   select { min-width: 0; border: 1px solid #383d3e; border-radius: 0.48rem; background: #202324; padding: 0.62rem 0.72rem; color: #e8e9e7; }
-  .actions { display: flex; gap: 0.55rem; }
+  .actions { display: flex; flex-wrap: wrap; gap: 0.55rem; }
   .collection-form .actions { grid-column: 1 / -1; }
   .management { display: grid; gap: 0.85rem; padding-top: 1.25rem; border-top: 1px solid #2d3131; }
-  .management-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; }
+  .management-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.75rem; }
   .management-head .selected-name { margin: 0; font-size: 1.05rem; }
   .management p { margin: 0; }
   .collection-settings { display: grid; gap: 0.9rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
-  .settings-form { display: grid; gap: 0.6rem; }
+  .settings-form { display: grid; max-width: 65ch; gap: 0.6rem; }
   .settings-form .actions { justify-content: start; }
   .settings-form textarea { font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0.5rem; resize: vertical; width: 100%; box-sizing: border-box; }
   .hint { color: #929997; font-size: 0.82rem; }
@@ -1902,10 +2241,16 @@
   .collection-retry p { margin: 0; }
   .choice-toggle { display: flex; align-items: center; gap: 0.5rem; color: #b8bcbb; font-size: 0.85rem; }
   .retry-refusals { margin: 0; padding-left: 1.1rem; max-height: 8rem; overflow-y: auto; color: #d8c9a8; font-size: 0.82rem; }
-  .document-search { display: flex; gap: 0.55rem; align-items: end; }
+  .document-search { display: flex; min-width: 0; flex-wrap: wrap; gap: 0.55rem; align-items: end; }
   .document-search .field { flex: 1 1 auto; }
   /* A page-wide table on a narrow window: the table scrolls inside the panel instead of pushing the
      whole page sideways. */
+  .document-overview { display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem; }
+  .document-list { display: grid; min-width: 0; gap: 0.85rem; }
+  .document-table-scroll { max-height: min(60vh, 36rem); overflow: auto; }
+  .documents thead th { position: sticky; top: 0; z-index: 1; background: #191c1d; }
+  summary { cursor: pointer; padding: 0.6rem 0; }
+  .active-imports { display: grid; gap: 0.4rem; }
   .table-scroll { min-width: 0; overflow-x: auto; }
   table.documents { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   table.documents caption { padding-bottom: 0.5rem; color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-align: left; text-transform: uppercase; }
@@ -1916,7 +2261,7 @@
   .bulk-actions { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
   .bulk-actions p { margin: 0; }
   .confirm-list { margin: 0; padding-left: 1.1rem; max-height: 8rem; overflow-y: auto; }
-  .paging { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+  .paging { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; }
   .document-details { display: grid; gap: 0.6rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .document-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.3rem 0.9rem; margin: 0; font-size: 0.85rem; }
   .document-details dl.progress { padding-top: 0.35rem; border-top: 1px solid #2b3030; }

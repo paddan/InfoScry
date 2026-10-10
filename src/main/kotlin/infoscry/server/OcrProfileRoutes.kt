@@ -137,6 +137,8 @@ data class OcrProfileProbeResponse(
     val supported: Boolean,
     val modelVersion: String? = null,
     val errorCode: String? = null,
+    val errorMessage: String? = null,
+    val statusCode: Int? = null,
 )
 
 /**
@@ -287,6 +289,8 @@ fun Routing.configureOcrProfileRoutes(context: AppContext) {
                         supported = measurement.supported,
                         modelVersion = measurement.modelVersion,
                         errorCode = measurement.errorCode,
+                        errorMessage = measurement.errorMessage,
+                        statusCode = measurement.statusCode,
                     ),
                 )
             }

@@ -4,8 +4,10 @@ import infoscry.ask.CitationValidation
 import infoscry.ask.CorrectionSnapshot
 import infoscry.ask.Evidence
 import infoscry.domain.CollectionId
+import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
 import infoscry.storage.CollectionStore
+import infoscry.storage.ContentStore
 import infoscry.storage.Database
 import infoscry.storage.DuplicateLlmProfileNameException
 import infoscry.storage.LlmStore
@@ -470,6 +472,104 @@ class LlmStoreTest {
         assertEquals("revision-a", entries.getValue("S1").revisionId)
         assertEquals("excerpt one", entries.getValue("S1").excerpt)
         assertNull(entries.getValue("S2").revisionId, "evidence written without a revision reads back as revision unknown")
+    }
+
+    @Test
+    fun `historical evidence resolves its document after publication removes the current unit`() {
+        val collectionId = defaultCollectionId()
+        val otherCollectionId = CollectionStore(database).create("Other").id
+        val documentId = DocumentId("historical-document")
+        val oldRevisionId = "historical-revision"
+        val newRevisionId = "replacement-revision"
+        val oldUnitId = "removed-unit"
+        val foreignDocumentId = "foreign-document"
+        val foreignRevisionId = "foreign-revision"
+        val now = "2026-10-10T12:00:00Z"
+        database.transaction { connection ->
+            connection.prepareStatement(
+                "INSERT INTO documents (id,collection_id,sha256,media_type,original_filename,original_path," +
+                    "size_bytes,status,created_at,updated_at) VALUES (?,?,?,?,?,?,0,'COMPLETE',?,?)",
+            ).use { statement ->
+                statement.setString(1, documentId.value); statement.setString(2, collectionId.value)
+                statement.setString(3, "historical-hash"); statement.setString(4, "application/pdf")
+                statement.setString(5, "history.pdf"); statement.setString(6, "managed/history.pdf")
+                statement.setString(7, now); statement.setString(8, now); statement.executeUpdate()
+            }
+            connection.prepareStatement(
+                "INSERT INTO document_revisions (id,document_id,state,provenance,created_at) VALUES (?,?,?,?,?)",
+            ).use { statement ->
+                statement.setString(1, oldRevisionId); statement.setString(2, documentId.value)
+                statement.setString(3, "SUPERSEDED"); statement.setString(4, "import"); statement.setString(5, now)
+                statement.executeUpdate()
+                statement.setString(1, newRevisionId); statement.setString(2, documentId.value)
+                statement.setString(3, "PUBLISHED"); statement.setString(4, "rescan"); statement.setString(5, now)
+                statement.executeUpdate()
+            }
+            connection.prepareStatement(
+                "INSERT INTO page_text_revisions (revision_id,ordinal,unit_id,locator,extracted_text,search_text," +
+                    "approval,created_at) VALUES (?,0,?,'{\"page\":1}','historical text','historical text','APPROVED',?)",
+            ).use { statement ->
+                statement.setString(1, oldRevisionId); statement.setString(2, oldUnitId); statement.setString(3, now)
+                statement.executeUpdate()
+            }
+            connection.prepareStatement(
+                "INSERT INTO document_active_revisions (document_id,revision_id,updated_at) VALUES (?,?,?)",
+            ).use { statement ->
+                statement.setString(1, documentId.value); statement.setString(2, newRevisionId)
+                statement.setString(3, now); statement.executeUpdate()
+            }
+            connection.prepareStatement(
+                "INSERT INTO content_units (id,document_id,ordinal,locator_type,locator,extracted_text,search_text," +
+                    "created_at,updated_at) VALUES (?, ?, 0, 'PDF_PAGE', '{\"page\":1}', 'historical text', 'historical text', ?, ?)",
+            ).use { statement ->
+                statement.setString(1, oldUnitId); statement.setString(2, documentId.value)
+                statement.setString(3, now); statement.setString(4, now); statement.executeUpdate()
+            }
+            connection.prepareStatement(
+                "INSERT INTO documents (id,collection_id,sha256,media_type,original_filename,original_path," +
+                    "size_bytes,status,created_at,updated_at) VALUES (?, ?, 'foreign-hash', 'application/pdf'," +
+                    "'foreign.pdf', 'managed/foreign.pdf', 0, 'COMPLETE', ?, ?)",
+            ).use { statement ->
+                statement.setString(1, foreignDocumentId); statement.setString(2, otherCollectionId.value)
+                statement.setString(3, now); statement.setString(4, now); statement.executeUpdate()
+            }
+            connection.prepareStatement(
+                "INSERT INTO document_revisions (id,document_id,state,provenance,created_at) VALUES (?,?,?,'import',?)",
+            ).use { statement ->
+                statement.setString(1, foreignRevisionId); statement.setString(2, foreignDocumentId)
+                statement.setString(3, "SUPERSEDED"); statement.setString(4, now); statement.executeUpdate()
+            }
+            connection.prepareStatement(
+                "INSERT INTO page_text_revisions (revision_id,ordinal,unit_id,locator,extracted_text,search_text," +
+                    "approval,created_at) VALUES (?,0,'foreign-unit','{\"page\":1}','private','private','APPROVED',?)",
+            ).use { statement ->
+                statement.setString(1, foreignRevisionId); statement.setString(2, now); statement.executeUpdate()
+            }
+        }
+
+        // Publication of the empty replacement removes the obsolete current unit while both immutable page
+        // revision rows remain available to resolve citation provenance.
+        ContentStore(database).publishRevision(documentId, emptyList())
+        val savedProfile = pricedProfile()
+        store.create(savedProfile)
+        val conversationId = store.persistInvestigateConversation(
+            collectionId, savedProfile, promptVersion = 1, retrievalSnapshot = "{}",
+        )
+        store.persistEvidenceLedgerEntry(conversationId, "S1", oldUnitId, "{\"page\":1}", "historical excerpt", revisionId = oldRevisionId)
+        store.persistEvidenceLedgerEntry(conversationId, "S2", "foreign-unit", "{\"page\":1}", "foreign excerpt", revisionId = foreignRevisionId)
+        store.persistEvidenceLedgerEntry(conversationId, "S3", oldUnitId, "{\"page\":1}", "unversioned excerpt")
+        store.persistEvidenceLedgerEntry(conversationId, "S4", "unknown-unit", "{\"page\":1}", "unknown excerpt")
+
+        val evidence = assertNotNull(store.loadInvestigateHistory(conversationId)).evidence.associateBy { it.evidenceId }
+
+        assertEquals(oldRevisionId, evidence.getValue("S1").revisionId)
+        assertEquals(documentId.value, evidence.getValue("S1").documentId)
+        assertEquals("", evidence.getValue("S2").documentId, "a revision in another collection must stay unresolved")
+        assertNull(evidence.getValue("S3").revisionId, "unversioned evidence remains excerpt-only")
+        assertEquals(documentId.value, evidence.getValue("S3").documentId,
+            "an unversioned unit can resolve only through its unique preserved document relationship")
+        assertNull(evidence.getValue("S4").revisionId)
+        assertEquals("", evidence.getValue("S4").documentId, "unknown provenance must not guess a document")
     }
 
     @Test
