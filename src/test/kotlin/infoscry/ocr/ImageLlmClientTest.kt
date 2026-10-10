@@ -1,5 +1,7 @@
 package infoscry.ocr
 
+import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.request.HttpRequestBuilder
 import infoscry.domain.DocumentId
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
@@ -629,6 +631,30 @@ class ImageLlmClientTest {
     }
 
     @Test
+    fun `a page answer after the CIO default deadline still succeeds within the reading deadline`() = runBlocking {
+        val page = page()
+        withServer(
+            script = listOf(FakeOpenAiResponse(
+                body = openAiAnswer(transcription(page)),
+                responseDelayMillis = 16_000,
+            )),
+            timeout = 30.seconds,
+        ) { server, client ->
+            assertEquals(DEFAULT_TRANSCRIPTION, client.transcribe(page).text)
+            assertEquals(1, server.handledRequests)
+        }
+    }
+
+    @Test
+    fun `a transport request timeout is reported as timeout without repeating the call`() = runBlocking {
+        val refused = failureOfTransport(HttpRequestTimeoutException(HttpRequestBuilder()))
+        assertEquals(ImageLlmException.TIMEOUT, refused.code)
+        assertTrue(refused.dispatched)
+        assertContains(refused.message.orEmpty(), "timed out")
+        assertFalse(refused.message.orEmpty().contains("connection was closed"))
+    }
+
+    @Test
     fun `a timeout is a failure and is not retried`() = runBlocking {
         val page = page()
         withServer(
@@ -1149,7 +1175,9 @@ class ImageLlmClientTest {
             engine = engine,
         )
         return try {
-            assertFailsWith<ImageLlmException> { client.transcribe(page) }
+            assertFailsWith<ImageLlmException> { client.transcribe(page) }.also {
+                assertEquals(1, engine.requestCount, "an ambiguous transport failure is not automatically retried")
+            }
         } finally {
             client.close()
             engine.close()

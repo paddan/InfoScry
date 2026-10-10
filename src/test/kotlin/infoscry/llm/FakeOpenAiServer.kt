@@ -32,6 +32,8 @@ internal class FakeOpenAiResponse(
     val fragmentBytes: Int = 1024,
     val gapMillis: Long = 0,
     val holdMillis: Long = 0,
+    /** Delay before headers, modelling a provider generating a non-streamed answer. */
+    val responseDelayMillis: Long = 0,
     /** Content-Length to advertise; 0 means the body length. A value beyond the body lets a test keep
      *  the client awaiting more bytes while the connection stays open (the cancellation test). */
     val declaredLength: Long = 0,
@@ -90,6 +92,10 @@ internal class FakeOpenAiServer(
             lastRequestBody.set(requestBody)
             capturedRequests.add(FakeOpenAiRequest(exchange.requestMethod, exchange.requestURI.path, requestBody))
             val response = script[min(index, script.size - 1)]
+            if (response.responseDelayMillis > 0 && closed.await(response.responseDelayMillis, TimeUnit.MILLISECONDS)) {
+                exchange.close()
+                return
+            }
             if (response.stream) {
                 streamResponse(exchange, response)
             } else {

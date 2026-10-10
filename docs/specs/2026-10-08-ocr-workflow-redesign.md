@@ -115,6 +115,20 @@ States shown per document: **Imported**, **Reading n of N**, **Done**,
 - A run never sends more pages than were confirmed. If it would, it ends as
   Failed with that reason rather than pausing.
 
+## LLM request deadlines (2026-10-10)
+
+A page-reading request may take up to **10 minutes**, covering the send, response
+headers, body and answer validation. This is an operational default allowing
+slow non-streamed image generation; it is not a measured provider latency SLA.
+The synthetic image-capability probe keeps its separate **60-second** deadline.
+CIO's independent request timeout is disabled so its 15-second default cannot
+cut either operation short. Cancellation still interrupts an in-flight request.
+
+A deadline ends the page with `OCR_TIMEOUT`. It is not retried automatically:
+the provider may already have generated and billed an answer. Previously
+committed pages remain resumable; existing published text stays unchanged on
+failure. HTTP request timeouts are distinguished from other transport failures.
+
 ## Always restartable
 
 The rule: **starting a run never depends on the state a previous run left

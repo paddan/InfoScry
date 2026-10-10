@@ -7,6 +7,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.network.sockets.ConnectTimeoutException
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -34,6 +35,7 @@ import javax.imageio.ImageIO
 import javax.net.ssl.SSLException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Duration.Companion.minutes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
@@ -348,6 +350,9 @@ class ImageLlmClient(
         // Production: the client's own CIO engine, which the client owns and closes with it — the
         // behaviour this code had before any seam existed.
         HttpClient(CIO) {
+            // The coroutine deadline covers the entire send and body read. CIO otherwise
+            // silently imposes its own 15-second request deadline on slow page generation.
+            engine { requestTimeout = 0 }
             followRedirects = false
             expectSuccess = false
         }
@@ -552,6 +557,13 @@ class ImageLlmClient(
                 // A refusal this client made about the answer is this page's outcome, not a provider failure:
                 // it is rethrown as itself so the codes say what actually happened.
                 throw refused
+            } catch (timedOut: HttpRequestTimeoutException) {
+                throw ImageLlmException(
+                    ImageLlmException.TIMEOUT,
+                    "the provider request timed out before an answer arrived, so this page's reading is unknown; " +
+                        "the call was not repeated, because an answer this client never saw may have been billed",
+                    dispatched = true,
+                )
             } catch (unreachable: IOException) {
                 throw ImageLlmException(
                     ImageLlmException.PROVIDER_UNAVAILABLE,
@@ -1105,7 +1117,7 @@ class ImageLlmClient(
         const val CAPABILITY_PROBE_UNIT_ID: String = "capability-probe"
 
         /** How long one provider call may take before its answer is treated as unknown. */
-        val DEFAULT_TIMEOUT: Duration = 120.seconds
+        val DEFAULT_TIMEOUT: Duration = 10.minutes
 
         /** How long a capability check waits for a provider: shorter than a page, because it is one small image. */
         val PROBE_TIMEOUT: Duration = 60.seconds

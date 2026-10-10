@@ -88,6 +88,11 @@ pages need reading, the dialog explains this and no rescan starts. A successful 
 the text and search entries automatically. **Text history** keeps previous
 versions and offers **Restore** without reading the pages again.
 
+LLM reading allows up to 10 minutes per page, including receiving the full answer.
+The small image-capability check allows 60 seconds. A timed-out page is not
+automatically sent again, since the provider may already have billed the call.
+You can cancel a running scan without waiting for that deadline.
+
 To force reading of a particular PDF/image page, open it in page review and choose
 **Scan this page again**. Use **Mark page N** while navigating, then **Scan selected
 pages** to read a sorted selection. The dialog shows exact one-based page numbers,
@@ -207,8 +212,10 @@ to inspect the source passage. A citation saved with a recorded revision opens
 that exact reading, so a later rescan cannot change what an old answer shows.
 Known-revision PDF page and supported-image citations use the image/text
 comparison and stay pinned; other locators retain the revision-bound text source view. Search, Ask and
-Investigate retain context beside sources when width permits; history yields space
-first, and narrow Back keeps the selected page.
+Investigate retain context beside sources when width permits, and narrow Back
+keeps the selected page. In both views, open **Conversation history** in the
+left panel to browse saved conversations. History starts closed and occupies no
+column in the answer workspace. **New conversation** remains visible above it.
 When the saved citation names no revision, the viewer shows the excerpt saved
 with the answer under a “Revision unknown” label rather than the document's
 current text.

@@ -98,6 +98,20 @@ Investigate evidence resolves document identity from preserved revision/unit
 provenance when publication removes its current unit.
 Current automatic PDF selection remains implemented.
 
+## LLM page deadline correction (2026-10-10)
+
+LLM page reading now allows 10 minutes, with CIO's independent 15-second request
+timeout disabled so the coroutine bounds the complete request and answer. The
+synthetic capability probe keeps its separate 60-second deadline. Transport
+request timeouts produce `OCR_TIMEOUT` without an automatic repeat.
+
+A local HTTP regression first reproduced the original failure with a 16-second
+delay, then received the page successfully after the correction. Both new
+regressions failed before the fix; all 75 focused OCR/rescan tests passed after
+it. Independent Luna review found no actionable issues. `./gradlew check` passed
+in 4m27s with 131 JVM suites / 1,600 tests and 425 frontend tests, without
+failures/errors/skips. No real provider request was made for this correction.
+
 ## Recorded verification
 
 The previous README recorded a local 2026-09-24 run of `check`, `externalTest`
