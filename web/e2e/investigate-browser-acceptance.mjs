@@ -10,6 +10,8 @@
  * the Kotlin test only has to check the process result (and its own database facts).
  */
 import { chromium } from 'playwright';
+import { mkdir } from 'node:fs/promises';
+const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR;
 
 const BASE_URL = process.env.BASE_URL;
 const SCENARIO = process.env.SCENARIO ?? 'primary';
@@ -171,31 +173,41 @@ async function restoreCitationToOlderReading(page) {
 }
 
 async function assertInvestigateMainGeometry(page) {
+  const history = page.getByRole('navigation', { name: 'Conversation history', exact: true });
+  const disclosure = history.locator('details');
+  assert(await disclosure.getAttribute('open') === null, 'Investigate history starts closed');
   for (const width of [390, 1024, 1440, 1920]) {
     await page.setViewportSize({ width, height: 900 });
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const geometry = await page.evaluate(() => {
       const answer = document.querySelector('#panel-investigate .answer');
-      const history = document.querySelector('.history-column');
+      const history = document.querySelector('nav[aria-label="Conversation history"]');
       const layout = document.querySelector('.content-layout');
+      const panels = layout.querySelector('.mode-panels');
       const rect = (node) => {
         const box = node.getBoundingClientRect();
         return { left: box.left, right: box.right, width: box.width, clientWidth: node.clientWidth, scrollWidth: node.scrollWidth };
       };
-      return { answer: rect(answer), history: rect(history), layout: rect(layout), historyExpanded: !history.classList.contains('collapsed') };
+      return { answer: rect(answer), history: rect(history), layout: rect(layout), panels: rect(panels),
+        historyInSidebar: Boolean(history.closest('aside.sidebar')), mainHistoryCount: layout.querySelectorAll('.history-sidebar').length };
     });
     assert(geometry.answer.width >= 240 && geometry.answer.scrollWidth <= geometry.answer.clientWidth + 1,
-      `${width}px Investigate answer should remain readable without internal overflow: ${JSON.stringify(geometry.answer)}`);
-    assert(geometry.answer.left >= 0 && geometry.answer.right <= width,
-      `${width}px Investigate answer stays inside the viewport: ${JSON.stringify(geometry.answer)}`);
-    assert(geometry.history.width > 0 && geometry.history.left >= 0 && geometry.history.right <= width,
-      `${width}px history remains on-screen: ${JSON.stringify(geometry.history)}`);
-    assert(geometry.layout.scrollWidth <= geometry.layout.clientWidth + 1,
-      `${width}px answer/history layout has no horizontal overflow: ${JSON.stringify(geometry.layout)}`);
-    const accessibleHistoryControl = geometry.historyExpanded
-      ? await page.getByRole('button', { name: 'The signed note', exact: true }).isVisible()
-      : await page.getByRole('button', { name: 'Expand Conversation history', exact: true }).isVisible();
-    assert(accessibleHistoryControl, `${width}px conversation history has a reachable entry or expand control`);
+      `${width}px Investigate answer remains readable: ${JSON.stringify(geometry.answer)}`);
+    assert(geometry.answer.left >= 0 && geometry.answer.right <= width, `${width}px answer fits the viewport`);
+    assert(geometry.historyInSidebar && geometry.mainHistoryCount === 0, 'history belongs only to the left controls');
+    assert(geometry.history.width > 0 && geometry.history.left >= 0 && geometry.history.right <= width, `${width}px sidebar history fits`);
+    assert(geometry.layout.scrollWidth <= geometry.layout.clientWidth + 1 && Math.abs(geometry.panels.width - geometry.layout.width) <= 2,
+      `${width}px the main task uses the width without a history column: ${JSON.stringify(geometry)}`);
+    assert(await history.getByRole('button', { name: 'New conversation', exact: true }).isVisible(), 'New conversation remains available while history is closed');
+    assert(!(await history.getByRole('button', { name: 'The signed note', exact: true }).isVisible()), 'closed history hides stored conversations');
+    await history.locator('summary').focus();
+    await page.keyboard.press('Enter');
+    assert(await history.getByRole('button', { name: 'The signed note', exact: true }).isVisible(), 'opening history exposes saved conversations');
+    await history.locator('summary').click();
+    if (SCREENSHOT_DIR && (width === 390 || width === 1920)) {
+      await mkdir(SCREENSHOT_DIR, { recursive: true });
+      await page.screenshot({ path: `${SCREENSHOT_DIR}/investigate-history-${width}.png`, fullPage: true });
+    }
   }
 }
 
@@ -368,7 +380,7 @@ const scenarios = {
     await page.waitForSelector('#panel-investigate button:has-text("Cancel")', { timeout: 15_000 });
     // Wait until the started event has been processed and the conversation row exists, so the
     // recovery question continues this conversation rather than starting a new one.
-    await page.waitForSelector('.history-row', { timeout: 15_000 });
+    await page.waitForSelector('.history-row', { state: 'attached', timeout: 15_000 });
     await page.click('#panel-investigate button:has-text("Cancel")');
     await waitForIdle(page);
     await page.waitForFunction(

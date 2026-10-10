@@ -23,7 +23,8 @@ query/conversation and history visibility. Ticket 04 supplies review content.
 ## Behavioral acceptance vectors
 
 1. Search/Ask/Investigate preserve their context beside an open source when
-   width permits; history can collapse and yields first when space is short.
+   width permits; Ask/Investigate history is closed by default in the left
+   sidebar and reserves no separate workspace column (amended 2026-10-10).
 2. Narrow mode has a labelled Back action and preserves current source/page.
 3. Open/close and mode switching preserve query/conversation and return focus
    to a valid opener; deletion of an opener falls back to the active view heading.
@@ -52,9 +53,10 @@ nonmodal split panes. Keep narrow single-pane accessibility explicit.
 
 ## Verification record — 2026-10-10
 
-Actual container width drives nonmodal split/single-pane layout and history
-collapse. Narrow Back retains source/page and context. Session history overrides
-remain local; close returns focus to the actual opener, or to the visible active
+Actual container width drives nonmodal split/single-pane layout. Ask/Investigate
+history was subsequently moved to a closed-by-default sidebar disclosure, with
+New conversation always visible; source width no longer controls history.
+Narrow Back retains source/page and context; close returns focus to the actual opener, or to the visible active
 view heading when that opener disappears, including Admin.
 
 Behavioral RED cases covered the previous modal and missing Admin focus targets.

@@ -1,5 +1,5 @@
 <script lang="ts">
-  /** One row of the history column: the conversation's stored title with a fallback label. */
+  /** Conversation history disclosure in the workspace sidebar. */
 
   export let label: string;
   export let entries: { id: string; title: string }[] = [];
@@ -7,32 +7,20 @@
   export let loading = false;
   /** A live Investigate turn owns the selection; the rows, New and delete wait until done. */
   export let disabled = false;
-  export let collapsed = false;
-  export let onToggleCollapsed: () => void = () => {};
   export let onSelect: (id: string) => void;
   export let onNew: () => void;
   export let onDelete: (id: string) => void;
 </script>
 
-<nav class="history-column" class:collapsed aria-label={label}>
-  <div class="history-heading">
-    <h2>{label}</h2>
-    {#if collapsed}
-      <button type="button" aria-label={`Expand ${label}`} aria-expanded="false" onclick={onToggleCollapsed}>Show</button>
-    {:else}
-      <div class="history-actions">
-        <button type="button" aria-label={`Collapse ${label}`} aria-expanded="true" onclick={onToggleCollapsed}>Hide</button>
-        <button type="button" class="new-conversation" onclick={onNew} disabled={disabled}>New conversation</button>
-      </div>
-    {/if}
-  </div>
-  {#if collapsed}
-    <!-- A compact rail keeps the disclosure reachable while source space is tight. -->
-  {:else if loading}
+<nav class="history-sidebar" aria-label={label}>
+  <button type="button" class="new-conversation" onclick={onNew} disabled={disabled}>New conversation</button>
+  <details>
+    <summary>Conversation history</summary>
+    {#if loading}
     <p class="history-status" role="status">Loading conversations…</p>
-  {:else if entries.length === 0}
+    {:else if entries.length === 0}
     <p class="history-status">No conversations yet.</p>
-  {:else}
+    {:else}
     <ol class="history-list">
       {#each entries as entry (entry.id)}
         <li>
@@ -56,39 +44,19 @@
         </li>
       {/each}
     </ol>
-  {/if}
+    {/if}
+  </details>
 </nav>
 
 <style>
-  .history-column {
-    position: static;
-    width: auto;
-    min-width: 0;
-    max-height: calc(100vh - 2.5rem);
-    display: flex;
-    flex-direction: column;
-    gap: 0.9rem;
-    padding: 1.35rem 1rem 1rem;
-    overflow-y: auto;
-    border-left: 1px solid #2a2d2e;
-    background: #181a1b;
+  .history-sidebar { display: grid; gap: 0.7rem; min-width: 0; }
+  .history-sidebar details { margin: 0; border-top: 1px solid #2d3131; padding: 0.65rem 0.25rem 0; }
+  .history-sidebar summary {
+    color: #c4c8c6;
+    font-size: 0.82rem;
+    cursor: pointer;
   }
-  .history-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    padding: 0 0.3rem;
-  }
-  .history-actions { display: flex; align-items: center; gap: 0.35rem; }
-  .history-heading h2 {
-    margin: 0;
-    color: #f0efec;
-    font-size: 0.95rem;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-  }
-  .history-heading button {
+  .history-sidebar > button {
     border: 1px solid #3a3e3e;
     border-radius: 0.46rem;
     background: #252929;
@@ -97,10 +65,7 @@
     font-size: 0.8rem;
     cursor: pointer;
   }
-  .history-heading button:hover { border-color: #656b68; background: #2d3232; }
-  .history-column.collapsed { width: 5.25rem; padding-right: 0.5rem; padding-left: 0.5rem; }
-  .history-column.collapsed .history-heading { display: grid; justify-content: center; gap: 0.45rem; }
-  .history-column.collapsed .history-heading h2 { width: 2rem; overflow: hidden; writing-mode: vertical-rl; transform: rotate(180deg); }
+  .history-sidebar > button:hover { border-color: #656b68; background: #2d3232; }
   .history-status { margin: 0; padding: 0 0.3rem; color: #929997; font-size: 0.85rem; }
   .history-list {
     display: grid;
@@ -145,15 +110,6 @@
     cursor: pointer;
   }
   .history-delete:hover, .history-delete:focus-visible { color: #f0a4a0; background: #2a1f1f; }
-  /* A live Investigate turn locks the column; the native disabled attribute stays visible here. */
-  .history-row:disabled, .history-delete:disabled, .history-heading button:disabled { opacity: 0.5; cursor: not-allowed; }
-  @media (max-width: 54rem) {
-    .history-column {
-      position: static;
-      width: 100%;
-      border-left: 0;
-      border-top: 1px solid #2a2d2e;
-      flex-direction: column;
-    }
-  }
+  /* A live Investigate turn locks history actions through native disabled controls. */
+  .history-row:disabled, .history-delete:disabled, .history-sidebar > button:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

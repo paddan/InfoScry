@@ -32,8 +32,10 @@ have a readable measure around 65–80 characters, while tables and source panes
 use the available width. No new UI dependency or persistent preference store.
 
 Search places the selected source beside the results when both panes fit. Ask
-and Investigate place it beside the answer; history is independently collapsible
-and must yield before answer/source become unusably narrow. Without an open
+and Investigate place it beside the answer. Their conversation history lives in
+a closed-by-default disclosure in the left workspace sidebar, with New conversation
+always visible outside the disclosure (amended 2026-10-10). History reserves no
+column or collapsed rail in the answer/source workspace. Without an open
 source, use the space for the current task. Opening/closing a source preserves
 query, conversation and meaningful focus. On narrow screens show one pane at a
 time with an explicit Back action. Layout decisions use the actual workspace

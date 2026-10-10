@@ -132,6 +132,25 @@ Actual preview/admission tests cover local keyless use and loss of external
 credentials after preview. No real provider request or user database edit was
 made, and the running installed server still requires rebuild/restart.
 
+## Conversation history in the left panel (2026-10-10)
+
+Ask and Investigate now keep conversation history in a closed native disclosure
+in the left panel. New conversation remains visible outside it. The separate
+history column and collapsed rail are removed, leaving the main workspace to
+answers and sources. Saved conversation selection/deletion and live Investigate
+controls retain their existing behavior.
+
+The updated disclosure regression failed before implementation, then all 97
+page tests and the complete 432-test frontend suite passed. Svelte diagnostics
+reported zero errors/warnings. Fifteen Document/Ask and Investigate browser
+scenarios passed with local fake providers, including keyboard disclosure,
+source geometry and history placement at 390/1024/1440/1920px. Desktop and mobile
+screenshots were inspected. Independent Luna review found no actionable issues.
+The final `./gradlew check` passed in 4m23s with 131 JVM suites / 1,607 tests
+and 432 frontend tests, zero failures/errors/skips. Documentation and diff
+checks passed. The installed server requires rebuild/restart to use this change;
+real-provider and human accessibility gates remain separate.
+
 ## Recorded verification
 
 The previous README recorded a local 2026-09-24 run of `check`, `externalTest`

@@ -148,13 +148,6 @@
     lastSourcePaneVisible = sourcePaneVisible;
     sourceVisibilityGeneration += 1;
   }
-  let historyShouldCollapse = false;
-  let historyCollapsed = false;
-  let historyExpandedAtNarrowWidth = false;
-  function toggleHistoryVisibility(): void {
-    if (historyShouldCollapse) historyExpandedAtNarrowWidth = !historyExpandedAtNarrowWidth;
-    else historyCollapsed = !historyCollapsed;
-  }
   let sourceOpener: HTMLElement | null = null;
   let investigateConversations: InvestigationSummary[] = [];
   let investigateConversationId: string | null = null;
@@ -930,6 +923,29 @@
         </div>
       </nav>
 
+      {#if activeMode === 'INVESTIGATE'}
+        <HistoryColumn
+          label="Conversation history"
+          entries={investigateConversations.map((item) => ({ id: item.id, title: item.title || item.question || 'Untitled conversation' }))}
+          openId={investigateConversationId}
+          loading={loadingInvestigationList}
+          disabled={investigateWorking}
+          onSelect={openInvestigationConversation}
+          onNew={newInvestigationConversation}
+          onDelete={deleteInvestigateConversation}
+        />
+      {:else if activeMode === 'ASK'}
+        <HistoryColumn
+          label="Ask history"
+          entries={askEntries.map((item) => ({ id: item.id, title: item.title }))}
+          openId={askConversationId}
+          loading={loadingAskHistory}
+          onSelect={openAskConversation}
+          onNew={newAskConversation}
+          onDelete={deleteAskConversation}
+        />
+      {/if}
+
       {#if activeMode === 'SEARCH'}
         <div class="sidebar-block search-settings">
           <span class="eyebrow">SEARCH SETTINGS</span>
@@ -1051,11 +1067,10 @@
       fallbackFocus={activeMode === 'ADMIN' ? adminHeading : workspaceHeading}
       bind:narrow={workspaceNarrow}
       bind:sourceVisible={sourcePaneVisible}
-      bind:historyShouldCollapse
       onClose={closeSourceSheet}
       onBack={backFromNarrowSource}
     >
-    <div class="content-layout" class:with-history={activeMode === 'INVESTIGATE' || activeMode === 'ASK'} class:history-collapsed={historyCollapsed || (historyShouldCollapse && !historyExpandedAtNarrowWidth)}>
+    <div class="content-layout">
     <div class="mode-panels">
       <div id="panel-search" role="tabpanel" aria-labelledby="tab-search" hidden={activeMode !== 'SEARCH'}>
       <div class="search-input-row">
@@ -1154,32 +1169,6 @@
       <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} limits={investigateLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
     {/key}
     </div>
-    {#if activeMode === 'INVESTIGATE'}
-      <HistoryColumn
-        label="Conversation history"
-        entries={investigateConversations.map((item) => ({ id: item.id, title: item.title || item.question || 'Untitled conversation' }))}
-        openId={investigateConversationId}
-        loading={loadingInvestigationList}
-        disabled={investigateWorking}
-        onSelect={openInvestigationConversation}
-        onNew={newInvestigationConversation}
-        onDelete={deleteInvestigateConversation}
-        collapsed={historyCollapsed || (historyShouldCollapse && !historyExpandedAtNarrowWidth)}
-        onToggleCollapsed={toggleHistoryVisibility}
-      />
-    {:else if activeMode === 'ASK'}
-      <HistoryColumn
-        label="Ask history"
-        entries={askEntries.map((item) => ({ id: item.id, title: item.title }))}
-        openId={askConversationId}
-        loading={loadingAskHistory}
-        onSelect={openAskConversation}
-        onNew={newAskConversation}
-        onDelete={deleteAskConversation}
-        collapsed={historyCollapsed || (historyShouldCollapse && !historyExpandedAtNarrowWidth)}
-        onToggleCollapsed={toggleHistoryVisibility}
-      />
-    {/if}
     </div>
 
     <div slot="source">
@@ -1305,8 +1294,6 @@
   .workspace-header { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin: 0 0 2rem; padding-bottom: 1.25rem; border-bottom: 1px solid #292d2d; }
   .workspace-header h1 { margin: 0.35rem 0 0; color: #f0efec; font-size: clamp(1.45rem, 2vw, 1.9rem); font-weight: 570; letter-spacing: -0.035em; }
   .content-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; margin: 0; align-items: start; }
-  .content-layout.with-history { grid-template-columns: minmax(0, 1fr) minmax(15rem, 20rem); }
-  .content-layout.with-history.history-collapsed { grid-template-columns: minmax(0, 1fr) 5.25rem; }
   .mode-panels { min-width: 0; }
   .mode-panels > div[role="tabpanel"] { margin: 0; min-width: 0; }
   .mode-panels [hidden] { display: none !important; }
@@ -1337,7 +1324,6 @@
   .source-text { max-height: calc(100vh - 14rem); overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; border: 1px solid #343939; border-radius: 0.45rem; background: #121515; padding: 0.9rem; font: 0.86rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
   [role="alert"] { color: #f0a4a0; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 62rem) { .content-layout.with-history { grid-template-columns: minmax(0, 1fr); } }
-  @media (max-width: 54rem) { .app-shell { grid-template-columns: 1fr; } .sidebar { min-height: auto; gap: 1rem; padding: 0.8rem 1rem; border-right: 0; border-bottom: 1px solid #2a2d2d; } .sidebar-footer { display: none; } .sidebar-note, .search-settings { max-width: 38rem; } .mode-nav [role="tablist"] { display: flex; } .mode-nav [role="tab"] { flex: 1; justify-content: center; } .content-layout.with-history { padding-right: 0; } }
+  @media (max-width: 54rem) { .app-shell { grid-template-columns: 1fr; } .sidebar { min-height: auto; gap: 1rem; padding: 0.8rem 1rem; border-right: 0; border-bottom: 1px solid #2a2d2d; } .sidebar-footer { display: none; } .sidebar-note, .search-settings { max-width: 38rem; } .mode-nav [role="tablist"] { display: flex; } .mode-nav [role="tab"] { flex: 1; justify-content: center; } }
   @media (max-width: 36rem) { .workspace { padding: 1.3rem var(--workspace-gutter); } .workspace-header { align-items: start; margin-bottom: 1.2rem; } .search-input-row form { align-items: stretch; flex-direction: column; } .mode-nav [role="tab"] { gap: 0.35rem; padding: 0.55rem 0.35rem; font-size: 0.83rem; } }
 </style>

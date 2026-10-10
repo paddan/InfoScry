@@ -93,7 +93,7 @@ describe('app shell', () => {
     expect((screen.getByLabelText('Search filenames') as HTMLInputElement).value).toBe('');
   });
 
-  it('lets Ask history collapse and reopen while preserving the selected conversation', async () => {
+  it('keeps New conversation visible and puts Ask history in a closed disclosure', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
       asks: () => jsonResponse({ asks: [askHistoryEntry('ask-1', 'The signer', 'Who signed it?')] }),
@@ -102,12 +102,12 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
     const history = await screen.findByRole('navigation', { name: 'Ask history' });
+    expect(within(history).getByRole('button', { name: 'New conversation' })).toBeTruthy();
+    const disclosure = within(history).getByText('Conversation history', { selector: 'summary' });
+    expect(disclosure.closest('details')?.getAttribute('open')).toBeNull();
+    await fireEvent.click(disclosure);
     expect(await within(history).findByRole('button', { name: 'The signer' })).toBeTruthy();
-
-    await fireEvent.click(within(history).getByRole('button', { name: 'Collapse Ask history' }));
-    expect(within(history).queryByRole('button', { name: 'The signer' })).toBeNull();
-    await fireEvent.click(within(history).getByRole('button', { name: 'Expand Ask history' }));
-    expect(await within(history).findByRole('button', { name: 'The signer' })).toBeTruthy();
+    expect(disclosure.closest('details')?.getAttribute('open')).not.toBeNull();
     expect(screen.getByRole('tabpanel', { name: 'Ask' })).toBeTruthy();
   });
 

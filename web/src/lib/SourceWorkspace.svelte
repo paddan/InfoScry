@@ -7,7 +7,6 @@
   export let opener: HTMLElement | null = null;
   export let fallbackFocus: HTMLElement | null = null;
   export let narrow = false;
-  export let historyShouldCollapse = false;
   /** True only while the source pane is the workspace's visible pane. */
   export let sourceVisible = false;
   export let onClose: () => void;
@@ -18,12 +17,9 @@
   let narrowPane: 'context' | 'source' = 'context';
   let wasOpen = false;
   let savedOpener: HTMLElement | null = null;
-  let measuredWidth = 0;
 
   function measure(width: number): void {
-    measuredWidth = width;
     narrow = width < 1000;
-    historyShouldCollapse = sourceOpen && width < 1280;
   }
 
   onMount(() => {
@@ -45,7 +41,6 @@
   }
   $: if (sourceOpen) savedOpener = opener;
   $: sourceVisible = sourceOpen && (!narrow || narrowPane === 'source');
-  $: if (measuredWidth > 0) historyShouldCollapse = sourceOpen && measuredWidth < 1280;
 
   async function close(): Promise<void> {
     const openerToReturn = savedOpener;

@@ -56,11 +56,13 @@ The [workspace and page review plan](docs/plans/2026-10-09-workspace-and-page-re
 is implemented: common views use the available width, and the compact
 document list has live filename search, inline details and session view memory.
 The adaptive source view preserves context and supports narrow-screen Back.
+Ask and Investigate keep conversation history closed in the left panel, with
+New conversation always available.
 PDF/image review shows exact-revision images beside extracted text, including
 historical PDF page and image citations. Live review can mark pages and confirm an exact
 page set and reading method for rescanning. Stopped selected-page runs can resume
 from committed pages. Integrated browser verification passed 42 scenarios; the
-final accumulated check passed 1,598 JVM and 425 frontend tests.
+latest accumulated check passed 1,607 JVM and 432 frontend tests.
 
 Real OCR providers and real CoreML are separate manual gates. Before treating the
 redesigned OCR workflow as verified on a real archive, check local Tesseract/Surya,

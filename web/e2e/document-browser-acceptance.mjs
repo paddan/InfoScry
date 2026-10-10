@@ -390,12 +390,18 @@ async function scenarioAskOldCitation(page) {
         pageWidth: document.documentElement.scrollWidth,
         answerWidth: box?.width ?? 0,
         answerOverflow: Boolean(answer && answer.scrollWidth > answer.clientWidth + 1),
-        historyVisible: Boolean(history && getComputedStyle(history).visibility !== 'hidden' && history.getBoundingClientRect().width > 0),
+        historyVisible: Boolean(history?.closest('aside.sidebar') && history.getBoundingClientRect().width > 0),
+        historyClosed: Boolean(history?.querySelector('details:not([open])')),
+        mainHistoryCount: document.querySelector('.content-layout').querySelectorAll('.history-sidebar').length,
       };
     });
     assert(layout.pageWidth <= width, `Ask answer layout overflows at ${width}px: ${JSON.stringify(layout)}`);
     assert(layout.answerWidth > 0 && !layout.answerOverflow, `Ask answer remains readable at ${width}px: ${JSON.stringify(layout)}`);
-    assert(layout.historyVisible, `Ask history remains reachable at ${width}px: ${JSON.stringify(layout)}`);
+    assert(layout.historyVisible && layout.historyClosed && layout.mainHistoryCount === 0, `Ask history is closed in the sidebar at ${width}px: ${JSON.stringify(layout)}`);
+    if (SCREENSHOT_DIR && (width === 390 || width === 1920)) {
+      await mkdir(SCREENSHOT_DIR, { recursive: true });
+      await page.screenshot({ path: `${SCREENSHOT_DIR}/ask-history-${width}.png`, fullPage: true });
+    }
     answerLayouts.push(layout);
   }
   console.log(`PASS ask-layout ${JSON.stringify(answerLayouts)}`);
@@ -545,6 +551,8 @@ async function scenarioAskImageUnknownCitation(page) {
   });
   await page.click('#tab-ask');
   const history = page.locator('nav[aria-label="Ask history"]');
+  assert(await history.locator('details').getAttribute('open') === null, 'Ask history starts closed');
+  await history.locator('summary').click();
   const savedAnswer = history.getByRole('button', { name: 'Image excerpt', exact: true });
   await savedAnswer.waitFor({ timeout: 20_000 });
   await history.getByRole('button', { name: 'New conversation' }).click();
