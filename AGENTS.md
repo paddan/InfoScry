@@ -99,3 +99,13 @@ or GPU verification.
   fake providers/tools. Do not send private documents to external services as
   test data. Run a real CoreML test on the local Mac before claiming GPU-dependent
   functionality works. CI, packaging, and release work are outside scope.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues in `paddan/InfoScry`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
