@@ -3,6 +3,8 @@ package infoscry.server
 import infoscry.AppContext
 import infoscry.collection.DeletionRecoveryBlockedException
 import infoscry.collection.OcrSettingsUpdate
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.Job
@@ -12,26 +14,8 @@ import infoscry.domain.JobType
 import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportPreviewRequest as ServiceImportPreviewRequest
 import infoscry.jobs.ImportStartRequest
-import infoscry.jobs.StaleImportPreviewException
 import infoscry.ocr.ReadingMethod
-import infoscry.ocr.ReadingMethodUnavailableException
-import infoscry.document.RescanRefusalException
-import infoscry.document.RestoreRefusalException
-import infoscry.document.RestoreRequestConflictException
-import infoscry.document.StaleActiveRevisionException
 import infoscry.jobs.DocumentIngest
-import infoscry.search.RevisionSnapshotUnavailableException
-import infoscry.storage.DocumentBeingDeletedException
-import infoscry.storage.OcrOperationConflictException
-import infoscry.storage.OcrRequestConflictException
-import infoscry.storage.StaleRescanPreviewException
-import infoscry.storage.StartRequestConflictException
-import infoscry.storage.CollectionConfirmationMismatchException
-import infoscry.storage.DuplicateCollectionNameException
-import infoscry.storage.DuplicateLlmProfileNameException
-import infoscry.storage.DuplicateOcrProfileNameException
-import infoscry.storage.LastLlmProfileException
-import infoscry.storage.MaintenanceInProgressException
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import infoscry.extract.ExternalProcess
@@ -795,153 +779,33 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
         // A search can be refused for a reason the caller can fix (an over-long query, an over-broad
         // filter) or one the environment has to fix (no model, no usable GPU, an index that needs a
         // rebuild). The code and the remedy travel either way, and the status names which kind it is.
+        // The lookup itself stays here rather than on the exception so infoscry.search need not depend
+        // on an HTTP status type.
         respondJson(
             searchFailureStatus(refused.code),
             ApiErrorResponse(ApiError(code = refused.code, message = refused.remedy)),
         )
-    } catch (maintenance: MaintenanceInProgressException) {
-        respondJson(
-            HttpStatusCode.Locked,
-            ApiErrorResponse(ApiError(code = "MAINTENANCE_IN_PROGRESS", message = maintenance.message.orEmpty())),
-        )
     } catch (blocked: DeletionRecoveryBlockedException) {
         // The exception's own message names managed and parked directories for the log; the client gets the
-        // curated sentence, which carries the phase and the error code instead of any path.
+        // curated sentence, which carries the phase and the error code instead of any path. The logging is
+        // this exception's own, so it keeps a dedicated clause rather than the shared ApiFaultException one.
         LOGGER.atWarn().addKeyValue(ERROR_DETAIL_FIELD, blocked.message.orEmpty())
             .log("a mutating command was refused while a deletion recovery is unresolved")
         respondJson(
             HttpStatusCode.Conflict,
             ApiErrorResponse(ApiError(code = "DELETION_RECOVERY_BLOCKED", message = blocked.clientMessage)),
         )
-    } catch (duplicate: DuplicateCollectionNameException) {
+    } catch (fault: ApiFaultException) {
+        // Every other domain refusal answers for itself: the status family, the stable code, and the
+        // sentence a client may see. See infoscry.domain.ApiFaultException.
         respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "DUPLICATE_COLLECTION_NAME", message = duplicate.message.orEmpty())),
-        )
-    } catch (duplicate: DuplicateLlmProfileNameException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "DUPLICATE_LLM_PROFILE_NAME", message = "an LLM profile with that name already exists")),
-        )
-    } catch (stale: infoscry.storage.StaleOcrProfileRevisionException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(
-                ApiError(
-                    code = "STALE_OCR_PROFILE_REVISION",
-                    message = "this profile was edited after the revision you were editing; reload it and edit again",
-                ),
-            ),
-        )
-    } catch (duplicate: DuplicateOcrProfileNameException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "DUPLICATE_OCR_PROFILE_NAME", message = "an OCR profile with that name already exists")),
-        )
-    } catch (last: LastLlmProfileException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "LAST_LLM_PROFILE", message = last.message.orEmpty())),
-        )
-    } catch (mismatch: CollectionConfirmationMismatchException) {
-        respondJson(
-            HttpStatusCode.BadRequest,
-            ApiErrorResponse(ApiError(code = "CONFIRMATION_MISMATCH", message = mismatch.message.orEmpty())),
-        )
-    } catch (sealed: RevisionSnapshotUnavailableException) {
-        // An authoritative publication could not be made coherent in this process, so no search answer would
-        // be right. 503 says "the archive is repairing itself, retry" rather than dressing a mixture of two
-        // readings up as a result.
-        respondJson(
-            HttpStatusCode.ServiceUnavailable,
-            ApiErrorResponse(
-                ApiError(
-                    code = "REVISION_SNAPSHOT_UNAVAILABLE",
-                    message = "the archive is finishing a publication; retry once it has completed",
-                ),
-            ),
+            fault.apiStatus.toHttpStatusCode(),
+            ApiErrorResponse(ApiError(code = fault.code, message = fault.clientMessage())),
         )
     } catch (missing: NoSuchElementException) {
         respondJson(
             HttpStatusCode.NotFound,
             ApiErrorResponse(ApiError(code = "NOT_FOUND", message = missing.message.orEmpty())),
-        )
-    } catch (refused: RescanRefusalException) {
-        // A rescan that cannot be admitted as asked: another format, a managed copy that is not the recorded
-        // one, an engine this build does not have, an unmeasured external profile, no embedder. The code names
-        // what to do about it, and 409 says the request was understood but the archive's state says no.
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = refused.code, message = refused.message.orEmpty())),
-        )
-    } catch (unavailable: ReadingMethodUnavailableException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "METHOD_UNAVAILABLE", message = unavailable.reason)),
-        )
-    } catch (stale: StaleImportPreviewException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "PREVIEW_STALE", message = "The files changed; review the summary again.")),
-        )
-    } catch (conflict: StartRequestConflictException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "REQUEST_ID_CONFLICT", message = conflict.message.orEmpty())),
-        )
-    } catch (refused: RestoreRefusalException) {
-        // A restore that cannot be done as asked. 409 says the request was understood and the archive's state
-        // says no; 503 says this machine cannot embed right now and the request is worth repeating later. The
-        // current revision is still the document's text in both cases, and the words are curated.
-        respondJson(
-            if (refused.unavailable) HttpStatusCode.ServiceUnavailable else HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = refused.code, message = refused.message.orEmpty())),
-        )
-    } catch (conflict: RestoreRequestConflictException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "RESTORE_REQUEST_CONFLICT", message = conflict.message.orEmpty())),
-        )
-    } catch (stale: StaleRescanPreviewException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(
-                ApiError(
-                    code = "STALE_RESCAN_PREVIEW",
-                    message = "the preview is no longer the document's state (${stale.message.orEmpty()}); " +
-                        "preview again",
-                ),
-            ),
-        )
-    } catch (conflict: OcrRequestConflictException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "OCR_REQUEST_CONFLICT", message = conflict.message.orEmpty())),
-        )
-    } catch (busy: OcrOperationConflictException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "OCR_ALREADY_RUNNING", message = busy.message.orEmpty())),
-        )
-    } catch (attempting: infoscry.storage.OcrAttemptInProgressException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "OCR_ATTEMPT_IN_PROGRESS", message = attempting.message.orEmpty())),
-        )
-    } catch (stale: StaleActiveRevisionException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(ApiError(code = "STALE_DOCUMENT_REVISION", message = stale.message.orEmpty())),
-        )
-    } catch (deleted: DocumentBeingDeletedException) {
-        respondJson(
-            HttpStatusCode.Conflict,
-            ApiErrorResponse(
-                ApiError(
-                    code = "DOCUMENT_BEING_DELETED",
-                    message = "this document is being deleted, so no rescan or restore may be admitted for it",
-                ),
-            ),
         )
     } catch (invalid: BadRequestException) {
         respondJson(
@@ -977,3 +841,11 @@ private val LOGGER = LoggerFactory.getLogger("infoscry.server")
 
 /** The name of the structured field carrying an unhandled failure's own message. */
 private const val ERROR_DETAIL_FIELD = "error_detail"
+
+/** The one place an [ApiStatus] becomes the `HttpStatusCode` the client sees. */
+private fun ApiStatus.toHttpStatusCode(): HttpStatusCode = when (this) {
+    ApiStatus.BAD_REQUEST -> HttpStatusCode.BadRequest
+    ApiStatus.CONFLICT -> HttpStatusCode.Conflict
+    ApiStatus.LOCKED -> HttpStatusCode.Locked
+    ApiStatus.SERVICE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+}

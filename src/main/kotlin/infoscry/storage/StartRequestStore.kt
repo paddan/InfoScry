@@ -1,11 +1,15 @@
 package infoscry.storage
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.domain.JobId
 import infoscry.domain.JobState
 import java.sql.Connection
 
 /** A client request id was already used for a different start or retry body. */
-class StartRequestConflictException(requestId: String) : IllegalStateException(
+class StartRequestConflictException(requestId: String) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "REQUEST_ID_CONFLICT",
     "request id '$requestId' was already used with a different request body",
 )
 

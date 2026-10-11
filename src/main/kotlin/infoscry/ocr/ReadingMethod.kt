@@ -1,5 +1,7 @@
 package infoscry.ocr
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.descriptors.PrimitiveKind
@@ -54,7 +56,7 @@ data class MethodAvailability(
     }
 }
 
-class ReadingMethodUnavailableException(val reason: String) : IllegalStateException(reason)
+class ReadingMethodUnavailableException(val reason: String) : ApiFaultException(ApiStatus.CONFLICT, "METHOD_UNAVAILABLE", reason)
 
 /** The methods a collection may choose, shared by previews and admitted starts. */
 interface ReadingMethodCatalog {

@@ -1,5 +1,7 @@
 package infoscry.storage
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.domain.DocumentId
 import infoscry.domain.JobState
 import infoscry.ocr.OcrDispatchStage
@@ -19,22 +21,29 @@ import java.util.UUID
 import kotlinx.serialization.json.Json
 
 /** The request id of an admission that another admission with the same id already made differently. */
-class OcrRequestConflictException(val requestId: String) : IllegalStateException(
+class OcrRequestConflictException(val requestId: String) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "OCR_REQUEST_CONFLICT",
     "request '$requestId' was already used to admit a rescan of this document with a different request, " +
         "so nothing was admitted; use the operation that request id already names, or send a new request id",
 )
 
 /** A rescan was admitted against a preview that is no longer the document's state, or is too old. */
-class StaleRescanPreviewException(val previewId: String, reason: String) : IllegalStateException(
+class StaleRescanPreviewException(val previewId: String, reason: String) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "STALE_RESCAN_PREVIEW",
     "rescan preview '$previewId' is no longer valid: $reason",
-)
+) {
+    override fun clientMessage(): String = "the preview is no longer the document's state ($message); preview again"
+}
 
 /** A rescan was requested for a document another operation of this archive is already reading. */
-class OcrOperationConflictException(val documentId: DocumentId, val stage: OcrOperationStage) :
-    IllegalStateException(
-        "document ${documentId.value} is already under a rescan operation in stage $stage; " +
-            "cancel or finish it before admitting another one",
-    )
+class OcrOperationConflictException(val documentId: DocumentId, val stage: OcrOperationStage) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "OCR_ALREADY_RUNNING",
+    "document ${documentId.value} is already under a rescan operation in stage $stage; " +
+        "cancel or finish it before admitting another one",
+)
 
 /**
  * A resume would start a second attempt of an operation that already has one.
@@ -44,7 +53,9 @@ class OcrOperationConflictException(val documentId: DocumentId, val stage: OcrOp
  * refusal is durable rather than a lock in a process — the attempt the operation names is the answer — so a
  * second caller is refused even when it never saw the first.
  */
-class OcrAttemptInProgressException(val operationId: String, val jobId: String) : IllegalStateException(
+class OcrAttemptInProgressException(val operationId: String, val jobId: String) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "OCR_ATTEMPT_IN_PROGRESS",
     "rescan operation $operationId is already being attempted by job $jobId; wait for it to pause or finish " +
         "instead of starting a second attempt of the same reading",
 )

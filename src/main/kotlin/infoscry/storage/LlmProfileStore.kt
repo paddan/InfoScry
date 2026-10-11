@@ -1,5 +1,7 @@
 package infoscry.storage
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.investigate.EffortLevel
 import infoscry.investigate.EffortPreset
 import infoscry.llm.LlmCapabilityProbe
@@ -16,11 +18,22 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 /** A profile name is already used (compared case-insensitively). */
-class DuplicateLlmProfileNameException(val name: String) :
-    IllegalStateException("an LLM profile named '$name' already exists")
+class DuplicateLlmProfileNameException(val name: String) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "DUPLICATE_LLM_PROFILE_NAME",
+    "an LLM profile named '$name' already exists",
+) {
+    // The client is told a profile name collided, not which name it tried — the name is already its own
+    // request, so echoing it back here would add nothing a log doesn't already have.
+    override fun clientMessage(): String = "an LLM profile with that name already exists"
+}
 
 /** The final profile cannot be deleted: Ask and Investigate need at least one to run against. */
-class LastLlmProfileException : IllegalStateException("the last LLM profile cannot be deleted")
+class LastLlmProfileException : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "LAST_LLM_PROFILE",
+    "the last LLM profile cannot be deleted",
+)
 
 /** The shipped default body is version 1; user overrides increment from there. */
 private const val SHIPPED_PROMPT_VERSION = 1

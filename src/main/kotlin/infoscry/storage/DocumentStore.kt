@@ -1,5 +1,7 @@
 package infoscry.storage
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Document
@@ -44,8 +46,15 @@ class CollectionNotActiveException(val collectionId: CollectionId) :
  * The durable record behind it is the deletion target, which outlives the document it names, so the
  * answer stays true after the deletion has finished and the identifiers can never be reused.
  */
-class DocumentBeingDeletedException(val documentId: DocumentId) :
-    IllegalStateException("document ${documentId.value} is being deleted and cannot be written")
+class DocumentBeingDeletedException(val documentId: DocumentId) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "DOCUMENT_BEING_DELETED",
+    "document ${documentId.value} is being deleted and cannot be written",
+) {
+    // The client is told the document is being deleted, not which one — the caller already knows the
+    // id it asked about.
+    override fun clientMessage(): String = "this document is being deleted, so no rescan or restore may be admitted for it"
+}
 
 /**
  * Persistence for documents. The row-level constraints are the authority: the unique

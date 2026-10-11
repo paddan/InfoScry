@@ -2,6 +2,8 @@ package infoscry.jobs
 
 import infoscry.diagnostics.ToolProbe
 import infoscry.collection.CollectionService
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.domain.CollectionId
 import infoscry.domain.Job
 import infoscry.domain.JobId
@@ -31,7 +33,11 @@ data class ImportStartRequest(
     val restartStopped: Boolean = false,
 )
 
-class StaleImportPreviewException : IllegalStateException("The files changed; review the summary again.")
+class StaleImportPreviewException : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "PREVIEW_STALE",
+    "The files changed; review the summary again.",
+)
 
 /** Shared HTTP and CLI admission for an import whose reading method and file set were confirmed. */
 class ImportStartService internal constructor(

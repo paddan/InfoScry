@@ -1,5 +1,7 @@
 package infoscry.storage
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
@@ -12,18 +14,22 @@ import java.sql.ResultSet
 import java.sql.SQLException
 
 /** A collection name is already used, compared case-insensitively. */
-class DuplicateCollectionNameException(val name: String) :
-    IllegalStateException("a collection named '$name' already exists")
+class DuplicateCollectionNameException(val name: String) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "DUPLICATE_COLLECTION_NAME",
+    "a collection named '$name' already exists",
+)
 
 /**
  * A deletion was not confirmed with the collection's exact name. Deleting a collection removes its
  * managed originals and index entries, so it must never happen from a mistyped or stale request.
  */
-class CollectionConfirmationMismatchException(val actualName: String, val confirmedName: String) :
-    IllegalStateException(
-        "deleting the collection '$actualName' requires confirming that exact name, " +
-            "but '$confirmedName' was given",
-    )
+class CollectionConfirmationMismatchException(val actualName: String, val confirmedName: String) : ApiFaultException(
+    ApiStatus.BAD_REQUEST,
+    "CONFIRMATION_MISMATCH",
+    "deleting the collection '$actualName' requires confirming that exact name, " +
+        "but '$confirmedName' was given",
+)
 
 /**
  * Persistence for collections. Every instant is written by [Instants]; names are stored trimmed and

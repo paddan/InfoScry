@@ -1,6 +1,8 @@
 package infoscry.document
 
 import infoscry.collection.DeletionBlockers
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.DocumentId
@@ -57,11 +59,16 @@ enum class RestoreStep {
  * difference between a 503 and a 409.
  */
 class RestoreRefusalException(
-    val code: String,
+    code: String,
     message: String,
     val unavailable: Boolean = false,
     cause: Throwable? = null,
-) : IllegalStateException(message, cause) {
+) : ApiFaultException(
+    if (unavailable) ApiStatus.SERVICE_UNAVAILABLE else ApiStatus.CONFLICT,
+    code,
+    message,
+    cause,
+) {
 
     companion object {
         /** The revision named is the one the document already publishes. */
@@ -94,7 +101,9 @@ class RestoreRefusalException(
 }
 
 /** A request id was reused for a restore with another body: nothing was admitted. */
-class RestoreRequestConflictException(val requestId: String) : IllegalStateException(
+class RestoreRequestConflictException(val requestId: String) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "RESTORE_REQUEST_CONFLICT",
     "request '$requestId' was already used for a different restore of this document, so nothing was " +
         "restored; use the operation that request id already names, or send a new request id",
 )
@@ -501,4 +510,4 @@ class RevisionRestoreService(
 private val LOGGER = LoggerFactory.getLogger("infoscry.document")
 
 /** The active text changed since the version selected for restoration was listed. */
-class StaleActiveRevisionException(message: String) : IllegalStateException(message)
+class StaleActiveRevisionException(message: String) : ApiFaultException(ApiStatus.CONFLICT, "STALE_DOCUMENT_REVISION", message)

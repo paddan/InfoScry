@@ -1,5 +1,7 @@
 package infoscry.storage
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -12,7 +14,9 @@ import kotlinx.coroutines.sync.withLock
  * one that says why it refused. A background job stage is different: it waits through
  * [MutationCoordinator.awaitMutation], because it resumes at its next durable checkpoint anyway.
  */
-class MaintenanceInProgressException(val operation: String) : IllegalStateException(
+class MaintenanceInProgressException(val operation: String) : ApiFaultException(
+    ApiStatus.LOCKED,
+    "MAINTENANCE_IN_PROGRESS",
     "InfoScry is running exclusive maintenance ($operation); mutating commands are refused until it " +
         "finishes. Retry once it reports no maintenance in progress.",
 )

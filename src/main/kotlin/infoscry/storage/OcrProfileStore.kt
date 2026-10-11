@@ -1,5 +1,7 @@
 package infoscry.storage
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.llm.LlmProvider
 import infoscry.llm.endpointCarriesUserInfo
 import infoscry.llm.sanitizedEndpoint
@@ -12,13 +14,24 @@ import java.sql.SQLException
 import java.util.UUID
 
 /** An OCR profile name is already used (compared case-insensitively). */
-class DuplicateOcrProfileNameException(val name: String) :
-    IllegalStateException("an OCR profile named '$name' already exists")
+class DuplicateOcrProfileNameException(val name: String) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "DUPLICATE_OCR_PROFILE_NAME",
+    "an OCR profile named '$name' already exists",
+) {
+    // Mirrors DuplicateLlmProfileNameException: the name is the caller's own request, so the client
+    // sentence need not repeat it.
+    override fun clientMessage(): String = "an OCR profile with that name already exists"
+}
 
 /** An edit named a revision the profile no longer reads through. */
-class StaleOcrProfileRevisionException : IllegalStateException(
+class StaleOcrProfileRevisionException : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "STALE_OCR_PROFILE_REVISION",
     "the profile was edited by someone else after this edit was prepared",
-)
+) {
+    override fun clientMessage(): String = "this profile was edited after the revision you were editing; reload it and edit again"
+}
 
 /**
  * Persistence for OCR profiles and their immutable revisions.

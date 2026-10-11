@@ -1,5 +1,7 @@
 package infoscry.search
 
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -209,8 +211,13 @@ class RevisionSnapshotGate {
  * holds the old one, so any answer would mix them. Recovery completes that publication at the next start,
  * which is why the message names restarting rather than retrying forever.
  */
-class RevisionSnapshotUnavailableException(reason: String) :
-    IllegalStateException("the revision snapshot is unavailable: $reason")
+class RevisionSnapshotUnavailableException(reason: String) : ApiFaultException(
+    ApiStatus.SERVICE_UNAVAILABLE,
+    "REVISION_SNAPSHOT_UNAVAILABLE",
+    "the revision snapshot is unavailable: $reason",
+) {
+    override fun clientMessage(): String = "the archive is finishing a publication; retry once it has completed"
+}
 
 /** One reader's lease on a revision snapshot. Closing it twice releases once. */
 class RevisionLease internal constructor(

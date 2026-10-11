@@ -2,6 +2,8 @@ package infoscry.document
 
 import infoscry.collection.DeletionBlockers
 import infoscry.config.AppPaths
+import infoscry.domain.ApiFaultException
+import infoscry.domain.ApiStatus
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
@@ -68,7 +70,7 @@ import org.apache.pdfbox.pdmodel.PDDocument
  * [code] is a safe code and [message] is a curated remedy: a rescan is refused with what a person has to do
  * — install Surya, probe the profile, renew the preview — and never with a provider's or a tool's words.
  */
-class RescanRefusalException(val code: String, message: String) : IllegalStateException(message) {
+class RescanRefusalException(code: String, message: String) : ApiFaultException(ApiStatus.CONFLICT, code, message) {
 
     companion object {
 
