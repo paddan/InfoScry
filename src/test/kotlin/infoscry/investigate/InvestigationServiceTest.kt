@@ -30,7 +30,7 @@ import infoscry.storage.ContentStore
 import infoscry.storage.Database
 import infoscry.storage.DocumentStore
 import infoscry.storage.Instants
-import infoscry.storage.LlmStore
+import infoscry.storage.LlmProfileStore
 import infoscry.storage.SchemaMigrator
 import java.io.IOException
 import java.nio.file.Files
@@ -54,7 +54,7 @@ import kotlin.test.assertTrue
 class InvestigationServiceTest {
     private val directory = Files.createTempDirectory("infoscry-investigate-service")
     private val database = Database(directory.resolve("state.db"))
-    private val store = LlmStore(database)
+    private val store = LlmProfileStore(database)
     private val contentStore = ContentStore(database)
     private val documentStore = DocumentStore(database)
 

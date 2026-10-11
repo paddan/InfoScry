@@ -1,7 +1,7 @@
 package infoscry.llm
 
 import infoscry.storage.Database
-import infoscry.storage.LlmStore
+import infoscry.storage.LlmProfileStore
 import infoscry.storage.SchemaMigrator
 import java.nio.file.Files
 import java.nio.file.Path
@@ -71,7 +71,7 @@ class ConversationTitlerTest {
     }
 
     private fun titler(written: MutableMap<String, String>) =
-        ConversationTitler(PromptService(LlmStore(database))) { id, title -> written[id] = title }
+        ConversationTitler(PromptService(LlmProfileStore(database))) { id, title -> written[id] = title }
 
     private fun profile(endpoint: String, enabled: Boolean) = LlmProfile(
         id = "profile",

@@ -96,16 +96,16 @@ class InvestigationEvidenceHistoryTest {
                 harness.context.revisionPublication.publish(replacedDocument, recordedRevision, candidate)
                 assertEquals(null, harness.context.content.readUnit(replacedUnit), "the replacement has to remove the cited unit")
 
-                val conversationId = harness.context.llm.persistInvestigateConversation(
+                val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
                     profile = profile,
                     promptVersion = 1,
                     retrievalSnapshot = RetrievalSnapshot.value(),
                 )
-                harness.context.llm.persistInvestigateMessage(conversationId, 0, "user", "What did the page say?")
+                harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "What did the page say?")
                 val locator = SourceLocation.TextLines(1, 1)
                 fun ledger(id: String, unit: ContentUnitId, excerpt: String, revision: String?) =
-                    harness.context.llm.persistEvidenceLedgerEntry(
+                    harness.context.investigationLedger.persistEvidenceLedgerEntry(
                         conversationId, id, unit.value, ApiJson.encodeToString(SourceLocation.serializer(), locator),
                         excerpt, messageSeq = 1, revisionId = revision,
                     )

@@ -240,7 +240,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                 val collectionId = CollectionId(collection.id.value)
                 val titler = ConversationTitler(
                     prompt = PromptService(context.llm),
-                    persist = context.llm::setConversationTitle,
+                    persist = context.conversations::setConversationTitle,
                 )
                 call.streamInvestigation(
                     investigationService(context, collectionId, profile),
@@ -264,7 +264,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             profile.requireDispatchable()
             // Tools stay scoped to the conversation's locked collection even when the request names a
             // different one; an unknown conversation still streams the service's CONVERSATION_NOT_FOUND.
-            val history = context.llm.loadInvestigateHistory(conversationId)
+            val history = context.investigationLedger.loadInvestigateHistory(conversationId)
             // The turn dispatches through the profile the conversation *locked*, not the one this request
             // names, so the locked snapshot passes the same gate: a conversation whose profile was switched
             // off after it was created must not keep dispatching through the address that was retired.
@@ -321,7 +321,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
             profile: LlmProfile,
             promptVersion: Int,
             retrievalSnapshot: String,
-        ): String = context.llm.persistInvestigateConversation(
+        ): String = context.investigationLedger.persistInvestigateConversation(
             collectionId = collectionId,
             profile = profile,
             promptVersion = promptVersion,
@@ -330,10 +330,10 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
 
         override fun appendTurn(conversationId: String, snapshot: InvestigateTurnSnapshot) {
             snapshot.messages.forEach { (seq, message) ->
-                context.llm.persistInvestigateMessage(conversationId, seq, message, superseded = seq in snapshot.supersededSeqs)
+                context.investigationLedger.persistInvestigateMessage(conversationId, seq, message, superseded = seq in snapshot.supersededSeqs)
             }
             snapshot.modelCalls.forEach { call ->
-                val modelCallId = context.llm.persistInvestigateModelCall(
+                val modelCallId = context.investigationLedger.persistInvestigateModelCall(
                     conversationId = conversationId,
                     provider = call.provider,
                     endpoint = call.endpoint,
@@ -349,7 +349,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
                     correctionOf = call.correctionOf,
                 )
                 call.toolCalls.forEach { tool ->
-                    context.llm.persistInvestigateToolCall(
+                    context.investigationLedger.persistInvestigateToolCall(
                         conversationId = conversationId,
                         modelCallId = modelCallId,
                         toolName = tool.toolName,
@@ -358,21 +358,21 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
                         durationMs = tool.durationMs,
                     )
                 }
-                context.llm.persistRequestEligibility(modelCallId, conversationId, call.eligibilityEvidenceIds)
-                context.llm.persistRequestOmissions(modelCallId, conversationId, call.omissionGroupLabels)
+                context.investigationLedger.persistRequestEligibility(modelCallId, conversationId, call.eligibilityEvidenceIds)
+                context.investigationLedger.persistRequestOmissions(modelCallId, conversationId, call.omissionGroupLabels)
             }
             snapshot.evidenceEntries.forEach { entry ->
-                context.llm.persistEvidenceLedgerEntry(
+                context.investigationLedger.persistEvidenceLedgerEntry(
                     conversationId, entry.evidenceId, entry.sourceUnitId, entry.locatorJson, entry.excerpt, entry.messageSeq,
                     entry.revisionId,
                 )
             }
             snapshot.limitEvents.forEach { event ->
-                context.llm.persistLimitEvent(conversationId, event.eventType, event.message)
+                context.investigationLedger.persistLimitEvent(conversationId, event.eventType, event.message)
             }
             // The turn's calls and cost land in the profile's accumulated counters exactly as
             // persistAsk does, so a price change cannot rewrite history: totals only grow.
-            context.llm.updateUsageTotals(
+            context.investigationLedger.updateUsageTotals(
                 profileId = snapshot.profile.id,
                 calls = snapshot.modelCalls.size,
                 inputTokens = snapshot.modelCalls.sumOf { it.inputTokens ?: 0L },
@@ -382,7 +382,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
             )
         }
 
-        override fun loadHistory(conversationId: String) = context.llm.loadInvestigateHistory(conversationId)
+        override fun loadHistory(conversationId: String) = context.investigationLedger.loadInvestigateHistory(conversationId)
     }
     return InvestigationService(
         tools = InvestigationTools(

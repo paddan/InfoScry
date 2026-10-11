@@ -51,7 +51,9 @@ import infoscry.storage.DeletionStore
 import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.JobStore
-import infoscry.storage.LlmStore
+import infoscry.storage.ConversationStore
+import infoscry.storage.InvestigationLedgerStore
+import infoscry.storage.LlmProfileStore
 import infoscry.storage.ImportItemStore
 import infoscry.storage.MutationCoordinator
 import infoscry.storage.OcrOperationStore
@@ -103,7 +105,9 @@ class AppContext private constructor(
     val library: ManagedLibrary,
     val mutations: MutationCoordinator,
     val jobs: JobStore,
-    val llm: LlmStore,
+    val llm: LlmProfileStore,
+    val conversations: ConversationStore,
+    val investigationLedger: InvestigationLedgerStore,
     /**
      * The unsafe deletion states that refuse every mutating command. One object, shared by the
      * collection and document deletion machines, so the refusal is the same answer whichever service a
@@ -602,7 +606,9 @@ class AppContext private constructor(
                     val jobs = JobStore(database)
                     val importItems = ImportItemStore(database)
                     val mutations = MutationCoordinator()
-                    val llm = LlmStore(database)
+                    val llm = LlmProfileStore(database)
+                    val conversations = ConversationStore(database, llm)
+                    val investigationLedger = InvestigationLedgerStore(database, llm)
 
                     // The search index is part of the data directory, so every open has exactly one. It is
                     // created before recovery so an unfinished deletion can finish its index phase, and it
@@ -623,6 +629,8 @@ class AppContext private constructor(
                             mutations = mutations,
                             jobs = jobs,
                             llm = llm,
+                            conversations = conversations,
+                            investigationLedger = investigationLedger,
                             blockers = DeletionBlockers(),
                             injectedIndexRemover = index,
                             injectedDocumentIndexRemover = documentIndex,

@@ -1,7 +1,7 @@
 package infoscry.llm
 
 import infoscry.storage.Database
-import infoscry.storage.LlmStore
+import infoscry.storage.LlmProfileStore
 import infoscry.storage.SchemaMigrator
 import java.nio.file.Files
 import java.nio.file.Path
@@ -15,7 +15,7 @@ import kotlin.test.assertTrue
 class PromptServiceTest {
 
     private lateinit var directory: Path
-    private lateinit var store: LlmStore
+    private lateinit var store: LlmProfileStore
     private lateinit var prompts: PromptService
 
     @BeforeTest
@@ -23,7 +23,7 @@ class PromptServiceTest {
         directory = Files.createTempDirectory("infoscry-prompts")
         val database = Database(directory.resolve("state.db"))
         SchemaMigrator(database).migrate()
-        store = LlmStore(database)
+        store = LlmProfileStore(database)
         prompts = PromptService(store)
     }
 

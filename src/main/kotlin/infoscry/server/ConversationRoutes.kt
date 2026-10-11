@@ -20,7 +20,7 @@ fun Routing.configureConversationRoutes(context: AppContext) {
                 ?: throw BadRequestException("a conversation id is required in the path")
             val deleted = context.mutations.withMutation {
                 context.collectionService.requireMutationsAllowed()
-                context.llm.deleteConversation(collection.id, conversationId)
+                context.conversations.deleteConversation(collection.id, conversationId)
             }
             if (!deleted) {
                 // Unknown ids and ids owned by another collection are the same answer: not-found, and

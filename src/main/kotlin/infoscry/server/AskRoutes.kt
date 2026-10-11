@@ -41,7 +41,7 @@ fun Routing.configureAskRoutes(context: AppContext) {
             val prompt = PromptService(context.llm)
             val titler = ConversationTitler(
                 prompt = prompt,
-                persist = context.llm::setConversationTitle,
+                persist = context.conversations::setConversationTitle,
             )
             var conversationId: String? = null
             val service = AskService(
@@ -54,7 +54,7 @@ fun Routing.configureAskRoutes(context: AppContext) {
                     }
                 },
                 persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
-                    context.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+                    context.conversations.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
                         .also { conversationId = it }
                 },
             )

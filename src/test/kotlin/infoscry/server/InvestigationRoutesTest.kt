@@ -545,7 +545,7 @@ class InvestigationRoutesTest {
         createProfile("active")
         val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
         val retired = harness.context.llm.findByName("retired")!!
-        val conversationId = harness.context.llm.persistInvestigateConversation(
+        val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
             profile = retired,
             promptVersion = 1,
@@ -575,7 +575,7 @@ class InvestigationRoutesTest {
             createProfile(name = "fixed-since", endpoint = fake.url)
             val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
             val profile = harness.context.llm.findByName("fixed-since")!!
-            val conversationId = harness.context.llm.persistInvestigateConversation(
+            val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                 collectionId = collection.id,
                 profile = profile,
                 promptVersion = 1,
@@ -884,7 +884,7 @@ class InvestigationRoutesTest {
             createProfile(endpoint = hanging.url)
             val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
             val profile = harness.context.llm.findByName("investigator")!!
-            val conversationId = harness.context.llm.persistInvestigateConversation(
+            val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                 collectionId = collection.id,
                 profile = profile,
                 promptVersion = 1,
@@ -941,14 +941,14 @@ class InvestigationRoutesTest {
         val defaultCollection = harness.context.collectionService.requireActiveByNameOrId("Default")
         val otherCollection = harness.context.collectionService.create("Other")
         val profile = harness.context.llm.findByName("investigator")!!
-        val conversationId = harness.context.llm.persistInvestigateConversation(
+        val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
             profile = profile,
             promptVersion = 3,
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
-        harness.context.llm.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
-        harness.context.llm.persistInvestigateMessage(conversationId, 1, "assistant", "Mira signed it.")
+        harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
+        harness.context.investigationLedger.persistInvestigateMessage(conversationId, 1, "assistant", "Mira signed it.")
 
         val loaded = harness.request(
             HttpMethod.Get,
@@ -1114,23 +1114,23 @@ class InvestigationRoutesTest {
         createProfile(endpoint = "https://provider.invalid/v1")
         val defaultCollection = harness.context.collectionService.requireActiveByNameOrId("Default")
         val profile = harness.context.llm.findByName("investigator")!!
-        val conversationId = harness.context.llm.persistInvestigateConversation(
+        val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
             profile = profile,
             promptVersion = 1,
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
-        harness.context.llm.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
-        harness.context.llm.persistInvestigateMessage(conversationId, 1, "assistant", "Mira signed it.")
-        val titledId = harness.context.llm.persistInvestigateConversation(
+        harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
+        harness.context.investigationLedger.persistInvestigateMessage(conversationId, 1, "assistant", "Mira signed it.")
+        val titledId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
             profile = profile,
             promptVersion = 1,
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
-        harness.context.llm.persistInvestigateMessage(titledId, 0, "user", "What day was it?")
-        harness.context.llm.persistInvestigateMessage(titledId, 1, "assistant", "Sunday.")
-        harness.context.llm.setConversationTitle(titledId, "The signing")
+        harness.context.investigationLedger.persistInvestigateMessage(titledId, 0, "user", "What day was it?")
+        harness.context.investigationLedger.persistInvestigateMessage(titledId, 1, "assistant", "Sunday.")
+        harness.context.conversations.setConversationTitle(titledId, "The signing")
 
         val list = harness.request(
             HttpMethod.Get,
@@ -1460,19 +1460,19 @@ class InvestigationRoutesTest {
 
         createProfile("evidence-keeper")
         val profile = harness.context.llm.findByName("evidence-keeper")!!
-        val conversationId = harness.context.llm.persistInvestigateConversation(
+        val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
             profile = profile,
             promptVersion = 1,
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
         val locatorJson = Json.encodeToString(SourceLocation.serializer(), SourceLocation.TextLines(1, 1))
-        harness.context.llm.persistEvidenceLedgerEntry(
+        harness.context.investigationLedger.persistEvidenceLedgerEntry(
             conversationId, "S1", replacedUnit.value, locatorJson, "the excerpt S1 saved",
             revisionId = recordedRevision,
         )
-        harness.context.llm.persistEvidenceLedgerEntry(conversationId, "S2", keptUnit.value, locatorJson, "the excerpt S2 saved")
-        harness.context.llm.persistEvidenceLedgerEntry(conversationId, "S3", replacedUnit.value, locatorJson, "the excerpt S3 saved")
+        harness.context.investigationLedger.persistEvidenceLedgerEntry(conversationId, "S2", keptUnit.value, locatorJson, "the excerpt S2 saved")
+        harness.context.investigationLedger.persistEvidenceLedgerEntry(conversationId, "S3", replacedUnit.value, locatorJson, "the excerpt S3 saved")
 
         val history = harness.request(
             HttpMethod.Get,
@@ -1590,14 +1590,14 @@ class InvestigationRoutesTest {
         val (documentId, unitId) = seedEvidenceDocument(collection.id, "doomed-notes.txt", "text that will be deleted")
         createProfile("doomed-keeper")
         val profile = harness.context.llm.findByName("doomed-keeper")!!
-        val conversationId = harness.context.llm.persistInvestigateConversation(
+        val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
             profile = profile,
             promptVersion = 1,
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
         val locatorJson = Json.encodeToString(SourceLocation.serializer(), SourceLocation.TextLines(1, 1))
-        harness.context.llm.persistEvidenceLedgerEntry(conversationId, "S1", unitId.value, locatorJson, "the excerpt S1 saved")
+        harness.context.investigationLedger.persistEvidenceLedgerEntry(conversationId, "S1", unitId.value, locatorJson, "the excerpt S1 saved")
 
         harness.context.database.transaction { connection ->
             connection.prepareStatement("DELETE FROM documents WHERE id = ?").use { statement ->

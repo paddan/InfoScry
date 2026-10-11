@@ -145,7 +145,7 @@ class AskRoutesTest {
                     draft = ContentUnitDraft(locator = locator, extractedText = "Mira signed it.", searchText = "Mira signed it.", method = ExtractionMethod.DIRECT_TEXT),
                     artifactRoot = harness.context.paths.libraryDir,
                 ).unit
-                harness.context.llm.persistAsk(
+                harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
                     question = "Who signed it?",
@@ -283,7 +283,7 @@ class AskRoutesTest {
                 )
 
                 val locator = SourceLocation.TextLines(1, 1)
-                harness.context.llm.persistAsk(
+                harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
                     question = "What did the page say?",
@@ -583,7 +583,7 @@ class AskRoutesTest {
             ApiTestServer(dataDir).use { harness ->
                 val collection = harness.context.collectionService.create("Default")
                 val profile = createLlmProfile(harness, name = "list-asker", model = "list-model", endpoint = "https://provider.invalid/v1")
-                harness.context.llm.persistAsk(
+                harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
                     question = "Who signed it?",
@@ -592,7 +592,7 @@ class AskRoutesTest {
                     initialUsage = TokenUsage(inputTokens = 1, outputTokens = 1, cacheReadTokens = 0),
                     initialCitations = CitationValidation(valid = emptyList(), invalid = emptyList()),
                 )
-                val titled = harness.context.llm.persistAsk(
+                val titled = harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
                     question = "What day was it?",
@@ -601,7 +601,7 @@ class AskRoutesTest {
                     initialUsage = TokenUsage(inputTokens = 1, outputTokens = 1, cacheReadTokens = 0),
                     initialCitations = CitationValidation(valid = emptyList(), invalid = emptyList()),
                 )
-                harness.context.llm.setConversationTitle(titled, "The signing")
+                harness.context.conversations.setConversationTitle(titled, "The signing")
 
                 val list = harness.request(
                     HttpMethod.Get,

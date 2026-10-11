@@ -1,7 +1,7 @@
 package infoscry.llm
 
 import infoscry.storage.Instants
-import infoscry.storage.LlmStore
+import infoscry.storage.LlmProfileStore
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import kotlinx.coroutines.CancellationException
@@ -34,7 +34,7 @@ class LlmProbeUnavailableException(message: String) : RuntimeException(message)
  * admission and record under it with [record].
  */
 class LlmCapabilityProbeService(
-    private val store: LlmStore,
+    private val store: LlmProfileStore,
     private val lookup: (String) -> String? = System::getenv,
     private val newHttpClient: () -> HttpClient = { HttpClient(CIO) },
 ) {

@@ -2,7 +2,7 @@ package infoscry.llm
 
 import infoscry.llm.LlmPromptRole.ASK
 import infoscry.llm.LlmPromptRole.INVESTIGATE
-import infoscry.storage.LlmStore
+import infoscry.storage.LlmProfileStore
 
 /**
  * Composes the three prompt layers in order:
@@ -15,7 +15,7 @@ import infoscry.storage.LlmStore
  *
  * The core always comes first and is always present; the other two layers may be empty.
  */
-class PromptService(private val store: LlmStore) {
+class PromptService(private val store: LlmProfileStore) {
 
     /** Layer 1 — code/resource controlled, immutable, never read from the database. */
     private val CORE_RULES: String = buildString {

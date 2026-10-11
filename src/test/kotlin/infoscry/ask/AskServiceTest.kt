@@ -19,7 +19,7 @@ import infoscry.search.SearchHit
 import infoscry.search.SearchMode
 import infoscry.search.SearchOutcome
 import infoscry.storage.Database
-import infoscry.storage.LlmStore
+import infoscry.storage.LlmProfileStore
 import infoscry.storage.SchemaMigrator
 import java.nio.file.Files
 import kotlinx.coroutines.flow.Flow
@@ -35,7 +35,7 @@ import kotlin.test.assertTrue
 class AskServiceTest {
     private val directory = Files.createTempDirectory("infoscry-ask-service")
     private val database = Database(directory.resolve("state.db"))
-    private val store = LlmStore(database)
+    private val store = LlmProfileStore(database)
 
     init { SchemaMigrator(database).migrate() }
 

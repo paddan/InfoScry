@@ -48,15 +48,15 @@ class ConversationRoutesTest {
                 // An Investigate conversation with every child the schema keeps: messages, a model
                 // call, a tool call on it, ledger evidence, request eligibility and omission rows,
                 // and a limit event.
-                val investigateId = harness.context.llm.persistInvestigateConversation(
+                val investigateId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
                     profile = profile,
                     promptVersion = 1,
                     retrievalSnapshot = RetrievalSnapshot.value(),
                 )
-                harness.context.llm.persistInvestigateMessage(investigateId, 0, "user", "Who signed it?")
-                harness.context.llm.persistInvestigateMessage(investigateId, 1, "assistant", "Mira signed it.")
-                val modelCallId = harness.context.llm.persistInvestigateModelCall(
+                harness.context.investigationLedger.persistInvestigateMessage(investigateId, 0, "user", "Who signed it?")
+                harness.context.investigationLedger.persistInvestigateMessage(investigateId, 1, "assistant", "Mira signed it.")
+                val modelCallId = harness.context.investigationLedger.persistInvestigateModelCall(
                     conversationId = investigateId,
                     provider = LlmProvider.OPENAI_COMPATIBLE.name,
                     endpoint = "https://provider.invalid/v1",
@@ -69,17 +69,17 @@ class ConversationRoutesTest {
                     cacheReadTokens = 0,
                     costUsd = 0.0001,
                 )
-                harness.context.llm.persistInvestigateToolCall(investigateId, modelCallId, "search_collection", "{}", "SUCCESS", 12L)
-                harness.context.llm.persistEvidenceLedgerEntry(
+                harness.context.investigationLedger.persistInvestigateToolCall(investigateId, modelCallId, "search_collection", "{}", "SUCCESS", 12L)
+                harness.context.investigationLedger.persistEvidenceLedgerEntry(
                     investigateId, "S1", "unit-seed",
                     """{"type":"text_lines","start":4,"end":4}""", "Mira signed it.",
                 )
-                harness.context.llm.persistRequestEligibility(modelCallId, investigateId, listOf("S1"))
-                harness.context.llm.persistRequestOmissions(modelCallId, investigateId, listOf("BUDGET"))
-                harness.context.llm.persistLimitEvent(investigateId, "BUDGET_LIMIT", "the budget was exceeded")
+                harness.context.investigationLedger.persistRequestEligibility(modelCallId, investigateId, listOf("S1"))
+                harness.context.investigationLedger.persistRequestOmissions(modelCallId, investigateId, listOf("BUDGET"))
+                harness.context.investigationLedger.persistLimitEvent(investigateId, "BUDGET_LIMIT", "the budget was exceeded")
 
                 // A stored Ask answer with its own messages, model call and citation rows.
-                val askId = harness.context.llm.persistAsk(
+                val askId = harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
                     question = "Who signed it?",
@@ -163,14 +163,14 @@ class ConversationRoutesTest {
                 val collection = harness.context.collectionService.create("Default")
                 val other = harness.context.collectionService.create("Other")
                 val profile = createProfile(harness, "delete-owner")
-                val conversationId = harness.context.llm.persistInvestigateConversation(
+                val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
                     profile = profile,
                     promptVersion = 1,
                     retrievalSnapshot = RetrievalSnapshot.value(),
                 )
-                harness.context.llm.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
-                harness.context.llm.persistLimitEvent(conversationId, "CANCELLED", "the reader stopped it")
+                harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
+                harness.context.investigationLedger.persistLimitEvent(conversationId, "CANCELLED", "the reader stopped it")
 
                 val response = harness.request(
                     HttpMethod.Delete,

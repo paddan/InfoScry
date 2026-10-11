@@ -49,7 +49,7 @@ class AskCommand : CliktCommand(name = "ask") {
                     LlmProvider.ANTHROPIC -> AnthropicClient(p, System::getenv)
                 }
             }, persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
-                open.llm.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+                open.conversations.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
             })
             runBlocking {
                 val events = mutableListOf<AskEvent>()
