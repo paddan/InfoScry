@@ -71,6 +71,25 @@ class ContentStoreTest {
     }
 
     @Test
+    fun `progress counts staged pages once and restores them from durable storage`() = kotlinx.coroutines.runBlocking {
+        val document = newDocument()
+        val revisions = DocumentRevisionStore(database, store)
+        val sink = infoscry.ocr.CandidateRevisionSink(revisions, document, "test")
+        store.recordProgress(document, fingerprint, infoscry.domain.UnitKind.PAGE, 4)
+        val page = infoscry.extract.ExtractionEvent.UnitReady("page-1", 0,
+            draftOf(SourceLocation.PdfPage(1)))
+        sink.deliver(document, fingerprint, page)
+        sink.deliver(document, fingerprint, page)
+        val progress = ContentStore(database).documentProgress(listOf(document)).getValue(document)
+        assertEquals(1, progress.processedUnits)
+        assertEquals(4, progress.totalUnits)
+        assertEquals(1, progress.directTextUnits)
+        val other = ExtractionFingerprint.of("e".repeat(64), ExtractionSettings(ocrLanguages = "eng"))
+        store.recordProgress(document, other, infoscry.domain.UnitKind.PAGE, 7)
+        assertEquals(0, store.documentProgress(listOf(document)).getValue(document).processedUnits)
+    }
+
+    @Test
     fun `a committed unit round-trips with its locator and both text forms`() {
         val document = newDocument()
 

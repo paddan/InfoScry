@@ -220,9 +220,9 @@ class ContentStore(private val database: Database) {
         documentId: DocumentId,
         fingerprint: ExtractionFingerprint,
         unitKind: UnitKind,
-        totalUnits: Int,
+        totalUnits: Int?,
     ) {
-        require(totalUnits >= 0) { "totalUnits must not be negative, was $totalUnits" }
+        require(totalUnits == null || totalUnits >= 0) { "totalUnits must not be negative, was $totalUnits" }
         database.transaction { connection ->
             connection.upsertProgress(
                 documentId = documentId,
@@ -882,6 +882,17 @@ class ContentStore(private val database: Database) {
                 )
             }
         }
+        // Revision pages stay durable after publication. A current candidate takes precedence
+        // over a published reading with the same fingerprint.
+        readRows(COUNT_REVISION_PROGRESS, ids) { rows ->
+            while (rows.next()) {
+                counts[DocumentId(rows.getString("document_id")) to rows.getString("fingerprint")] = Counted(
+                    processed = rows.getInt("processed_units"), failed = 0,
+                    directText = rows.getInt("direct_text_units"), ocr = rows.getInt("ocr_units"),
+                    unitsWithMethod = rows.getInt("units_with_method"),
+                )
+            }
+        }
         return counts
     }
 
@@ -1245,6 +1256,20 @@ class ContentStore(private val database: Database) {
         private const val SELECT_EXTRACTION_SUMMARIES =
             "SELECT document_id, fingerprint, total_units FROM document_extractions " +
                 "WHERE document_id IN (%s)"
+
+        private val COUNT_REVISION_PROGRESS = """
+            SELECT r.document_id, r.attempt_fingerprint AS fingerprint,
+                   COUNT(p.ordinal) AS processed_units,
+                   SUM(CASE WHEN p.extraction_method = 'DIRECT_TEXT' THEN 1 ELSE 0 END) AS direct_text_units,
+                   SUM(CASE WHEN p.extraction_method = 'OCR' THEN 1 ELSE 0 END) AS ocr_units,
+                   COUNT(p.extraction_method) AS units_with_method
+            FROM document_revisions r
+            LEFT JOIN page_text_revisions p ON p.revision_id = r.id
+            WHERE r.state IN ('CANDIDATE', 'PUBLISHED') AND r.attempt_fingerprint IS NOT NULL
+              AND r.document_id IN (%s)
+            GROUP BY r.id
+            ORDER BY CASE WHEN r.state = 'CANDIDATE' THEN 1 ELSE 0 END
+        """
 
         /**
          * What one attempt's checkpoints add up to.

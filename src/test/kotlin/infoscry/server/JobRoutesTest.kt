@@ -2,6 +2,9 @@ package infoscry.server
 
 import infoscry.domain.JobType
 import infoscry.storage.ImportItemOutcome
+import io.ktor.client.request.prepareGet
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.utils.io.readUTF8Line
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -36,6 +39,61 @@ class JobRoutesTest {
     fun stopServer() {
         harness.close()
         dataDir.toFile().deleteRecursively()
+    }
+
+    @Test
+    fun `job and import history expose durable progress for the current document only`() = runBlocking {
+        val context = harness.context
+        val collection = context.collectionService.requireActiveByNameOrId("Default")
+        val document = infoscry.domain.Document(
+            id = infoscry.domain.DocumentId.new(), collectionId = collection.id,
+            sha256 = "a".repeat(64), mediaType = "application/pdf", originalFilename = "large.pdf",
+            sourcePath = "/private/large.pdf", sizeBytes = 42, status = infoscry.domain.DocumentStatus.EXTRACTING,
+            createdAt = infoscry.storage.Instants.now(), updatedAt = infoscry.storage.Instants.now(),
+        )
+        context.documents.insert(document)
+        val job = context.jobs.enqueue(JobType.IMPORT, collection.id, total = 2)
+        context.jobs.claim(job.id)
+        context.jobs.progress(job.id, stage = "extract", currentItem = "large.pdf")
+        context.importItems.queue(job.id, "large", "/private/large.pdf")
+        context.importItems.attachDocument(job.id, "large", document.id)
+        val fingerprint = infoscry.extract.ExtractionFingerprint.of(document.sha256, infoscry.extract.ExtractionSettings(ocrLanguages = "eng"))
+        context.content.recordProgress(document.id, fingerprint, infoscry.domain.UnitKind.PAGE, 40)
+        val sink = infoscry.ocr.CandidateRevisionSink(context.revisions, document.id, "test")
+        val event = infoscry.extract.ExtractionEvent.UnitReady("page-1", 0, infoscry.extract.ContentUnitDraft(
+            locator = infoscry.domain.SourceLocation.PdfPage(1), extractedText = "private text", searchText = "private text",
+            method = infoscry.domain.ExtractionMethod.OCR,
+        ))
+        sink.deliver(document.id, fingerprint, event)
+        suspend fun currentProgress(path: String, history: Boolean = false): kotlinx.serialization.json.JsonObject {
+            val body = harness.get(path).bodyAsText()
+            assertFalse(body.contains("private text"))
+            assertFalse(body.contains("/private/"))
+            val wire = Json.parseToJsonElement(body).jsonObject
+            val entry = if (history) wire["imports"]!!.jsonArray.single().jsonObject else wire["job"]!!.jsonObject
+            return entry["currentProgress"]!!.jsonObject
+        }
+        assertEquals("1", currentProgress("/api/jobs/${job.id.value}")["processedUnits"].toString())
+        assertEquals("40", currentProgress("/api/collections/${collection.id.value}/imports", true)["totalUnits"].toString())
+        kotlinx.coroutines.withTimeout(5_000) {
+            harness.client.prepareGet(harness.url + "/api/jobs/${job.id.value}/events").execute { response ->
+                val channel = response.bodyAsChannel()
+                suspend fun nextProgress(): String {
+                    channel.readUTF8Line() // id
+                    val data = channel.readUTF8Line()!!.removePrefix("data: ")
+                    channel.readUTF8Line() // blank line
+                    return Json.parseToJsonElement(data).jsonObject["currentProgress"]!!.jsonObject["processedUnits"].toString()
+                }
+                assertEquals("1", nextProgress())
+                // Only the committed page changes; the SSE must not depend on the job row changing.
+                sink.deliver(document.id, fingerprint, event.copy(key = "page-2", ordinal = 1))
+                assertEquals("2", nextProgress())
+            }
+        }
+        assertEquals("2", currentProgress("/api/jobs/${job.id.value}")["processedUnits"].toString())
+        context.jobs.complete(job.id)
+        val terminal = Json.parseToJsonElement(harness.get("/api/jobs/${job.id.value}").bodyAsText()).jsonObject["job"]!!.jsonObject
+        assertTrue(terminal["currentProgress"] == null || terminal["currentProgress"].toString() == "null")
     }
 
     @Test

@@ -23,7 +23,10 @@ The redesign gives one place to decide, one confirmation, and one result.
 ## Product decisions (from the owner)
 
 1. The **document** is the unit of work. Each document shows one status and one
-   next action.
+   next action. During import, file progress is accompanied by a separate count
+   and progress bar for saved pages of the current document (including direct-text
+   pages). Unknown totals use an indeterminate bar. Progress comes from durable
+   results so reloads and resumed attempts retain the saved count.
 2. Import of a file or a directory, and **Scan again**, share one **start
    dialog**. The reading method is chosen each time. The collection's default
    method pre-fills the dialog; the dialog is always shown and must be

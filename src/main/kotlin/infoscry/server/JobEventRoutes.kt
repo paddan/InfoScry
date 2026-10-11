@@ -31,17 +31,19 @@ internal data class JobEventWire(
     val state: JobState,
     val stage: String? = null,
     val currentItem: String? = null,
+    val currentProgress: DocumentProgressView? = null,
     val completed: Int = 0,
     val total: Int = 0,
     val errorCode: String? = null,
     val cancelRequested: Boolean = false,
 )
 
-private fun Job.toJobEventWire() = JobEventWire(
+private fun Job.toJobEventWire(context: AppContext) = JobEventWire(
     jobId = id.value,
     state = state,
     stage = stage,
     currentItem = currentItem,
+    currentProgress = currentImportProgress(context),
     completed = completed,
     total = total,
     errorCode = errorCode,
@@ -93,25 +95,27 @@ private suspend fun ApplicationCall.streamJobEvents(
     respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {
         // Ktor 3.2 has no HttpHeaders.LastEventID constant, so the header is named explicitly.
         var sequence = lastEventId
-        fun writeEvent(job: Job): Boolean {
+        fun writeEvent(job: JobEventWire): Boolean {
             if (sequence == Long.MAX_VALUE) return false
             sequence += 1
-            write("id: $sequence\ndata: ${ApiJson.encodeToString(job.toJobEventWire())}\n\n".toByteArray(StandardCharsets.UTF_8))
+            write("id: $sequence\ndata: ${ApiJson.encodeToString(job)}\n\n".toByteArray(StandardCharsets.UTF_8))
             flush()
             return sequence < Long.MAX_VALUE
         }
 
-        if (!writeEvent(initial)) return@respondOutputStream
+        val initialWire = initial.toJobEventWire(context)
+        if (!writeEvent(initialWire)) return@respondOutputStream
         if (initial.state.isTerminal()) return@respondOutputStream
 
-        var previous = initial
+        var previous = initialWire
         var idleDeadlineNanos = System.nanoTime() + idleDeadlineMillis * 1_000_000L
         while (true) {
             delay(JOB_EVENT_POLL_INTERVAL_MILLIS)
             val current = context.jobs.get(jobId) ?: return@respondOutputStream
-            if (current != previous) {
-                previous = current
-                val canContinue = writeEvent(current)
+            val wire = current.toJobEventWire(context)
+            if (wire != previous) {
+                previous = wire
+                val canContinue = writeEvent(wire)
                 if (current.state.isTerminal() || !canContinue) return@respondOutputStream
                 // Idle means "no event emitted for the bound": only an emit pushes the deadline out,
                 // never the poll itself. A job that stays quiet past the bound closes the stream, and

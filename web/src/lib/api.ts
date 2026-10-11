@@ -84,6 +84,8 @@ export type JobApiView = {
   stage?: string | null;
   /** The file the job is working on now, as its own name; never the path it was selected from. */
   currentItem?: string | null;
+  /** Committed units of the currently read document, separate from file counts. */
+  currentProgress?: DocumentProgressView | null;
   completed: number;
   total: number;
   errorCode?: string | null;
@@ -1239,6 +1241,8 @@ export type ImportHistoryEntry = {
   stage?: string | null;
   /** The file the import is working on now, as its own name; never the path it was selected from. */
   currentItem?: string | null;
+  /** Committed units of the currently read document, separate from file counts. */
+  currentProgress?: DocumentProgressView | null;
   filesCompleted: number;
   filesTotal: number;
   errorCode?: string | null;

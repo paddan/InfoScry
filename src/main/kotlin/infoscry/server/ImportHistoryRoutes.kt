@@ -28,6 +28,7 @@ data class ImportHistoryEntry(
     val state: JobState,
     val stage: String? = null,
     val currentItem: String? = null,
+    val currentProgress: DocumentProgressView? = null,
     val filesCompleted: Int,
     val filesTotal: Int,
     val errorCode: String? = null,
@@ -89,6 +90,7 @@ private fun Job.toImportHistoryEntry(context: AppContext) = ImportHistoryEntry(
     state = state,
     stage = stage,
     currentItem = currentItem,
+    currentProgress = currentImportProgress(context),
     filesCompleted = completed,
     filesTotal = total,
     errorCode = errorCode,
@@ -105,3 +107,10 @@ private const val MAX_IMPORTS_PER_PAGE = 200
 
 /** The existing per-file outcome route, so a history row carries a link rather than a second payload. */
 private const val JOB_ITEMS_PATH_PREFIX = "/api/jobs"
+
+/** The serial import has at most one unfinished attached file. Never associate a file by basename. */
+internal fun Job.currentImportProgress(context: AppContext): DocumentProgressView? {
+    if (type != infoscry.domain.JobType.IMPORT || state != JobState.RUNNING || stage !in setOf("extract", "chunk", "embed", "index", "record")) return null
+    val documentId = context.importItems.currentDocument(id) ?: return null
+    return context.content.documentProgress(listOf(documentId))[documentId]?.toView()
+}

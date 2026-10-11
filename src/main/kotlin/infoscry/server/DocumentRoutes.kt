@@ -470,7 +470,7 @@ private fun Document.toListItem(
 )
 
 /** The stored counts as the wire shows them: the same fields, none of the failed codes. */
-private fun DocumentProgress.toView() = DocumentProgressView(
+internal fun DocumentProgress.toView() = DocumentProgressView(
     unitKind = unitKind,
     totalUnits = totalUnits,
     processedUnits = processedUnits,

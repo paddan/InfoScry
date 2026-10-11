@@ -135,6 +135,7 @@ data class JobApiView(
     val stage: String? = null,
     /** The file the job is working on now, as its own name; never the path it was selected from. */
     val currentItem: String? = null,
+    val currentProgress: DocumentProgressView? = null,
     val completed: Int = 0,
     val total: Int = 0,
     val errorCode: String? = null,
@@ -758,6 +759,7 @@ private fun Job.toApiView(context: AppContext) = JobApiView(
     collectionId = collectionId,
     stage = stage,
     currentItem = currentItem,
+    currentProgress = currentImportProgress(context),
     completed = completed,
     total = total,
     errorCode = errorCode,

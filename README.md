@@ -6,7 +6,8 @@ reader and a command-line interface.
 
 ## What you can do
 
-- Import files and folders into collections without changing the originals.
+- Import files and folders into collections without changing the originals. Follow both
+  file progress and the current document’s page progress during processing.
 - Extract text from PDFs, images, Office documents, text files and e-books,
   including OCR for scanned material.
 - Find passages with keyword, semantic or hybrid search.

@@ -710,10 +710,11 @@ describe('collections panel', () => {
   });
 
   it('shows active import progress and read failures outside all disclosures', async () => {
-    api.listCollectionImports.mockResolvedValue(history([importEntry('active', { state: 'RUNNING', filesCompleted: 2, filesTotal: 4 })]));
+    api.listCollectionImports.mockResolvedValue(history([importEntry('active', { state: 'RUNNING', filesCompleted: 2, filesTotal: 4, currentProgress: { unitKind: 'PAGE', processedUnits: 3, totalUnits: 20, failedUnits: 0 } })]));
     const view = render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
     expect(await screen.findByRole('region', { name: 'Active imports' })).toBeTruthy();
     expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText(/2.*4/)).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Active imports' })).getByRole('progressbar', { name: 'Page progress' }).getAttribute('value')).toBe('3');
     for (const disclosure of view.container.querySelectorAll('details')) expect(disclosure.open).toBe(false);
     api.listCollectionImports.mockRejectedValueOnce(new Error('history unavailable'));
     await view.rerender({ visible: false });

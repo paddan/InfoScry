@@ -12,7 +12,7 @@ application suites.
 | Area | Current behavior |
 |---|---|
 | Local runtime | Backend, CLI and static web reader; foreground loopback server |
-| Import | Managed copies, per-collection deduplication, extraction/OCR checkpoints and persistent jobs; unsupported files are skipped and not shown; include/exclude extensions and per-collection ignore patterns |
+| Import | Managed copies, per-collection deduplication, extraction/OCR checkpoints and persistent jobs; separate file and current-document page progress bars backed by saved results; unsupported files are skipped and not shown; include/exclude extensions and per-collection ignore patterns |
 | Search | Keyword, semantic and hybrid retrieval, live as the reader types; advanced filters rerun the current query; validated retrieval refills stale or artifact-heavy results; inclusive import dates and safe excerpt highlighting; recoverable reindexing |
 | Collections | Creation, settings (including OCR defaults and ignore patterns), paged document browsing, progress, durable import history, retries (optionally with a chosen OCR method) and recoverable deletion |
 | LLM profiles | CLI/Admin management, role defaults, provider presets and model catalog; new Admin profiles suggest a provider/model name until manually edited; tool calling measured from Admin or the CLI |
@@ -229,6 +229,24 @@ ticket in this plan owns, and the existing explicit **Create PDF with
 selectable text** control already covers it; closing it is a separate,
 future decision. Native Preview/second-reader selection and real
 Tesseract/Surya/LLM/CoreML positioning remain open, owner-run manual gates.
+
+## Per-page import progress (2026-10-11)
+
+Import and active collection views retain file progress and show a separate
+progress bar and processed-page count for the current document. Counts come from
+committed checkpoints or staged/published revision pages; a resumed attempt does
+not count a saved page twice, and publication retains the final count. Unknown
+totals use an indeterminate bar. No schema change is required.
+
+Regression tests reproduced the missing progress and the publication reset before
+the fixes. The final `./gradlew check` passed with 1,817 JVM tests and
+472 frontend tests; standalone frontend type checking reported no errors or
+warnings. Tests cover polling, unknown totals, next-document reset, duplicate
+page delivery, attempt isolation, SSE updates, interrupted import/resume and
+completed counts after reopening the archive. Independent code review was clean
+after the publication correction. Local documentation links and diff checks
+passed. Browser acceptance and real-provider/CoreML processing were not rerun
+for this change.
 
 ## Recorded verification
 

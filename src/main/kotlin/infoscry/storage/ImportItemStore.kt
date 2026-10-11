@@ -69,6 +69,21 @@ data class ImportItem(
  */
 class ImportItemStore(private val database: Database) {
 
+    /** The one attached unfinished file of a serial import, without loading its complete history. */
+    fun currentDocument(jobId: JobId): DocumentId? = database.read { connection ->
+        connection.prepareStatement(
+            "SELECT document_id FROM import_items WHERE job_id = ? AND outcome = 'PENDING' " +
+                "AND document_id IS NOT NULL LIMIT 2",
+        ).use { statement ->
+            statement.setString(1, jobId.value)
+            statement.executeQuery().use { rows ->
+                if (!rows.next()) return@use null
+                val documentId = DocumentId(rows.getString("document_id"))
+                if (rows.next()) null else documentId
+            }
+        }
+    }
+
     /** Queues one file for this job, or returns the row an earlier attempt already queued. */
     fun queue(jobId: JobId, itemKey: String, sourcePath: String): ImportItem {
         require(itemKey.isNotBlank()) { "an import item needs a key" }

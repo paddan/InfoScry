@@ -26,6 +26,23 @@ describe('ImportPanel', () => {
   });
   afterEach(cleanup);
 
+  it('shows page progress separately from file progress and updates on polling', async () => {
+    vi.mocked(api.startImport).mockResolvedValue({ job: { ...job, state: 'RUNNING', completed: 0,
+      currentItem: 'a.pdf', currentProgress: { unitKind: 'PAGE', processedUnits: 1, totalUnits: 4, failedUnits: 0 } } } as api.ImportStarted);
+    vi.mocked(api.getJob).mockResolvedValue({ ...job, state: 'RUNNING', completed: 0,
+      currentItem: 'a.pdf', currentProgress: { unitKind: 'PAGE', processedUnits: 2, totalUnits: 4, failedUnits: 0 } } as api.JobApiView);
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
+    const pages = await screen.findByRole('progressbar', { name: 'Page progress' });
+    expect(pages.getAttribute('value')).toBe('1');
+    expect(pages.getAttribute('max')).toBe('4');
+    expect(screen.getByRole('progressbar', { name: 'Import progress' }).getAttribute('value')).toBe('0');
+    await waitFor(() => expect(pages.getAttribute('value')).toBe('2'), { timeout: 2500 });
+    expect(screen.getByText('2 of 4 pages processed')).toBeTruthy();
+  });
+
   it('routes import through the dialog and confirms the method and preview hash', async () => {
     render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
     await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));

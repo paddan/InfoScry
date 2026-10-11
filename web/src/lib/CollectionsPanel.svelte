@@ -37,6 +37,7 @@
   import CollectionOcrSettings from './CollectionOcrSettings.svelte';
   import DocumentRescan from './DocumentRescan.svelte';
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
+  import ImportUnitProgress from './ImportUnitProgress.svelte';
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
@@ -1662,6 +1663,7 @@
             {#each imports.filter(isWatchedImport) as entry (entry.id)}
               <p>{JOB_STATE_LABELS[entry.state]} · {fileCountLabel(entry.filesCompleted, entry.filesTotal)}</p>
               <p class="hint">{stageCell(entry)}</p>
+              <ImportUnitProgress progress={entry.currentProgress} />
             {/each}
           </section>
         {/if}

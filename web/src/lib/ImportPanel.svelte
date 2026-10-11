@@ -11,6 +11,7 @@
     type JobState,
   } from './api';
   import type { RescanStarted } from './api';
+  import ImportUnitProgress from './ImportUnitProgress.svelte';
   import StartReadingDialog from './StartReadingDialog.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { importProgressText } from './importProgress';
@@ -242,6 +243,7 @@
         <progress aria-label="Import progress"></progress>
       {/if}
       <p role="status">{status}</p>
+      <ImportUnitProgress progress={job.currentProgress} />
     </div>
   {/if}
   {#if !importing && job !== null && isTerminal(job.state)}

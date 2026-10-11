@@ -102,6 +102,60 @@ import kotlinx.serialization.json.putJsonObject
 class ImportJobHandlerTest {
 
     @Test
+    fun `staged import reports every committed page and resumes its saved page count`() {
+        withHarness { harness ->
+            val source = harness.writeText("large.txt", "scanned text")
+            val observed = mutableListOf<Int>()
+            val parked = CompletableDeferred<Unit>()
+            fun extractor(stop: Boolean, context: AppContext) = object : DocumentExtractor {
+                override val supportedMediaTypes = setOf("text/plain")
+                override val pageImageSupport = PageImageSupport.Supported
+                override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+                    emit(ExtractionEvent.Progress(UnitKind.PAGE, 3))
+                    observed += context.content.documentProgress(listOf(input.documentId)).getValue(input.documentId).processedUnits
+                    repeat(3) { ordinal ->
+                        val key = "page-$ordinal"
+                        if (!input.isCommitted(key)) {
+                            input.boundary.unit {
+                                emit(ExtractionEvent.UnitReady(key, ordinal, ContentUnitDraft(
+                                    locator = SourceLocation.PdfPage(ordinal + 1), extractedText = "page text $ordinal",
+                                    searchText = "page text $ordinal", method = ExtractionMethod.OCR,
+                                )))
+                            }
+                            val progress = context.content.documentProgress(listOf(input.documentId)).getValue(input.documentId)
+                            assertEquals(3, progress.totalUnits)
+                            observed += progress.processedUnits
+                            if (stop) {
+                                parked.complete(Unit)
+                                kotlinx.coroutines.awaitCancellation()
+                            }
+                        }
+                    }
+                    emit(ExtractionEvent.Finished(emptyMap(), 3))
+                }
+            }
+            val id = AppContext.open(harness.dataDir).use { context ->
+                val job = harness.enqueueForTest(context, listOf(source), ocr = checkingSnapshot())
+                harness.attach(context, harness.stagingPipeline(context, extractor(true, context)))
+                runBlocking { withTimeout(5_000) { parked.await() } }
+                job.id
+            }
+            AppContext.open(harness.dataDir).use { context ->
+                harness.attach(context, harness.stagingPipeline(context, extractor(false, context)))
+                assertEquals(JobState.COMPLETE, runBlocking { awaitTerminal(context, id) }.state)
+                val document = context.importItems.listForJob(id).single().documentId!!
+                assertEquals(3, context.content.documentProgress(listOf(document)).getValue(document).processedUnits,
+                    "publication must retain the final page count")
+            }
+            AppContext.open(harness.dataDir).use { context ->
+                val document = context.importItems.listForJob(id).single().documentId!!
+                assertEquals(3, context.content.documentProgress(listOf(document)).getValue(document).processedUnits)
+            }
+            assertEquals(listOf(0, 1, 1, 2, 3), observed)
+        }
+    }
+
+    @Test
     fun `a folder with supported and unsupported files imports only the supported ones`() {
         withHarness { harness ->
             val good = harness.writeText("good.txt", "Alpha\nBeta\n")

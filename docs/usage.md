@@ -17,7 +17,11 @@ Search.
    enabled image-capable LLM profile. The collection default only pre-selects it.
 5. Check the page count, destination and estimated cost, then confirm **Read …**
    or **Send …**. Unavailable methods show their reason.
-6. Follow processing progress and inspect the per-file results in import history.
+6. Follow file progress and the separate progress bar for pages of the current
+   document, then inspect the per-file results in import history. The page count
+   updates as each page is saved, including pages with direct text. If the total
+   is unknown, the bar is indeterminate and the processed count remains visible.
+   Saved page progress survives reloading and resuming an interrupted import.
 
 The picker opens on the Mac running the server and requires a graphical session.
 When that is unavailable, enter paths manually. Imports use immutable managed

@@ -226,6 +226,13 @@ internal class DocumentIngest(
                     is ExtractionEvent.UnitReady -> Unit
                 }
                 sink.deliver(document.id, fingerprint, event)
+                if (sink.stagesForReview) {
+                    when (event) {
+                        is ExtractionEvent.Progress -> content.recordProgress(document.id, fingerprint, event.unitKind, event.totalUnits)
+                        is ExtractionEvent.UnitReady -> content.recordProgress(document.id, fingerprint, event.unit.locator.unitKind, null)
+                        else -> Unit
+                    }
+                }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
