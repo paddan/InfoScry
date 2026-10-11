@@ -590,17 +590,7 @@ export async function fetchLlmCatalog(
   const send = async (): Promise<Response> => fetch(url, {
     headers: { [CSRF_HEADER]: await csrfToken() },
   });
-  let response = await send();
-  if (!response.ok) {
-    try {
-      await readJson(response);
-    } catch (failure) {
-      if (!(failure instanceof ApiError) || failure.code !== 'CATALOG_REQUIRES_CREDENTIALS') throw failure;
-      sessionToken = null;
-      response = await send();
-    }
-  }
-  const catalog = (await readJson(response)) as LlmCatalog;
+  const catalog = (await readJson(await sendWithSessionRetry(send, 'CATALOG_REQUIRES_CREDENTIALS'))) as LlmCatalog;
   // The server leaves an unknown field out, and the form tells "unknown" from "no" by comparing with null.
   return { ...catalog, models: catalog.models.map((model) => ({
     ...model,
@@ -753,19 +743,7 @@ export async function startAsk(
     body: JSON.stringify({ collection, question, profile }),
     signal,
   });
-  let response = await send();
-  if (!response.ok) {
-    try {
-      await readJson(response);
-    } catch (failure) {
-      if (!(failure instanceof ApiError) || failure.code !== 'MUTATION_REQUIRES_CREDENTIALS' || signal?.aborted) {
-        throw failure;
-      }
-      sessionToken = null;
-      response = await send();
-    }
-  }
-  return response;
+  return sendWithSessionRetry(send, 'MUTATION_REQUIRES_CREDENTIALS', signal);
 }
 
 /** Decode the API's newline-delimited SSE data frames, including frames split across network chunks. */
@@ -876,17 +854,7 @@ async function investigateRequest(path: string, body: unknown, signal?: AbortSig
     body: JSON.stringify(body),
     signal,
   });
-  let response = await send();
-  if (!response.ok) {
-    try {
-      await readJson(response);
-    } catch (failure) {
-      if (!(failure instanceof ApiError) || failure.code !== 'MUTATION_REQUIRES_CREDENTIALS' || signal?.aborted) throw failure;
-      sessionToken = null;
-      response = await send();
-    }
-  }
-  return response;
+  return sendWithSessionRetry(send, 'MUTATION_REQUIRES_CREDENTIALS', signal);
 }
 
 export async function* readInvestigationEvents(response: Response, signal?: AbortSignal): AsyncGenerator<InvestigateEvent> {
@@ -1479,17 +1447,26 @@ async function mutate(path: string, method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
       : { 'Content-Type': 'application/json', [CSRF_HEADER]: await csrfToken() },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  return readJson(await sendWithSessionRetry(send, 'MUTATION_REQUIRES_CREDENTIALS'));
+}
+
+/**
+ * Sends a request and, if the server reports the session's CSRF token is stale, clears it and
+ * retries once with a freshly fetched one. `send` is called again on retry so it picks up the new
+ * token; a caller whose `signal` is already aborted skips the retry and lets the failure through.
+ */
+async function sendWithSessionRetry(send: () => Promise<Response>, staleCode: string, signal?: AbortSignal): Promise<Response> {
   let response = await send();
   if (!response.ok) {
     try {
       await readJson(response);
     } catch (failure) {
-      if (!(failure instanceof ApiError) || failure.code !== 'MUTATION_REQUIRES_CREDENTIALS') throw failure;
+      if (!(failure instanceof ApiError) || failure.code !== staleCode || signal?.aborted) throw failure;
       sessionToken = null;
       response = await send();
     }
   }
-  return readJson(response);
+  return response;
 }
 
 /**

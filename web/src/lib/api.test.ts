@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -400,5 +400,77 @@ describe('effort profile JSON', () => {
     expect((await listLlmProfiles()).profiles[0].effortOverrides).toEqual(overrides);
     expect((await updateLlmProfile('p1', { ...input, effortOverrides: null })).effortOverrides).toBeNull();
     expect(bodies.map(b => b.effortOverrides)).toEqual([overrides, null]);
+  });
+});
+
+describe('stale-session retry', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('clears the cached token and retries a mutation once on MUTATION_REQUIRES_CREDENTIALS', async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    let patchAttempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-retry-mutate' }), { status: 200 });
+      patchAttempts += 1;
+      if (patchAttempts === 1) {
+        return new Response(JSON.stringify({ error: { code: 'MUTATION_REQUIRES_CREDENTIALS', message: 'stale' } }), { status: 401 });
+      }
+      return new Response(JSON.stringify({
+        collection: {
+          id: 'Archive', name: 'Renamed', createdAt: 't', updatedAt: 't',
+          description: null, lifecycle: 'ACTIVE', documentCount: 0, ocrLanguages: 'eng',
+        },
+      }), { status: 200 });
+    }));
+
+    const result = await renameCollection('Archive', 'Renamed');
+
+    expect(result.name).toBe('Renamed');
+    expect(patchAttempts).toBe(2);
+    const sessionCalls = calls.filter((call) => call.url === '/api/session');
+    expect(sessionCalls).toHaveLength(1);
+    const patches = calls.filter((call) => call.url === '/api/collections/Archive');
+    expect((patches[1].init?.headers as Record<string, string>)['X-InfoScry-Csrf']).toBe('csrf-retry-mutate');
+  });
+
+  it('clears the cached token and retries once on CATALOG_REQUIRES_CREDENTIALS', async () => {
+    let attempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-retry-catalog' }), { status: 200 });
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response(JSON.stringify({ error: { code: 'CATALOG_REQUIRES_CREDENTIALS', message: 'stale' } }), { status: 401 });
+      }
+      return new Response(JSON.stringify({ live: true, models: [] }), { status: 200 });
+    }));
+
+    const catalog = await fetchLlmCatalog('OPENAI_COMPATIBLE', 'http://localhost:11434/v1', null);
+
+    expect(catalog.models).toEqual([]);
+    expect(attempts).toBe(2);
+  });
+
+  it('retries a streaming request once and still hands back the raw Response', async () => {
+    const calls: { init?: RequestInit }[] = [];
+    let postAttempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-retry-ask' }), { status: 200 });
+      calls.push({ init });
+      postAttempts += 1;
+      if (postAttempts === 1) {
+        return new Response(JSON.stringify({ error: { code: 'MUTATION_REQUIRES_CREDENTIALS', message: 'stale' } }), { status: 401 });
+      }
+      return new Response('data:{"type":"done","text":"answer"}\n\n', { status: 200 });
+    }));
+
+    const response = await startAsk('Archive', 'question', 'profile-1');
+
+    expect(response.ok).toBe(true);
+    expect(postAttempts).toBe(2);
+    expect((calls[1].init?.headers as Record<string, string>)['X-InfoScry-Csrf']).toBe('csrf-retry-ask');
   });
 });
