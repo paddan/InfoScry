@@ -8,8 +8,12 @@ import infoscry.domain.UnitKind
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrPageResult
+import infoscry.ocr.PageImage
 import infoscry.ocr.PageImageRenderer
+import infoscry.ocr.PageOcrEngine
 import infoscry.ocr.PageOcrEngines
+import infoscry.ocr.writtenLayoutReferenceFor
+import infoscry.pdf.LayoutReference
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -470,6 +474,15 @@ class PdfExtractor(
                         // render that is kept is named: a working render is deleted below, and a record of
                         // it would be a reference to a file nobody can reopen.
                         sourceImage = image.artifactProvenance(input.artifactRoot).takeIf { keepsRenders },
+                        // A layout names the same image a page's sourceImage does; a page kept with no
+                        // durable image has no picture a selectable-PDF export could ever show a layer
+                        // over, so positioning it here would only persist a reference nothing can use.
+                        image = image.takeIf { keepsRenders },
+                        engine = engine,
+                        reading = verified,
+                        languages = input.settings.ocrLanguages,
+                        positioningEngine = attemptEngines.engineFor(OcrEngine.TESSERACT),
+                        artifactRoot = input.artifactRoot,
                     )
                     if (!keepsRenders) {
                         // The collector has committed the unit by the time `emit` returns, so a working image
@@ -542,8 +555,24 @@ class PdfExtractor(
         meanConfidence: Double? = null,
         sourceImage: SourceImageProvenance? = null,
         directText: String? = null,
+        /** Present only for an OCR unit whose reading image is being kept; see [layoutReferenceFor]. */
+        image: PageImage? = null,
+        engine: OcrEngine? = null,
+        reading: OcrPageResult? = null,
+        languages: String? = null,
+        positioningEngine: PageOcrEngine? = null,
+        artifactRoot: Path? = null,
     ) {
         val normalised = TextNormalizer.normalize(text)
+        val layoutReference = layoutReferenceFor(
+            image = image,
+            engine = engine,
+            reading = reading,
+            languages = languages,
+            positioningEngine = positioningEngine,
+            artifactRoot = artifactRoot,
+            canonicalText = normalised.extracted,
+        )
         emit(
             ExtractionEvent.UnitReady(
                 key = key,
@@ -564,8 +593,42 @@ class PdfExtractor(
                         ?.let(TextNormalizer::normalize)
                         ?.extracted
                         ?.takeIf(String::isNotBlank),
+                    layoutReference = layoutReference,
                 ),
             ),
+        )
+    }
+
+    /**
+     * Builds and durably writes this OCR unit's normalized text-geometry layout (ticket 04 of the
+     * selectable-PDF plan), bound to [canonicalText] — the *final, normalized* text this unit commits, never
+     * the engine's raw reading — or `null` when there is nothing to position: no image kept, no PDF geometry
+     * captured for it, or the local aligner could not place anything at all and chose to say so with no spans
+     * rather than fabricate coverage (see [infoscry.pdf.OcrGeometryAligner]).
+     *
+     * Positioning and the sidecar write both happen inside the unit boundary's permit this method is already
+     * called from, so the layout commits together with the unit it belongs to — but neither one can fail the
+     * unit: a local tool that cannot run right now, or any other failure of this best-effort step, is caught
+     * and reported as no layout, never as this page's reading having failed (acceptance vector 6).
+     */
+    private suspend fun layoutReferenceFor(
+        image: PageImage?,
+        engine: OcrEngine?,
+        reading: OcrPageResult?,
+        languages: String?,
+        positioningEngine: PageOcrEngine?,
+        artifactRoot: Path?,
+        canonicalText: String,
+    ): LayoutReference? {
+        if (image == null || engine == null || reading == null || languages == null || artifactRoot == null) return null
+        return writtenLayoutReferenceFor(
+            page = image,
+            canonicalText = canonicalText,
+            engine = engine,
+            reading = reading,
+            languages = languages,
+            positioningEngine = positioningEngine,
+            artifactRoot = artifactRoot,
         )
     }
 

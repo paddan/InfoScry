@@ -2853,6 +2853,7 @@ function stubFetch(overrides: {
   search?: (url: string) => Response | Promise<Response>;
   source?: (url: string) => Response | Promise<Response>;
   pageReview?: (url: string) => Response | Promise<Response>;
+  selectablePdf?: (url: string) => Response | Promise<Response>;
   ask?: (signal?: AbortSignal) => Response | Promise<Response>;
   asks?: (url: string) => Response | Promise<Response>;
   investigations?: (url: string) => Response | Promise<Response>;
@@ -2923,6 +2924,9 @@ function stubFetch(overrides: {
     if (url.includes('/imports')) {
       return (overrides.imports ?? (() => jsonResponse({ imports: [], total: 0 })))(url);
     }
+    if (url.includes('/selectable-pdf')) {
+      return (overrides.selectablePdf ?? ((target: string) => jsonResponse(notCreatedPdfStatus(target))))(url);
+    }
     if (url.endsWith('/documents/retry')) {
       return (overrides.retry ?? (() => jsonResponse({ collectionId: 'nightfall', acceptedJobIds: [], rejected: [] }, 202)))(url);
     }
@@ -2979,3 +2983,58 @@ function eventResponse(events: unknown[]): Response {
   });
   return { ok: true, status: 200, statusText: '', body: stream } as Response;
 }
+
+/** A status the selectable-PDF route answers for a revision with no copy yet; the revision is the one asked for. */
+function notCreatedPdfStatus(url: string) {
+  const revisionId = new URL(url, window.location.origin).searchParams.get('revision') ?? '';
+  return {
+    revisionId, key: null, state: 'NOT_CREATED', selectablePages: 0, totalPages: null,
+    blankPages: 0, unavailablePages: [], reasonCode: null,
+  };
+}
+
+describe('selectable PDF copies of cited sources', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
+  });
+  afterEach(() => {
+    cleanup();
+    window.localStorage.clear();
+  });
+
+  /** Searches the default collection and opens its one result: the cited source that bypasses PageReview. */
+  async function openCitedSearchResult(result: Record<string, unknown>) {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [result], staleFiltered: 0 }),
+      source: () => jsonResponse(sourcePage('A matching excerpt', 0, 19)),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax records' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Default.*Page 12/s }));
+    await screen.findByRole('region', { name: 'Source' });
+    return { calls };
+  }
+
+  it('shows the copy beside Open original for the citation revision and sends no create request', async () => {
+    const { calls } = await openCitedSearchResult({ ...hit('Default', 'Page 12'), revisionId: 'revision-1' });
+
+    const group = await screen.findByRole('group', { name: 'Selectable PDF copy' });
+    const original = screen.getByRole('link', { name: 'Open original' });
+    expect(group.parentElement).toBe(original.parentElement);
+    expect(await screen.findByRole('button', { name: 'Create PDF with selectable text' })).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/default/documents/document-1/selectable-pdf?revision=revision-1')).toBe(true);
+    expect(calls.some((call) => call.url.includes('/selectable-pdf') && call.init?.method === 'POST')).toBe(false);
+  });
+
+  it('shows the copy as unavailable and asks for nothing when the citation names no revision', async () => {
+    const { calls } = await openCitedSearchResult(hit('Default', 'Page 12'));
+
+    expect(await screen.findByText('Selectable PDF is unavailable for this source.')).toBeTruthy();
+    expect(calls.some((call) => call.url.includes('/selectable-pdf'))).toBe(false);
+    expect(screen.getByRole('link', { name: 'Open original' })).toBeTruthy();
+  });
+});

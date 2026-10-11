@@ -169,6 +169,7 @@ class CandidateRevisionSink(
             sourceImage = draft.sourceImage,
             approval = approval,
             unitKey = event.key,
+            layoutReference = draft.layoutReference,
         )
     }
 }

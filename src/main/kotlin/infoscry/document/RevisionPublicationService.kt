@@ -58,6 +58,24 @@ data class PublicationRecoveryReport(
 )
 
 /**
+ * What [RevisionPublicationService] calls once a revision's publication is durably recorded: the one
+ * seam the selectable-PDF feature (ticket 06 of its plan) hooks to queue a derived artifact, without
+ * this file depending on that package.
+ *
+ * Every implementation must be safe to call more than once for the same revision (a crash-recovery path
+ * calls it again) and must never throw: a failure here must never be mistaken for a failure of the
+ * publication it follows. [RevisionPublicationService] does not catch exceptions from it as a safety
+ * net — a hook that throws is a bug in the hook, not a reason to fail the publication silently.
+ */
+fun interface RevisionPublishedHook {
+    fun onPublished(documentId: DocumentId, collectionId: CollectionId, revisionId: String)
+
+    companion object {
+        val NONE = RevisionPublishedHook { _, _, _ -> }
+    }
+}
+
+/**
  * Publishes a staged candidate revision of one document, and finishes the publications a previous
  * process left behind.
  *
@@ -89,6 +107,12 @@ class RevisionPublicationService(
     private val index: () -> LuceneIndex,
     private val gate: RevisionSnapshotGate = RevisionSnapshotGate(),
     private val cleanupDrainMillis: Long = CLEANUP_DRAIN_MILLIS,
+    /**
+     * Called once a revision's publication is durably recorded as PUBLISHED, for import, rescan and
+     * restore alike — see [RevisionPublishedHook]. The default does nothing; production wires the
+     * selectable-PDF service's queueing here.
+     */
+    private val onPublished: RevisionPublishedHook = RevisionPublishedHook.NONE,
 ) {
 
     /** The revision scope a reader that starts now must search under. */
@@ -205,6 +229,9 @@ class RevisionPublicationService(
             observe(PublicationStep.SNAPSHOT_PUBLISHED)
             revisions.markPublished(intent.id)
             observe(PublicationStep.PUBLISHED)
+            // A derived-artifact feature (selectable PDF) queues its own work from here; a failure in it
+            // must never be mistaken for a failure of this publication, which has already succeeded.
+            onPublished.onPublished(documentId, document.collectionId, candidateRevisionId)
 
             // 4. The replaced reading's rows wait for the readers that may still be inside them.
             cleanup(intent)
@@ -282,6 +309,10 @@ class RevisionPublicationService(
             // An attempt that never reached PUBLISHED is still resolved below, from its own intent; only a
             // published one is a cleanup that is owed and nothing else will do.
             if (intent.publishedAt == null) continue
+            // Idempotent, and the only place this startup repairs a publish whose own onPublished call
+            // never ran because the process died between markPublished and it (never between it and the
+            // index write below, which only ever runs for an intent this loop already knows is published).
+            onPublished.onPublished(intent.documentId, intent.collectionId, intent.targetRevisionId)
             if (intent.baseRevisionId != null) {
                 index().deleteSupersededRows(intent.documentId, intent.targetRevisionId)
             }
@@ -345,6 +376,7 @@ class RevisionPublicationService(
         observe(PublicationStep.SNAPSHOT_PUBLISHED)
         revisions.markPublished(intent.id)
         observe(PublicationStep.PUBLISHED)
+        onPublished.onPublished(intent.documentId, intent.collectionId, intent.targetRevisionId)
         cleanup(intent)
         observe(PublicationStep.CLEANED)
     }

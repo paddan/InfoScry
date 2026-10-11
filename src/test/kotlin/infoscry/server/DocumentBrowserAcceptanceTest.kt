@@ -219,6 +219,31 @@ class DocumentBrowserAcceptanceTest {
     }
 
     @Test
+    fun `Selectable PDF actions build through the real pipeline, serve a verified download and fit every viewport width`() {
+        startServer()
+        // startServer() alone starts no background job runner (unlike startRescanServer(), which wires its
+        // own RESCAN-only runner): the real production composition root is attached explicitly here, with
+        // the same fake embedder/chunker every other browser-acceptance test uses, so the real
+        // SelectablePdfJobHandler this feature registers in that one composition root actually runs.
+        infoscry.jobs.ImportJobHandler.attachTo(
+            context(),
+            documentEmbedder = { TestDocumentEmbedder() },
+            chunker = Chunker(WhitespaceTokenCounter(prefixTokens = 2, specialTokens = 1)),
+        )
+        runScenario("selectable-pdf")
+        val revisionId = context().revisions.activeRevisionId(seeded.documentId)!!
+        val status = context().selectablePdfService.status(CollectionId("default"), seeded.documentId, revisionId)
+        assertEquals(infoscry.pdf.PdfArtifactState.READY, status.state, "the three native pages build to a fully selectable export")
+        assertEquals(3, status.totalPages)
+        assertEquals(3, status.selectablePages)
+        assertEquals(
+            1,
+            context().jobs.list(limit = 50).count { it.type == JobType.SELECTABLE_PDF },
+            "the browser's repeated GET/POST never enqueued a second selectable-PDF job",
+        )
+    }
+
+    @Test
     fun `page resources stay paired across delayed and missing images and unsupported text stays readable`() {
         val textDocumentId = seedResourceTextDocument()
         startServer()

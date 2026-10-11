@@ -1002,6 +1002,124 @@ function pageReviewPath(collectionId: string, documentId: string): string {
   return `/api/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/page-review`;
 }
 
+// ---- selectable PDF copies of one published revision ----
+
+/** The state of one revision's selectable PDF copy. NOT_CREATED means no artifact exists yet. */
+export type PdfArtifactState = 'NOT_CREATED' | 'QUEUED' | 'BUILDING' | 'READY' | 'PARTIAL' | 'FAILED';
+
+/** How one physical page of the copy was written. UNAVAILABLE pages carry a reason; the others do not. */
+export type PdfPageCoverage = 'NATIVE' | 'OCR' | 'BLANK' | 'UNAVAILABLE';
+
+export type PdfPageResult = {
+  ordinal: number;
+  coverage: PdfPageCoverage;
+  reasonCode: string | null;
+};
+
+/**
+ * One revision's selectable PDF status. `key` names the attempt, `totalPages` is null until measured,
+ * and `reasonCode` is a safe code, never a message. The server writes the nullable fields as explicit
+ * nulls; the decoder also reads an omitted field as null so the UI never renders `undefined`.
+ */
+export type PdfArtifactStatus = {
+  revisionId: string;
+  key: string | null;
+  state: PdfArtifactState;
+  selectablePages: number;
+  totalPages: number | null;
+  blankPages: number;
+  unavailablePages: PdfPageResult[];
+  reasonCode: string | null;
+};
+
+export type CreateSelectablePdfRequest = { revisionId: string; retry: boolean };
+
+const PDF_ARTIFACT_STATES: readonly PdfArtifactState[] = ['NOT_CREATED', 'QUEUED', 'BUILDING', 'READY', 'PARTIAL', 'FAILED'];
+const PDF_PAGE_COVERAGES: readonly PdfPageCoverage[] = ['NATIVE', 'OCR', 'BLANK', 'UNAVAILABLE'];
+
+function selectablePdfPath(collectionId: string, documentId: string): string {
+  return `/api/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/selectable-pdf`;
+}
+
+/**
+ * Read one revision's status. A GET only: it never generates, enqueues or calls a provider, so opening a
+ * source may call it freely.
+ */
+export async function getSelectablePdfStatus(
+  collectionId: string,
+  documentId: string,
+  revisionId: string,
+): Promise<PdfArtifactStatus> {
+  const response = await fetch(`${selectablePdfPath(collectionId, documentId)}?revision=${encodeURIComponent(revisionId)}`);
+  return decodePdfArtifactStatus(await readJson(response));
+}
+
+/**
+ * Create the copy for a revision, or retry an unsuccessful one. The server returns the current identity, so
+ * a repeated call returns what the first one started. `retry` is always sent explicitly.
+ */
+export async function createSelectablePdf(
+  collectionId: string,
+  documentId: string,
+  request: CreateSelectablePdfRequest,
+): Promise<PdfArtifactStatus> {
+  const body = await mutate(selectablePdfPath(collectionId, documentId), 'POST', {
+    revisionId: request.revisionId,
+    retry: request.retry === true,
+  });
+  return decodePdfArtifactStatus(body);
+}
+
+/**
+ * The relative URL of a verified copy. `inline` opens it in the browser's viewer; otherwise the browser
+ * downloads it. Opening or downloading performs no generation.
+ */
+export function selectablePdfFileHref(
+  collectionId: string,
+  documentId: string,
+  revisionId: string,
+  key: string,
+  inline: boolean,
+): string {
+  return `${selectablePdfPath(collectionId, documentId)}/file?revision=${encodeURIComponent(revisionId)}&key=${encodeURIComponent(key)}&inline=${inline ? 'true' : 'false'}`;
+}
+
+function decodePdfArtifactStatus(value: unknown): PdfArtifactStatus {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const state = raw.state;
+  if (typeof raw.revisionId !== 'string' || !PDF_ARTIFACT_STATES.includes(state as PdfArtifactState)) {
+    throw new ApiError('INVALID_RESPONSE', 'the server answered with a selectable PDF status this page cannot read');
+  }
+  const key = typeof raw.key === 'string' ? raw.key : null;
+  // A queued, building, ready or partial artifact always names its attempt; NOT_CREATED and FAILED may not.
+  if (key === null && ['QUEUED', 'BUILDING', 'READY', 'PARTIAL'].includes(state as string)) {
+    throw new ApiError('INVALID_RESPONSE', 'the server answered with a selectable PDF without its attempt key');
+  }
+  const unavailable = Array.isArray(raw.unavailablePages) ? raw.unavailablePages : [];
+  return {
+    revisionId: raw.revisionId,
+    key,
+    state: state as PdfArtifactState,
+    selectablePages: typeof raw.selectablePages === 'number' ? raw.selectablePages : 0,
+    totalPages: typeof raw.totalPages === 'number' ? raw.totalPages : null,
+    blankPages: typeof raw.blankPages === 'number' ? raw.blankPages : 0,
+    unavailablePages: unavailable.map(decodePdfPageResult),
+    reasonCode: typeof raw.reasonCode === 'string' ? raw.reasonCode : null,
+  };
+}
+
+function decodePdfPageResult(value: unknown): PdfPageResult {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  if (typeof raw.ordinal !== 'number' || !PDF_PAGE_COVERAGES.includes(raw.coverage as PdfPageCoverage)) {
+    throw new ApiError('INVALID_RESPONSE', 'the server answered with a selectable PDF page this page cannot read');
+  }
+  return {
+    ordinal: raw.ordinal,
+    coverage: raw.coverage as PdfPageCoverage,
+    reasonCode: typeof raw.reasonCode === 'string' ? raw.reasonCode : null,
+  };
+}
+
 /**
  * Ask the server to open the native pick dialog for files (`directory = false`) or one folder.
  * Returns the absolute paths the user chose, in pick order.

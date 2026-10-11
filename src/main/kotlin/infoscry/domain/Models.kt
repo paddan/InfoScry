@@ -225,6 +225,16 @@ enum class JobType {
      * `ocr_operations`, because a rescan outlives the attempt that started it.
      */
     RESCAN,
+
+    /**
+     * Builds the derived, selectable-text PDF copy of one published revision (selectable-PDF plan,
+     * ticket 06).
+     *
+     * It depends on nothing an import, a rescan or a restore needs: it reads only already-committed
+     * revision text, images and layouts, and a failure here never changes the published reading, the
+     * search index or embeddings. There is no GPU or provider work anywhere in this job.
+     */
+    SELECTABLE_PDF,
 }
 
 /**

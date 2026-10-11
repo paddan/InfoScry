@@ -13,6 +13,7 @@ import infoscry.document.RevisionPublicationService
 import infoscry.embedding.DocumentEmbedder
 import infoscry.extract.TextNormalizer
 import infoscry.jobs.JobStage
+import infoscry.pdf.LayoutReference
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.DocumentBeingDeletedException
 import infoscry.storage.DocumentRevisionStore
@@ -33,6 +34,13 @@ internal data class StagedCandidatePage(
     val confidence: Double?,
     val artifactRelativePath: String?,
     val artifactSha256: String?,
+    /**
+     * This page's normalized text-geometry layout (ticket 04 of the selectable-PDF plan), bound to [text]
+     * once normalized the same way [draftOf] normalizes it. Inherited, never recomputed, when [text] is the
+     * page's unchanged baseline; built fresh only when the reading genuinely replaces it. Absent is the
+     * honest answer for a page with nothing to position, never a guess.
+     */
+    val layoutReference: LayoutReference? = null,
 )
 
 /**
@@ -89,8 +97,23 @@ internal class CandidateRevisionPhases(
      *   a collection that runs without a reviewer; nothing is left pending that nobody could ever resolve.
      *
      * With a reviewer configured, the first three rules are the whole decision, and nothing changes for it.
+     *
+     * [engine], [languages] and [positioningEngine] exist for exactly one purpose: when this page's text is
+     * genuinely new (the second branch below), its normalized text-geometry layout is built here, through
+     * [infoscry.ocr.writtenLayoutReferenceFor], and durably written under [documentArtifactRoot] before this
+     * method returns — so a layout is either committed together with the page that names it, or the whole
+     * attempt was interrupted before either committed, never one without the other. A page whose text is
+     * unchanged from its baseline inherits that baseline's own layout reference exactly, including its
+     * absence: identical bytes never fabricate a layout nobody positioned (acceptance vector 4).
      */
-    fun acceptedPageOf(page: RescanPage, reading: OcrPageResult): StagedCandidatePage {
+    suspend fun acceptedPageOf(
+        page: RescanPage,
+        reading: OcrPageResult,
+        engine: OcrEngine,
+        languages: String,
+        positioningEngine: PageOcrEngine?,
+        documentArtifactRoot: Path,
+    ): StagedCandidatePage {
         val baseline = page.baseline
         val baselineText = baseline?.extractedText
         return if (baseline != null && !baselineText.isNullOrBlank() && baselineText == reading.text) {
@@ -101,8 +124,21 @@ internal class CandidateRevisionPhases(
                 confidence = baseline.meanConfidence,
                 artifactRelativePath = baseline.artifactRelativePath,
                 artifactSha256 = baseline.artifactSha256,
+                layoutReference = baseline.layoutReference,
             )
         } else {
+            val image = page.image
+            val layoutReference = image?.let {
+                writtenLayoutReferenceFor(
+                    page = it,
+                    canonicalText = TextNormalizer.normalize(reading.text).extracted,
+                    engine = engine,
+                    reading = reading,
+                    languages = languages,
+                    positioningEngine = positioningEngine,
+                    artifactRoot = documentArtifactRoot,
+                )
+            }
             StagedCandidatePage(
                 text = reading.text,
                 extractionMethod = ExtractionMethod.OCR,
@@ -110,6 +146,7 @@ internal class CandidateRevisionPhases(
                 confidence = reading.meanConfidence,
                 artifactRelativePath = reading.artifactRelativePath,
                 artifactSha256 = reading.artifactSha256,
+                layoutReference = layoutReference,
             )
         }
     }
@@ -142,6 +179,7 @@ internal class CandidateRevisionPhases(
                 ?: page.baseline?.sourceImage,
             approval = stagedPage.approval,
             producerRevisionId = producerRevisionId,
+            layoutReference = stagedPage.layoutReference,
         )
     }
 

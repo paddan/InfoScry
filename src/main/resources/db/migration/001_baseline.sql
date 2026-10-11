@@ -103,7 +103,7 @@ CREATE INDEX documents_collection_status ON documents (collection_id, status);
 CREATE TABLE jobs (
     id TEXT NOT NULL PRIMARY KEY,
     collection_id TEXT REFERENCES collections (id) ON DELETE CASCADE,
-    type TEXT NOT NULL CHECK (type IN ('IMPORT', 'REINDEX', 'RETRY', 'RESCAN')),
+    type TEXT NOT NULL CHECK (type IN ('IMPORT', 'REINDEX', 'RETRY', 'RESCAN', 'SELECTABLE_PDF')),
     state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETE', 'FAILED', 'CANCELLED')),
     stage TEXT,
     completed INTEGER NOT NULL DEFAULT 0 CHECK (completed >= 0),
@@ -709,8 +709,28 @@ CREATE TABLE page_text_revisions (
     -- The extractor key this page was read for, so a resumed attempt skips a page it already staged.
     -- Null for pages that no resumable attempt staged.
     unit_key                    TEXT,
+    -- `layout_relative_path` and `layout_sha256` name a normalized text-geometry sidecar (ticket 04 of the
+    -- selectable-PDF plan): a versioned mapping of this page's canonical text onto positioned spans over its
+    -- reading image, kept separate from the engine/TSV artifact above. The path resolves the same way
+    -- `source_image_relative_path` does, against the document's own `artifacts/` directory, and is never
+    -- absolute or able to climb out of it. Both columns are present together or absent together: a page this
+    -- pipeline never positioned, or one committed before this column existed, has neither. Nothing here is
+    -- read for search, publication or page-reading success; it only ever affects a selectable-PDF export, and
+    -- a page with no layout here is simply not selectable in that export.
+    layout_relative_path         TEXT    CHECK (
+        layout_relative_path IS NULL OR (
+            length(trim(layout_relative_path)) > 0
+            AND substr(layout_relative_path, 1, 1) NOT IN ('/', '\')
+            AND layout_relative_path NOT GLOB '[A-Za-z]:*'
+            AND ('/' || replace(layout_relative_path, '\', '/') || '/') NOT LIKE '%/../%'
+            AND ('/' || replace(layout_relative_path, '\', '/') || '/') NOT LIKE '%/./%'
+            AND ('/' || replace(layout_relative_path, '\', '/') || '/') NOT LIKE '%//%'
+        )
+    ),
+    layout_sha256                TEXT    CHECK (layout_sha256 IS NULL OR length(layout_sha256) = 64),
     PRIMARY KEY (revision_id, ordinal),
     CHECK ((artifact_relative_path IS NULL) = (artifact_sha256 IS NULL)),
+    CHECK ((layout_relative_path IS NULL) = (layout_sha256 IS NULL)),
     CHECK (
         (
             source_image_root IS NULL
@@ -826,6 +846,60 @@ CREATE TABLE revision_restores (
 );
 
 CREATE INDEX revision_restores_document ON revision_restores (document_id, created_at);
+
+-- ---------------------------------------------------------------------------------------------
+-- Selectable-PDF artifacts (ticket 06 of the selectable-PDF plan)
+-- ---------------------------------------------------------------------------------------------
+--
+-- One row per (document, revision): the durable artifact row is also the "desired" marker a crash
+-- between publication and job enqueue recovers from, so there is one row to reason about rather than
+-- a separate intent table. A row starts QUEUED the moment a publication (import, rescan or restore)
+-- durably commits; `job_id` names the attempt that owns it now, so a crash between recording the row
+-- and enqueueing its job is found by scanning rows with no live job, never by scanning every published
+-- revision in the archive — only revisions this feature actually queued ever get a row at all, which is
+-- what keeps a first run against an archive from re-processing its whole history.
+--
+-- `key` is the SELECTABLE_PDF_KEY_VERSION cache key ([selectablePdfArtifactKey], ticket 02): present
+-- once an attempt has resolved its inputs, null while merely QUEUED. `manifest_*`/`pdf_*` are present
+-- together or absent together and only once the writer's output has been reopened and hash-verified,
+-- never merely trusted from an in-process return value. `unavailable_pages` is the manifest's own
+-- `PdfPageResult` list for UNAVAILABLE pages, as JSON, so a PARTIAL status can explain itself without a
+-- second read of the manifest file. `attempt` counts explicit retries, so a stale job referencing an
+-- old attempt is recognisably stale rather than merely absent.
+--
+-- `revision_id` is deliberately not a foreign key with ON DELETE CASCADE from `document_revisions`:
+-- a revision row is never deleted on its own, only through its document, which this table's own
+-- `document_id` cascade already follows. `document_id` cascades so a document's deletion removes this
+-- row the same way it removes every other derived row, with no extra cleanup step of its own.
+CREATE TABLE selectable_pdf_artifacts (
+    document_id             TEXT    NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    revision_id             TEXT    NOT NULL,
+    collection_id           TEXT    NOT NULL CHECK (length(collection_id) > 0),
+    state                   TEXT    NOT NULL CHECK (state IN ('QUEUED', 'BUILDING', 'READY', 'PARTIAL', 'FAILED')),
+    key                     TEXT    CHECK (key IS NULL OR length(key) = 64),
+    job_id                  TEXT,
+    manifest_relative_path  TEXT,
+    manifest_sha256         TEXT    CHECK (manifest_sha256 IS NULL OR length(manifest_sha256) = 64),
+    pdf_relative_path       TEXT,
+    pdf_sha256              TEXT    CHECK (pdf_sha256 IS NULL OR length(pdf_sha256) = 64),
+    pdf_bytes               INTEGER CHECK (pdf_bytes IS NULL OR pdf_bytes > 0),
+    total_pages             INTEGER CHECK (total_pages IS NULL OR total_pages >= 0),
+    selectable_pages        INTEGER NOT NULL DEFAULT 0 CHECK (selectable_pages >= 0),
+    blank_pages             INTEGER NOT NULL DEFAULT 0 CHECK (blank_pages >= 0),
+    unavailable_pages       TEXT,
+    reason_code             TEXT,
+    attempt              INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+    created_at           TEXT    NOT NULL,
+    updated_at           TEXT    NOT NULL,
+    PRIMARY KEY (document_id, revision_id),
+    CHECK ((manifest_relative_path IS NULL) = (manifest_sha256 IS NULL)),
+    CHECK ((pdf_relative_path IS NULL) = (pdf_sha256 IS NULL))
+);
+
+-- What recovery scans: a row whose job may be stale or missing. Narrow and bounded by construction,
+-- because only a row this feature itself created ever reaches QUEUED or BUILDING.
+CREATE INDEX selectable_pdf_artifacts_pending ON selectable_pdf_artifacts (state)
+    WHERE state IN ('QUEUED', 'BUILDING');
 
 -- ---------------------------------------------------------------------------------------------
 -- OCR page reviews and validation records

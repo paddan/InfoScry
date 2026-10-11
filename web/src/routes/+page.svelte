@@ -5,6 +5,7 @@
   import HistoryColumn from '../lib/HistoryColumn.svelte';
   import SourceWorkspace from '../lib/SourceWorkspace.svelte';
   import PageReview from '../lib/PageReview.svelte';
+  import SelectablePdfActions from '../lib/SelectablePdfActions.svelte';
   import DocumentRescan from '../lib/DocumentRescan.svelte';
   import StartReadingDialog from '../lib/StartReadingDialog.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
@@ -1185,6 +1186,7 @@
         narrow={workspaceNarrow}
         onBack={backFromPageReview}
         onScanPages={pageReviewDocument.historical ? undefined : requestPageScan}
+        visible={sourcePaneVisible}
       />
       {/key}
       {#if !pageReviewDocument.historical}
@@ -1201,7 +1203,15 @@
         />
       {/if}
     {:else if selectedHit !== null}
-      <p><a href={originalHref(selectedHit)} target="_blank" rel="noopener noreferrer">Open original</a></p>
+      <div class="source-original" style="display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin: 0 0 .8rem;">
+        <a href={originalHref(selectedHit)} target="_blank" rel="noopener noreferrer">Open original</a>
+        <SelectablePdfActions
+          collectionId={selectedHit.collectionId}
+          documentId={selectedHit.documentId}
+          revisionId={selectedHit.revisionId ?? null}
+          visible={sourcePaneVisible}
+        />
+      </div>
       {#if savedExcerpt === null && source !== null && source.position !== undefined && source.unitCount !== undefined && source.unitCount > 1}
         <nav class="source-pager" aria-label="Pages of this document">
           <button type="button" onclick={() => openNeighbour(source?.previousId)} disabled={loadingSource || source.previousId === undefined}>Previous</button>

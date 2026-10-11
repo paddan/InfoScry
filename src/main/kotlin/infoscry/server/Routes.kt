@@ -525,6 +525,7 @@ fun Application.configureRoutes(
 
         configureSearchRoutes(context, context.mutations)
         configureSourceRoutes(context)
+        configureSelectablePdfRoutes(context)
         configurePageReviewRoutes(context)
         configureLlmProfileRoutes(context)
         configureOcrProfileRoutes(context)

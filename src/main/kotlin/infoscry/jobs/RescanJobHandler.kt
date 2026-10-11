@@ -91,6 +91,11 @@ class RescanJobHandler internal constructor(
     private val afterCandidatePublished: suspend (JobId) -> Unit = {},
     /** A narrow seam for exercising recovery after a page checkpoint is durable. */
     private val afterPageCommitted: suspend (JobId, Int) -> Unit = { _, _ -> },
+    /**
+     * A narrow seam for exercising recovery after a page's reading (and any layout sidecar it wrote) is
+     * decided, but before that decision is committed as a durable page. See ticket 04's acceptance vector 5.
+     */
+    private val afterPageStaged: suspend (JobId, Int) -> Unit = { _, _ -> },
     /** A narrow seam for observing the resumed checkpoint before page iteration begins. */
     private val afterInitialProgressReported: suspend (JobId) -> Unit = {},
     /** A narrow seam immediately before publication changes the document's authoritative revision. */
@@ -234,6 +239,13 @@ class RescanJobHandler internal constructor(
                     "admit a new rescan, which will be identified by the runtime in use",
             )
         }
+        // The engine a separate local positioning pass uses for any reading engine but Tesseract itself (see
+        // infoscry.ocr.positioningAnchors): always local, never dispatched, so it is asked for with no
+        // dispatch authority at all. Tesseract's own reading already supplies its own anchors and never
+        // needs this; a build with no Tesseract engine configured answers null, which is "no local
+        // positioning available" rather than a failure.
+        val positioningEngine: PageOcrEngine? =
+            if (snapshot.engine == infoscry.ocr.OcrEngine.TESSERACT) null else engineFor(infoscry.ocr.OcrEngine.TESSERACT, snapshot, null)
         val baselineRevisionId = operation.baseRevisionId
         if (revisions.activeRevisionId(document.id) != baselineRevisionId) {
             // Another publication replaced the reading this operation was admitted against. Comparing pages
@@ -332,10 +344,15 @@ class RescanJobHandler internal constructor(
             val outcome = read(page, engine, snapshot)
             val stagedPage = outcome.reading?.let { reading ->
                 phases.acceptedPageOf(
-                    page,
-                    reading,
+                    page = page,
+                    reading = reading,
+                    engine = snapshot.engine,
+                    languages = snapshot.language,
+                    positioningEngine = positioningEngine,
+                    documentArtifactRoot = documentArtifactRoot,
                 )
             }
+            afterPageStaged(job.id, page.ordinal)
             stage.run(STAGE_COMMIT) {
                 if (stagedPage != null) {
                     revisions.appendPage(
@@ -446,6 +463,7 @@ class RescanJobHandler internal constructor(
                     confidence = baselinePage.meanConfidence,
                     artifactRelativePath = baselinePage.artifactRelativePath,
                     artifactSha256 = baselinePage.artifactSha256,
+                    layoutReference = baselinePage.layoutReference,
                 ),
                 documentArtifactRoot = documentArtifactRoot,
                 producerRevisionId = baselinePage.producerRevisionId,

@@ -132,6 +132,23 @@ class TesseractOcr(
     }
 
     /**
+     * Word boxes for [page], read purely to anchor a local text-geometry alignment (ticket 04 of the
+     * selectable-PDF plan) rather than as a reading: only [TesseractReading.boxes] is kept, the recognised
+     * text is discarded, and no TSV artifact is written — the artifact that belongs to a page's actual
+     * reading is written by [transcribe], never by this seam, so the two kinds of reference are never
+     * confused with each other. This still runs the one tool and the one subprocess bound every other call
+     * on this class does; a missing tool answers the same refusal [transcribe] would.
+     */
+    override suspend fun positionAnchors(page: PageImage, languages: String): List<OcrWordBox> {
+        val workingDirectory = Files.createTempDirectory(WORK_DIRECTORY_PREFIX)
+        try {
+            return run(page.imagePath, languages, workingDirectory).reading.boxes
+        } finally {
+            workingDirectory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
      * Reads one page of a container whose pictures are working material rather than managed page images.
      *
      * A chapter of a book archive is drawn into an image for the length of one extraction and deleted

@@ -18,7 +18,7 @@ application suites.
 | LLM profiles | CLI/Admin management, role defaults, provider presets and model catalog; new Admin profiles suggest a provider/model name until manually edited; tool calling measured from Admin or the CLI |
 | Ask | Streaming answers with validated citations and saved answer history |
 | Investigate | Bounded research, retained-evidence follow-ups, one adopted answer per turn and saved conversations; an unmeasured profile is marked and refused with the remedy |
-| Sources | Bounded extracted-source viewer and managed-original link |
+| Sources | Bounded extracted-source viewer, managed-original link and selectable-text PDF copies (durable generation, repeat/retry, rescan/Restore identity; automated fake-provider coverage only — native-reader and real-engine positioning are separate open gates) |
 
 ## OCR engines and document rescanning
 
@@ -151,6 +151,85 @@ and 432 frontend tests, zero failures/errors/skips. Documentation and diff
 checks passed. The installed server requires rebuild/restart to use this change;
 real-provider and human accessibility gates remain separate.
 
+## Selectable-text PDF copies, automated acceptance (2026-10-11)
+
+The [PDF text-selection plan](plans/2026-10-10-selectable-pdf.md) (tickets
+01–08: models, local alignment, PDF writer, durable jobs/service, HTTP routes,
+UI) was integrated and acceptance-tested against ticket
+[09](tickets/selectable-pdf/09-integrated-acceptance.md)'s automated scope: the
+acceptance vectors that fake/local providers can exercise end to end, not the
+manual native-reader or real-engine gates.
+
+A new `infoscry.pdf.SelectablePdfLifecycleTest` runs the real import/publish/
+job pipeline (no mocked service calls) and independently re-opens the produced
+bytes with PDFBox, rather than trusting the writer's or service's own report:
+exact copied text on both a native and an OCR page, every OCR glyph's box
+inside its span's rectangle plus the writer's fixed 1.5pt self-consistency
+inset, no duplicate text layer, an unchanged managed original, every physical
+page present, and no duplicate artifact file or job across repeated GET/POST.
+A second test rescans one selected page with a counted fake Tesseract-shaped
+engine (its own word boxes, never a separate alignment pass): only that page's
+export layer changes, the untouched native page and the historical revision's
+own export file are byte-for-byte unaffected, repeated GET/POST/retry never
+call the engine again, and restoring the original revision produces a new,
+distinctly-keyed current export that inherits the restored revision's own
+layout — not the latest unrelated one. Crash/retry/deletion/late-completion
+convergence (plan acceptance vector 3) is already covered through the same
+real pipeline by the existing `SelectablePdfRecoveryTest` and
+`SelectablePdfServiceTest`; this file was re-run unchanged (174 tests,
+`infoscry.pdf.*`, 0 failures) rather than duplicated.
+
+`DocumentBrowserAcceptanceTest` gained one Chromium scenario
+(`selectable-pdf`): opening a document's page review, using the real **Create
+PDF with selectable text** control, polling the real status route to READY,
+downloading the real file through the real route and verifying its bytes
+(`%PDF-` signature, non-trivial size, byte-identical on a repeated download),
+a repeated POST create answering the same verified identity with no second
+job, and the controls fitting 390/1024/1440/1920px with keyboard focus
+reaching the visible "Open PDF with selectable text" link. The full
+`DocumentBrowserAcceptanceTest` class (8 tests, including this one) passed
+together, which is this ticket's evidence that the addition does not affect
+the existing historical-citation and source-selection scenarios in the same
+file. `InvestigateBrowserAcceptanceTest` was not touched and not re-run: this
+feature does not reach Investigate's own conversation flow.
+
+One real, unrelated-to-tickets-01–08 production gap was found while building
+the browser scenario and is reported here rather than patched: a document's
+plain first import commits through `StoredUnitsSink` directly, which never
+calls `RevisionPublicationService.publish()` — so the `RevisionPublishedHook`
+that auto-queues selectable-PDF generation never fires for a first import, in
+this codebase's existing production composition, not only in this test. Only
+a later rescan or Restore (which do call `publish()`) queues it automatically.
+This is a sharper, independently-confirmed instance of the gap ticket 04
+already recorded ("a plain first import... does not" get a selectable-PDF
+layout); the browser scenario above works around it exactly as the spec's own
+fallback describes ("Existing archived PDFs are eligible through an explicit
+Create PDF with selectable text action"), by clicking that control rather than
+assuming automatic queueing. Closing the gap — wiring the hook into the first-
+import commit path, or accepting "explicit Create only" as the first-import
+behavior — is a product decision for the coordinator/owner, not made here.
+
+Documentation (this file, `README.md`, `docs/usage.md`) was updated to the
+state above, distinguishing durable/repeatable generation and the
+automated-test byte/position evidence from the open manual gates: native
+Preview/second-reader selection and clipboard comparison, real Tesseract/Surya/
+an authorized real LLM reading, and CoreML/accessibility. None of those manual
+or real-provider checks were run or claimed here.
+
+The coordinator's independent final gate ran 2026-10-11: a from-cold
+`./gradlew check -PskipFrontend` passed in 5m12s with 1813 backend and 470
+frontend tests, zero failures; a from-cold `./gradlew externalTest --tests
+infoscry.server.DocumentBrowserAcceptanceTest` passed with all 8 scenarios,
+zero failures; `git diff --check` found and the coordinator fixed one trivial
+trailing-blank-line issue in `page.test.ts`, re-verified clean (470/470
+unaffected). The first-import auto-queue gap above was reviewed and
+deliberately left open rather than fixed in this pass — it is a cross-cutting
+change to `ImportPipeline`/`StoredUnitsSink`/`ContentUnit`, none of which any
+ticket in this plan owns, and the existing explicit **Create PDF with
+selectable text** control already covers it; closing it is a separate,
+future decision. Native Preview/second-reader selection and real
+Tesseract/Surya/LLM/CoreML positioning remain open, owner-run manual gates.
+
 ## Recorded verification
 
 The previous README recorded a local 2026-09-24 run of `check`, `externalTest`
@@ -258,12 +337,16 @@ older response, inclusive date bounds, a single-digit query, mode changes and
 safe highlighted source text. It uses the built reader, local server, temporary
 archive and a deterministic local query embedder.
 
-**Document and Ask:** three Chromium scenarios cover Admin page navigation and
-focus wrapping, one selected page in a three-page PDF rescan, and opening an
-Ask citation after its recorded revision becomes historical, without a live
-pager. They verify selected-page progress, one fake-engine call and all three
-stable page IDs after publication. Generated PDFs, fake reading/answer providers
-and deterministic test embeddings keep this separate from OCR-quality gates.
+**Document and Ask:** Chromium scenarios cover Admin page navigation and
+focus wrapping, one selected page in a three-page PDF rescan, opening an
+Ask citation after its recorded revision becomes historical without a live
+pager, and (2026-10-11) building a selectable-text PDF copy through its real
+UI controls, downloading and verifying the actual bytes, and fitting
+390/1024/1440/1920px. They verify selected-page progress, one fake-engine call,
+all three stable page IDs after publication, and (for the selectable-PDF
+scenario) a verified READY export with no duplicate job. Generated PDFs, fake
+reading/answer providers and deterministic test embeddings keep this separate
+from OCR-quality gates.
 
 These tests drive the real built reader and local server. They establish
 workflow and persistence behavior within their test setup. The original
@@ -277,6 +360,11 @@ acceptance demonstrates that follow-ups complete.
 - A human-operated native macOS file/folder picker check; automated route tests
   replace the dialog with a fake.
 - A human keyboard and screen-reader pass.
+- Selectable-text PDF copies: native macOS Preview and a second PDF reader's
+  own mark/copy and clipboard behavior, real Tesseract/Surya/an authorized real
+  LLM reading's positioning, and a document's plain first import not yet
+  auto-queueing generation (use **Create PDF with selectable text** explicitly
+  until that is addressed).
 - Real OCR and CoreML processing progress inside the complete Collections
   workflow. Separate real-tool/GPU tests do not close this workflow gate.
 

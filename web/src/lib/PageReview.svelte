@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { documentPageReviewImageUrl, getDocumentPageReview, SOURCE_PAGE_CHARS, type PageReviewResponse } from './api';
+  import SelectablePdfActions from './SelectablePdfActions.svelte';
 
   export let collectionId: string;
   export let documentId: string;
@@ -12,6 +13,8 @@
   export let clearMarksSignal = 0;
   export let historical = false;
   export let savedExcerpt: string | null = null;
+  /** A hidden source pane keeps the selectable-PDF status it has but stops polling it. */
+  export let visible = true;
   export let narrow = false;
   export let onBack: () => void;
   /** Sends a zero-based explicit page selection to the shared, confirmed rescan flow. */
@@ -27,6 +30,12 @@
   let imageRetry = 0;
   let requestGeneration = 0;
   let pinnedRevision = revisionId;
+  /**
+   * The revision the selectable-PDF actions describe. A historical review names it at once; a live review
+   * learns it from its first page answer. Undefined keeps the actions out until then. An excerpt-only view
+   * still shows them, as unavailable, because it names no revision to act on.
+   */
+  let pdfRevision: string | null | undefined = revisionId;
   let split = 50;
   let zoom = 1;
   let activePane: 'image' | 'text' = 'image';
@@ -83,6 +92,7 @@
       if (generation !== requestGeneration) return;
       page = result;
       text = result.text;
+      pdfRevision = result.revisionId;
       // The first live response selects one immutable revision for every later page in this review.
       if (exactRevision === undefined && result.revisionId !== null) pinnedRevision = result.revisionId;
       else if (exactRevision !== undefined) pinnedRevision = exactRevision;
@@ -219,6 +229,9 @@
   <header class="review-toolbar">
     <button type="button" aria-label="Back to documents" onclick={leaveReview}>Back</button>
     <a class="original-link" href={`/api/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/original`} target="_blank" rel="noopener noreferrer">Open original</a>
+    {#if savedExcerpt !== null || pdfRevision !== undefined}
+      <SelectablePdfActions {collectionId} {documentId} revisionId={savedExcerpt !== null ? null : pdfRevision} visible={visible} />
+    {/if}
     <nav class="page-navigation" aria-label="Document pages">
       <button type="button" aria-label="Previous page" disabled={page?.previousOrdinal == null || loadingText} onclick={() => page?.previousOrdinal != null && loadPage(page.previousOrdinal)}>
         Previous

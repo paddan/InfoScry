@@ -590,6 +590,133 @@ async function scenarioAskImageUnknownCitation(page) {
   console.log(`PASS ask-unknown-excerpt locator=${evidence.locator.type} pairingRequests=${pageRequests.length} uiAskWire=${JSON.stringify(askWireEvidence)} network=${JSON.stringify(askNetworkResponses)}`);
 }
 
+async function scenarioSelectablePdf(page) {
+  await enterAdmin(page);
+  await openDocumentDetails(page);
+  await page.locator('#admin-panel-collections .document-details button', { hasText: 'Open document' }).click();
+  const review = page.locator('.page-review');
+  await review.waitFor({ timeout: 20_000 });
+  await review.getByText('Page 1 of 3', { exact: true }).waitFor({ timeout: 20_000 });
+
+  const actions = review.locator('[role="group"][aria-label="Selectable PDF copy"]');
+  await actions.waitFor({ timeout: 20_000 });
+  // A document's plain first import does not go through RevisionPublicationService.publish() (it commits
+  // through StoredUnitsSink directly, same as every other first import in this codebase), so the
+  // publication hook that auto-queues selectable-PDF generation never fires here — only an explicit
+  // rescan or restore publication does. This is the documented, still-open "Create PDF with selectable
+  // text" path (spec: "Existing archived PDFs are eligible through an explicit Create PDF with selectable
+  // text action"), so this scenario starts generation explicitly through that real UI control.
+  const pageMetadataResponse = await page.request.get(`${BASE_URL}/api/collections/default/documents/${DOCUMENT_ID}/page-review?ordinal=0`);
+  assert(pageMetadataResponse.ok(), `baseline page metadata is readable: ${pageMetadataResponse.status()}`);
+  const revisionId = (await pageMetadataResponse.json()).revisionId;
+  assert(revisionId, 'the document has a published revision to generate a selectable PDF for');
+
+  await actions.getByText('No PDF with selectable text has been made for this revision.').waitFor({ timeout: 20_000 });
+  await actions.getByRole('button', { name: 'Create PDF with selectable text' }).click();
+
+  const statusUrl = `${BASE_URL}/api/collections/default/documents/${DOCUMENT_ID}/selectable-pdf?revision=${encodeURIComponent(revisionId)}`;
+  let finalStatus;
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const response = await page.request.get(statusUrl);
+    assert(response.ok(), `selectable-PDF status is readable: HTTP ${response.status()} ${await response.text()}`);
+    const body = await response.json();
+    if (body.state === 'READY' || body.state === 'PARTIAL' || body.state === 'FAILED') { finalStatus = body; break; }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert(finalStatus, `selectable-PDF generation reached a terminal state within 60 seconds`);
+  assert(finalStatus.state === 'READY', `expected a fully selectable three-page export: ${JSON.stringify(finalStatus)}`);
+  assert(finalStatus.totalPages === 3 && finalStatus.selectablePages === 3, `expected every physical page to be selectable: ${JSON.stringify(finalStatus)}`);
+  console.log(`STATUS selectable-pdf-generated ${JSON.stringify(finalStatus)}`);
+
+  await page.waitForFunction(() => {
+    const group = document.querySelector('[role="group"][aria-label="Selectable PDF copy"]');
+    return Boolean(group && /Selectable text on \d+ of \d+ pages/.test(group.textContent ?? ''));
+  }, null, { timeout: 20_000 });
+  const statusText = (await actions.textContent())?.replace(/\s+/g, ' ').trim() ?? '';
+  assert(statusText.includes('Selectable text on 3 of 3 pages'), `expected the UI to reflect the same fully selectable export: ${JSON.stringify(statusText)}`);
+
+  const openLink = actions.locator('a', { hasText: 'Open PDF with selectable text' });
+  const downloadLink = actions.locator('a', { hasText: 'Download PDF with selectable text' });
+  await openLink.waitFor({ timeout: 20_000 });
+  const openHref = await openLink.getAttribute('href');
+  const downloadHref = await downloadLink.getAttribute('href');
+  assert(openHref && downloadHref, `both open and download actions are present: ${JSON.stringify({ openHref, downloadHref })}`);
+  const downloadUrl = new URL(downloadHref, BASE_URL);
+  assert(downloadUrl.searchParams.get('revision') === revisionId, `the download link names its exact revision: ${downloadHref}`);
+
+  // Download the real file through the real route, and independently verify it is a non-trivial PDF — not
+  // merely that the route answered 200 or that the button exists.
+  const downloaded = await page.request.get(downloadUrl.toString());
+  assert(downloaded.ok(), `the real file route serves the generated PDF: HTTP ${downloaded.status()}`);
+  assert((downloaded.headers()['content-type'] ?? '').includes('application/pdf'), `the response is served as a PDF: ${JSON.stringify(downloaded.headers())}`);
+  const bytes = await downloaded.body();
+  assert(bytes.length > 500, `the downloaded file is a non-trivial PDF, got ${bytes.length} bytes`);
+  assert(bytes.subarray(0, 5).toString('latin1') === '%PDF-', `the downloaded bytes are a real PDF, not a stub: ${JSON.stringify(bytes.subarray(0, 16).toString('latin1'))}`);
+
+  // Repeating the download and the create request must never duplicate the artifact or enqueue a second job.
+  const secondDownload = await page.request.get(downloadUrl.toString());
+  assert(secondDownload.ok(), 'repeating the download is still served');
+  const secondBytes = await secondDownload.body();
+  assert(Buffer.compare(bytes, secondBytes) === 0, 'repeated download serves byte-identical content');
+
+  const createResponse = await page.evaluate(async ({ documentId, revisionId }) => {
+    const session = await fetch('/api/session');
+    const { csrfToken } = await session.json();
+    const response = await fetch(`/api/collections/default/documents/${documentId}/selectable-pdf`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-InfoScry-Csrf': csrfToken },
+      body: JSON.stringify({ revisionId, retry: false }),
+    });
+    return { status: response.status, body: await response.json() };
+  }, { documentId: DOCUMENT_ID, revisionId });
+  assert(createResponse.status === 200 && createResponse.body.state === 'READY' && createResponse.body.selectablePages === 3,
+    `a repeated POST create answers the same verified READY identity: ${JSON.stringify(createResponse)}`);
+  console.log(`PASS selectable-pdf-ready status=${JSON.stringify(statusText)} bytes=${bytes.length} revision=${revisionId}`);
+
+  // Acceptance vector 4: the controls fit every required viewport width without page-wide overflow, and
+  // the existing historical-citation/source-selection behavior around them (covered by the other scenarios
+  // in this file) is otherwise untouched by this feature.
+  const widths = [390, 1024, 1440, 1920];
+  const geometries = [];
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(100);
+    const geometry = await page.evaluate(() => {
+      const group = document.querySelector('[role="group"][aria-label="Selectable PDF copy"]');
+      const rect = group?.getBoundingClientRect();
+      return {
+        viewport: innerWidth,
+        pageWidth: document.documentElement.scrollWidth,
+        groupWidth: rect?.width ?? 0,
+        groupOverflow: Boolean(group && group.scrollWidth > group.clientWidth + 1),
+      };
+    });
+    assert(geometry.pageWidth <= width, `selectable-PDF controls cause page-wide overflow at ${width}px: ${JSON.stringify(geometry)}`);
+    assert(geometry.groupWidth > 0 && !geometry.groupOverflow, `selectable-PDF controls wrap without overflowing their own group at ${width}px: ${JSON.stringify(geometry)}`);
+    geometries.push(geometry);
+    if (SCREENSHOT_DIR && (width === 390 || width === 1920)) {
+      await mkdir(SCREENSHOT_DIR, { recursive: true });
+      await page.screenshot({ path: `${SCREENSHOT_DIR}/selectable-pdf-${width}.png`, fullPage: true });
+    }
+  }
+  if (SCREENSHOT_DIR) await appendFile(`${SCREENSHOT_DIR}/selectable-pdf-geometry.jsonl`, `${JSON.stringify(geometries)}\n`);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await review.getByRole('button', { name: 'Previous page' }).focus();
+  let reached = false;
+  for (let step = 0; step < 20; step += 1) {
+    await page.keyboard.press('Tab');
+    const active = await page.evaluate(() => ({
+      text: document.activeElement?.textContent?.trim() ?? null,
+      visible: Boolean(document.activeElement && document.activeElement.getBoundingClientRect().width > 0),
+    }));
+    if (active.text === 'Open PDF with selectable text' && active.visible) { reached = true; break; }
+  }
+  assert(reached, 'keyboard focus can reach the visible "Open PDF with selectable text" link');
+  console.log('PASS selectable-pdf-viewports widths=' + JSON.stringify(widths) + ' keyboardFocusReached=' + reached);
+}
+
 async function scenarioPageSelection(page) {
   await enterAdmin(page);
   await openDocumentDetails(page);
@@ -842,6 +969,7 @@ try {
   else if (SCENARIO === 'ask-image-old-citation') await scenarioAskImageOldCitation(page);
   else if (SCENARIO === 'ask-image-create') await scenarioAskImageCreate(page);
   else if (SCENARIO === 'ask-image-unknown-citation') await scenarioAskImageUnknownCitation(page);
+  else if (SCENARIO === 'selectable-pdf') await scenarioSelectablePdf(page);
   else if (SCENARIO === 'page-selection') await scenarioPageSelection(page);
   else if (SCENARIO === 'page-selection-retry') await scenarioPageSelectionRetry(page);
   else throw new Error(`unknown scenario ${SCENARIO}`);

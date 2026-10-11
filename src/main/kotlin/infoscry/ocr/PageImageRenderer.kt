@@ -4,8 +4,11 @@ import infoscry.domain.DocumentId
 import infoscry.extract.PdfExtractor
 import infoscry.extract.PdfPageRenderer
 import infoscry.extract.PngPageRenderer
+import infoscry.pdf.ImageToPdf
+import infoscry.pdf.PdfPageGeometry
 import java.nio.file.Files
 import java.nio.file.Path
+import javax.imageio.ImageIO
 import kotlin.math.ceil
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
@@ -65,6 +68,12 @@ class PageImageRenderer(
         require(written.startsWith(directory)) {
             "a renderer wrote $written outside the attempt directory ${directory}"
         }
+        // Captured here and nowhere else, while [media] — the live PDF page object — is still open: once this
+        // render returns, nothing downstream has the original page to measure again. A page whose geometry or
+        // transform cannot be read or built this way (a header this build cannot parse, degenerate media/crop
+        // boxes) simply gets none; see [PageImage.pdfGeometry].
+        val (geometry, transform) = geometryAndTransform(media, written)
+
         return PageImage.ofFile(
             documentId = documentId,
             unitId = unitId,
@@ -75,7 +84,92 @@ class PageImageRenderer(
             artifactRoot = artifactRoot,
             renderDpi = dpi,
             rotationDegrees = rotationOf(media),
+            pdfGeometry = geometry,
+            pdfTransform = transform,
         )
+    }
+
+    /**
+     * This page's [PdfPageGeometry] and the mapping from [renderedImage]'s own pixels into unrotated PDF user
+     * space, or `null, null` when either cannot be built.
+     *
+     * The mapping is deliberately built from the *rendered raster's own measured dimensions*, never from the
+     * DPI it was asked to render at: a renderer that could not honor the exact DPI, or rounding between
+     * points and pixels, would otherwise make the transform disagree with the picture it is supposed to
+     * describe. [SelectablePdfWriter] later re-derives this same geometry independently from the original and
+     * validates a layout's transform against it with tolerance, which is why the formulas here mirror its
+     * `geometryOf`/`fitTransform` exactly: the two are meant to agree, not merely to be each internally
+     * consistent.
+     */
+    private fun geometryAndTransform(page: PDPage, renderedImage: Path): Pair<PdfPageGeometry?, ImageToPdf?> {
+        val size = measuredSize(renderedImage) ?: return null to null
+        val geometry = try {
+            val media = page.mediaBox
+            val crop = page.cropBox
+            PdfPageGeometry(
+                mediaX = media.lowerLeftX.toDouble(),
+                mediaY = media.lowerLeftY.toDouble(),
+                mediaWidth = media.width.toDouble(),
+                mediaHeight = media.height.toDouble(),
+                cropX = crop.lowerLeftX.toDouble(),
+                cropY = crop.lowerLeftY.toDouble(),
+                cropWidth = crop.width.toDouble(),
+                cropHeight = crop.height.toDouble(),
+                rotation = rotationOf(page),
+                userUnit = page.userUnit.toDouble(),
+            )
+        } catch (invalid: IllegalArgumentException) {
+            null
+        } ?: return null to null
+        val transform = try {
+            fitTransform(geometry, size.first, size.second)
+        } catch (invalid: IllegalArgumentException) {
+            null
+        } ?: return null to null
+        return geometry to transform
+    }
+
+    /**
+     * The mapping from top-left image pixels of a raster [imageWidth] by [imageHeight] into unrotated PDF
+     * user space for a page rendered to cover [geometry]'s crop box: the same formula
+     * `SelectablePdfWriter.fitTransform` uses to place a reading image back onto the page.
+     */
+    private fun fitTransform(geometry: PdfPageGeometry, imageWidth: Int, imageHeight: Int): ImageToPdf {
+        val quarterTurn = geometry.rotation == 90 || geometry.rotation == 270
+        val displayWidth = if (quarterTurn) geometry.cropHeight else geometry.cropWidth
+        val displayHeight = if (quarterTurn) geometry.cropWidth else geometry.cropHeight
+        val kx = displayWidth / imageWidth
+        val ky = displayHeight / imageHeight
+        val cx = geometry.cropX
+        val cy = geometry.cropY
+        val cw = geometry.cropWidth
+        val ch = geometry.cropHeight
+        return when (geometry.rotation) {
+            0 -> ImageToPdf(kx, 0.0, 0.0, -ky, cx, cy + ch)
+            90 -> ImageToPdf(0.0, kx, ky, 0.0, cx, cy)
+            180 -> ImageToPdf(-kx, 0.0, 0.0, ky, cx + cw, cy)
+            else -> ImageToPdf(0.0, -kx, -ky, 0.0, cx + cw, cy + ch)
+        }
+    }
+
+    /** The pixel dimensions [path]'s own header declares, or `null` when this build cannot read them. */
+    private fun measuredSize(path: Path): Pair<Int, Int>? = try {
+        ImageIO.createImageInputStream(path.toFile())?.use { stream ->
+            val readers = ImageIO.getImageReaders(stream)
+            if (!readers.hasNext()) {
+                null
+            } else {
+                val reader = readers.next()
+                try {
+                    reader.input = stream
+                    reader.getWidth(0) to reader.getHeight(0)
+                } finally {
+                    reader.dispose()
+                }
+            }
+        }
+    } catch (unreadable: java.io.IOException) {
+        null
     }
 
     /**

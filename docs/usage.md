@@ -59,6 +59,22 @@ text, including blank pages and documents without extracted text. Other formats
 open their first readable unit in the text source viewer. **Open original** opens
 the managed copy; the wider format-specific source-viewer finish line remains open.
 
+Beside **Open original** for a PDF source, **Create PDF with selectable text**
+builds a separate copy whose published reading is placed invisibly over its page
+image, so the exact text can be selected and copied in an ordinary PDF reader
+outside InfoScry. **Open PDF with selectable text** and **Download PDF with
+selectable text** appear once it is ready; a partial result lists exactly which
+pages have no selectable text and why, and **Retry PDF generation** rebuilds a
+failed or partial copy without repeating any paid reading. This is a separate,
+revision-bound copy: the original and managed files are never changed, and
+archive search keeps using Lucene over the existing extracted text — this only
+affects selecting and copying text inside the generated PDF. A document's very
+first import does not yet queue this automatically; use **Create PDF with
+selectable text** explicitly until that is addressed. Native PDF-reader
+selection and real OCR-engine positioning (Tesseract, Surya, an authorized LLM)
+are verified separately from this automated behavior; see
+[implementation status](implementation-status.md).
+
 Page review keeps image and text bound to one exact revision. **Previous** and
 **Next** include blank/failed physical pages; an unavailable total is labelled
 rather than inferred from extracted pages. Stored OCR images are labelled separately

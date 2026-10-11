@@ -1,0 +1,38 @@
+[
+  {
+    "text": "Åsa Lindqvist\nbetalade 120 kronor\ntill Åsa.\nDen stor-\nkostnad var hög.",
+    "bbox": [
+      200,
+      302,
+      833,
+      586
+    ],
+    "confidence": null,
+    "label": "Text",
+    "readingOrder": 0
+  },
+  {
+    "text": "Ärendet avslutades den 3 maj.",
+    "bbox": [
+      200,
+      617,
+      722,
+      644
+    ],
+    "confidence": null,
+    "label": "Text",
+    "readingOrder": 1
+  },
+  {
+    "text": "Åsa Lindqvist\nÖrebro 2 maj\nochså åäö ÅÄÖ\nSumma 1250\nTotal amount: 1250 SEK",
+    "bbox": [
+      906,
+      302,
+      1500,
+      586
+    ],
+    "confidence": null,
+    "label": "Text",
+    "readingOrder": 2
+  }
+]

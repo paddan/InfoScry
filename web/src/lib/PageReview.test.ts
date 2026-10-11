@@ -1,11 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageReviewResponse } from './api';
-const mocks = vi.hoisted(() => ({ getPage: vi.fn(), imageUrl: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getPage: vi.fn(), imageUrl: vi.fn(), pdfStatus: vi.fn(), pdfCreate: vi.fn() }));
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
   getDocumentPageReview: mocks.getPage,
   documentPageReviewImageUrl: mocks.imageUrl,
+  getSelectablePdfStatus: mocks.pdfStatus,
+  createSelectablePdf: mocks.pdfCreate,
 }));
 import PageReview from './PageReview.svelte';
 
@@ -21,6 +23,11 @@ beforeEach(() => {
   mocks.getPage.mockReset();
   mocks.imageUrl.mockReset();
   mocks.imageUrl.mockImplementation((_collection: string, page: PageReviewResponse | undefined) => page ? `/image/${page.ordinal}` : null);
+  mocks.pdfStatus.mockReset();
+  mocks.pdfCreate.mockReset();
+  mocks.pdfStatus.mockImplementation(async (_collection: string, _document: string, revisionId: string) => ({
+    revisionId, key: null, state: 'NOT_CREATED', selectablePages: 0, totalPages: null, blankPages: 0, unavailablePages: [], reasonCode: null,
+  }));
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
@@ -236,5 +243,84 @@ describe('PageReview', () => {
     await screen.findByText('Text for page 1');
     expect(screen.queryByText('Selected pages: 1')).toBeNull();
     expect(screen.getByText('No pages selected')).toBeTruthy();
+  });
+
+  it('places the selectable PDF actions beside Open original and never creates a copy by opening the review', async () => {
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number }) => metadata(options.ordinal));
+    render(PageReview, { props: { collectionId: 'collection-1', documentId: 'doc-1', initialOrdinal: 0, onBack: vi.fn() } });
+
+    const create = await screen.findByRole('button', { name: 'Create PDF with selectable text' });
+    const toolbar = document.querySelector('.review-toolbar') as HTMLElement;
+    expect(toolbar.contains(screen.getByRole('link', { name: 'Open original' }))).toBe(true);
+    expect(toolbar.contains(create)).toBe(true);
+    expect(mocks.pdfStatus).toHaveBeenCalledWith('collection-1', 'doc-1', 'revision-a');
+    expect(mocks.pdfCreate).not.toHaveBeenCalled();
+  });
+
+  it('keeps the marked page selection and Open original while the copy is being prepared', async () => {
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number }) => metadata(options.ordinal));
+    mocks.pdfStatus.mockResolvedValue({
+      revisionId: 'revision-a', key: 'a'.repeat(64), state: 'QUEUED', selectablePages: 0, totalPages: null, blankPages: 0, unavailablePages: [], reasonCode: null,
+    });
+    render(PageReview, { props: { collectionId: 'c', documentId: 'doc-1', initialOrdinal: 0, onBack: vi.fn(), onScanPages: vi.fn() } });
+
+    await screen.findByText('Text for page 1');
+    await fireEvent.click(screen.getByRole('button', { name: 'Mark page 1' }));
+    expect(await screen.findByText('PDF with selectable text is queued.')).toBeTruthy();
+    expect(screen.getByText('Selected pages: 1')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open original' })).toBeTruthy();
+    expect(mocks.pdfCreate).not.toHaveBeenCalled();
+  });
+
+  it('reads the copy status of a historical citation from its own revision only', async () => {
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number; revision?: string }) =>
+      metadata(options.ordinal, { revisionId: options.revision ?? 'revision-old' }));
+    render(PageReview, { props: {
+      collectionId: 'collection-1', documentId: 'doc-1', initialOrdinal: 0, historical: true,
+      revisionId: 'revision-old', publishedRevisionId: 'revision-new', onBack: vi.fn(),
+    } });
+
+    await screen.findByText('Text for page 1');
+    await screen.findByRole('button', { name: 'Create PDF with selectable text' });
+    expect(mocks.pdfStatus).toHaveBeenCalledWith('collection-1', 'doc-1', 'revision-old');
+    expect(mocks.pdfStatus).not.toHaveBeenCalledWith('collection-1', 'doc-1', 'revision-new');
+  });
+
+  it('shows the selectable PDF actions as unavailable for an excerpt whose revision is unknown', async () => {
+    render(PageReview, { props: {
+      collectionId: 'collection-1', documentId: 'doc-1', initialOrdinal: 3, historical: true,
+      revisionId: 'revision-old', savedExcerpt: 'Citation excerpt', onBack: vi.fn(),
+    } });
+
+    expect(screen.getByText('Citation excerpt')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open original' })).toBeTruthy();
+    expect(await screen.findByText('Selectable PDF is unavailable for this source.')).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Selectable PDF copy' })).toBeTruthy();
+    expect(mocks.pdfStatus).not.toHaveBeenCalled();
+    expect(mocks.pdfCreate).not.toHaveBeenCalled();
+  });
+
+  it('stops polling the copy status while the source pane is hidden and resumes when it is shown', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number }) => metadata(options.ordinal));
+      mocks.pdfStatus.mockResolvedValue({
+        revisionId: 'revision-a', key: null, state: 'QUEUED', selectablePages: 0, totalPages: null, blankPages: 0, unavailablePages: [], reasonCode: null,
+      });
+      const view = render(PageReview, { props: { collectionId: 'c', documentId: 'doc-1', initialOrdinal: 0, visible: true, onBack: vi.fn() } });
+      expect(await screen.findByText('PDF with selectable text is queued.')).toBeTruthy();
+
+      await view.rerender({ visible: false });
+      const hiddenAt = mocks.pdfStatus.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(mocks.pdfStatus.mock.calls.length).toBe(hiddenAt);
+
+      await view.rerender({ visible: true });
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(mocks.pdfStatus.mock.calls.length).toBeGreaterThan(hiddenAt);
+      expect(mocks.pdfCreate).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

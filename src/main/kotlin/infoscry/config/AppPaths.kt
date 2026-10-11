@@ -93,6 +93,16 @@ class AppPaths private constructor(val root: Path) {
         documentDir(collectionId, documentId).resolve(ARTIFACTS_DIRECTORY)
 
     /**
+     * Where one revision's selectable-PDF copy lives: the content-addressed key is its own directory,
+     * so two attempts that resolve the same inputs ([infoscry.pdf.selectablePdfArtifactKey]) share one
+     * directory and a rewrite is a safe overwrite rather than a second file. It lives inside the
+     * document's own `artifacts/` directory, so document and collection deletion park and purge it with
+     * everything else the document owns, with no extra step of their own.
+     */
+    fun selectablePdfDir(collectionId: CollectionId, documentId: DocumentId, revisionId: String, key: String): Path =
+        artifactsDir(collectionId, documentId).resolve(SELECTABLE_PDF_DIRECTORY).resolve(revisionId).resolve(key)
+
+    /**
      * Where a collection's managed directory is parked while its deletion is in flight.
      *
      * The trash lives inside `library/` on purpose: parking it has to be an atomic rename, which needs
@@ -136,6 +146,7 @@ class AppPaths private constructor(val root: Path) {
         const val ARTIFACTS_DIRECTORY = "artifacts"
         const val LIBRARY_DIRECTORY = "library"
         const val LOGS_DIRECTORY = "logs"
+        const val SELECTABLE_PDF_DIRECTORY = "selectable-pdf"
 
         /**
          * The layout of a data directory, naming paths without creating or touching anything.

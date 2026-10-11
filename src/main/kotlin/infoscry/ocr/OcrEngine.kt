@@ -6,6 +6,13 @@ import infoscry.domain.SourceImageRoot
 import infoscry.extract.OcrUnavailableException
 import infoscry.extract.PdfExtractor
 import infoscry.extract.TesseractOcr
+import infoscry.pdf.GeometryAlignmentInput
+import infoscry.pdf.ImageToPdf
+import infoscry.pdf.LayoutReference
+import infoscry.pdf.OcrGeometryAligner
+import infoscry.pdf.PageTextLayout
+import infoscry.pdf.PageTextLayoutStore
+import infoscry.pdf.PdfPageGeometry
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -47,9 +54,21 @@ data class PageImage(
     val renderDpi: Int?,
     val rotationDegrees: Int,
     val renderVersion: Int = RENDER_VERSION,
+    /**
+     * This page's PDF geometry and the mapping from this image's pixels into it, captured while the original
+     * PDF page was open for rendering (ticket 04 of the selectable-PDF plan). Both are absent together: a
+     * picture document has no PDF page to measure, and so does a page rebuilt later from a provenance record
+     * rather than rendered live ([ofProvenance]) — a local text-geometry alignment is only ever attempted for
+     * a page that carries both.
+     */
+    val pdfGeometry: PdfPageGeometry? = null,
+    val pdfTransform: ImageToPdf? = null,
 ) {
 
     init {
+        require((pdfGeometry == null) == (pdfTransform == null)) {
+            "a page image's PDF geometry and transform are present together or absent together"
+        }
         require(unitId.isNotBlank()) { "a page image needs the page's stable unit id" }
         require(ordinal >= 0) { "a page image needs the page's ordinal, was $ordinal" }
         require(sha256.length == SHA256_HEX_LENGTH && sha256.all { character -> character.isHexCharacter() }) {
@@ -257,6 +276,8 @@ data class PageImage(
             renderDpi: Int?,
             rotationDegrees: Int,
             renderVersion: Int = RENDER_VERSION,
+            pdfGeometry: PdfPageGeometry? = null,
+            pdfTransform: ImageToPdf? = null,
         ): PageImage {
             val path = resolveInside(imageRoot, imageReference)
             val size = imageSize(path)
@@ -273,6 +294,8 @@ data class PageImage(
                 renderDpi = renderDpi,
                 rotationDegrees = rotationDegrees,
                 renderVersion = renderVersion,
+                pdfGeometry = pdfGeometry,
+                pdfTransform = pdfTransform,
             )
         }
 
@@ -559,6 +582,22 @@ interface PageOcrEngine {
     suspend fun transcribe(page: PageImage, settings: OcrSettingsSnapshot): OcrPageResult
 
     /**
+     * Word boxes for [page], read purely for *local text-geometry positioning* rather than as this page's
+     * published reading, or `null` when this engine offers no such pass.
+     *
+     * This is "a separately identified local pass" (plan, 2026-10-10): when the published reading came from
+     * an engine with no spatial anchors of its own — Surya's blocks are not word boxes, and an LLM reading has
+     * no boxes at all — the local aligner (03) still needs *some* word-level anchors to place the published
+     * text onto. A local tool that can supply them offers this method; its *text* is never read and never
+     * becomes, or replaces, any page's published reading, and no artifact is written for it — only the boxes
+     * matter, and the only durable output of using them is the [PageTextLayout] the caller builds and persists
+     * itself. The call is still bounded by this engine's own subprocess limits, and it never dispatches off
+     * this machine: the default answers `null`, which is the honest answer for an engine that cannot run
+     * locally against arbitrary pixels (an external image-model engine, for instance).
+     */
+    suspend fun positionAnchors(page: PageImage, languages: String): List<OcrWordBox>? = null
+
+    /**
      * What this engine's runtime is, discovered without reading a page, or `null` when it cannot be.
      *
      * This exists because whether a committed page may be reused is decided by the *attempt's* fingerprint,
@@ -685,4 +724,97 @@ class PageOcrEngines(
         /** The prefix of the code that names the engine a build does not have, as `NEEDS_TESSERACT` is. */
         const val NEEDS_ENGINE_CODE_PREFIX: String = "NEEDS_"
     }
+}
+
+/**
+ * The version of the local word-box positioning pass behind [positioningAnchors]: Tesseract word boxes, read
+ * either from the published reading itself ([OcrEngine.TESSERACT]) or from a separate local pass over the
+ * same image for any other engine. Record it on every [PageTextLayout] this pipeline builds, so a later
+ * change to which tool supplies anchors — or to how they are read — never silently compares against a layout
+ * a different positioning procedure produced.
+ */
+const val LOCAL_TESSERACT_POSITIONING_VERSION: String = "tesseract-anchors-1"
+
+/**
+ * The word boxes 03's local aligner anchors a page's canonical text onto, for whichever engine actually
+ * produced the page's published reading.
+ *
+ * Tesseract's own TSV *is* the positioning pass when it is also the reading engine: [reading]'s boxes are
+ * reused rather than read a second time. For any other engine — Surya's blocks are not word-level, and an
+ * LLM reading carries no boxes at all — [tesseractEngine] (when one is configured) is asked for a *separate*
+ * local pass over the same image, read purely for its boxes (see [PageOcrEngine.positionAnchors]). With no
+ * Tesseract engine configured at all, this answers no anchors, which is the honest "no local positioning
+ * available" case: a caller building a layout from an empty anchor list gets back an incomplete layout with a
+ * safe reason, never a crash and never a failed page reading.
+ */
+suspend fun positioningAnchors(
+    engine: OcrEngine,
+    reading: OcrPageResult,
+    page: PageImage,
+    languages: String,
+    tesseractEngine: PageOcrEngine?,
+): List<OcrWordBox> =
+    if (engine == OcrEngine.TESSERACT) {
+        reading.boxes
+    } else {
+        tesseractEngine?.positionAnchors(page, languages).orEmpty()
+    }
+
+/**
+ * The [PageTextLayout] for one OCR page's *final, normalized* [canonicalText], or `null` when this page
+ * carries no PDF geometry to position against at all (a picture document, or a page rebuilt from a
+ * provenance record rather than rendered live — see [PageImage.pdfGeometry]).
+ *
+ * The result is never null once geometry is present: [OcrGeometryAligner.align] always returns a layout, and
+ * an alignment it could not confidently complete comes back `complete = false` with a safe reason rather than
+ * as an absent result, exactly as ticket 04's acceptance requires — missing or ambiguous positioning is
+ * recorded, not treated as this page's reading having failed.
+ */
+fun layoutForOcrPage(
+    page: PageImage,
+    canonicalText: String,
+    anchors: List<OcrWordBox>,
+    positioningVersion: String = LOCAL_TESSERACT_POSITIONING_VERSION,
+): PageTextLayout? {
+    val geometry = page.pdfGeometry ?: return null
+    val transform = page.pdfTransform ?: return null
+    // An unmeasured raster has no width or height to align against at all; GeometryAlignmentInput requires
+    // both, and a page this seam cannot measure is "no layout", never a crash that would take the page's
+    // already-successful reading down with it.
+    if (page.width == null || page.height == null) return null
+    return OcrGeometryAligner.align(
+        GeometryAlignmentInput(
+            canonicalText = canonicalText,
+            image = page,
+            geometry = geometry,
+            transform = transform,
+            anchors = anchors,
+            positioningVersion = positioningVersion,
+        ),
+    )
+}
+
+/**
+ * [layoutForOcrPage]'s layout for one OCR page, durably written under [artifactRoot] and returned as a
+ * reference — or `null` when there is nothing to position ([layoutForOcrPage] already answers `null` for
+ * that), or when any step of getting there failed. This step is best-effort by design (ticket 04's acceptance
+ * vector 6): a local tool that cannot run right now, or any other I/O failure, is caught here once rather
+ * than by every caller separately, and is never this page's reading having failed — [canonicalText] must
+ * already be this unit's *final, normalized* text, the same text the caller is about to commit as the page's
+ * `extractedText`, never an earlier or unnormalized form.
+ */
+suspend fun writtenLayoutReferenceFor(
+    page: PageImage,
+    canonicalText: String,
+    engine: OcrEngine,
+    reading: OcrPageResult,
+    languages: String,
+    positioningEngine: PageOcrEngine?,
+    artifactRoot: Path,
+): LayoutReference? = try {
+    val anchors = positioningAnchors(engine, reading, page, languages, positioningEngine)
+    val layout = layoutForOcrPage(page, canonicalText, anchors) ?: return null
+    PageTextLayoutStore.write(artifactRoot, layout)
+} catch (failure: IOException) {
+    null
 }

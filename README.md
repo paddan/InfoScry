@@ -70,6 +70,21 @@ a confirmed external OCR profile, page totals and cost/destination summaries,
 cancellation and restart, preserved old text on failure, and History → Restore with
 real GPU embeddings. Automated fake-provider tests do not establish OCR quality.
 
+The [PDF text-selection plan](docs/plans/2026-10-10-selectable-pdf.md) and its
+[agent tickets](docs/tickets/selectable-pdf/STATUS.md) are substantially
+implemented: a revision-bound PDF copy places the published reading invisibly
+over its page image so it can be selected and copied in an ordinary PDF reader.
+Generation is durable, repeatable and recoverable; a selected-page rescan or
+Restore changes only its own export and keeps historical exports exact; archive
+search continues through Lucene, unaffected. Automated fake-provider tests cover
+this end to end, including independent PDFBox byte inspection of the produced
+files and a real-browser acceptance scenario. Original and managed PDF files are
+never changed. Open gates: a document's plain first import does not yet
+automatically queue generation (use **Create PDF with selectable text**
+explicitly); native Preview/second-reader selection and real Tesseract/Surya/
+LLM/CoreML positioning are separate manual gates, not established by fake tests.
+See [implementation status](docs/implementation-status.md).
+
 The project targets local use on macOS arm64. CI, distributable packaging and
 public or multi-user hosting are outside the current scope.
 

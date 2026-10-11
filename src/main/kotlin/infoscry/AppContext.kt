@@ -15,6 +15,7 @@ import infoscry.document.RescanService
 import infoscry.document.RevisionHistoryService
 import infoscry.document.RevisionRestoreService
 import infoscry.document.RevisionPublicationService
+import infoscry.document.RevisionPublishedHook
 import infoscry.jobs.rescanEngineFactory
 import infoscry.domain.Collection
 import infoscry.domain.Job
@@ -36,6 +37,8 @@ import infoscry.logging.LoggingBootstrap
 import infoscry.ocr.OcrProfileService
 import infoscry.ocr.OcrReadingMethodCatalog
 import infoscry.ocr.StaleOcrStateCleanup
+import infoscry.pdf.SelectablePdfService
+import infoscry.storage.SelectablePdfStore
 import infoscry.search.IndexIdentity
 import infoscry.search.LuceneIndex
 import infoscry.search.LuceneSchema
@@ -235,6 +238,21 @@ class AppContext private constructor(
     val ocrReviews: OcrReviewStore = OcrReviewStore(database)
 
     /**
+     * Durable selectable-PDF generation (ticket 06 of the selectable-PDF plan): its own row is also the
+     * durable "desired" marker [revisionPublication] queues from, right after a publication commits.
+     */
+    val selectablePdfStore: SelectablePdfStore = SelectablePdfStore(database)
+
+    val selectablePdfService: SelectablePdfService = SelectablePdfService(
+        paths = paths,
+        documents = documents,
+        revisions = revisions,
+        library = library,
+        store = selectablePdfStore,
+        jobs = jobs,
+    )
+
+    /**
      * Publishing a staged candidate revision of one document, and finishing what a previous process left
      * unfinished. It shares the mutation gate with every other writer, because the publication boundary is
      * where a deletion or a tombstoned collection gets to win.
@@ -246,6 +264,9 @@ class AppContext private constructor(
         mutations = mutations,
         index = { index() },
         gate = revisionSnapshots,
+        onPublished = RevisionPublishedHook { documentId, collectionId, revisionId ->
+            selectablePdfService.queueForPublishedRevision(documentId, collectionId, revisionId)
+        },
     )
 
     /** Exact revision-bound text and page images, available without OCR or embeddings. */
@@ -632,6 +653,15 @@ class AppContext private constructor(
                                 blocked = collections.blocked + documents.blocked,
                             )
                         }
+                        // The other half of the selectable-PDF publication->enqueue gap: a row this
+                        // feature itself recorded (never every published revision) whose job is not live
+                        // gets a fresh one. Runs after deletion recovery, so a document deletion already
+                        // won before this could recreate anything for it.
+                        val selectablePdfRepaired = context.selectablePdfService.reconcileQueuedJobs()
+                        if (selectablePdfRepaired > 0) {
+                            LOGGER.atInfo().addKeyValue(SELECTABLE_PDF_REPAIRED_FIELD, selectablePdfRepaired)
+                                .log("repaired selectable-PDF artifacts whose job was not live")
+                        }
                         // The sweep runs after the marker is resolved and before any writer is admitted,
                         // so the set it removes is exactly the unreferenced one: a half-built successor
                         // and a generation a previous process could not retire.
@@ -689,6 +719,7 @@ class AppContext private constructor(
         }
 
         private const val RESUMED_JOBS_FIELD = "resumed_jobs"
+        private const val SELECTABLE_PDF_REPAIRED_FIELD = "selectable_pdf_repaired"
         private const val SWEPT_GENERATIONS_FIELD = "swept_generations"
         private const val COMPONENT_FIELD = "component"
         private const val JOBS_COMPONENT = "jobs"

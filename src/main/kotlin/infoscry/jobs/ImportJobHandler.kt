@@ -834,6 +834,12 @@ class ImportJobHandler internal constructor(
                 engineFor = rescanEngineFactory(context.ocrProfiles, clientEngine = clientEngine),
                 profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
             )
+            // Durable selectable-PDF generation (ticket 06 of the selectable-PDF plan). It depends on
+            // nothing above: it reads only already-committed revision text, images and layouts, and is
+            // wired here, in the one composition root the server and every standalone CLI command share,
+            // so a selectable-PDF attempt can never run under a different queue than the rest of this
+            // data directory's work.
+            val selectablePdfHandler = SelectablePdfJobHandler(context.selectablePdfService)
             val runner = JobRunner(
                 store = context.jobs,
                 collections = context.collections,
@@ -844,6 +850,7 @@ class ImportJobHandler internal constructor(
                         JobType.RETRY to retryHandler,
                         JobType.REINDEX to ReindexJobHandler(reindexService(context)),
                         JobType.RESCAN to rescanHandler,
+                        JobType.SELECTABLE_PDF to selectablePdfHandler,
                     ),
                 ),
             )

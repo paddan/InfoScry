@@ -11,6 +11,7 @@ import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.fingerprintPresence
+import infoscry.pdf.LayoutReference
 import java.io.IOException
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -179,6 +180,13 @@ const val PAGE_IMAGES_UNSUPPORTED_CODE: String = "PAGE_IMAGES_UNSUPPORTED"
  * pair: a picture and a scanned page have no text layer, a layer that could not be read is not one, and
  * fill-missing either commits the layer as the unit or replaces it outright without ever handing two
  * readings of one page to a sink.
+ *
+ * [layoutReference] names a normalized text-geometry sidecar for this unit's *final* text (ticket 04 of the
+ * selectable-PDF plan): a mapping of [extractedText] onto positioned spans over [sourceImage]. It is absent
+ * exactly when no local positioning was attempted or none could be built — a unit with no [sourceImage] has
+ * nothing to position against, and a reading engine or page geometry this build cannot locally position is
+ * an absence here, never a failure of the unit itself. It affects only a later selectable-PDF export; a unit
+ * with no layout reference is read, searched and cited exactly like one that was never meant to carry one.
  */
 data class ContentUnitDraft(
     val locator: SourceLocation,
@@ -190,6 +198,7 @@ data class ContentUnitDraft(
     val meanConfidence: Double? = null,
     val sourceImage: SourceImageProvenance? = null,
     val directText: String? = null,
+    val layoutReference: LayoutReference? = null,
 )
 
 /**

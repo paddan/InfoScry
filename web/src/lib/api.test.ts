@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchLlmCatalog, ApiError, continueInvestigation, createCollection, getCollectionDocumentSummary, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { fetchLlmCatalog, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -239,5 +239,148 @@ describe('model catalog metadata decoding', () => {
       id: 'known', contextWindow: 32000, maxOutputTokens: 4096, inputPricePerMillion: 0, outputPricePerMillion: 0,
       cacheReadPricePerMillion: null, priceKnown: true, imageInput: true,
     });
+  });
+});
+
+describe('selectable PDF status decoding', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const answer = (body: unknown, status = 200) => vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(body), { status }));
+
+  it('decodes NOT_CREATED with the explicit nulls the server writes and no counts', async () => {
+    vi.stubGlobal('fetch', answer({
+      revisionId: 'rev-1', key: null, state: 'NOT_CREATED', selectablePages: 0, totalPages: null,
+      blankPages: 0, unavailablePages: [], reasonCode: null,
+    }));
+
+    expect(await getSelectablePdfStatus('Archive', 'doc-1', 'rev-1')).toEqual({
+      revisionId: 'rev-1', key: null, state: 'NOT_CREATED', selectablePages: 0, totalPages: null,
+      blankPages: 0, unavailablePages: [], reasonCode: null,
+    });
+  });
+
+  it('reads omitted nullable fields as null for every documented state', async () => {
+    const key = 'a'.repeat(64);
+    for (const state of ['QUEUED', 'BUILDING', 'READY', 'PARTIAL', 'FAILED'] as const) {
+      vi.stubGlobal('fetch', answer({
+        revisionId: 'rev-1', state, selectablePages: 0, blankPages: 0, unavailablePages: [],
+        ...(state === 'FAILED' ? { reasonCode: 'ARTIFACT_VERIFICATION_FAILED' } : { key }),
+      }));
+      const status = await getSelectablePdfStatus('Archive', 'doc-1', 'rev-1');
+      expect(status.state).toBe(state);
+      expect(status.totalPages).toBeNull();
+      expect(status.key).toBe(state === 'FAILED' ? null : key);
+      expect(status.reasonCode).toBe(state === 'FAILED' ? 'ARTIFACT_VERIFICATION_FAILED' : null);
+      expect(status.unavailablePages).toEqual([]);
+    }
+  });
+
+  it('decodes READY and BLANK-only counts and keeps PARTIAL unavailable pages with their reasons', async () => {
+    const key = 'b'.repeat(64);
+    vi.stubGlobal('fetch', answer({
+      revisionId: 'rev-1', key, state: 'PARTIAL', selectablePages: 1, totalPages: 3, blankPages: 0,
+      unavailablePages: [{ ordinal: 1, coverage: 'UNAVAILABLE', reasonCode: 'PDF_TEXT_ALIGNMENT_AMBIGUOUS' }],
+      reasonCode: null,
+    }));
+    const partial = await getSelectablePdfStatus('Archive', 'doc-1', 'rev-1');
+    expect(partial).toEqual({
+      revisionId: 'rev-1', key, state: 'PARTIAL', selectablePages: 1, totalPages: 3, blankPages: 0,
+      unavailablePages: [{ ordinal: 1, coverage: 'UNAVAILABLE', reasonCode: 'PDF_TEXT_ALIGNMENT_AMBIGUOUS' }],
+      reasonCode: null,
+    });
+
+    vi.stubGlobal('fetch', answer({
+      revisionId: 'rev-1', key, state: 'READY', selectablePages: 0, totalPages: 2, blankPages: 2,
+      unavailablePages: [], reasonCode: null,
+    }));
+    expect(await getSelectablePdfStatus('Archive', 'doc-1', 'rev-1')).toMatchObject({
+      state: 'READY', selectablePages: 0, totalPages: 2, blankPages: 2,
+    });
+  });
+
+  it('refuses a state the page does not know and a queued artifact without its key', async () => {
+    vi.stubGlobal('fetch', answer({ revisionId: 'rev-1', key: null, state: 'SOMETHING_ELSE', selectablePages: 0, blankPages: 0, unavailablePages: [] }));
+    await expect(getSelectablePdfStatus('Archive', 'doc-1', 'rev-1')).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+
+    vi.stubGlobal('fetch', answer({ revisionId: 'rev-1', key: null, state: 'QUEUED', selectablePages: 0, totalPages: null, blankPages: 0, unavailablePages: [], reasonCode: null }));
+    await expect(getSelectablePdfStatus('Archive', 'doc-1', 'rev-1')).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('reads the status with an encoded revision and never sends a request that generates', async () => {
+    const fetchMock = answer({ revisionId: 'rev/1', key: null, state: 'NOT_CREATED', selectablePages: 0, totalPages: null, blankPages: 0, unavailablePages: [], reasonCode: null });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getSelectablePdfStatus('Archive One', 'doc/1', 'rev/1');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/collections/Archive%20One/documents/doc%2F1/selectable-pdf?revision=rev%2F1');
+    expect(fetchMock.mock.calls[0][1]).toBeUndefined();
+  });
+
+  it('surfaces the server refusal code for an unknown revision as an ApiError', async () => {
+    vi.stubGlobal('fetch', answer({ error: { code: 'NOT_FOUND', message: 'no revision' } }, 404));
+    await expect(getSelectablePdfStatus('Archive', 'doc-1', 'rev-9')).rejects.toMatchObject({ code: 'NOT_FOUND', status: 404 });
+  });
+});
+
+describe('selectable PDF creation', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('posts the revision with the explicit retry flag and the session CSRF token, then decodes the answer', async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      if (String(input) === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-pdf' }), { status: 200 });
+      return new Response(JSON.stringify({
+        revisionId: 'rev-1', key: 'c'.repeat(64), state: 'QUEUED', selectablePages: 0,
+        totalPages: null, blankPages: 0, unavailablePages: [], reasonCode: null,
+      }), { status: 200 });
+    }));
+
+    const status = await createSelectablePdf('Archive', 'doc-1', { revisionId: 'rev-1', retry: false });
+
+    expect(status.state).toBe('QUEUED');
+    const post = calls.find((call) => call.url === '/api/collections/Archive/documents/doc-1/selectable-pdf');
+    expect(post?.init?.method).toBe('POST');
+    expect(JSON.parse(String(post?.init?.body))).toEqual({ revisionId: 'rev-1', retry: false });
+    // The session token is cached for the module's life, so the test asserts that a token is sent, not its value.
+    expect((post?.init?.headers as Record<string, string>)['X-InfoScry-Csrf']).toEqual(expect.any(String));
+    expect((post?.init?.headers as Record<string, string>)['X-InfoScry-Csrf'].length).toBeGreaterThan(0);
+  });
+
+  it('sends retry true only when the caller asks for a retry', async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-pdf' }), { status: 200 });
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({
+        revisionId: 'rev-1', key: 'd'.repeat(64), state: 'QUEUED', selectablePages: 0,
+        totalPages: null, blankPages: 0, unavailablePages: [], reasonCode: null,
+      }), { status: 200 });
+    }));
+
+    await createSelectablePdf('Archive', 'doc-1', { revisionId: 'rev-1', retry: true });
+
+    expect(bodies).toEqual([{ revisionId: 'rev-1', retry: true }]);
+  });
+
+  it('keeps the server conflict code so a caller can offer a retry without a raw message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-pdf' }), { status: 200 });
+      return new Response(JSON.stringify({ error: { code: 'DOCUMENT_BEING_DELETED', message: 'The document is being deleted.' } }), { status: 409 });
+    }));
+
+    await expect(createSelectablePdf('Archive', 'doc-1', { revisionId: 'rev-1', retry: false }))
+      .rejects.toMatchObject({ code: 'DOCUMENT_BEING_DELETED', status: 409 });
+  });
+});
+
+describe('selectable PDF file links', () => {
+  it('builds encoded relative inline and attachment links for exactly the named revision and key', () => {
+    const key = 'e'.repeat(64);
+    expect(selectablePdfFileHref('Archive One', 'doc/1', 'rev/1', key, true))
+      .toBe(`/api/collections/Archive%20One/documents/doc%2F1/selectable-pdf/file?revision=rev%2F1&key=${key}&inline=true`);
+    expect(selectablePdfFileHref('Archive', 'doc-1', 'rev-1', key, false))
+      .toBe(`/api/collections/Archive/documents/doc-1/selectable-pdf/file?revision=rev-1&key=${key}&inline=false`);
   });
 });
