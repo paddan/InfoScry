@@ -1714,135 +1714,66 @@ describe('app shell', () => {
     expect(within(column).getByRole('button', { name: 'Delete conversation The treaty' }).getAttribute('disabled')).toBeNull();
   });
 
-  it('sends the sidebar question limits with the question and remembers them', async () => {
+  it('sends and remembers effort, displays server caps and clears them when the selection changes', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
-      investigateStart: () => eventResponse([{ type: 'done', text: 'Answer', evidence: [] }]),
+      investigateStart: () => eventResponse([
+        { type: 'started', id: 'effort-conv', resolvedLimits: { maxToolRounds: 3, maxToolCalls: 7, maxTurnSeconds: 90 } },
+        { type: 'done', text: 'Answer', evidence: [] },
+      ]),
     });
     render(Page);
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
-
-    // The three native controls sit below the profile, inside one named group, at their defaults.
-    expect(screen.getByRole('group', { name: 'Question limits' })).toBeTruthy();
-    const rounds = screen.getByLabelText('Max tool rounds') as HTMLInputElement;
-    const toolCalls = screen.getByLabelText('Max tool calls') as HTMLInputElement;
-    const seconds = screen.getByLabelText('Max time per question (seconds)') as HTMLInputElement;
-    expect([rounds.value, toolCalls.value, seconds.value]).toEqual(['50', '50', '600']);
-    expect(screen.getByText('A round may contain several tool calls. Time includes preparing the final answer.')).toBeTruthy();
-
-    await fireEvent.input(rounds, { target: { value: '4' } });
-    await fireEvent.input(toolCalls, { target: { value: '7' } });
-    await fireEvent.input(seconds, { target: { value: '90' } });
-    expect(JSON.parse(window.localStorage.getItem('infoscry-investigate-limits:v1') ?? 'null')).toEqual({
-      maxToolRounds: 4,
-      maxToolCalls: 7,
-      maxTurnSeconds: 90,
-    });
-
+    const effort = screen.getByLabelText('Effort level') as HTMLSelectElement;
+    expect([...effort.options].map(o => o.value)).toEqual(['LOW', 'MEDIUM', 'HIGH', 'XHIGH']);
+    expect(effort.value).toBe('MEDIUM');
+    expect(screen.queryByText(/Up to .* tool rounds/)).toBeNull();
+    await fireEvent.change(effort, { target: { value: 'HIGH' } });
+    expect(JSON.parse(localStorage.getItem('infoscry-investigate-effort:v1')!)).toBe('HIGH');
     await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
-
-    await waitFor(() => expect(calls.some((entry) => entry.url === '/api/investigations')).toBe(true));
-    const start = calls.find((entry) => entry.url === '/api/investigations');
-    expect(JSON.parse(String(start?.init?.body))).toEqual({
-      collection: 'default',
-      question: 'What happened?',
-      profile: 'Local',
-      limits: { maxToolRounds: 4, maxToolCalls: 7, maxTurnSeconds: 90 },
-    });
-  });
-
-  it('restores the defaults from unreadable stored limits', async () => {
-    window.localStorage.setItem('infoscry-investigate-limits:v1', JSON.stringify({
-      maxToolRounds: 4.5,
-      maxToolCalls: 7,
-      maxTurnSeconds: 99999,
-    }));
-    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
-    render(Page);
-    await screen.findByText('Default');
-    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
-
-    expect((screen.getByLabelText('Max tool rounds') as HTMLInputElement).value).toBe('50');
-    expect((screen.getByLabelText('Max tool calls') as HTMLInputElement).value).toBe('7');
-    expect((screen.getByLabelText('Max time per question (seconds)') as HTMLInputElement).value).toBe('600');
-  });
-
-  it('shows a field-associated error and sends no request for an invalid limit', async () => {
-    const { calls } = stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
-    render(Page);
-    await screen.findByText('Default');
-    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
-
-    await fireEvent.input(screen.getByLabelText('Max tool rounds'), { target: { value: '51' } });
-    const rounds = screen.getByLabelText('Max tool rounds');
-    const message = screen.getByText('Max tool rounds must be a whole number between 1 and 50.');
-    expect(rounds.getAttribute('aria-describedby')).toBe(message.id);
-    expect(rounds.getAttribute('aria-invalid')).toBe('true');
-
-    await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
-
-    expect(calls.some((entry) => entry.url === '/api/investigations')).toBe(false);
-    expect(window.localStorage.getItem('infoscry-investigate-limits:v1')).not.toContain('51');
-  });
-
-  it('restores all three defaults on Reset defaults', async () => {
-    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
-    render(Page);
-    await screen.findByText('Default');
-    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
-
-    await fireEvent.input(screen.getByLabelText('Max tool rounds'), { target: { value: '2' } });
-    await fireEvent.input(screen.getByLabelText('Max tool calls'), { target: { value: '3' } });
-    await fireEvent.input(screen.getByLabelText('Max time per question (seconds)'), { target: { value: '30' } });
+    await screen.findByText('Up to 3 tool rounds, 7 tool calls, 90 seconds per question.');
+    expect(JSON.parse(String(calls.find(c => c.url === '/api/investigations')?.init?.body)).limits).toEqual({ effortLevel: 'HIGH' });
+    await fireEvent.change(effort, { target: { value: 'LOW' } });
+    expect(screen.queryByText(/Up to .* tool rounds/)).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Reset defaults' }));
-
-    expect((screen.getByLabelText('Max tool rounds') as HTMLInputElement).value).toBe('50');
-    expect((screen.getByLabelText('Max tool calls') as HTMLInputElement).value).toBe('50');
-    expect((screen.getByLabelText('Max time per question (seconds)') as HTMLInputElement).value).toBe('600');
-    expect(JSON.parse(window.localStorage.getItem('infoscry-investigate-limits:v1') ?? 'null')).toEqual({
-      maxToolRounds: 50,
-      maxToolCalls: 50,
-      maxTurnSeconds: 600,
-    });
+    expect(effort.value).toBe('MEDIUM');
   });
 
-  it('disables the question limits while an Investigate turn runs', async () => {
+  it('ignores old numeric preferences and restores the new effort preference', async () => {
+    localStorage.setItem('infoscry-investigate-limits:v1', JSON.stringify({ maxToolRounds: 2 }));
+    localStorage.setItem('infoscry-investigate-effort:v1', JSON.stringify('XHIGH'));
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    expect((screen.getByLabelText('Effort level') as HTMLSelectElement).value).toBe('XHIGH');
+  });
+
+  it('disables effort while a turn is running', async () => {
     let releaseDone!: () => void;
-    const doneGate = new Promise<void>((resolve) => { releaseDone = resolve; });
+    const doneGate = new Promise<void>(resolve => { releaseDone = resolve; });
     const encoder = new TextEncoder();
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
-      investigateStart: () => ({
-        ok: true,
-        status: 200,
-        statusText: '',
-        body: new ReadableStream<Uint8Array>({
-          async start(controller) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'started', id: 'conv-2' })}\n\n`));
-            await doneGate;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'done', text: 'First answer', evidence: [] })}\n\n`));
-            controller.close();
-          },
-        }),
-      } as Response),
+      investigateStart: () => ({ ok: true, status: 200, statusText: '', body: new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(encoder.encode('data: {"type":"started","id":"conv-2"}\n\n'));
+          await doneGate;
+          controller.enqueue(encoder.encode('data: {"type":"done","text":"Answer","evidence":[]}\n\n'));
+          controller.close();
+        },
+      }) } as Response),
     });
     render(Page);
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
     await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
-
-    const rounds = () => screen.getByLabelText('Max tool rounds');
-    await waitFor(() => expect(rounds().getAttribute('disabled')).not.toBeNull());
-    expect(screen.getByLabelText('Max tool calls').getAttribute('disabled')).not.toBeNull();
-    expect(screen.getByLabelText('Max time per question (seconds)').getAttribute('disabled')).not.toBeNull();
-    expect(screen.getByRole('button', { name: 'Reset defaults' }).getAttribute('disabled')).not.toBeNull();
-
+    await waitFor(() => expect((screen.getByLabelText('Effort level') as HTMLSelectElement).disabled).toBe(true));
     releaseDone();
-    await waitFor(() => expect(rounds().getAttribute('disabled')).toBeNull());
+    await waitFor(() => expect((screen.getByLabelText('Effort level') as HTMLSelectElement).disabled).toBe(false));
   });
 
   it('streams Ask events, shows usage and links only citations from completed evidence', async () => {

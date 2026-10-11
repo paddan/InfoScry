@@ -1,5 +1,7 @@
 package infoscry.server
 
+import infoscry.investigate.EffortLevel
+import infoscry.investigate.EffortResolver
 import infoscry.AppContext
 import infoscry.domain.CollectionId
 import infoscry.domain.SourceLocation
@@ -35,23 +37,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 
-/**
- * Wire form of [InvestigationLimits]. Its defaults come from the domain type, so an omitted `limits`
- * object — or an omitted field inside one — falls back to the same values everywhere.
- */
+/** The per-turn effort choice; numeric caps are resolved from the active profile. */
 @Serializable
-data class InvestigationLimitsRequest(
-    val maxToolRounds: Int = InvestigationLimits.DEFAULT_MAX_TOOL_ROUNDS,
-    val maxToolCalls: Int = InvestigationLimits.DEFAULT_MAX_TOOL_CALLS,
-    val maxTurnSeconds: Int = InvestigationLimits.DEFAULT_MAX_TURN_SECONDS,
-) {
-    /**
-     * Maps to the domain limits and validates them. A failure throws [IllegalArgumentException],
-     * which the route renders as a 400 INVALID_REQUEST before any side effect.
-     */
-    fun toLimits(): InvestigationLimits =
-        InvestigationLimits(maxToolRounds, maxToolCalls, maxTurnSeconds).also { it.validate() }
-}
+data class InvestigationLimitsRequest(val effortLevel: EffortLevel = EffortLevel.MEDIUM)
 
 /** The request both create and continue accept; continue ignores collection/profile in favour of the locked snapshot. */
 @Serializable
@@ -229,13 +217,12 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
 
     post("/api/investigations") {
         call.handle {
-            val body = call.receiveJson<InvestigationApiRequest>()
-            // Validated before lookup, reservation or SSE so invalid limits can never create a conversation.
-            val limits = body.limits.toLimits()
+            val body = call.receiveJsonRejectingUnknownFields<InvestigationApiRequest>()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             // A switched-off profile is refused before the capability gate, the conversation or the SSE
             // stream: retired by a person, or because its address carried a credential.
+            val preset = EffortResolver.resolve(profile, body.limits.effortLevel)
             profile.requireDispatchable()
             if (!profile.toolCallingSupported) {
                 // The gate fires before the service is built, so no provider call and no conversation
@@ -257,7 +244,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                 )
                 call.streamInvestigation(
                     investigationService(context, collectionId, profile),
-                    InvestigateRequest(collectionId, body.question, profile, limits = limits),
+                    InvestigateRequest(collectionId, body.question, profile, limits = preset.limits, reasoning = preset.reasoning),
                     runningTurns,
                     activeTurnIds,
                     // Titled once, from the opening question, when the first turn has finished and
@@ -271,9 +258,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
     post("/api/investigations/{id}/continue") {
         call.handle {
             val conversationId = call.conversationId()
-            val body = call.receiveJson<InvestigationApiRequest>()
-            // Validated before reservation or SSE, exactly like create.
-            val limits = body.limits.toLimits()
+            val body = call.receiveJsonRejectingUnknownFields<InvestigationApiRequest>()
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             profile.requireDispatchable()
@@ -284,6 +269,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             // names, so the locked snapshot passes the same gate: a conversation whose profile was switched
             // off after it was created must not keep dispatching through the address that was retired.
             history?.profile?.requireDispatchable()
+            val preset = EffortResolver.resolve(history?.profile ?: profile, body.limits.effortLevel)
             val lockedCollectionId = history?.collectionId ?: CollectionId(collection.id.value)
             if (!activeTurnIds.add(conversationId)) {
                 call.respondJson(
@@ -295,7 +281,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             try {
                 call.streamInvestigation(
                     investigationService(context, lockedCollectionId, profile),
-                    InvestigateRequest(CollectionId(collection.id.value), body.question, profile, conversationId = conversationId, limits = limits),
+                    InvestigateRequest(CollectionId(collection.id.value), body.question, profile, conversationId = conversationId, limits = preset.limits, reasoning = preset.reasoning),
                     runningTurns,
                     activeTurnIds,
                     reservedId = conversationId,
@@ -503,10 +489,12 @@ internal data class InvestigateWire(
     // shapes; NEVER keeps even `done` unchanged while no evidence exists.
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val evidence: List<EvidenceWire> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val resolvedLimits: InvestigationLimits? = null,
 )
 
 internal fun InvestigateEvent.toWire() = when (this) {
-    is InvestigateEvent.Started -> InvestigateWire("started", id = conversationId)
+    is InvestigateEvent.Started -> InvestigateWire("started", id = conversationId, resolvedLimits = resolvedLimits)
     is InvestigateEvent.Delta -> InvestigateWire("delta", text = text)
     is InvestigateEvent.ToolCall -> InvestigateWire("tool", callId = callId, name = name, arguments = arguments)
     is InvestigateEvent.ToolResult -> InvestigateWire("tool", callId = callId, name = name, resultCode = resultCode, durationMs = durationMs)

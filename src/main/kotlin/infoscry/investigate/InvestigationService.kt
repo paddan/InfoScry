@@ -34,6 +34,7 @@ data class InvestigateRequest(
     val conversationId: String? = null,
     /** The current turn's research limits; a continue keeps its conversation locks but uses these. */
     val limits: InvestigationLimits = InvestigationLimits(),
+    val reasoning: NativeReasoning = NativeReasoning.None,
 )
 
 /** Prior turns of a conversation, as persisted. */
@@ -60,7 +61,7 @@ data class InvestigateHistory(
 
 sealed interface InvestigateEvent {
     /** Emitted with the id a route can use to continue the conversation. */
-    data class Started(val conversationId: String) : InvestigateEvent
+    data class Started(val conversationId: String, val resolvedLimits: InvestigationLimits = InvestigationLimits()) : InvestigateEvent
     data class Delta(val text: String) : InvestigateEvent
     data class ToolCall(val callId: String, val name: String, val arguments: String) : InvestigateEvent
     data class ToolResult(val callId: String, val name: String, val resultCode: String, val durationMs: Long) : InvestigateEvent
@@ -235,7 +236,7 @@ class InvestigationService(
             promptVersion = lockedPromptVersion,
             retrievalSnapshot = retrievalSnapshot,
         )
-        emit(InvestigateEvent.Started(conversationId))
+        emit(InvestigateEvent.Started(conversationId, limits))
 
         // Turn state lives outside the withTimeout body so a timed-out or cancelled turn can still
         // be appended through the same path, with the typed limit event recorded last.
@@ -572,7 +573,7 @@ class InvestigationService(
                 emit(InvestigateEvent.Limit(limitCode, limitMessage))
                 emit(InvestigateEvent.AnswerStart)
 
-                val pruned = pruneToFit(profile, budget, conversationMessages.toList(), conversationGroups, tools.definitions, profile.maxOutputTokens)
+                val pruned = pruneToFit(profile, budget, conversationMessages.map { it.copy(assistantContent = null) }, conversationGroups, tools.definitions, profile.maxOutputTokens)
                 // Eligibility is exactly the evidence the pruned request carried: the union of the
                 // surviving groups' ids. Dropped evidence stays in the ledger for older displayed
                 // citations but can justify no new one.
@@ -641,7 +642,7 @@ class InvestigationService(
                             // Collected, never executed: this response is not a final answer.
                             is LlmEvent.ToolCallReady -> returnedToolCalls.add(event.call)
                             is LlmEvent.Usage -> callUsage = callUsage + event.usage
-                            is LlmEvent.Completed -> Unit
+                            is LlmEvent.AssistantContentReady, is LlmEvent.Completed -> Unit
                         }
                     }) {
                         InvestigationTimeouts.ProviderCollectOutcome.Completed -> Unit
@@ -709,13 +710,17 @@ class InvestigationService(
                     synthesizeFromEvidence("MAX_ROUNDS", "Tool round limit reached; preparing an answer from collected sources.")
                     break
                 }
-                val pruned = pruneToFit(profile, budget, conversationMessages.toList(), conversationGroups, tools.definitions, profile.maxOutputTokens)
-                val candidateRequest = LlmRequest(pruned.messages, tools.definitions, maxOutputTokens = profile.maxOutputTokens)
+                val pruned = pruneToFit(profile, budget, conversationMessages.toList(), conversationGroups, tools.definitions, profile.maxOutputTokens, reasoning = request.reasoning)
+                val candidateRequest = LlmRequest(pruned.messages, tools.definitions, maxOutputTokens = profile.maxOutputTokens, reasoning = request.reasoning)
                 val omittedGroups = pruned.omittedGroupIds
                 val measurement = budget.measure(profile, candidateRequest, stream = true)
                 if (!measurement.fits) {
-                    limitEvents.add(LimitEventSnapshot("CONTEXT_BUDGET_EXCEEDED", "irreducible request exceeds context window"))
-                    emit(InvestigateEvent.Error("CONTEXT_BUDGET_EXCEEDED", "the request is too large for the configured model"))
+                    if (pruned.messages.any { it.assistantContent != null }) {
+                        synthesizeFromEvidence("CONTEXT_BUDGET_EXCEEDED", "Research context is full; preparing an answer from collected sources.")
+                    } else {
+                        limitEvents.add(LimitEventSnapshot("CONTEXT_BUDGET_EXCEEDED", "irreducible request exceeds context window"))
+                        emit(InvestigateEvent.Error("CONTEXT_BUDGET_EXCEEDED", "the request is too large for the configured model"))
+                    }
                     break
                 }
                 if (totalDeadlinePassed()) {
@@ -734,6 +739,7 @@ class InvestigationService(
 
                 val answer = StringBuilder()
                 val toolCalls = mutableListOf<infoscry.llm.ToolCall>()
+                var assistantContent: infoscry.llm.AnthropicAssistantContent? = null
                 var callUsage = TokenUsage(0, 0, 0)
                 var callFailed = false
 
@@ -756,6 +762,7 @@ class InvestigationService(
                             is LlmEvent.Usage -> {
                                 callUsage = callUsage + event.usage
                             }
+                            is LlmEvent.AssistantContentReady -> assistantContent = event.content
                             is LlmEvent.Completed -> Unit
                         }
                     }
@@ -967,11 +974,12 @@ class InvestigationService(
                 // when a round or call limit stopped this round, so its model call and tool calls are
                 // still persisted after their events were emitted.
                 if (toolCalls.isNotEmpty()) {
-                    val assistantToolMsg = LlmMessage("assistant", "", toolCalls = toolCalls.toList())
+                    val assistantToolMsg = LlmMessage("assistant", "", toolCalls = toolCalls.toList(),
+                        assistantContent = assistantContent.takeIf { request.reasoning is NativeReasoning.AnthropicThinkingBudget })
                     val exchangeStart = conversationMessages.size
                     val exchangeSeq = seq
                     conversationMessages.add(assistantToolMsg)
-                    messageRecords.add(seq++ to assistantToolMsg)
+                    messageRecords.add(seq++ to assistantToolMsg.copy(assistantContent = null))
                     conversationMessages.addAll(toolResultMessages)
                     conversationGroups.add(Pair(exchangeStart, conversationMessages.size))
                     groupEvidenceIds[conversationGroups.size - 1] = roundEvidenceIds.toList()

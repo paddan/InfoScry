@@ -709,12 +709,12 @@ describe('collections panel', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('shows active import progress and read failures outside all disclosures', async () => {
+  it('omits the duplicate active import summary and keeps history read failures visible', async () => {
     api.listCollectionImports.mockResolvedValue(history([importEntry('active', { state: 'RUNNING', filesCompleted: 2, filesTotal: 4, currentProgress: { unitKind: 'PAGE', processedUnits: 3, totalUnits: 20, failedUnits: 0 } })]));
     const view = render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
-    expect(await screen.findByRole('region', { name: 'Active imports' })).toBeTruthy();
-    expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText(/2.*4/)).toBeTruthy();
-    expect(within(screen.getByRole('region', { name: 'Active imports' })).getByRole('progressbar', { name: 'Page progress' }).getAttribute('value')).toBe('3');
+    await waitFor(() => expect(view.container.querySelector('.imports')?.textContent).toContain('2 of 4 files'));
+    expect(screen.queryByRole('region', { name: 'Active imports' })).toBeNull();
+    expect(screen.queryByText('3 of 20 pages processed')).toBeNull();
     for (const disclosure of view.container.querySelectorAll('details')) expect(disclosure.open).toBe(false);
     api.listCollectionImports.mockRejectedValueOnce(new Error('history unavailable'));
     await view.rerender({ visible: false });
@@ -1883,15 +1883,15 @@ describe('collections panel', () => {
       const { unmount } = renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 2)], selectedId: 'nightfall' }));
       await act(async () => {});
       expect(api.listCollectionImports).toHaveBeenCalledTimes(1);
-      expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText('Copying · first.pdf')).toBeTruthy();
-      expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText(/0 of 2 files/)).toBeTruthy();
+      expect(within(screen.getByRole('region', { name: 'Import history for Nightfall' })).getByText('Copying · first.pdf')).toBeTruthy();
+      expect(within(screen.getByRole('region', { name: 'Import history for Nightfall' })).getByText(/0 of 2 files/)).toBeTruthy();
 
       // An unfinished import is read again from the server, which is what makes the row keep up with the
       // file being read — including after a reload, because nothing here is remembered in the browser.
       await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
       expect(api.listCollectionImports).toHaveBeenCalledTimes(2);
-      expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText('Extracting · second.pdf')).toBeTruthy();
-      expect(within(screen.getByRole('region', { name: 'Active imports' })).getByText(/1 of 2 files/)).toBeTruthy();
+      expect(within(screen.getByRole('region', { name: 'Import history for Nightfall' })).getByText('Extracting · second.pdf')).toBeTruthy();
+      expect(within(screen.getByRole('region', { name: 'Import history for Nightfall' })).getByText(/1 of 2 files/)).toBeTruthy();
       expect(screen.queryByText(/first\.pdf/)).toBeNull();
 
       unmount();

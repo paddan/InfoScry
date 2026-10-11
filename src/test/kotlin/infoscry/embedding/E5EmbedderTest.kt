@@ -184,6 +184,41 @@ class E5EmbedderTest {
     }
 
     @Test
+    fun `a long passage later in the list does not shrink the short batches before it`() {
+        val batches = E5Embedder.planBatches(listOf(50, 50, 500), 600)
+
+        assertEquals(
+            listOf(0..1, 2..2),
+            batches,
+            "the two short rows batch together on their own size; the later outlier opens its own batch " +
+                "instead of throttling rows that come before it",
+        )
+    }
+
+    @Test
+    fun `a handful of long rows scattered through many short ones do not inflate the whole document's batching`() {
+        // 2,000 short rows (80 tokens, the common case for most chunks of a real document) with five long
+        // rows (500 tokens, an occasional dense paragraph or a table) spread far apart -- the realistic
+        // shape of one document's chunk lengths, where only a few passages are near the model's own limit.
+        // [bugPlanBatches] is the exact algorithm this class shipped before the fix, kept here only as the
+        // regression oracle: it measured the longest row anywhere in the *remaining* list, so every short
+        // row anywhere before a later outlier was throttled down to budget/500 rows per batch, regardless
+        // of how far away that outlier actually was.
+        val lengths = (0 until 2000).map { index -> if (index % 400 == 399) 500 else 80 }
+        val budget = 8192
+
+        val batches = E5Embedder.planBatches(lengths, budget)
+        val buggyBatches = bugPlanBatches(lengths, budget)
+
+        assertTrue(
+            batches.size * 2 < buggyBatches.size,
+            "the fixed planner made ${batches.size} batches against the superseded algorithm's " +
+                "${buggyBatches.size} for the same five outliers scattered through 2,000 short rows; it " +
+                "should need far fewer model calls, not a comparable number",
+        )
+    }
+
+    @Test
     fun `a device that runs out of memory gets smaller batches instead of a failure`() {
         val runner = OutOfMemoryRunner(failAbove = 1)
         val embedder = embedder(runner = runner, batchTokenBudget = 512)
@@ -348,6 +383,29 @@ class E5EmbedderTest {
         vector.forEach { sum += it.toDouble() * it }
         return kotlin.math.sqrt(sum).toFloat()
     }
+}
+
+/**
+ * [E5Embedder.planBatches] exactly as it shipped before the fix, kept only as the regression oracle for
+ * `a handful of long rows scattered through many short ones do not inflate the whole document's batching`.
+ *
+ * It measured the longest row anywhere in the *remaining* list rather than only inside the batch being
+ * built, so one long row anywhere later in a unit's chunks throttled every short batch before it down to
+ * `batchTokenBudget / thatRow'sLength` rows, however far away the long row actually was.
+ */
+private fun bugPlanBatches(lengths: List<Int>, batchTokenBudget: Int): List<IntRange> {
+    if (lengths.isEmpty()) return emptyList()
+    val batches = mutableListOf<IntRange>()
+    var start = 0
+    while (start < lengths.size) {
+        val longest = lengths.subList(start, lengths.size).max()
+        var end = start
+        while (end < lengths.size && longest * (end - start + 1) <= batchTokenBudget) end++
+        if (end == start) end = start + 1
+        batches += start until end
+        start = end
+    }
+    return batches
 }
 
 /** A runner that records what it was asked for and returns one fixed vector per passage. */

@@ -2,6 +2,10 @@
 
 [Project overview](../README.md) · [Development](development.md) · [Implementation status](implementation-status.md)
 
+Current feature contracts: [OCR workflow](ocr-workflow.md),
+[selectable PDF](selectable-pdf.md) and
+[PDF interfaces](selectable-pdf-contracts.md).
+
 ## Architecture
 
 One Kotlin/JVM process owns the services, loopback web server, persistent jobs,
@@ -269,9 +273,23 @@ model.
 
 ## Investigate limits
 
-The [user guide](usage.md#investigate-and-ask-follow-up-questions) lists defaults
-and configurable ranges. Limits are numeric browser preferences stored under
-`infoscry-investigate-limits:v1` and apply to future turns.
+[Effort contracts](investigate-effort.md) describe resolution, validation and native transport.
+
+The [user guide](usage.md#investigate-and-ask-follow-up-questions) lists the four
+effort levels. The browser stores its selection under `infoscry-investigate-effort:v1`;
+the old numeric preference is ignored. Start/continue accept `limits: { effortLevel }`,
+defaulting to MEDIUM when omitted, and reject obsolete numeric fields or unknown levels.
+The server resolves sparse per-profile overrides against global defaults and reports
+`resolvedLimits` only on the `started` SSE event. Follow-ups use the conversation's
+locked provider profile. Limits apply to future turns.
+
+Optional profile-native reasoning affects research requests only. Anthropic signed
+and redacted content is retained in request-local ordered envelopes and measured in
+the actual provider budget; required tool exchanges cannot be pruned. It never enters
+stored history or SSE. Synthesis and citation correction use None and an envelope-free
+outbound view. The nullable `effort_overrides_json` column is part of the fresh baseline
+only: existing version-1 archives require separately authorized recreation before
+using this schema; no automatic migration or user-data reset is included.
 
 Time includes request preparation, provider work, synthesis and citation
 correction, but excludes the optional conversation title. Synthesis reserves

@@ -1,5 +1,6 @@
 package infoscry.llm
 
+import infoscry.investigate.*
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -23,6 +24,38 @@ class LlmProfilesTest {
         enabled = true,
         apiKeyEnvironmentVariable = "ANTHROPIC_API_KEY",
     )
+
+    @Test
+    fun `effort overrides validate every cap and native provider contract`() {
+        val invalid = listOf(
+            InvestigationLimits(0, 1, 10), InvestigationLimits(51, 1, 10),
+            InvestigationLimits(1, -1, 10), InvestigationLimits(1, 101, 10),
+            InvestigationLimits(1, 1, 9), InvestigationLimits(1, 1, 1801),
+        )
+        invalid.forEach { limits ->
+            assertFailsWith<IllegalArgumentException> {
+                valid.copy(effortOverrides = mapOf(EffortLevel.LOW to EffortPreset(limits)))
+            }
+        }
+        listOf(0, 1023, valid.maxOutputTokens).forEach { tokens ->
+            assertFailsWith<IllegalArgumentException> {
+                valid.copy(effortOverrides = mapOf(EffortLevel.HIGH to EffortPreset(InvestigationLimits(), NativeReasoning.AnthropicThinkingBudget(tokens))))
+            }
+        }
+        val thinking = mapOf(EffortLevel.HIGH to EffortPreset(InvestigationLimits(), NativeReasoning.AnthropicThinkingBudget(1024)))
+        val accepted = valid.copy(effortOverrides = thinking)
+        assertFailsWith<IllegalArgumentException> { accepted.copy(maxOutputTokens = 1024) }
+        assertFailsWith<IllegalArgumentException> { accepted.copy(provider = LlmProvider.OPENAI_COMPATIBLE) }
+        assertFailsWith<IllegalArgumentException> {
+            valid.copy(effortOverrides = mapOf(EffortLevel.LOW to EffortPreset(InvestigationLimits(), NativeReasoning.OpenAiReasoningEffort("high"))))
+        }
+        listOf("low", "medium", "high").forEach { value ->
+            valid.copy(provider = LlmProvider.OPENAI_COMPATIBLE, effortOverrides = mapOf(EffortLevel.LOW to EffortPreset(InvestigationLimits(), NativeReasoning.OpenAiReasoningEffort(value))))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            valid.copy(provider = LlmProvider.OPENAI_COMPATIBLE, effortOverrides = mapOf(EffortLevel.LOW to EffortPreset(InvestigationLimits(), NativeReasoning.OpenAiReasoningEffort("xhigh"))))
+        }
+    }
 
     @Test
     fun `a profile validates its bounds and its environment variable name`() {

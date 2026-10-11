@@ -11,10 +11,15 @@ or GPU verification.
 
 - Read [README.md](README.md) for current status.
 - Design specs live in `docs/specs/` and implementation tickets in
-  `docs/tickets/`; read the relevant one before implementing.
+  `docs/tickets/`; read the relevant one before implementing. Completed plans
+  and tickets are removed after preserving current contracts and open gates in
+  reference documentation; historical reports remain in Git history.
 
 ## Workflow
 
+- Implementation does not require subagents. Work directly in the current
+  session; use subagents only when the user explicitly requests delegation.
+  This applies to implementation plans and tickets as well.
 - Implement the requested task and its dependencies; do not expand into later
   phases without authorization. Resolve routine choices within the approved scope.
 - If the spec and ticket conflict, report the exact contradiction rather than
@@ -68,12 +73,12 @@ or GPU verification.
   result instead of an error or a duplicate side effect, and must converge from
   any partial state a crash can leave. Design and test it for each new
   operation: run it twice, interrupt it at each step and run it again.
-- OCR workflow (implemented 2026-10-09; real-provider/CoreML workflow gates remain open): the reading method (engine and profile as one
+- OCR workflow (implemented 2026-10-09; remaining OCR/PDF checks confirmed complete by the owner 2026-10-11): the reading method (engine and profile as one
   choice) is confirmed in a start dialog on every import and rescan, with the
   collection default only pre-filling it; every page that can need reading is read (PDF pages with no usable text layer, or a large image and a poor text layer; see the spec); external sending
   is approved once in that dialog, never by a mid-run pause; there is no
   reviewer, and a finished run replaces the text with the previous version kept
-  in history. See `docs/specs/2026-10-08-ocr-workflow-redesign.md`.
+  in history. See `docs/ocr-workflow.md`.
 
 ## Embeddings, LLMs, and local boundaries
 

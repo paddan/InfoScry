@@ -176,10 +176,16 @@ class Chunker(
     /**
      * The furthest character this chunk can reach and still fit the model's passage budget.
      *
-     * The walk is a binary search rather than a character-by-character expansion: the encoded length grows
-     * with the text, so the boundary is found in a logarithmic number of measurements instead of one per
-     * character. The answer is verified before it is used, so a tokenizer whose length is not perfectly
-     * monotone in its input can make the chunk conservative but never too long.
+     * Finding that boundary is two searches, not one. A plain binary search between `start + 1` and the
+     * unit's own end would measure candidates half the *remaining unit* away on its very first probe — and
+     * every later chunk of the same unit would do the same against its own, still-huge remainder. For a
+     * unit with no interior structure (a heading-free document is one unit end to end) that cost is paid
+     * once per chunk against a length that barely shrinks, which turns chunking one large unit into work
+     * proportional to its length *squared*. Growing the candidate end geometrically from `start` instead
+     * finds a bracket around the true boundary — one bound that fits, one that does not — using probes no
+     * larger than the boundary itself, however large the rest of the unit is; only then does the binary
+     * search narrow that small bracket. The answer is verified before it is used, so a tokenizer whose
+     * length is not perfectly monotone in its input can make the chunk conservative but never too long.
      */
     private fun furthestFittingEnd(
         text: String,
@@ -187,9 +193,24 @@ class Chunker(
         header: String?,
         maxSequenceTokens: Int,
     ): Int {
+        if (start >= text.length) return start
+        if (!fits(text, start, start + 1, header, maxSequenceTokens)) return start
+
         var low = start + 1
         var high = text.length
-        if (!fits(text, start, low, header, maxSequenceTokens)) return start
+        // Starts at 2, not 1: the check above already proved `start + 1` fits, so the first candidate this
+        // loop tests should be the next untested one.
+        var span = 2
+        while (start + span < high) {
+            val candidate = start + span
+            if (!fits(text, start, candidate, header, maxSequenceTokens)) {
+                high = candidate
+                break
+            }
+            low = candidate
+            span *= 2
+        }
+
         while (low < high) {
             val middle = low + (high - low + 1) / 2
             if (fits(text, start, middle, header, maxSequenceTokens)) low = middle else high = middle - 1

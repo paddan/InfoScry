@@ -37,7 +37,6 @@
   import CollectionOcrSettings from './CollectionOcrSettings.svelte';
   import DocumentRescan from './DocumentRescan.svelte';
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
-  import ImportUnitProgress from './ImportUnitProgress.svelte';
   import ImportPanel from './ImportPanel.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
@@ -1658,15 +1657,6 @@
           {/if}
         </div>
         {#if importsError !== null}<p role="alert">{importsError}</p>{/if}
-        {#if imports.some(isWatchedImport)}
-          <section class="active-imports" aria-label="Active imports">
-            {#each imports.filter(isWatchedImport) as entry (entry.id)}
-              <p>{JOB_STATE_LABELS[entry.state]} · {fileCountLabel(entry.filesCompleted, entry.filesTotal)}</p>
-              <p class="hint">{stageCell(entry)}</p>
-              <ImportUnitProgress progress={entry.currentProgress} />
-            {/each}
-          </section>
-        {/if}
         {#if expanded}
           <section id="collection-documents" class="document-list" aria-label="Documents" bind:this={documentsSection}>
         <div class="document-controls">
@@ -2252,7 +2242,6 @@
   .document-table-scroll { max-height: min(60vh, 36rem); overflow: auto; }
   .documents thead th { position: sticky; top: 0; z-index: 1; background: #191c1d; }
   summary { cursor: pointer; padding: 0.6rem 0; }
-  .active-imports { display: grid; gap: 0.4rem; }
   .table-scroll { min-width: 0; overflow-x: auto; }
   table.documents { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   table.documents caption { padding-bottom: 0.5rem; color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-align: left; text-transform: uppercase; }

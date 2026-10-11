@@ -1,5 +1,8 @@
 package infoscry.llm
 
+import infoscry.investigate.EffortLevel
+import infoscry.investigate.EffortPreset
+import infoscry.investigate.NativeReasoning
 import kotlinx.serialization.Serializable
 import java.net.URI
 import java.util.Locale
@@ -49,8 +52,10 @@ data class LlmProfile(
     val apiKeyEnvironmentVariable: String? = null,
     val toolCallingMeasured: Boolean? = null,
     val capabilityCheckedAt: String? = null,
+    val effortOverrides: Map<EffortLevel, EffortPreset>? = null,
 ) {
     init {
+        validateEffortOverrides()
         require(name.isNotBlank()) { "LlmProfile.name must not be blank" }
         require(model.isNotBlank()) { "LlmProfile.model must not be blank" }
         require(contextWindow > 0) { "LlmProfile.contextWindow must be positive, was $contextWindow" }
@@ -81,6 +86,25 @@ data class LlmProfile(
         apiKeyEnvironmentVariable?.let { require(ValidEnvironmentVariableName.matches(it)) {
             "apiKeyEnvironmentVariable must be a valid environment variable name, was '$it'"
         } }
+    }
+
+    fun validateEffortOverrides() {
+        effortOverrides?.values?.forEach { preset ->
+            preset.limits.validate()
+            when (val reasoning = preset.reasoning) {
+                NativeReasoning.None -> Unit
+                is NativeReasoning.AnthropicThinkingBudget -> {
+                    require(provider == LlmProvider.ANTHROPIC) { "Anthropic thinking requires an Anthropic profile" }
+                    require(reasoning.tokens >= 1024 && reasoning.tokens < maxOutputTokens) {
+                        "Anthropic thinking budget must be at least 1024 and below maxOutputTokens"
+                    }
+                }
+                is NativeReasoning.OpenAiReasoningEffort -> {
+                    require(provider == LlmProvider.OPENAI_COMPATIBLE) { "OpenAI reasoning requires an OpenAI-compatible profile" }
+                    require(reasoning.value in setOf("low", "medium", "high")) { "OpenAI reasoning effort must be low, medium or high" }
+                }
+            }
+        }
     }
 
     /**

@@ -11,6 +11,7 @@ import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
+import infoscry.llm.AnthropicAssistantContent
 import infoscry.llm.LlmCompletion
 import infoscry.llm.LlmCompletionClient
 import infoscry.llm.LlmEvent
@@ -42,6 +43,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlin.test.AfterTest
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -97,6 +99,27 @@ class InvestigationServiceTest {
     )
 
     private fun request() = InvestigateRequest(CollectionId("collection"), "question", profile())
+
+    @Test
+    fun `native research echoes signed content but persistence and synthesis never receive it`() = runBlocking {
+        val collection = CollectionStore(database).create("Native research").id
+        val unitId = addUnit(insertDocument(collection), 0, "native-unit", "The meeting began at noon.")
+        val tool = infoscry.llm.ToolCall("c1", "read_content_unit", """{"contentUnitId":"${unitId.value}"}""")
+        val envelope = AnthropicAssistantContent(listOf(kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"thinking","thinking":"private thought","signature":"signature"}""").jsonObject))
+        val provider = PerRoundProvider(listOf(
+            listOf(LlmEvent.ToolCallReady(tool), LlmEvent.AssistantContentReady(envelope), LlmEvent.Completed),
+            listOf(LlmEvent.ToolCallReady(tool.copy(id = "c2")), LlmEvent.AssistantContentReady(envelope), LlmEvent.Completed),
+            listOf(LlmEvent.TextDelta("The meeting began at noon [S1]."), LlmEvent.Completed),
+        ))
+        val persistence = FakePersistence()
+        val native = NativeReasoning.AnthropicThinkingBudget(1024)
+        service(tools(collection), provider, persistence).investigate(InvestigateRequest(collection, "When?", profile().copy(provider = LlmProvider.ANTHROPIC, maxOutputTokens = 2048, contextWindow = 20000), limits = InvestigationLimits(maxToolRounds = 2), reasoning = native)).toList()
+        assertEquals(native, provider.streamRequests[0].reasoning)
+        assertTrue(provider.streamRequests[1].messages.any { it.assistantContent === envelope })
+        assertEquals(NativeReasoning.None, provider.streamRequests.last().reasoning)
+        assertTrue(provider.streamRequests.last().messages.all { it.assistantContent == null })
+        assertTrue(persistence.appended.single().second.messages.all { it.second.assistantContent == null })
+    }
 
     @Test
     fun `blank question emits INVALID_REQUEST and makes no calls`() = runBlocking {
@@ -442,6 +465,31 @@ class InvestigationServiceTest {
         }
 
         assertEquals("client disconnected", thrown.message)
+    }
+
+    @Test
+    fun `a protected thinking loop that exceeds context switches to plain cited synthesis`() = runBlocking {
+        val collection = CollectionStore(database).create("Native context cap").id
+        val unitId = addUnit(insertDocument(collection), 0, "native-budget-unit", "The meeting began at noon.")
+        val tool = infoscry.llm.ToolCall("c1", "read_content_unit", """{"contentUnitId":"${unitId.value}"}""")
+        val block = kotlinx.serialization.json.buildJsonObject {
+            put("type", kotlinx.serialization.json.JsonPrimitive("thinking"))
+            put("thinking", kotlinx.serialization.json.JsonPrimitive("opaque".repeat(10000)))
+            put("signature", kotlinx.serialization.json.JsonPrimitive("signed"))
+        }
+        val envelope = AnthropicAssistantContent(listOf(block))
+        val provider = PerRoundProvider(listOf(
+            listOf(LlmEvent.ToolCallReady(tool), LlmEvent.AssistantContentReady(envelope), LlmEvent.Completed),
+            listOf(LlmEvent.TextDelta("The meeting began at noon [S1]."), LlmEvent.Completed),
+        ))
+        val nativeProfile = profile().copy(provider = LlmProvider.ANTHROPIC, maxOutputTokens = 2048, contextWindow = 20000)
+        val events = service(tools(collection), provider).investigate(InvestigateRequest(collection, "When?", nativeProfile, reasoning = NativeReasoning.AnthropicThinkingBudget(1024))).toList()
+        assertEquals(2, provider.streamRequests.size, "the oversize native request is never dispatched")
+        assertEquals(NativeReasoning.None, provider.streamRequests.last().reasoning)
+        assertTrue(provider.streamRequests.last().messages.all { it.assistantContent == null })
+        assertTrue(events.filterIsInstance<InvestigateEvent.Limit>().any { it.code == "CONTEXT_BUDGET_EXCEEDED" })
+        assertTrue(events.any { it is InvestigateEvent.Done })
+        assertTrue(events.none { it is InvestigateEvent.Error })
     }
 
     @Test

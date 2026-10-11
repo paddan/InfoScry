@@ -101,7 +101,7 @@ class AskService(
                         initialUsage = initialUsage + event.usage
                         emit(AskEvent.Usage(event.usage.inputTokens, event.usage.outputTokens))
                     }
-                    is LlmEvent.Completed, is LlmEvent.ToolCallReady -> Unit
+                    is LlmEvent.AssistantContentReady, is LlmEvent.Completed, is LlmEvent.ToolCallReady -> Unit
                 }
             }
             var finalAnswer = answer.toString()

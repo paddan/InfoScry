@@ -273,6 +273,27 @@ class ChunkerTest {
     }
 
     @Test
+    fun `a large heading-free unit is chunked in work proportional to its length, not its length squared`() {
+        // A heading-free Word, HTML or Markdown document becomes exactly one unit this large: nothing
+        // splits it before the chunker sees it. A boundary search that re-measured candidates against the
+        // *whole remaining unit* on every chunk would sum to characters measured proportional to the
+        // unit's length squared; this pins a linear bound instead.
+        val unit = unitOf(words(20_000))
+        val counting = CountingTokenCounter(counter())
+
+        val plan = Chunker(counting).chunk(unit)
+
+        assertTrue(plan.drafts.size > 30, "a 20,000-word unit should need many chunks")
+        assertEquals(unit.searchText, covered(unit, plan))
+        val textLength = unit.searchText.length
+        assertTrue(
+            counting.totalCharactersMeasured <= textLength * LINEAR_WORK_FACTOR,
+            "measured ${counting.totalCharactersMeasured} characters to chunk a ${textLength}-character " +
+                "unit; a quadratic boundary search would far exceed ${textLength * LINEAR_WORK_FACTOR}",
+        )
+    }
+
+    @Test
     fun `a counter that reads no body token is refused rather than handed fabricated offsets`() {
         val unit = unitOf("alpha beta")
 
@@ -320,6 +341,29 @@ class ChunkerTest {
     private companion object {
         const val BUDGET = 512
         const val OVERLAP = 100
+
+        /**
+         * How many characters of measurement a linear boundary search may spend per character of unit
+         * text. Growth-phase probes roughly double (1, 2, 4, ... up to twice the true boundary) plus a
+         * binary search within that bracket, so the true per-chunk cost is a small multiple of the chunk
+         * size — generous headroom above that, but orders of magnitude below what a quadratic search over
+         * a 20,000-word unit would spend.
+         */
+        const val LINEAR_WORK_FACTOR = 50
+    }
+}
+
+/** A counter that delegates to [inner] while summing the characters every [encodePassage] call measured. */
+private class CountingTokenCounter(private val inner: TokenCounter) : TokenCounter {
+
+    var totalCharactersMeasured: Long = 0
+        private set
+
+    override val id: String get() = inner.id
+
+    override fun encodePassage(text: String): EncodedPassage {
+        totalCharactersMeasured += text.length
+        return inner.encodePassage(text)
     }
 }
 

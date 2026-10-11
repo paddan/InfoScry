@@ -1,5 +1,6 @@
 package infoscry.llm
 
+import infoscry.investigate.NativeReasoning
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
 
@@ -17,8 +18,10 @@ data class LlmMessage(
     val content: String,
     val toolCalls: List<ToolCall> = emptyList(),
     val toolCallId: String? = null,
+    val assistantContent: AnthropicAssistantContent? = null,
 ) {
     init {
+        require(assistantContent == null || role == "assistant") { "assistant content requires an assistant message" }
         require(role.isNotBlank()) { "LlmMessage.role must not be blank" }
         require(toolCalls.isEmpty() || role == "assistant") {
             "LlmMessage.toolCalls requires an assistant message"
@@ -63,6 +66,7 @@ data class LlmRequest(
     val tools: List<ToolDefinition> = emptyList(),
     val requiredToolName: String? = null,
     val maxOutputTokens: Int = 4096,
+    val reasoning: NativeReasoning = NativeReasoning.None,
 ) {
     init {
         require(messages.isNotEmpty()) { "LlmRequest.messages must not be empty" }
@@ -79,6 +83,8 @@ data class LlmRequest(
 sealed interface LlmEvent {
     /** A piece of the model's answer text, in order. */
     data class TextDelta(val text: String) : LlmEvent
+
+    data class AssistantContentReady(val content: AnthropicAssistantContent) : LlmEvent
 
     /** One completed tool call the model requested; arguments are JSON text, already accumulated. */
     data class ToolCallReady(val call: ToolCall) : LlmEvent

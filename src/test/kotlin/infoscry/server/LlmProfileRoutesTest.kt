@@ -39,6 +39,46 @@ class LlmProfileRoutesTest {
         HttpMethod.Post, "/api/llm/profiles", body, Credential.CSRF,
     )
 
+    @Test fun `effort override API persists clears and rejects invalid caps or reasoning on create and update`() = runBlocking {
+        val reasoning = "\"reasoning\":{\"type\":\"OpenAiReasoningEffort\",\"value\":\"high\"}"
+        fun body(rounds: Int = 7, calls: Int = 9, seconds: Int = 60, native: String = reasoning) =
+            profileBody.dropLast(1) + ",\"effortOverrides\":{\"HIGH\":{\"limits\":{\"maxToolRounds\":$rounds,\"maxToolCalls\":$calls,\"maxTurnSeconds\":$seconds},$native}}}"
+        val created = create(body())
+        assertEquals(HttpStatusCode.Created, created.status, created.bodyAsText())
+        assertContains(created.bodyAsText(), "effortOverrides")
+        val id = Regex("\"id\":\"([^\"]+)\"").find(created.bodyAsText())!!.groupValues[1]
+        val invalid = listOf(body(rounds = 0), body(rounds = 51), body(calls = -1), body(calls = 101), body(seconds = 9), body(seconds = 1801),
+            body(native = "\"reasoning\":{\"type\":\"OpenAiReasoningEffort\",\"value\":\"xhigh\"}"),
+            body(native = "\"reasoning\":{\"type\":\"AnthropicThinkingBudget\",\"tokens\":1024}"))
+        invalid.forEach { value ->
+            assertEquals(HttpStatusCode.BadRequest, create(value).status)
+            assertEquals(HttpStatusCode.BadRequest, harness.request(HttpMethod.Put, "/api/llm/profiles/$id", value, Credential.CSRF).status)
+        }
+        assertContains(harness.get("/api/llm/profiles").bodyAsText(), "\"maxToolRounds\":7")
+        val cleared = harness.request(HttpMethod.Put, "/api/llm/profiles/$id", profileBody, Credential.CSRF)
+        assertEquals(HttpStatusCode.OK, cleared.status)
+        assertFalse(cleared.bodyAsText().contains("OpenAiReasoningEffort"))
+    }
+
+    @Test fun `Anthropic budget validation and every reasoning discriminator round trip through HTTP`() = runBlocking {
+        fun body(tokens: Int, provider: String = "ANTHROPIC", output: Int = 4096) = profileBody
+            .replace("OPENAI_COMPATIBLE", provider).replace("\"maxOutputTokens\":1024", "\"maxOutputTokens\":$output")
+            .dropLast(1) + ",\"effortOverrides\":{\"HIGH\":{\"limits\":{\"maxToolRounds\":7,\"maxToolCalls\":9,\"maxTurnSeconds\":60},\"reasoning\":{\"type\":\"AnthropicThinkingBudget\",\"tokens\":$tokens}}}}"
+        val created = create(body(2048))
+        assertEquals(HttpStatusCode.Created, created.status)
+        assertContains(created.bodyAsText(), "\"type\":\"AnthropicThinkingBudget\",\"tokens\":2048")
+        val id = harness.context.llm.findByName("Test profile")!!.id
+        for (bad in listOf(body(1023), body(4096), body(5000), body(2048, provider = "OPENAI_COMPATIBLE"), body(2048, output = 2048))) {
+            assertEquals(HttpStatusCode.BadRequest, create(bad).status)
+            assertEquals(HttpStatusCode.BadRequest, harness.request(HttpMethod.Put, "/api/llm/profiles/$id", bad, Credential.CSRF).status)
+        }
+        assertContains(harness.get("/api/llm/profiles").bodyAsText(), "\"tokens\":2048")
+        val none = body(2048).replace("{\"type\":\"AnthropicThinkingBudget\",\"tokens\":2048}", "{\"type\":\"None\"}")
+        val updated = harness.request(HttpMethod.Put, "/api/llm/profiles/$id", none, Credential.CSRF)
+        assertEquals(HttpStatusCode.OK, updated.status)
+        assertContains(updated.bodyAsText(), "\"type\":\"None\"")
+    }
+
     @Test fun `profile CRUD exposes key variable presence but never its value`() = runBlocking {
         val created = create()
         assertEquals(HttpStatusCode.Created, created.status, created.bodyAsText())

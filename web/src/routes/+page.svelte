@@ -12,16 +12,8 @@
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
   import type { DocumentListViewState } from '../lib/documentListViewState';
   import CollectionsPanel from '../lib/CollectionsPanel.svelte';
-  import {
-    DEFAULT_INVESTIGATION_LIMITS,
-    INVESTIGATION_LIMIT_FIELDS,
-    investigationLimitErrors,
-    loadInvestigationLimits,
-    saveInvestigationLimits,
-    validInvestigationLimits,
-    type InvestigationLimitKey,
-    type InvestigationLimitsInput,
-  } from '../lib/investigationLimits';
+  import { DEFAULT_EFFORT_LEVEL, loadEffortLevel, saveEffortLevel } from '../lib/investigationLimits';
+  import type { EffortLevel, ResolvedInvestigationLimits } from '../lib/api';
   import { profileOptionLabel, toolCallingRemedy, toolCallingState } from '../lib/toolCalling';
   import { qualityLabel } from '../lib/ocrQuality';
   import { newRequestId } from '../lib/ocrRescan';
@@ -160,15 +152,12 @@
   let askListGeneration = 0;
   /** An Investigate turn is live; the history column waits until its done event before changing it. */
   let investigateWorking = false;
-  /** The per-question Investigate limits, restored from this browser and applied to the next turn. */
-  let investigateLimits: InvestigationLimitsInput = { ...loadInvestigationLimits() };
-  let limitErrors: Partial<Record<InvestigationLimitKey, string>> = {};
-  // One field-associated message per out-of-contract value; the panel refuses to send while any exists.
-  $: limitErrors = investigationLimitErrors(investigateLimits);
-  // Only a complete, in-range set is stored, so a half-typed value leaves the last good preference.
-  $: {
-    const storedLimits = validInvestigationLimits(investigateLimits);
-    if (storedLimits !== null) saveInvestigationLimits(storedLimits);
+  let investigateEffort: EffortLevel = loadEffortLevel();
+  let resolvedEffort: { profile: string; effortLevel: EffortLevel; limits: ResolvedInvestigationLimits } | null = null;
+  $: saveEffortLevel(investigateEffort);
+  $: if (resolvedEffort && (resolvedEffort.profile !== investigateProfile || resolvedEffort.effortLevel !== investigateEffort)) resolvedEffort = null;
+  function handleResolvedLimits(snapshot: NonNullable<typeof resolvedEffort>): void {
+    if (snapshot.profile === investigateProfile && snapshot.effortLevel === investigateEffort) resolvedEffort = snapshot;
   }
   /** A row delete that failed; shows the server's reason without any conversation content. */
   let deleteError: string | null = null;
@@ -240,7 +229,7 @@
 
   /** Restore all three settings to the defaults; the reactive store writes them as the preference. */
   function resetInvestigateLimits(): void {
-    investigateLimits = { ...DEFAULT_INVESTIGATION_LIMITS };
+    investigateEffort = DEFAULT_EFFORT_LEVEL;
   }
 
   function openInvestigationConversation(id: string): void {
@@ -1020,25 +1009,15 @@
             {#if investigateRemedy !== null}<p class="profile-remedy" role="note">{investigateRemedy}</p>{/if}
             <p>Investigate can search the selected collection as needed. Search filters apply to Search only.</p>
             <fieldset class="limit-settings">
-              <legend>Question limits</legend>
-              <p>A round may contain several tool calls. Time includes preparing the final answer.</p>
-              {#each INVESTIGATION_LIMIT_FIELDS as field (field.key)}
-                <label for={`limit-${field.key}`}>{field.label}</label>
-                <input
-                  id={`limit-${field.key}`}
-                  type="number"
-                  min={field.min}
-                  max={field.max}
-                  step="1"
-                  disabled={investigateWorking}
-                  bind:value={investigateLimits[field.key]}
-                  aria-invalid={limitErrors[field.key] !== undefined}
-                  aria-describedby={limitErrors[field.key] === undefined ? undefined : `limit-error-${field.key}`}
-                />
-                {#if limitErrors[field.key] !== undefined}
-                  <p class="limit-error" id={`limit-error-${field.key}`} role="alert">{limitErrors[field.key]}</p>
-                {/if}
-              {/each}
+              <legend>Question effort</legend>
+              <label for="investigate-effort">Effort level</label>
+              <select id="investigate-effort" bind:value={investigateEffort} disabled={investigateWorking}>
+                <option value="LOW">Low</option><option value="MEDIUM">Medium</option>
+                <option value="HIGH">High</option><option value="XHIGH">Extra high</option>
+              </select>
+              {#if resolvedEffort}
+                <p class="resolved-limits">Up to {resolvedEffort.limits.maxToolRounds} tool rounds, {resolvedEffort.limits.maxToolCalls} tool calls, {resolvedEffort.limits.maxTurnSeconds} seconds per question.</p>
+              {/if}
               <button type="button" disabled={investigateWorking} onclick={resetInvestigateLimits}>Reset defaults</button>
             </fieldset>
           {/if}
@@ -1167,7 +1146,7 @@
 
     {#key selectedCollectionId}
       <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onOpenSource={(evidence) => openEvidence(evidence, evidenceHit(evidence))} /></div>
-      <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} limits={investigateLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
+      <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} effortLevel={investigateEffort} onResolvedLimits={handleResolvedLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
     {/key}
     </div>
     </div>
@@ -1296,8 +1275,6 @@
   .sidebar-note p { margin: 0; color: #b0b5b3; font-size: 0.8rem; }
   .limit-settings { display: grid; gap: 0.45rem; margin: 0; border: 0; border-top: 1px solid #2d3131; padding: 0.85rem 0 0; }
   .limit-settings legend { padding: 0; color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
-  .limit-settings input { font-size: 0.82rem; padding: 0.5rem; }
-  .sidebar-note .limit-error { color: #e08c8c; }
   .sidebar-footer { display: flex; align-items: center; gap: 0.5rem; margin-top: auto; border-top: 1px solid #2d3131; padding: 1rem 0.35rem 0; color: #89908e; font-size: 0.76rem; }
   .status-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: #85ad87; box-shadow: 0 0 0 3px #85ad8720; }
   .workspace { width: 100%; min-width: 0; padding: 2.1rem var(--workspace-gutter); }

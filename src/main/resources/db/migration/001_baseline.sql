@@ -350,6 +350,7 @@ CREATE TABLE llm_profiles (
     -- The measured result of the last capability test.
     tool_calling_measured            INTEGER,
     capability_checked_at            TEXT,
+    effort_overrides_json             TEXT,
     created_at                       TEXT    NOT NULL,
     updated_at                       TEXT    NOT NULL
 );

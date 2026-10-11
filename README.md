@@ -12,7 +12,8 @@ reader and a command-line interface.
   including OCR for scanned material.
 - Find passages with keyword, semantic or hybrid search.
 - Use **Ask** for answers from one search, or **Investigate** for follow-up
-  conversations that search and read sources over several steps.
+  conversations that search and read sources over several steps, with Low, Medium,
+  High or Extra high effort and optional per-profile overrides.
 - Open cited source passages and manage collections and LLM profiles in the
   English web interface.
 
@@ -44,18 +45,17 @@ which may be an external service.
 
 Implementation is in progress. The backend, CLI and web reader exist;
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
-The [OCR workflow redesign](docs/specs/2026-10-08-ocr-workflow-redesign.md) adds a
+The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan, reads selected pages and publishes
 a complete reading automatically while keeping previous text in history. Its browser
-gate passes against local test doubles. Open follow-ups are listed in
+gate passes against local test doubles. Remaining product choices are listed in
 [docs/tickets/follow-ups](docs/tickets/follow-ups/STATUS.md). Document paging, selective
 rescanning and historical Ask citations have browser coverage; the format-specific
 source-viewer finish line remains open. See [implementation status](docs/implementation-status.md)
 for recorded checks.
 
-The [workspace and page review plan](docs/plans/2026-10-09-workspace-and-page-review.md)
-is implemented: common views use the available width, and the compact
-document list has live filename search, inline details and session view memory.
+The workspace and page review are implemented: common views use the available
+width, and the compact document list has live filename search, inline details and session view memory.
 The adaptive source view preserves context and supports narrow-screen Back.
 Ask and Investigate keep conversation history closed in the left panel, with
 New conversation always available.
@@ -63,27 +63,28 @@ PDF/image review shows exact-revision images beside extracted text, including
 historical PDF page and image citations. Live review can mark pages and confirm an exact
 page set and reading method for rescanning. Stopped selected-page runs can resume
 from committed pages. Integrated browser verification passed 42 scenarios; the
-latest accumulated check passed 1,607 JVM and 432 frontend tests.
+latest accumulated check passed 1,838 JVM and 471 frontend tests.
+The latest Investigate browser run passed all nine scenarios against local fake
+providers. [Effort contracts](docs/investigate-effort.md) describe profile overrides
+and the fresh-database prerequisite; no existing archive was reset or migrated.
 
-Real OCR providers and real CoreML are separate manual gates. Before treating the
-redesigned OCR workflow as verified on a real archive, check local Tesseract/Surya,
-a confirmed external OCR profile, page totals and cost/destination summaries,
-cancellation and restart, preserved old text on failure, and History → Restore with
-real GPU embeddings. Automated fake-provider tests do not establish OCR quality.
+Patrik confirmed the remaining OCR/PDF checks complete on 2026-10-11,
+including real-provider/CoreML workflow and native PDF-reader checks. This owner
+confirmation is recorded separately from automated test results in
+[implementation status](docs/implementation-status.md).
 
-The [PDF text-selection plan](docs/plans/2026-10-10-selectable-pdf.md) and its
-[agent tickets](docs/tickets/selectable-pdf/STATUS.md) are substantially
-implemented: a revision-bound PDF copy places the published reading invisibly
+The [selectable-PDF design](docs/selectable-pdf.md) is
+implemented, with [remaining integration work](docs/tickets/selectable-pdf/STATUS.md):
+a revision-bound PDF copy places the published reading invisibly
 over its page image so it can be selected and copied in an ordinary PDF reader.
 Generation is durable, repeatable and recoverable; a selected-page rescan or
 Restore changes only its own export and keeps historical exports exact; archive
 search continues through Lucene, unaffected. Automated fake-provider tests cover
 this end to end, including independent PDFBox byte inspection of the produced
 files and a real-browser acceptance scenario. Original and managed PDF files are
-never changed. Open gates: a document's plain first import does not yet
+never changed. A document's plain first import does not yet
 automatically queue generation (use **Create PDF with selectable text**
-explicitly); native Preview/second-reader selection and real Tesseract/Surya/
-LLM/CoreML positioning are separate manual gates, not established by fake tests.
+explicitly). The remaining OCR/PDF checks are confirmed complete by the owner.
 See [implementation status](docs/implementation-status.md).
 
 The project targets local use on macOS arm64. CI, distributable packaging and

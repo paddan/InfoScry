@@ -1,5 +1,6 @@
 package infoscry.llm
 
+import infoscry.investigate.NativeReasoning
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.header
@@ -253,6 +254,7 @@ data class ChatCompletionRequest(
     val tools: List<ChatTool>? = null,
     val tool_choice: OpenAiToolChoice? = null,
     val stream_options: StreamOptions = StreamOptions(),
+    val reasoning_effort: String? = null,
 )
 
 @Serializable
@@ -374,6 +376,7 @@ internal fun buildChatCompletionRequest(
         )
     },
     max_tokens = request.maxOutputTokens,
+    reasoning_effort = (request.reasoning as? NativeReasoning.OpenAiReasoningEffort)?.value,
     tools = request.tools.takeIf { it.isNotEmpty() }?.map { tool ->
         ChatTool(
             function = ChatFunction(

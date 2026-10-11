@@ -11,6 +11,9 @@ import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
+import infoscry.investigate.EffortLevel
+import infoscry.investigate.EffortPreset
+import infoscry.investigate.InvestigationLimits
 import infoscry.investigate.InvestigateEvent
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
@@ -110,6 +113,12 @@ class InvestigationRoutesTest {
         }
     }
 
+    private fun lowLimits(rounds: Int = 50, calls: Int = 50, seconds: Int = 600): String {
+        val profile = harness.context.llm.findByName("investigator")!!
+        harness.context.llm.update(profile.id, profile.copy(effortOverrides = mapOf(EffortLevel.LOW to EffortPreset(InvestigationLimits(rounds, calls, seconds)))))
+        return """{"effortLevel":"LOW"}"""
+    }
+
     private fun createBody(
         question: String = "what happened",
         profile: String = "investigator",
@@ -117,6 +126,19 @@ class InvestigationRoutesTest {
         limits: String? = null,
     ) =
         """{"collection":"$collection","question":"$question","profile":"$profile"${limits?.let { ",\"limits\":$it" } ?: ""}}"""
+
+    @Test fun `start and continue SSE expose the resolved level caps only on started`() = runBlocking {
+        createProfile()
+        val profile = harness.context.llm.findByName("investigator")!!
+        harness.context.llm.update(profile.id, profile.copy(effortOverrides = mapOf(EffortLevel.LOW to EffortPreset(InvestigationLimits(3, 4, 30)))))
+        val default = harness.request(HttpMethod.Post, "/api/investigations", createBody(), Credential.BEARER)
+        assertContains(default.bodyAsText(), "\"resolvedLimits\":{\"maxToolRounds\":50,\"maxToolCalls\":50,\"maxTurnSeconds\":600}")
+        val id = default.bodyAsText().substringAfter("\"type\":\"started\"").substringAfter("\"id\":\"").substringBefore('"')
+        val continued = harness.request(HttpMethod.Post, "/api/investigations/$id/continue", createBody(limits = """{"effortLevel":"LOW"}"""), Credential.BEARER)
+        assertContains(continued.bodyAsText(), "\"resolvedLimits\":{\"maxToolRounds\":3,\"maxToolCalls\":4,\"maxTurnSeconds\":30}")
+        continued.bodyAsText().lineSequence().filter { it.startsWith("data: {") && !it.contains("\"type\":\"started\"") }.forEach { assertFalse(it.contains("resolvedLimits")) }
+        assertEquals(HttpStatusCode.BadRequest, harness.request(HttpMethod.Post, "/api/investigations", createBody(limits = """{"effortLevel":"UNKNOWN"}"""), Credential.BEARER).status)
+    }
 
     // ---- Wire unit contract ----
 
@@ -192,7 +214,7 @@ class InvestigationRoutesTest {
                 "/api/investigations",
                 // Explicit limits: the shipped default round cap is larger than the ten scripted
                 // research responses this test serves.
-                body = createBody(question = "Who signed the note?", limits = """{"maxToolRounds":10}"""),
+                body = createBody(question = "Who signed the note?", limits = lowLimits(rounds = 10)),
                 credential = Credential.BEARER,
             )
 
@@ -279,7 +301,7 @@ class InvestigationRoutesTest {
             val response = harness.request(
                 HttpMethod.Post,
                 "/api/investigations",
-                body = createBody(question = "Who signed the note?", limits = """{"maxToolCalls":20}"""),
+                body = createBody(question = "Who signed the note?", limits = lowLimits(calls = 20)),
                 credential = Credential.BEARER,
             )
 
@@ -356,7 +378,7 @@ class InvestigationRoutesTest {
             val first = harness.request(
                 HttpMethod.Post,
                 "/api/investigations",
-                body = createBody(question = "Who signed the note?", limits = """{"maxToolRounds":2}"""),
+                body = createBody(question = "Who signed the note?", limits = lowLimits(rounds = 2)),
                 credential = Credential.BEARER,
             )
             assertEquals(HttpStatusCode.OK, first.status, first.bodyAsText())
@@ -367,7 +389,7 @@ class InvestigationRoutesTest {
             val followUp = harness.request(
                 HttpMethod.Post,
                 "/api/investigations/$conversationId/continue",
-                body = createBody(question = "When was it signed?", limits = """{"maxToolRounds":2}"""),
+                body = createBody(question = "When was it signed?", limits = lowLimits(rounds = 2)),
                 credential = Credential.BEARER,
             )
             assertEquals(HttpStatusCode.OK, followUp.status, followUp.bodyAsText())
@@ -426,7 +448,7 @@ class InvestigationRoutesTest {
             val response = harness.request(
                 HttpMethod.Post,
                 "/api/investigations",
-                body = createBody(question = "Who signed the note?", limits = """{"maxToolRounds":2}"""),
+                body = createBody(question = "Who signed the note?", limits = lowLimits(rounds = 2)),
                 credential = Credential.BEARER,
             )
             assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
@@ -690,7 +712,7 @@ class InvestigationRoutesTest {
             val response = harness.request(
                 HttpMethod.Post,
                 "/api/investigations",
-                body = """{"collection":"Default","question":"Who signed the note?","profile":"investigator","limits":{"maxToolRounds":1}}""",
+                body = """{"collection":"Default","question":"Who signed the note?","profile":"investigator","limits":${lowLimits(rounds = 1)}}""",
                 credential = Credential.BEARER,
             )
 
@@ -739,7 +761,7 @@ class InvestigationRoutesTest {
             val continued = harness.request(
                 HttpMethod.Post,
                 "/api/investigations/$conversationId/continue",
-                body = """{"collection":"Other","question":"and then?","profile":"investigator","limits":{"maxToolRounds":1,"maxToolCalls":5,"maxTurnSeconds":120}}""",
+                body = """{"collection":"Other","question":"and then?","profile":"investigator","limits":${lowLimits(rounds = 1, calls = 5, seconds = 120)}}""",
                 credential = Credential.BEARER,
             )
 

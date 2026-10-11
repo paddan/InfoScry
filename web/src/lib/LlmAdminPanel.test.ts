@@ -87,6 +87,45 @@ describe('LLM admin panel', () => {
 
   afterEach(cleanup);
 
+  it('edits sparse effort overrides and Clear returns the row to inherited defaults', async () => {
+    api.listLlmProfiles.mockResolvedValue({ profiles: [profile('p1', 'fast')], defaults: { ASK: 'p1', INVESTIGATE: null } });
+    api.updateLlmProfile.mockImplementation(async (_id, input) => profile('p1', 'fast', input));
+    render(LlmAdminPanel);
+    const rounds = await screen.findByLabelText('HIGH tool rounds');
+    expect((rounds as HTMLInputElement).value).toBe('50');
+    expect((screen.getByLabelText('LOW tool calls') as HTMLInputElement).value).toBe('15');
+    await fireEvent.input(rounds, { target: { value: '7' } });
+    await fireEvent.change(screen.getByLabelText('HIGH native reasoning'), { target: { value: 'high' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(api.updateLlmProfile).toHaveBeenCalledWith('p1', expect.objectContaining({
+      effortOverrides: { HIGH: { limits: { maxToolRounds: 7, maxToolCalls: 75, maxTurnSeconds: 1200 }, reasoning: { type: 'OpenAiReasoningEffort', value: 'high' } } },
+    })));
+    await screen.findByText("'fast' saved.");
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear HIGH override' }));
+    expect((screen.getByLabelText('HIGH tool rounds') as HTMLInputElement).value).toBe('50');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(api.updateLlmProfile).toHaveBeenLastCalledWith('p1', expect.objectContaining({ effortOverrides: null })));
+  });
+
+  it('offers an optional Anthropic token budget and clears it back to inherited limits', async () => {
+    api.listLlmProfiles.mockResolvedValue({ profiles: [profile('p1', 'native', { provider: 'ANTHROPIC' })], defaults: { ASK: null, INVESTIGATE: null } });
+    api.updateLlmProfile.mockImplementation(async (_id, input) => profile('p1', 'native', input));
+    render(LlmAdminPanel);
+    const budget = await screen.findByLabelText('HIGH native reasoning') as HTMLInputElement;
+    expect(budget.type).toBe('number');
+    expect(budget.min).toBe('1024');
+    expect(budget.max).toBe('4095');
+    expect(budget.value).toBe('');
+    await fireEvent.input(budget, { target: { value: '2048' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(api.updateLlmProfile).toHaveBeenCalledWith('p1', expect.objectContaining({ effortOverrides: {
+      HIGH: { limits: { maxToolRounds: 50, maxToolCalls: 75, maxTurnSeconds: 1200 }, reasoning: { type: 'AnthropicThinkingBudget', tokens: 2048 } },
+    } })));
+    await screen.findByText("'native' saved.");
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear HIGH override' }));
+    expect((screen.getByLabelText('HIGH native reasoning') as HTMLInputElement).value).toBe('');
+  });
+
   it('groups editable settings separately from saved-profile checks in the shared workspace', async () => {
     api.listLlmProfiles.mockResolvedValue({ profiles: [profile('p1', 'fast')], defaults: { ASK: 'p1', INVESTIGATE: null } });
     render(LlmAdminPanel);

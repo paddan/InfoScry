@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchLlmCatalog, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -12,7 +12,7 @@ const collect = async (response: Response) => {
 describe('readInvestigationEvents', () => {
   it('passes the limit and answer-start frames through and still drops unknown types', async () => {
     const events = await collect(sse(
-      JSON.stringify({ type: 'started', id: 'conversation-1' }),
+      JSON.stringify({ type: 'started', id: 'conversation-1', resolvedLimits: { maxToolRounds: 7, maxToolCalls: 9, maxTurnSeconds: 90 } }),
       JSON.stringify({ type: 'limit', code: 'MAX_ROUNDS', message: 'Tool round limit reached.' }),
       JSON.stringify({ type: 'answer-start' }),
       JSON.stringify({ type: 'delta', text: 'answer' }),
@@ -22,6 +22,7 @@ describe('readInvestigationEvents', () => {
     ));
 
     expect(events.map((event) => event.type)).toEqual(['started', 'limit', 'answer-start', 'delta', 'done']);
+    expect(events[0]).toEqual({ type: 'started', id: 'conversation-1', resolvedLimits: { maxToolRounds: 7, maxToolCalls: 9, maxTurnSeconds: 90 } });
     expect(events[1]).toEqual({ type: 'limit', code: 'MAX_ROUNDS', message: 'Tool round limit reached.' });
     expect(events[2]).toEqual({ type: 'answer-start' });
   });
@@ -137,9 +138,7 @@ describe('investigation limit payloads', () => {
 
     await startInvestigation('collection-1', 'What happened?', 'local-cheap');
     await continueInvestigation('conversation-1', 'collection-1', 'When?', 'local-cheap', undefined, {
-      maxToolRounds: 4,
-      maxToolCalls: 7,
-      maxTurnSeconds: 90,
+      effortLevel: 'HIGH',
     });
 
     expect(bodies[0]).toEqual({ collection: 'collection-1', question: 'What happened?', profile: 'local-cheap' });
@@ -147,7 +146,7 @@ describe('investigation limit payloads', () => {
       collection: 'collection-1',
       question: 'When?',
       profile: 'local-cheap',
-      limits: { maxToolRounds: 4, maxToolCalls: 7, maxTurnSeconds: 90 },
+      limits: { effortLevel: 'HIGH' },
     });
   });
 });
@@ -382,5 +381,24 @@ describe('selectable PDF file links', () => {
       .toBe(`/api/collections/Archive%20One/documents/doc%2F1/selectable-pdf/file?revision=rev%2F1&key=${key}&inline=true`);
     expect(selectablePdfFileHref('Archive', 'doc-1', 'rev-1', key, false))
       .toBe(`/api/collections/Archive/documents/doc-1/selectable-pdf/file?revision=rev-1&key=${key}&inline=false`);
+  });
+});
+
+
+describe('effort profile JSON', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it('round trips sparse overrides and sends an explicit null when cleared', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const overrides = { HIGH: { limits: { maxToolRounds: 7, maxToolCalls: 9, maxTurnSeconds: 90 }, reasoning: { type: 'OpenAiReasoningEffort' as const, value: 'high' as const } } };
+    const input = { name: 'native', provider: 'OPENAI_COMPATIBLE' as const, endpoint: 'https://example.test', model: 'model', contextWindow: 10000, maxOutputTokens: 1000, inputPricePerMillion: 0, outputPricePerMillion: 0, cacheReadPricePerMillion: 0, enabled: true, apiKeyEnvironmentVariable: null, effortOverrides: overrides };
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'token' }));
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify(init?.body ? { profile: { id: 'p1', ...JSON.parse(String(init.body)) } } : { profiles: [{ id: 'p1', ...input }], defaults: { ASK: null, INVESTIGATE: null } }));
+    }));
+    expect((await createLlmProfile(input)).effortOverrides).toEqual(overrides);
+    expect((await listLlmProfiles()).profiles[0].effortOverrides).toEqual(overrides);
+    expect((await updateLlmProfile('p1', { ...input, effortOverrides: null })).effortOverrides).toBeNull();
+    expect(bodies.map(b => b.effortOverrides)).toEqual([overrides, null]);
   });
 });

@@ -1,5 +1,7 @@
 package infoscry.llm
 
+import infoscry.investigate.NativeReasoning
+import kotlinx.serialization.json.JsonArray
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.header
@@ -86,7 +88,7 @@ class AnthropicClient(
         while (true) {
             val response = awaitRequest(request)
             if (response.status.isSuccess()) {
-                consume(response)
+                consume(response, request.reasoning is NativeReasoning.AnthropicThinkingBudget)
                 emit(LlmEvent.Completed)
                 return@flow
             }
@@ -139,14 +141,16 @@ class AnthropicClient(
      * its JSON `type`. The body is closed by Ktor when the channel is exhausted; a cancelled consumer
      * unwinds the read inside [LlmSseLineReader.readLine].
      */
-    private suspend fun FlowCollector<LlmEvent>.consume(response: HttpResponse) {
+    private suspend fun FlowCollector<LlmEvent>.consume(response: HttpResponse, thinking: Boolean) {
         val scanner = SseScanner()
+        val content = AnthropicContentAccumulator(thinking)
         val toolUses = ArrayList<ToolUseAccumulator>()
         val channel = response.bodyAsChannel()
         var streaming = true
         while (streaming) {
             val line = LlmSseLineReader.readLine(channel) ?: break
             for (event in scanner.feed(line + "\n")) {
+                if (event.data.isNotBlank()) content.accept(event.data)
                 if (!applyEvent(event, toolUses)) {
                     streaming = false
                     break
@@ -155,12 +159,14 @@ class AnthropicClient(
         }
         if (streaming) {
             for (event in scanner.finish()) {
+                if (event.data.isNotBlank()) content.accept(event.data)
                 applyEvent(event, toolUses)
             }
             // A stream that ended without message_stop but with an open tool-use block is truncated;
             // a completed block was already emitted at content_block_stop, so nothing is pending here.
             flushOnTruncatedStream(toolUses)
         }
+        content.finish()?.let { emit(LlmEvent.AssistantContentReady(it)) }
     }
 
     /**
@@ -342,6 +348,9 @@ class AnthropicClient(
 // ---- Anthropic Messages wire types ----
 
 @Serializable
+data class AnthropicThinking(val type: String = "enabled", val budget_tokens: Int)
+
+@Serializable
 data class AnthropicMessagesRequest(
     val model: String,
     val max_tokens: Int,
@@ -349,6 +358,7 @@ data class AnthropicMessagesRequest(
     val messages: List<AnthropicMessage>,
     val tools: List<AnthropicTool>? = null,
     val tool_choice: AnthropicToolChoice? = null,
+    val thinking: AnthropicThinking? = null,
 )
 
 @Serializable
@@ -416,9 +426,13 @@ internal fun buildAnthropicMessagesRequest(
 ): AnthropicMessagesRequest = AnthropicMessagesRequest(
     model = model,
     max_tokens = request.maxOutputTokens,
+    thinking = (request.reasoning as? NativeReasoning.AnthropicThinkingBudget)?.let { AnthropicThinking(budget_tokens = it.tokens) },
     stream = stream,
     messages = request.messages.map { message ->
         when {
+            message.assistantContent != null && request.reasoning is NativeReasoning.AnthropicThinkingBudget -> AnthropicMessage(
+                role = "assistant", content = JsonArray(message.assistantContent.blocks),
+            )
             message.toolCalls.isNotEmpty() -> AnthropicMessage(
                 role = message.role, // the contract invariant guarantees "assistant"
                 content = buildJsonArray {

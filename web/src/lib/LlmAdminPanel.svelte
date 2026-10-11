@@ -18,6 +18,7 @@
     type LlmProfileInput,
     type OcrProfile,
   } from './api';
+  import EffortProfileFields from './EffortProfileFields.svelte';
   import ProviderModelFields from './ProviderModelFields.svelte';
   import { toolCallingState } from './toolCalling';
 
@@ -71,6 +72,7 @@
       cacheReadPricePerMillion: profile.cacheReadPricePerMillion,
       enabled: profile.enabled,
       apiKeyEnvironmentVariable: profile.apiKeyEnvironmentVariable,
+      effortOverrides: profile.effortOverrides ? structuredClone(profile.effortOverrides) : null,
     };
   }
 
@@ -180,6 +182,7 @@
       cacheReadPricePerMillion: Math.max(0, Number(draft.cacheReadPricePerMillion) || 0),
       enabled: draft.enabled,
       apiKeyEnvironmentVariable: draft.apiKeyEnvironmentVariable?.trim() || null,
+      effortOverrides: draft.effortOverrides ?? null,
     };
     try {
       if (creating) {
@@ -379,6 +382,7 @@
           </div>
         </div>
       </fieldset>
+      <EffortProfileFields bind:overrides={draft.effortOverrides} provider={draft.provider} maxOutputTokens={draft.maxOutputTokens} />
       {#if !creating && selectedProfile !== null}
         <fieldset class="profile-checks">
           <legend>Profile checks</legend>

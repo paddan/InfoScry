@@ -1,5 +1,9 @@
 package infoscry.server
 
+import infoscry.investigate.EffortLevel
+import infoscry.investigate.EffortPreset
+import infoscry.investigate.InvestigationLimits
+import infoscry.investigate.NativeReasoning
 import infoscry.EXTERNAL_TAG
 import infoscry.document.RestoreFixtures
 import infoscry.domain.ContentUnitId
@@ -203,8 +207,31 @@ class InvestigateBrowserAcceptanceTest {
         ).use { fake ->
             createInvestigatorProfile(fake.url)
             setDefaultInvestigatorProfile()
+            val profile = harness.context.llm.findByName("investigator")!!
+            harness.context.llm.update(profile.id, profile.copy(effortOverrides = mapOf(EffortLevel.LOW to EffortPreset(InvestigationLimits(1, 15, 120)))))
             runScenario("roundLimit")
             assertEquals(3, fake.handledRequests, "one research round, one synthesis, one title")
+        }
+    }
+
+    @Test
+    fun `effort hints use profile overrides with and without native reasoning`() {
+        FakeOpenAiServer(listOf(
+            answerStream("First effort answer."), FakeOpenAiResponse(body = titleCompletion("First effort")),
+            answerStream("Second effort answer."), FakeOpenAiResponse(body = titleCompletion("Second effort")),
+        )).use { fake ->
+            createInvestigatorProfile(fake.url)
+            val base = harness.context.llm.findByName("investigator")!!
+            val native = base.copy(id = UUID.randomUUID().toString(), name = "native investigator", effortOverrides = mapOf(
+                EffortLevel.HIGH to EffortPreset(InvestigationLimits(7, 9, 90), NativeReasoning.OpenAiReasoningEffort("high")),
+            ))
+            harness.context.llm.create(native)
+            harness.context.llm.recordCapability(native.name, LlmCapabilityProbe(true, "2026-10-11T10:00:00Z"))
+            setDefaultInvestigatorProfile()
+            runScenario("effortHints")
+            val requests = fake.requestBodies.filter { it.contains("\"messages\"") }
+            assertTrue(requests.first().contains("\"reasoning_effort\":\"high\""))
+            assertTrue(requests.drop(1).none { it.contains("reasoning_effort") }, "title and plain-profile turns stay at None")
         }
     }
 

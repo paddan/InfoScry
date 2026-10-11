@@ -1262,6 +1262,49 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a unit with many chunks is embedded in grouped batches rather than one call per chunk`() {
+        withHarness { harness ->
+            // One unit with far more chunks than one embedding batch holds, so the grouping inside
+            // `DocumentIngest.embedAndIndex` is what this test watches, not the chunker that produced them.
+            // This is the regression guard for the import's embedding throughput: a change that dropped the
+            // `chunked(EMBED_BATCH)` grouping, or shrank it to one chunk, would still pass every correctness
+            // test (every chunk is still embedded) while making every large document's import far slower.
+            val source = harness.writeText("many-chunks.txt", "placeholder")
+            var embedCalls = 0
+            val countingEmbedder = object : DocumentEmbedder {
+                override fun embedDocuments(texts: List<String>): List<FloatArray> {
+                    embedCalls++
+                    return TestDocumentEmbedder().embedDocuments(texts)
+                }
+            }
+
+            val run = harness.importDurably(
+                sources = listOf(source),
+                extractor = SingleLargeUnit(words(70_000)),
+                embedder = countingEmbedder,
+            )
+
+            val item = run.items.single()
+            assertEquals(ImportItemOutcome.IMPORTED, item.outcome)
+            val documentId = item.documentId!!
+            val chunkCount = AppContext.open(harness.dataDir).use { context ->
+                context.index().chunkCount(CollectionId("default"), documentId)
+            }
+            assertTrue(
+                chunkCount > EMBED_BATCH,
+                "the fixture must produce more chunks than one embedding batch to test grouping, got $chunkCount",
+            )
+            val expectedCalls = (chunkCount + EMBED_BATCH - 1) / EMBED_BATCH
+            assertEquals(
+                expectedCalls,
+                embedCalls,
+                "$chunkCount chunks grouped into batches of at most $EMBED_BATCH must take $expectedCalls " +
+                    "embedding calls, not one per chunk",
+            )
+        }
+    }
+
+    @Test
     fun `a document refused before its first unit fails and stores nothing`() {
         withHarness { harness ->
             val source = harness.writeText("secret.txt", "not readable\n")
@@ -1557,6 +1600,15 @@ class ImportJobHandlerTest {
             directory.toFile().deleteRecursively()
         }
     }
+
+    /** `count` whitespace-separated words, one [WhitespaceTokenCounter] token apiece. */
+    private fun words(count: Int): String = (1..count).joinToString(" ") { "word$it" }
+
+    /**
+     * How many chunks one embedding call may carry, mirroring `DocumentIngest.EMBED_BATCH` (private to that
+     * class) so a test can predict how many calls a known chunk count must take.
+     */
+    private val EMBED_BATCH = 64
 }
 
 /** One import attempt's durable result. */
@@ -2424,6 +2476,44 @@ internal class RecordingUnits(
         }
         input.boundary.unit {
             emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = units))
+        }
+    }
+}
+
+/**
+ * An extractor that commits its whole text as one unit.
+ *
+ * [RecordingUnits] produces many small units, each one too short to chunk into more than one passage, so it
+ * cannot exercise `DocumentIngest.embedAndIndex`'s own grouping of a single unit's chunks into embedding
+ * batches. This produces the other shape: one unit large enough to chunk into many passages, the way a
+ * heading-free document or a format with no page boundaries commits.
+ */
+internal class SingleLargeUnit(private val text: String) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    override val pageImageSupport: PageImageSupport = PageImageSupport.Supported
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        val key = "unit-0"
+        if (!input.isCommitted(key)) {
+            input.boundary.unit {
+                emit(
+                    ExtractionEvent.UnitReady(
+                        key = key,
+                        ordinal = 0,
+                        unit = ContentUnitDraft(
+                            locator = SourceLocation.TextLines(start = 1, end = 1),
+                            extractedText = text,
+                            searchText = text,
+                            method = ExtractionMethod.DIRECT_TEXT,
+                        ),
+                    ),
+                )
+            }
+        }
+        input.boundary.unit {
+            emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = 1))
         }
     }
 }

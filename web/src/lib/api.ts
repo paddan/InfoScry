@@ -7,7 +7,6 @@
  * CLI's credential and never reaches a browser.
  */
 
-import type { InvestigationLimits } from './investigationLimits';
 
 /** Which reader a collection's OCR uses; `LLM` reads page images through an OCR profile. */
 export type OcrEngine = 'TESSERACT' | 'SURYA' | 'LLM';
@@ -203,7 +202,7 @@ export type InvestigationHistory = {
   activity: InvestigateActivity[];
 };
 export type InvestigateEvent =
-  | { type: 'started'; id: string }
+  | { type: 'started'; id: string; resolvedLimits?: ResolvedInvestigationLimits }
   | { type: 'delta'; text: string }
   | { type: 'tool'; callId: string; name: string; arguments?: string; resultCode?: string; durationMs?: number }
   | { type: 'usage'; inputTokens: number; outputTokens: number }
@@ -221,6 +220,12 @@ export type LlmProfilePrice = {
   toolCallingMeasured?: boolean | null;
   capabilityCheckedAt?: string | null;
 };
+
+export type EffortLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH';
+export type ResolvedInvestigationLimits = { maxToolRounds: number; maxToolCalls: number; maxTurnSeconds: number };
+export type NativeReasoning = { type: 'None' } | { type: 'AnthropicThinkingBudget'; tokens: number }
+  | { type: 'OpenAiReasoningEffort'; value: 'low' | 'medium' | 'high' };
+export type EffortPreset = { limits: ResolvedInvestigationLimits; reasoning: NativeReasoning };
 
 export type LlmProvider = 'OPENAI_COMPATIBLE' | 'ANTHROPIC';
 
@@ -240,6 +245,7 @@ export type LlmProfile = {
   keyAvailable: boolean;
   toolCallingMeasured: boolean | null;
   capabilityCheckedAt: string | null;
+  effortOverrides?: Partial<Record<EffortLevel, EffortPreset>> | null;
 };
 
 /** The fields a profile mutation accepts; the server owns id and capability measurements. */
@@ -837,7 +843,7 @@ export async function startInvestigation(
   question: string,
   profile: string,
   signal?: AbortSignal,
-  limits?: InvestigationLimits,
+  limits?: { effortLevel: EffortLevel },
 ): Promise<Response> {
   return investigateRequest('/api/investigations', { collection, question, profile, ...(limits === undefined ? {} : { limits }) }, signal);
 }
@@ -849,7 +855,7 @@ export async function continueInvestigation(
   question: string,
   profile: string,
   signal?: AbortSignal,
-  limits?: InvestigationLimits,
+  limits?: { effortLevel: EffortLevel },
 ): Promise<Response> {
   const path = `/api/investigations/${encodeURIComponent(conversationId)}/continue`;
   return investigateRequest(path, { collection, question, profile, ...(limits === undefined ? {} : { limits }) }, signal);

@@ -66,7 +66,7 @@ class E5Embedder internal constructor(
             .optAddSpecialTokens(true)
             // Truncation is off on purpose: a tokenizer that shortened its input would report a passage that
             // fits while the model received a different one, which is the failure this budget exists to
-            // prevent. An oversized passage is refused by `refuseOverlongPassage` instead.
+            // prevent. An oversized passage is refused by `encodeRow` instead.
             .optTruncation(false)
             .optPadding(false)
             .optWithOverflowingTokens(false)
@@ -190,21 +190,23 @@ class E5Embedder internal constructor(
         return EncodedPassage(tokens)
     }
 
+    /**
+     * Encodes [text] under [prefix] and refuses it if the encoding overflows the model's budget.
+     *
+     * One tokenizer call measures and builds the row together: a separate measuring pass would tokenize
+     * the same text twice for every passage embedded, which is wasted CPU work repeated once per chunk of
+     * every document.
+     */
     private fun encodeRow(prefix: String, text: String, tooLongCode: String): EncodedRow {
-        refuseOverlongPassage(prefix, text, tooLongCode)
         val encoding: Encoding = tokenizer.encode(prefix + text)
-        return EncodedRow(ids = encoding.ids, mask = encoding.attentionMask)
-    }
-
-    private fun refuseOverlongPassage(prefix: String, text: String, code: String) {
-        val tokens = tokenizer.encode(prefix + text).ids.size
-        if (tokens > manifest.maxSequenceTokens) {
+        if (encoding.ids.size > manifest.maxSequenceTokens) {
             throw EmbeddingException(
-                code = code,
-                message = "this text needs $tokens tokens, but ${manifest.model} accepts at most " +
-                    "${manifest.maxSequenceTokens}; it was divided into passages that each fit",
+                code = tooLongCode,
+                message = "this text needs ${encoding.ids.size} tokens, but ${manifest.model} accepts at " +
+                    "most ${manifest.maxSequenceTokens}; it was divided into passages that each fit",
             )
         }
+        return EncodedRow(ids = encoding.ids, mask = encoding.attentionMask)
     }
 
     /** The passage prefix this tokenizer measured with, so a caller can see what the budget paid for. */
@@ -358,18 +360,29 @@ class E5Embedder internal constructor(
             )
         }
 
-        /** Splits row lengths into batches whose padded total stays inside [batchTokenBudget]. */
+        /**
+         * Splits row lengths into batches whose padded total stays inside [batchTokenBudget].
+         *
+         * The longest row considered at each step is the longest *already in this batch*, grown one row at a
+         * time — not the longest anywhere in the remaining rows. A single long passage later in the list must
+         * not shrink the batches built from the short rows before it: that would turn one outlier into many
+         * tiny batches, and each tiny batch is a separate model call.
+         */
         internal fun planBatches(lengths: List<Int>, batchTokenBudget: Int): List<IntRange> {
             if (lengths.isEmpty()) return emptyList()
             val batches = mutableListOf<IntRange>()
             var start = 0
             while (start < lengths.size) {
-                val longest = lengths.subList(start, lengths.size).max()
-                var end = start
-                while (end < lengths.size && longest * (end - start + 1) <= batchTokenBudget) end++
                 // One passage longer than the whole budget is still one batch: refusing it belongs to the
                 // caller's budget check, not to a planner that would drop it.
-                if (end == start) end = start + 1
+                var longest = lengths[start]
+                var end = start + 1
+                while (end < lengths.size) {
+                    val candidateLongest = maxOf(longest, lengths[end])
+                    if (candidateLongest * (end - start + 1) > batchTokenBudget) break
+                    longest = candidateLongest
+                    end++
+                }
                 batches += start until end
                 start = end
             }

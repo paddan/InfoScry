@@ -15,11 +15,8 @@
     type InvestigateMessage,
     type LlmProfilePrice,
   } from './api';
-  import {
-    DEFAULT_INVESTIGATION_LIMITS,
-    validInvestigationLimits,
-    type InvestigationLimitsInput,
-  } from './investigationLimits';
+  import { DEFAULT_EFFORT_LEVEL, isEffortLevel } from './investigationLimits';
+  import type { EffortLevel, ResolvedInvestigationLimits } from './api';
 
   export let collectionId: string;
   /** The page owns the open conversation for this view; a row click or a new conversation moves it once. */
@@ -34,7 +31,8 @@
   export let availableProfiles: LlmProfilePrice[] = [];
   export let profileStatus = 'Loading profiles…';
   /** The sidebar's per-question limits; each turn sends the snapshot this prop holds at submit. */
-  export let limits: InvestigationLimitsInput = { ...DEFAULT_INVESTIGATION_LIMITS };
+  export let effortLevel: EffortLevel = DEFAULT_EFFORT_LEVEL;
+  export let onResolvedLimits: (snapshot: { profile: string; effortLevel: EffortLevel; limits: ResolvedInvestigationLimits }) => void = () => {};
 
   let question = '';
   let prices: LlmProfilePrice[] = [];
@@ -59,7 +57,7 @@
   let historyGeneration = 0;
   let handledConversationId: string | null = null;
   /** An out-of-contract setting blocks the turn here as well as in the sidebar's own error state. */
-  $: limitsProblem = validInvestigationLimits(limits) === null;
+  $: limitsProblem = !isEffortLevel(effortLevel);
 
   async function loadPanel(): Promise<void> {
     try { if (profile === '') profile = await investigateDefaultProfile(); }
@@ -129,8 +127,8 @@
     event.preventDefault();
     const text = question.trim();
     if (text === '' || collectionId === '' || profile === '' || working || loadingHistory) return;
-    const turnLimits = validInvestigationLimits(limits);
-    if (turnLimits === null) return;
+    if (!isEffortLevel(effortLevel)) return;
+    const turnLimits = { effortLevel };
     // No in-flight history read may land over this turn's streamed messages.
     historyGeneration += 1;
     loadingHistory = false;
@@ -162,6 +160,7 @@
         if (event.type === 'started') {
           conversationId = event.id;
           onConversationStarted(event.id);
+          if (event.resolvedLimits) onResolvedLimits({ profile: turnProfile, effortLevel: turnLimits.effortLevel, limits: event.resolvedLimits });
         } else if (event.type === 'delta') {
           messages[answerIndex] = { role: 'assistant', text: messages[answerIndex].text + event.text };
           messages = [...messages];

@@ -1,5 +1,6 @@
 package infoscry.llm
 
+import infoscry.investigate.*
 import infoscry.ask.CitationValidation
 import infoscry.ask.CorrectionSnapshot
 import infoscry.ask.Evidence
@@ -66,6 +67,28 @@ class LlmStoreTest {
         enabled = true,
         apiKeyEnvironmentVariable = apiKeyEnvironmentVariable,
     )
+
+    @Test fun `store revalidates a caller-mutated override map before writing`() {
+        val overrides = mutableMapOf(EffortLevel.LOW to EffortPreset(InvestigationLimits(2, 3, 20)))
+        val profile = profile("Mutable overrides").copy(effortOverrides = overrides)
+        store.create(profile)
+        overrides[EffortLevel.LOW] = EffortPreset(InvestigationLimits(0, 3, 20))
+        assertFailsWith<IllegalArgumentException> { store.update(profile.id, profile) }
+        assertFailsWith<IllegalArgumentException> { store.create(profile) }
+        assertEquals(2, store.findById(profile.id)!!.effortOverrides!![EffortLevel.LOW]!!.limits.maxToolRounds)
+    }
+
+    @Test
+    fun `effort overrides persist across all lookup paths and repeated updates and can be cleared`() {
+        val overrides = mapOf(EffortLevel.HIGH to EffortPreset(InvestigationLimits(7, 9, 60), NativeReasoning.OpenAiReasoningEffort("high")))
+        val created = store.create(profile("effort").copy(effortOverrides = overrides))
+        assertEquals(overrides, store.findById(created.id)?.effortOverrides)
+        assertEquals(overrides, store.findByName(created.name)?.effortOverrides)
+        assertEquals(overrides, store.list().single().effortOverrides)
+        repeat(2) { assertEquals(overrides, store.update(created.id, created)?.effortOverrides) }
+        repeat(2) { assertNull(store.update(created.id, created.copy(effortOverrides = null))?.effortOverrides) }
+        assertNull(store.findById(created.id)?.effortOverrides)
+    }
 
     @Test
     fun `profiles round trip`() {

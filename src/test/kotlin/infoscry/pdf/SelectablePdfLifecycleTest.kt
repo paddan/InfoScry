@@ -52,7 +52,7 @@ import org.apache.pdfbox.Loader
  *
  * Every assertion here independently re-opens the actual produced bytes with PDFBox and reads them back
  * — this file never trusts the service's or writer's own report of what it wrote. It is scoped to what
- * [docs/tickets/selectable-pdf/09-integrated-acceptance.md] calls the "automatable acceptance vectors
+ * [docs/implementation-status.md] calls the "automatable acceptance vectors
  * using fake/local providers": no Tesseract/Surya/LLM/CoreML process is named, configured or imported
  * anywhere below. Crash/retry/deletion/late-completion convergence (acceptance vector 3) is already
  * covered, through the same real pipeline, by [SelectablePdfRecoveryTest] and [SelectablePdfServiceTest];

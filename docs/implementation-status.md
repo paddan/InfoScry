@@ -3,7 +3,9 @@
 [Project overview](../README.md) · [Development and verification commands](development.md)
 
 This is the overview of implemented behavior and verification boundaries.
-Detailed feature results live in the linked ticket reports. Recorded test runs
+Completed plans and tickets are retained in Git history; open work remains in
+`docs/tickets/`. Current contracts live in the reference guides and active specs.
+Recorded test runs
 below describe earlier work; reorganizing the documentation did not rerun the
 application suites.
 
@@ -17,21 +19,20 @@ application suites.
 | Collections | Creation, settings (including OCR defaults and ignore patterns), paged document browsing, progress, durable import history, retries (optionally with a chosen OCR method) and recoverable deletion |
 | LLM profiles | CLI/Admin management, role defaults, provider presets and model catalog; new Admin profiles suggest a provider/model name until manually edited; tool calling measured from Admin or the CLI |
 | Ask | Streaming answers with validated citations and saved answer history |
-| Investigate | Bounded research, retained-evidence follow-ups, one adopted answer per turn and saved conversations; an unmeasured profile is marked and refused with the remedy |
-| Sources | Bounded extracted-source viewer, managed-original link and selectable-text PDF copies (durable generation, repeat/retry, rescan/Restore identity; automated fake-provider coverage only — native-reader and real-engine positioning are separate open gates) |
+| Investigate | Four effort levels with server-resolved profile overrides and opt-in research-only native reasoning; bounded research, retained-evidence follow-ups, one adopted answer per turn and saved conversations; an unmeasured profile is marked and refused with the remedy |
+| Sources | Bounded extracted-source viewer, managed-original link and selectable-text PDF copies (durable generation, repeat/retry, rescan/Restore identity; automated fake-provider coverage plus owner-confirmed OCR/PDF checks on 2026-10-11) |
 
 ## OCR engines and document rescanning
 
-The [OCR workflow redesign](specs/2026-10-08-ocr-workflow-redesign.md) replaces
+The [OCR workflow](ocr-workflow.md) replaces
 collection engine/profile/mode controls with one reading method confirmed at
 start. Selected pages are read and successful runs publish the complete document
 automatically, preserving text history and Restore. Stopped and legacy paused work is cleaned on startup.
 Only pages that can need reading are read (see the spec's "Page selection"). The
-redesign's tickets are complete and were removed from `docs/` (see git history
-before the commit that adds [the follow-up plan](plans/2026-10-09-follow-ups.md));
-open work is in [the follow-up tickets](tickets/follow-ups/STATUS.md). Real
-providers and CoreML remain separate manual gates; fake tests do not establish
-OCR quality.
+redesign's implementation tickets and follow-up plan are complete and were removed.
+Patrik confirmed the remaining OCR/PDF checks complete on 2026-10-11.
+[Remaining product choices](tickets/follow-ups/STATUS.md) are separate from those
+checks. Automated fake tests alone do not establish OCR quality.
 
 ## Fixes from local testing
 
@@ -42,12 +43,13 @@ browser scenario: measuring tool calling from Admin, a finished import's stage,
 the OCR settings in text history, OCR profiles with the LLM providers and
 image-capable models, skipping unsupported files, include/exclude extensions,
 per-collection ignore patterns, and retrying a document with a chosen OCR
-method. The owner decisions are recorded in ticket
-[06](tickets/follow-ups/06-owner-decisions.md); existing behavior is retained.
+method. Existing file/folder extension filters, case-insensitive ignore matching and
+fixed page-selection thresholds are retained. The owner declined existing-data
+migration and profile conversion; only the fresh baseline changes.
 
 ## Compact document list and page review work
 
-The [compact Collections document list](specs/2026-09-30-compact-document-list.md)
+The compact Collections document list
 has its collection-wide summary and collapsed/session UI implemented (tickets
 01–02). Ticket 02 passed independent review and a final gate of 1,585 JVM and 358
 frontend tests, with type/build checks green. Ticket 03 is implemented and reviewed:
@@ -55,26 +57,26 @@ live filename search and inline details passed 1,585 JVM / 382 frontend tests,
 with type/build checks green. Browser ticket 04 is implemented and reviewed:
 16 scenarios passed, including geometry and visible focus at four widths. Its
 final gate passed 1,585 JVM / 383 frontend tests. Human accessibility stays open.
-Its [plan](tickets/compact-document-list/STATUS.md) adds a
+The implemented UI includes a
 collapsed summary, bounded full-width table, session view memory, live filename
 search and inline details.
 
-The [wide workspace and page review plan](plans/2026-10-09-workspace-and-page-review.md)
+The wide workspace and page review implementation
 was refined and authorized for implementation with agents on 2026-10-09.
 The common wide workspace is implemented and independently reviewed: its gate
 passed 1,557 JVM and 335 frontend tests, with frontend type/build checks green.
-Rendered viewport geometry is verified by ticket 07. The exact-revision
+Rendered viewport geometry is covered by the integrated browser gate. The exact-revision
 page-review API is implemented and reviewed, including durable per-page method
 provenance, independent text/image access and immutable rescan raster namespaces.
 Its final accumulated gate passed 1,585 JVM and 337 frontend tests with no
 failures, errors or skips. The adaptive nonmodal source/history workspace is
 implemented and independently reviewed, including narrow Back and opener/fallback
 focus. Its final gate passed 1,585 JVM / 389 frontend tests with type/build checks
-green; viewport geometry is verified in ticket 07.
+green; viewport geometry is covered by integrated browser acceptance.
 Side-by-side PDF/image review is implemented and independently reviewed, including
 TIFF display conversion, historical page citations and independent resource states.
 Its final frontend gate passed 402 tests with type/build checks green; actual browser
-geometry is verified in ticket 07.
+geometry is covered by integrated browser acceptance.
 Durable explicit-page rescan backend is implemented and reviewed: 35 focused
 backend tests, a supplementary 11-test cancel/restart gate, nine API wire tests and
 five real child-process crash boundaries passed. The frozen canonical selection
@@ -82,7 +84,7 @@ controls rendering/OCR/progress while unselected provenance is preserved.
 Manual page selection and confirmation are implemented and independently reviewed,
 including visible progress, Back/hidden lifecycle, uncertain replay and active-head
 publication refresh after Restore.
-Integrated [ticket](tickets/workspace-and-page-review/STATUS.md) has a green
+Integrated acceptance has a green
 42-test browser gate (Collections 16, Document 7, Investigate 8, OCR 10 and Search
 1), including geometry at 390/1024/1440/1920px, exact historical PDF/image
 citations, selected-only reading, partial explicit-run resume and independent
@@ -153,10 +155,9 @@ real-provider and human accessibility gates remain separate.
 
 ## Selectable-text PDF copies, automated acceptance (2026-10-11)
 
-The [PDF text-selection plan](plans/2026-10-10-selectable-pdf.md) (tickets
-01–08: models, local alignment, PDF writer, durable jobs/service, HTTP routes,
-UI) was integrated and acceptance-tested against ticket
-[09](tickets/selectable-pdf/09-integrated-acceptance.md)'s automated scope: the
+The [selectable-PDF design](selectable-pdf.md) is implemented
+(models, local alignment, PDF writer, durable jobs/service, HTTP routes and UI).
+Integrated acceptance covers the automated scope: the
 acceptance vectors that fake/local providers can exercise end to end, not the
 manual native-reader or real-engine gates.
 
@@ -228,12 +229,15 @@ change to `ImportPipeline`/`StoredUnitsSink`/`ContentUnit`, none of which any
 ticket in this plan owns, and the existing explicit **Create PDF with
 selectable text** control already covers it; closing it is a separate,
 future decision. Native Preview/second-reader selection and real
-Tesseract/Surya/LLM/CoreML positioning remain open, owner-run manual gates.
+Tesseract/Surya/LLM/CoreML positioning were still open at that run; the owner
+subsequently confirmed the remaining OCR/PDF checks complete (see below).
 
 ## Per-page import progress (2026-10-11)
 
-Import and active collection views retain file progress and show a separate
-progress bar and processed-page count for the current document. Counts come from
+The import panel retains file progress and shows a separate progress bar and
+processed-page count for the current document. The duplicate block below the
+import form (Running, stage/filename and page progress) was removed at the owner's
+request on 2026-10-11; import history retains its normal status rows. Counts come from
 committed checkpoints or staged/published revision pages; a resumed attempt does
 not count a saved page twice, and publication retains the final count. Unknown
 totals use an indeterminate bar. No schema change is required.
@@ -247,6 +251,24 @@ completed counts after reopening the archive. Independent code review was clean
 after the publication correction. Local documentation links and diff checks
 passed. Browser acceptance and real-provider/CoreML processing were not rerun
 for this change.
+
+## Investigate effort levels (2026-10-11)
+
+All seven implementation tickets were completed inline without subagents.
+[Current contracts](investigate-effort.md) cover the fixed default table, sparse
+profile overrides, validation, request/SSE shape, sidebar hint and fresh-baseline
+storage prerequisite. Completed spec, plan and tickets were removed; historical
+planning remains in Git history.
+
+Focused backend and frontend tests exercised persistence, validation, research-only
+provider fields, signed/redacted multi-round replay, safe malformed-stream failures,
+context budgeting and plain synthesis after a protected native loop fills context.
+The real Chromium reader passed all nine Investigate acceptance scenarios with local
+fake providers, including hints for native and plain profiles and clearing stale caps.
+Final `./gradlew check` passed with 470 frontend tests and the complete normal JVM
+suite; Svelte checking reported no errors or warnings. Documentation and diff checks
+passed. This establishes automated behavior, not real-provider model compatibility.
+No user archive was reset or migrated, and nothing was committed or pushed.
 
 ## Recorded verification
 
@@ -301,8 +323,8 @@ PDF tests cover mixed page selection, stable IDs and provenance, and recovery.
 The owner retained existing filter/ignore/selection behavior and declined all
 existing-data migrations and profile conversion. The fresh baseline changed;
 the owner must recreate the database before using this version. No archive data
-was deleted or converted. The real-PDF corpus and real-model/provider checks in
-[ticket 05](tickets/follow-ups/05-real-pdf-and-model-check.md) remain open.
+was deleted or converted. The real-PDF corpus and real-model/provider checks were still open at that run;
+Patrik confirmed the remaining OCR/PDF checks complete on 2026-10-11.
 
 The follow-up five-class browser gate also passed all 36 tests: Collections 14,
 OCR 10, Investigate 8, Search 1 and Document 3. This browser-only run did not
@@ -348,7 +370,7 @@ cancellation recovery. They use a local fake provider. The Investigate report
 language and default-method settings, explicit method selection, automatic
 publication, cancellation, restart after interruption, text history and guarded
 restoration. Eleven scenarios pass with fake engines and a local fake provider;
-the current run is recorded in the redesign ticket status.
+the recorded run is summarized above; completed tickets remain in Git history.
 
 **Search:** a Chromium scenario exercises live advanced filters, a delayed
 older response, inclusive date bounds, a single-digit query, mode changes and
@@ -371,20 +393,26 @@ workflow and persistence behavior within their test setup. The original
 follow-up symptom was not reproduced against the pre-fix browser code; current
 acceptance demonstrates that follow-ups complete.
 
+## Owner-confirmed OCR/PDF checks (2026-10-11)
+
+Patrik confirmed that the remaining OCR/PDF checks are complete. This closes the
+real-PDF selection/model/provider check, native Preview/second-reader selection
+and clipboard checks, PDF resource/annotation checks, real OCR positioning,
+CoreML/accessibility checks within the OCR/PDF workflow, and the PARTIAL browser
+check. Completed verification tickets were removed. No new provider, GPU,
+native-reader or browser run was performed by the agent for this documentation
+update; commands, model versions and fixture results were not supplied with the
+owner's confirmation. Earlier test records above describe their own run scope.
+
 ## Open verification and product gates
 
 - The format-specific source views and source-viewer finish line.
-- Real-provider browser acceptance, including the model-catalog workflow.
-- A human-operated native macOS file/folder picker check; automated route tests
-  replace the dialog with a fake.
-- A human keyboard and screen-reader pass.
-- Selectable-text PDF copies: native macOS Preview and a second PDF reader's
-  own mark/copy and clipboard behavior, real Tesseract/Surya/an authorized real
-  LLM reading's positioning, and a document's plain first import not yet
-  auto-queueing generation (use **Create PDF with selectable text** explicitly
-  until that is addressed).
-- Real OCR and CoreML processing progress inside the complete Collections
-  workflow. Separate real-tool/GPU tests do not close this workflow gate.
+- Real-provider browser acceptance outside the confirmed OCR/PDF scope, including
+  the general model-catalog workflow and opt-in Investigate native reasoning.
+- A human-operated native macOS file/folder picker check.
+- General keyboard/screen-reader checks outside the confirmed OCR/PDF scope.
+- A plain first import does not yet auto-queue selectable-PDF generation. Use
+  **Create PDF with selectable text** until that integration decision is addressed.
 
 Ambiguous legacy Investigate answer pairs are preserved by design rather than
 reconciled automatically. The project remains implementation in progress.

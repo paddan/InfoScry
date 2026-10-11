@@ -1,5 +1,7 @@
 package infoscry.storage
 
+import infoscry.investigate.EffortLevel
+import infoscry.investigate.EffortPreset
 import infoscry.llm.LlmCapabilityProbe
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
@@ -203,7 +205,7 @@ class LlmStore(private val database: Database) {
             "SELECT id, name, provider, endpoint, model, api_key_environment_variable, " +
                 "context_window, max_output_tokens, supports_tool_calling, " +
                 "input_price_per_million, output_price_per_million, cache_read_price_per_million, " +
-                "enabled, tool_calling_measured, capability_checked_at " +
+                "enabled, tool_calling_measured, capability_checked_at, effort_overrides_json " +
                 "FROM llm_profiles ORDER BY name",
         ).use { statement ->
             statement.executeQuery().use { results ->
@@ -221,7 +223,7 @@ class LlmStore(private val database: Database) {
             "SELECT id, name, provider, endpoint, model, api_key_environment_variable, " +
                 "context_window, max_output_tokens, supports_tool_calling, " +
                 "input_price_per_million, output_price_per_million, cache_read_price_per_million, " +
-                "enabled, tool_calling_measured, capability_checked_at " +
+                "enabled, tool_calling_measured, capability_checked_at, effort_overrides_json " +
                 "FROM llm_profiles WHERE name = ? COLLATE NOCASE",
         ).use { statement ->
             statement.setString(1, name.trim())
@@ -236,7 +238,7 @@ class LlmStore(private val database: Database) {
             "SELECT id, name, provider, endpoint, model, api_key_environment_variable, " +
                 "context_window, max_output_tokens, supports_tool_calling, " +
                 "input_price_per_million, output_price_per_million, cache_read_price_per_million, " +
-                "enabled, tool_calling_measured, capability_checked_at FROM llm_profiles WHERE id = ?",
+                "enabled, tool_calling_measured, capability_checked_at, effort_overrides_json FROM llm_profiles WHERE id = ?",
         ).use { statement ->
             statement.setString(1, id)
             statement.executeQuery().use { results -> if (results.next()) readProfile(results) else null }
@@ -244,6 +246,7 @@ class LlmStore(private val database: Database) {
     }
 
     fun create(profile: LlmProfile): LlmProfile {
+        profile.validateEffortOverrides()
         require(profile.id.isNotBlank()) { "an LLM profile needs an id" }
         require(profile.maxOutputTokens < profile.contextWindow) {
             "LLM profile output token limit must be below its context window to leave room for input"
@@ -255,8 +258,8 @@ class LlmStore(private val database: Database) {
                 "INSERT INTO llm_profiles (id, name, provider, endpoint, model, " +
                     "api_key_environment_variable, context_window, max_output_tokens, " +
                     "supports_tool_calling, input_price_per_million, output_price_per_million, " +
-                    "cache_read_price_per_million, enabled, created_at, updated_at) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "cache_read_price_per_million, enabled, created_at, updated_at, effort_overrides_json) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ).use { statement ->
                 statement.setString(1, profile.id)
                 statement.setString(2, profile.name.trim())
@@ -273,6 +276,7 @@ class LlmStore(private val database: Database) {
                 statement.setInt(13, profile.enabled.asInt())
                 statement.setString(14, Instants.now())
                 statement.setString(15, Instants.now())
+                statement.setString(16, profile.effortOverrides?.let { Json.encodeToString(it) })
                 try {
                     statement.executeUpdate()
                 } catch (failure: SQLException) {
@@ -288,6 +292,7 @@ class LlmStore(private val database: Database) {
 
     /** Updates editable profile fields while retaining the row identity and invalidating stale measurements. */
     fun update(id: String, profile: LlmProfile): LlmProfile? {
+        profile.validateEffortOverrides()
         require(id.isNotBlank()) { "an LLM profile needs an id" }
         require(profile.maxOutputTokens < profile.contextWindow) {
             "LLM profile output token limit must be below its context window to leave room for input"
@@ -304,7 +309,7 @@ class LlmStore(private val database: Database) {
                         "cache_read_price_per_million = ?, enabled = ?, " +
                         "tool_calling_measured = CASE WHEN provider IS NOT ? OR endpoint IS NOT ? OR model IS NOT ? THEN NULL ELSE tool_calling_measured END, " +
                         "capability_checked_at = CASE WHEN provider IS NOT ? OR endpoint IS NOT ? OR model IS NOT ? THEN NULL ELSE capability_checked_at END, " +
-                        "updated_at = ? WHERE id = ?",
+                        "updated_at = ?, effort_overrides_json = ? WHERE id = ?",
                 ).use { statement ->
                     statement.setString(1, profile.name.trim())
                     statement.setString(2, profile.provider.name)
@@ -324,7 +329,8 @@ class LlmStore(private val database: Database) {
                     statement.setString(16, profile.endpoint.takeIf { it.isNotBlank() })
                     statement.setString(17, profile.model)
                     statement.setString(18, Instants.now())
-                    statement.setString(19, id)
+                    statement.setString(19, profile.effortOverrides?.let { Json.encodeToString(it) })
+                    statement.setString(20, id)
                     statement.executeUpdate() > 0
                 }
             }
@@ -412,7 +418,7 @@ class LlmStore(private val database: Database) {
             "SELECT id, name, provider, endpoint, model, api_key_environment_variable, " +
                 "context_window, max_output_tokens, supports_tool_calling, " +
                 "input_price_per_million, output_price_per_million, cache_read_price_per_million, " +
-                "enabled, tool_calling_measured, capability_checked_at FROM llm_profiles WHERE id = ?",
+                "enabled, tool_calling_measured, capability_checked_at, effort_overrides_json FROM llm_profiles WHERE id = ?",
         ).use { statement ->
             statement.setString(1, profileId)
             statement.executeQuery().use { results -> if (results.next()) readProfile(results) else null }
@@ -518,6 +524,7 @@ class LlmStore(private val database: Database) {
             enabled = enabled,
             toolCallingMeasured = measured,
             capabilityCheckedAt = results.getString("capability_checked_at"),
+            effortOverrides = results.getString("effort_overrides_json")?.let { Json.decodeFromString<Map<EffortLevel, EffortPreset>>(it) },
         )
     }
 
@@ -760,7 +767,7 @@ class LlmStore(private val database: Database) {
             "SELECT id, name, provider, endpoint, model, api_key_environment_variable, " +
                 "context_window, max_output_tokens, supports_tool_calling, " +
                 "input_price_per_million, output_price_per_million, cache_read_price_per_million, " +
-                "enabled, tool_calling_measured, capability_checked_at " +
+                "enabled, tool_calling_measured, capability_checked_at, effort_overrides_json " +
                 "FROM llm_profiles WHERE name = ? COLLATE NOCASE",
         ).use { statement ->
             statement.setString(1, conversation.profileName)

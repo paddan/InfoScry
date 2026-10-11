@@ -1,26 +1,11 @@
-# OCR workflow redesign: choose at start, read everything, no review
+# OCR workflow reference
 
-Status: implemented (2026-10-09); open follow-ups are in
-[the follow-up tickets](../tickets/follow-ups/STATUS.md). It superseded the
-2026-09-30 selectable-OCR-and-rescanning design, which was removed from `docs/`
-(see git history) together with the completed tickets.
+Current reading-method, start, recovery and page-selection contracts.
+See [implementation status](implementation-status.md) for recorded verification
+and [remaining product choices](tickets/follow-ups/STATUS.md). Patrik confirmed the
+remaining OCR/PDF checks complete on 2026-10-11.
 
-## Why
-
-Import, scanning and approval are hard to follow in the shipped UI:
-
-- A run starts, then pauses for an external-page approval the person did not
-  expect, and the pause is shown as "Complete".
-- Engine, transcription profile, mode, reviewer and allowance are separate
-  fields on the collection and again per scan. They can contradict each other
-  ("engine LLM needs a transcription profile, and a local engine must not name
-  one") and the person cannot tell which values a run will use.
-- Pages can wait for review while the review list is empty, which leaves a
-  document unusable.
-
-The redesign gives one place to decide, one confirmation, and one result.
-
-## Product decisions (from the owner)
+## Reading workflow
 
 1. The **document** is the unit of work. Each document shows one status and one
    next action. During import, file progress is accompanied by a separate count
@@ -185,9 +170,9 @@ Removed: import mode, reviewer profile, external page allowance. The removed col
 idempotent startup cleanup withdraws stale work. a stored engine/profile pair that disagrees is
 resolved to the engine's local method.
 
-## Single-user simplifications (read this part carefully)
+## Single-user behavior
 
-These relax guarantees the older spec makes for concurrent readers:
+The application has one user:
 
 - A rescan no longer refuses to start, or holds the document, because another
   reader or operation might see intermediate state. Two writers to the same
@@ -200,55 +185,10 @@ managed copies, stable content-unit ids, atomic index publication that preserves
 all collections, recovery of unfinished publications and collection deletion,
 and keeping keys, questions and document text out of logs.
 
-## Superseded contracts
-
-| Older contract | Replaced by |
-|---|---|
-| Collection engine, profiles, mode, reviewer, allowance as import defaults | Collection language and default method only |
-| Per-scan overrides merged field by field with collection settings | One method chosen in the dialog |
-| Import modes FILL_MISSING and CHECK_AND_IMPROVE | All pages read |
-| Reviewer, comparison, review decisions, *Review pages*, *Discard pending pages* | Removed; history and Restore |
-| External page allowance, mid-run approval, `awaiting-approval` stage, `POST /api/jobs/{id}/approve-external` | Approval in the dialog; no mid-run pause |
-| Candidate revision held for a person before publication | Publish when the run completes |
-| Scan again refused while a scan or pending review holds the document | Not applicable |
-
-The old flow and its code have been removed.
-
-## Verification
-
-- Backend tests with fake providers and temporary data directories for: preview
-  hash binding and stale refusal, a run that reads every page, publication on
-  completion, failure and resume without re-reading committed pages, and
-  cancellation leaving the text unchanged.
-- Idempotence tests for each operation above: call it twice, and interrupt it
-  after every durable step then call it again; the end state and the response
-  are the same as an uninterrupted single call.
-- Restart tests: after cancel, failure, provider loss and a simulated process
-  kill at each stage, a new start for the same document succeeds without any
-  prior action, and the text is unchanged until a run completes. A database
-  written by the shipped flow (paused job, pending candidate) is cleaned and
-  restartable.
-- Web tests for the dialog: pre-filled default, unavailable methods with
-  reasons, summary and cost text, confirm label, and the document status line.
-- The existing `externalTest` Playwright acceptance is rewritten for the new
-  flow with the local fake provider.
-- Real CoreML and a real external provider are not exercised by these tests and
-  stay unverified until run by hand.
-
-## Open items
-
-- Cost estimate for LLM profiles uses the existing token assumption per page;
-  whether a better estimate is wanted is not decided.
-- Whether Restore should also be offered right after a run (an *Undo* link on
-  the Done status) is not decided.
-
 ## Page selection (2026-10-09)
 
-This section describes implemented automatic selection. The implemented
-[page-review extension](2026-10-09-workspace-and-page-review.md) adds an explicit
-page set that overrides this heuristic for manual rescans. See its
-[ticket status](../tickets/workspace-and-page-review/STATUS.md) for verification
-and the remaining manual gates.
+Automatic selection is used for import and ordinary rescans. An explicit
+page set selected in page review overrides the heuristic for manual rescans.
 
 Reading every page sent text-only pages to the model for nothing. A PDF page is
 selected for reading when either holds:

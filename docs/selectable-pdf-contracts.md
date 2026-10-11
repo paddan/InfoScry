@@ -1,9 +1,8 @@
-# Selectable PDF: shared agent contracts
+# Selectable PDF interface contracts
 
-Read the [spec](../../specs/2026-10-10-selectable-pdf.md),
-[plan](../../plans/2026-10-10-selectable-pdf.md) and [dispatch status](STATUS.md).
-These proposed contracts refine the plan's interface sketches. Ticket 02 freezes
-them after 01; no parallel implementer may change them unilaterally.
+Current interface reference for the implemented PDF-copy feature. Read the
+[design](selectable-pdf.md) and [remaining integration work](tickets/selectable-pdf/STATUS.md).
+Update contracts and consumers together when a change is authorized.
 
 ## Product boundaries
 
@@ -12,12 +11,10 @@ Archive search stays in Lucene. Do not add PDF search controls, another index,
 embedding work or a new OCR fallback. Original and managed-original bytes remain
 immutable. The generated file is a separate revision-bound copy.
 
-No product implementation is authorized by the ticket-writing request. On a later
-implementation instruction, preserve unrelated edits and follow the dependency
-frontier. No automatic private-provider tests, deployment, archive conversion,
-database reset, commit or push. UI copy is English.
+Real-provider tests and archive reset require separate authorization. Preserve
+unrelated edits and keep UI copy in English.
 
-## Layout types (owned by 02)
+## Layout types
 
 Package `infoscry.pdf`; serializable immutable records. Exact finite/range/hash
 invariants are validated at construction/read boundaries. UTF-16 offsets address

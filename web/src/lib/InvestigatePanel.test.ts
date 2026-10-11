@@ -1,7 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import InvestigatePanel from './InvestigatePanel.svelte';
-import { DEFAULT_INVESTIGATION_LIMITS } from './investigationLimits';
 import { ApiError, type InvestigateEvent } from './api';
 
 /**
@@ -85,7 +84,7 @@ describe('Investigate panel', () => {
 
     expect(await screen.findByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
     expect(api.startInvestigation).toHaveBeenCalledTimes(1);
-    expect(api.startInvestigation).toHaveBeenCalledWith('collection-1', 'What happened?', 'local-cheap', expect.any(AbortSignal), DEFAULT_INVESTIGATION_LIMITS);
+    expect(api.startInvestigation).toHaveBeenCalledWith('collection-1', 'What happened?', 'local-cheap', expect.any(AbortSignal), { effortLevel: 'MEDIUM' });
     expect(onConversationStarted).toHaveBeenCalledWith('conversation-1');
     expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeTruthy();
 
@@ -94,7 +93,7 @@ describe('Investigate panel', () => {
 
     expect(await screen.findByText('Follow-up answer')).toBeTruthy();
     expect(api.continueInvestigation).toHaveBeenCalledTimes(1);
-    expect(api.continueInvestigation).toHaveBeenCalledWith('conversation-1', 'collection-1', 'When?', 'local-cheap', expect.any(AbortSignal), DEFAULT_INVESTIGATION_LIMITS);
+    expect(api.continueInvestigation).toHaveBeenCalledWith('conversation-1', 'collection-1', 'When?', 'local-cheap', expect.any(AbortSignal), { effortLevel: 'MEDIUM' });
     // The history refresh happens once each stream closes, after the server wrote the title.
     await waitFor(() => expect(onConversationFinished).toHaveBeenCalledTimes(2));
     expect(screen.getByText(/Estimated cost:/).textContent).toContain('$0.0000');
@@ -219,8 +218,8 @@ describe('Investigate panel', () => {
         { type: 'started', id: 'conversation-limits' },
         { type: 'done', text: 'Follow-up answer', evidence: [] },
       )());
-    const limits = { maxToolRounds: 4, maxToolCalls: 7, maxTurnSeconds: 90 };
-    render(InvestigatePanel, { props: { ...props, conversationId: null, limits } });
+    const limits = { effortLevel: 'HIGH' as const };
+    render(InvestigatePanel, { props: { ...props, conversationId: null, effortLevel: limits.effortLevel } });
 
     await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
@@ -235,7 +234,7 @@ describe('Investigate panel', () => {
 
   it('sends no request while a limit value is out of contract', async () => {
     const { rerender } = render(InvestigatePanel, {
-      props: { ...props, conversationId: null, limits: { maxToolRounds: 51, maxToolCalls: 20, maxTurnSeconds: 600 } },
+      props: { ...props, conversationId: null, effortLevel: 'INVALID' as never },
     });
     await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
     const submit = screen.getByRole('button', { name: 'Investigate' }) as HTMLButtonElement;
@@ -244,10 +243,10 @@ describe('Investigate panel', () => {
     expect(api.startInvestigation).not.toHaveBeenCalled();
 
     // An empty number input binds as undefined, exactly like a cleared field in the sidebar.
-    await rerender({ limits: { maxToolRounds: undefined, maxToolCalls: 20, maxTurnSeconds: 600 } });
+    await rerender({ effortLevel: '' as never });
     expect((screen.getByRole('button', { name: 'Investigate' }) as HTMLButtonElement).disabled).toBe(true);
 
-    await rerender({ limits: { maxToolRounds: 10, maxToolCalls: 20, maxTurnSeconds: 600 } });
+    await rerender({ effortLevel: 'MEDIUM' });
     expect((screen.getByRole('button', { name: 'Investigate' }) as HTMLButtonElement).disabled).toBe(false);
   });
 

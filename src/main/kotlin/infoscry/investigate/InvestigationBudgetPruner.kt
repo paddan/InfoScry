@@ -38,9 +38,10 @@ fun pruneToFit(
     groups: List<Pair<Int, Int>>,
     tools: List<infoscry.llm.ToolDefinition>,
     maxOutputTokens: Int,
+    reasoning: NativeReasoning = NativeReasoning.None,
 ): PrunedRequest {
     val omitted = mutableListOf<String>()
-    val initialMeasurement = budget.measure(profile, LlmRequest(allMessages, tools, maxOutputTokens = maxOutputTokens), stream = true)
+    val initialMeasurement = budget.measure(profile, LlmRequest(allMessages, tools, maxOutputTokens = maxOutputTokens, reasoning = reasoning), stream = true)
 
     if (initialMeasurement.fits) return PrunedRequest(allMessages, emptyList())
 
@@ -53,11 +54,14 @@ fun pruneToFit(
     var measurement = initialMeasurement
     for (gi in 2 until groups.size) {
         if (measurement.fits) break
-        removed.add(groups[gi])
+        val group = groups[gi]
+        if (reasoning is NativeReasoning.AnthropicThinkingBudget &&
+            allMessages.subList(group.first, group.second).any { it.assistantContent != null }) continue
+        removed.add(group)
         messages = allMessages.filterIndexed { index, _ ->
             removed.none { index >= it.first && index < it.second }
         }
-        measurement = budget.measure(profile, LlmRequest(messages, tools, maxOutputTokens = maxOutputTokens), stream = true)
+        measurement = budget.measure(profile, LlmRequest(messages, tools, maxOutputTokens = maxOutputTokens, reasoning = reasoning), stream = true)
         omitted.add("grp$gi")
     }
 

@@ -364,12 +364,30 @@ const scenarios = {
   /** The configured round limit stops research with a visible notice and a cited answer. */
   async roundLimit(browser) {
     const { page } = await openReader(browser);
-    await page.fill('#limit-maxToolRounds', '1');
+    await page.selectOption('#investigate-effort', 'LOW');
     await submit(page, 'Find the signature.', { answer: 'Found the signature' });
     await waitForHistoryTitle(page, 'Round note');
     const notice = (await page.textContent('#panel-investigate [role="note"]')) ?? '';
     assert(notice.includes('Tool round limit reached'), `expected the round notice, got ${JSON.stringify(notice)}`);
     assert((await answerTexts(page)).some((text) => text.includes('Found the signature')), 'the round-limited turn must answer from evidence');
+  },
+
+  async effortHints(browser) {
+    const { page } = await openReader(browser);
+    await page.selectOption('#llm-profile', { label: 'native investigator' });
+    await page.selectOption('#investigate-effort', 'HIGH');
+    assert(await page.locator('.resolved-limits').count() === 0, 'no guessed caps before starting');
+    await submit(page, 'First effort question.', { answer: 'First effort answer' });
+    await waitForHistoryTitle(page, 'First effort');
+    await page.getByText('Up to 7 tool rounds, 9 tool calls, 90 seconds per question.', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+    await page.selectOption('#llm-profile', { label: 'investigator' });
+    assert(await page.locator('.resolved-limits').count() === 0, 'changing profile clears caps');
+    await submit(page, 'Second effort question.', { answer: 'Second effort answer' });
+    await waitForHistoryTitle(page, 'Second effort');
+    await page.getByText('Up to 50 tool rounds, 75 tool calls, 1200 seconds per question.', { exact: true }).waitFor();
+    await page.selectOption('#investigate-effort', 'LOW');
+    assert(await page.locator('.resolved-limits').count() === 0, 'changing effort clears caps');
   },
 
   /** Cancellation releases the controls and a further question succeeds. */

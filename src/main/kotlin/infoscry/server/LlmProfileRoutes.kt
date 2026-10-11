@@ -1,5 +1,7 @@
 package infoscry.server
 
+import infoscry.investigate.EffortLevel
+import infoscry.investigate.EffortPreset
 import infoscry.AppContext
 import infoscry.llm.LlmCapabilityProbeService
 import infoscry.llm.LlmProbeRefusedException
@@ -32,6 +34,7 @@ data class LlmProfileRequest(
     val cacheReadPricePerMillion: Double,
     val enabled: Boolean,
     val apiKeyEnvironmentVariable: String? = null,
+    val effortOverrides: Map<EffortLevel, EffortPreset>? = null,
 )
 
 @Serializable
@@ -51,6 +54,7 @@ data class LlmProfileApiView(
     val keyAvailable: Boolean,
     val toolCallingMeasured: Boolean?,
     val capabilityCheckedAt: String?,
+    val effortOverrides: Map<EffortLevel, EffortPreset>? = null,
 )
 
 @Serializable
@@ -210,6 +214,7 @@ private fun LlmProfileRequest.toProfile(id: String): LlmProfile = try {
         cacheReadPricePerMillion = cacheReadPricePerMillion,
         enabled = enabled,
         apiKeyEnvironmentVariable = apiKeyEnvironmentVariable,
+        effortOverrides = effortOverrides,
     )
 } catch (_: IllegalArgumentException) {
     // Validation messages can contain caller supplied fields, including a token mistakenly pasted into
@@ -233,6 +238,7 @@ private fun LlmProfile.toApiView(): LlmProfileApiView = LlmProfileApiView(
     keyAvailable = keyAvailable(System::getenv),
     toolCallingMeasured = toolCallingMeasured,
     capabilityCheckedAt = capabilityCheckedAt,
+    effortOverrides = effortOverrides,
 )
 
 private fun io.ktor.server.application.ApplicationCall.promptRole(): LlmPromptRole =

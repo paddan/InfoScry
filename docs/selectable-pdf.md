@@ -1,14 +1,10 @@
 # PDF copies with selectable text
 
-Status: implemented (2026-10-11) for fake/local-provider acceptance; see
-[the plan's status](../plans/2026-10-10-selectable-pdf.md) and
-[STATUS.md](../tickets/selectable-pdf/STATUS.md) for the ticket-by-ticket record.
-The design below describes what was built. Native-reader selection and real
-Tesseract/Surya/LLM/CoreML positioning (the "Acceptance and open gates" section
-below) remain open manual/real-provider gates.
-
-Implementation work is divided into [agent tickets](../tickets/selectable-pdf/STATUS.md)
-with [shared interface contracts](../tickets/selectable-pdf/CONTRACTS.md).
+Implemented feature reference. Patrik confirmed the remaining OCR/PDF checks
+complete on 2026-10-11; see [verification status](implementation-status.md#owner-confirmed-ocrpdf-checks-2026-10-11).
+[Interface contracts](selectable-pdf-contracts.md) describe revision/layout and
+HTTP boundaries. [First-import automatic generation](tickets/selectable-pdf/STATUS.md)
+remains a separate integration decision.
 
 ## Intent and success
 
@@ -17,30 +13,23 @@ in the copied PDF. InfoScry currently stores the reading separately. A generated
 PDF must expose the published reading, retain the document's page order and
 appearance, and open in an ordinary PDF reader outside InfoScry.
 
-Proposed defaults: automatically prepare a derived PDF after successful PDF
-import, rescan and History → Restore; offer explicit open/download actions beside
-Open original. These defaults are proposals, not previously approved behavior.
+Rescan and History → Restore queue a derived PDF. A plain first import currently
+requires **Create PDF with selectable text**; automatic generation for that path
+remains a separate integration decision. Open/download actions appear beside
+Open original.
 
 Archive search remains in Lucene, using the existing extracted text and index.
 PDF generation adds no search feature, alternate index or search dependency. A
 PDF reader may incidentally find text in its text layer; that is not an acceptance
 criterion. Correct spatial selection and clipboard text are the acceptance criteria.
 
-## Existing seams and important gaps
+## Engine boundaries
 
-- `TesseractOcr` returns word rectangles and durable compressed TSV artifacts.
-- `SuryaOcr` returns rectangles in `OcrPageResult.boxes`, but the worker's entries
-  are **blocks**, not necessarily words or lines; it does not write a durable
-  geometry artifact. Do not treat the `OcrWordBox` type name as a granularity guarantee.
-- `LlmOcr` returns transcription without rectangles. A hidden page-sized text box
-  would permit copying but would not satisfy spatial text selection.
-- Revision pages already preserve text, source-image provenance, artifact hashes
-  and producer revision identity. They do not preserve a complete normalized
-  text-to-position mapping or a PDF export record.
-- `PageImageRenderer` records raster dimensions and page rotation in `PageImage`,
-  but persisted `SourceImageProvenance` does not include the full PDF transform.
-- `SourceRoutes` serves the immutable managed original. PDFBox **3.0.7** is
-  already pinned. No extra PDF writer process is needed.
+Tesseract provides word rectangles. Surya can provide block-level rectangles;
+LLM readings have no native positions. The implemented local positioning pass
+aligns the published reading to local anchors without changing its text or
+sending it externally again. See the shared contracts for layout, provenance,
+revision identity and coverage rules. Real-engine checks were confirmed complete by Patrik on 2026-10-11.
 
 ## Chosen approach and alternatives
 
@@ -158,7 +147,7 @@ reading image; rebuild it only from verified immutable input and the same render
 contract. Lossless image embedding in the first version avoids another lossy
 conversion. Process one page at a time with existing PDF/raster limits, temporary
 file-backed storage and a cancellable job. Record duration and byte counts, not
-text. File size and native Preview memory use need a representative manual check.
+text. File size and native Preview memory checks were included in the owner-confirmed completion.
 
 This is a PDF copy with selectable text, not a tagged accessible PDF, PDF/A
 conversion, signature-preserving rewrite or source-viewer replacement. Show a
@@ -179,7 +168,7 @@ in status; file response has `application/pdf`, safe Content-Disposition, exact
 length, private cache policy and an ETag from the verified artifact hash. Opening
 or downloading performs no generation and no provider call.
 
-## Acceptance and open gates
+## Acceptance and verification
 
 Automated generated fixtures must establish exact copied text, no stale/duplicate
 OCR, correct word/line positions, unchanged source hashes, revision coherence,
@@ -187,11 +176,12 @@ repeatability, cancellation/recovery and deletion. Rendered appearance must matc
 the input page image at the defined scale. Browser tests use fake providers and
 download the real generated PDF; they do not alone prove native selection UX.
 
-Manual gates: select and copy Swedish text in macOS Preview and a second PDF
+Native-reader checks cover selecting and copying Swedish text in macOS Preview and a second PDF
 reader; inspect corrected words over the image, rotated pages, a mixed native/
 scanned PDF, a real Surya page and an explicitly authorized real LLM reading.
-Check text order, memory/file size and annotations. No claim of real-provider,
-CoreML or screen-reader acceptance from fake tests.
+Check text order, memory/file size and annotations. Patrik confirmed the remaining OCR/PDF checks complete on 2026-10-11. This is
+owner confirmation, separate from the automated fake-provider evidence; no new
+provider, CoreML or native-reader test was run by the agent for this update.
 
 ## Primary technical references
 

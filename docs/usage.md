@@ -37,8 +37,8 @@ collection named `Default` yourself.
 collection, including documents on other pages. Click the total to show all
 documents, or a status count to show that status; either clears the filename
 filter. **Add documents**, **Settings** and **Import history** remain reachable
-while the document list is collapsed. Active import progress and history errors
-appear outside the history disclosure.
+while the document list is collapsed. File and page progress appear once inside
+**Add documents**; history errors appear outside the history disclosure.
 
 Expand **Documents** to see filename, reading status and progress in a bounded
 scrolling table, with search, status, sorting and pagination outside the scroll
@@ -265,13 +265,23 @@ follows the same rule as Ask: evidence recorded with its revision opens that
 exact reading, and evidence naming no revision shows its saved excerpt under a
 “Revision unknown” label.
 
-The sidebar sets the limits for the next question or follow-up:
+The sidebar selects the effort for the next question or follow-up. **Medium** is
+the default. Profiles inherit these limits unless an admin overrides a level:
 
-| Setting | Default | Range |
-|---|---|---|
-| Tool rounds | 50 | 1–50 |
-| Tool calls | 50 | 1–100 |
-| Time per question | 600 seconds | 10–1800 seconds |
+| Effort | Tool rounds | Tool calls | Time per question |
+|---|---|---|---|
+| Low | 10 | 15 | 120 seconds |
+| Medium | 50 | 50 | 600 seconds |
+| High | 50 | 75 | 1200 seconds |
+| Extra high | 50 | 100 | 1800 seconds |
+
+After a turn starts, the hint beside **Effort level** shows the server-resolved
+limits for the selected profile and level. Changing either clears the hint until
+a matching turn starts. **Admin → LLM profiles → Investigate effort levels**
+can override individual rows; **Clear** restores inheritance. Native reasoning
+is optional and defaults to None. Enable it only for a model/endpoint that accepts
+the provider's thinking budget or reasoning-effort option. Ask and final-answer
+synthesis do not use these reasoning settings.
 
 The first limit reached stops research and triggers a final answer using the
 available evidence. With no usable evidence, the answer reports that limitation.

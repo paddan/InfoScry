@@ -1,10 +1,13 @@
 package infoscry.investigate
 
+import kotlinx.serialization.Serializable
+
 /**
  * The per-turn research limits a reader sets for one Investigate question. The bounds are deliberate
  * bounded v1 choices; the first limit reached ends research. Validated here so HTTP and non-HTTP
  * callers obey the same contract. A round is one model response containing one or more tool calls.
  */
+@Serializable
 data class InvestigationLimits(
     val maxToolRounds: Int = DEFAULT_MAX_TOOL_ROUNDS,
     val maxToolCalls: Int = DEFAULT_MAX_TOOL_CALLS,
