@@ -146,6 +146,26 @@ describe('SelectablePdfActions per-state UI', () => {
     expect(screen.getByRole('link', { name: 'Open PDF with selectable text' })).toBeTruthy();
   });
 
+  it('collapses many pages sharing one reason into a single ranged line instead of one per page', async () => {
+    const consecutive = Array.from({ length: 13 }, (_, i) => ({
+      ordinal: 44 + i, coverage: 'UNAVAILABLE' as const, reasonCode: 'PDF_TEXT_ALIGNMENT_AMBIGUOUS',
+    }));
+    mocks.status.mockResolvedValue(status({
+      state: 'PARTIAL', selectablePages: 44, totalPages: 60, blankPages: 0,
+      unavailablePages: [
+        ...consecutive,
+        { ordinal: 59, coverage: 'UNAVAILABLE', reasonCode: 'LAYOUT_CORRUPT' },
+      ],
+    }));
+    render(SelectablePdfActions, { props: props() });
+
+    expect(await screen.findByText(
+      'Pages 45-57: The recognized text could not be matched to its position on these pages.',
+    )).toBeTruthy();
+    expect(screen.getByText('Page 60: The saved text positions for this page are damaged.')).toBeTruthy();
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  });
+
   it('shows a FAILED copy with a plain-English reason, never the raw code, and retries with retry true', async () => {
     mocks.status.mockResolvedValue(status({ state: 'FAILED', key: null, selectablePages: 0, totalPages: null, reasonCode: 'ARTIFACT_VERIFICATION_FAILED' }));
     mocks.create.mockResolvedValue(status({ state: 'QUEUED', totalPages: null, selectablePages: 0 }));

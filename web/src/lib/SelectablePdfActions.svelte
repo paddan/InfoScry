@@ -16,36 +16,39 @@
   export let visible = true;
   export let pollMillis = 2000;
 
-  /** Plain-English copy for the safe reason codes the backend can name. Unknown codes get the generic line. */
-  const REASON_COPY: Record<string, string> = {
-    PDF_TEXT_ALIGNMENT_AMBIGUOUS: 'The recognized text could not be matched to its position on this page.',
-    PDF_TEXT_ALIGNMENT_LIMIT_EXCEEDED: 'Positioning this page took more work than allowed.',
-    LAYOUT_MISSING: 'The text positions for this page are missing.',
-    LAYOUT_CORRUPT: 'The saved text positions for this page are damaged.',
-    LAYOUT_PROVENANCE_MISMATCH: 'The saved text positions do not belong to this reading.',
-    READING_IMAGE_MISSING: 'The page image needed to place the text is missing.',
-    READING_IMAGE_UNREADABLE: 'The page image needed to place the text could not be read.',
-    READING_IMAGE_MISMATCH: 'The page image changed after the text was read.',
-    READING_IMAGE_PROVENANCE: 'The page image does not belong to this reading.',
-    SOURCE_IMAGE_PROVENANCE: 'The page image does not belong to this reading.',
-    PAGE_GEOMETRY_UNREADABLE: 'The page size could not be read.',
-    PAGE_GEOMETRY_MISMATCH: 'The page size does not match the reading.',
-    TRANSFORM_MISMATCH: 'The page image and its text positions do not line up.',
-    UNSUPPORTED_GLYPH: 'This page has characters the PDF font cannot show.',
-    UNAVAILABLE_WITHOUT_IMAGE: 'There is no page image to show for this page.',
-    BLANK_NOT_VERIFIED: 'This page could not be verified as blank.',
-    BLANK_WITHOUT_IMAGE: 'This page could not be verified as blank.',
-    ARTIFACT_VERIFICATION_FAILED: 'The generated PDF did not pass its check.',
-    OUTPUT_TEXT: 'The generated PDF did not match the published reading.',
-    OUTPUT_PAGE_COUNT: 'The generated PDF did not match the published reading.',
-    OUTPUT_GEOMETRY: 'The generated PDF did not match the published reading.',
-    PAGE_COUNT_MISMATCH: 'The generated PDF did not match the published reading.',
-    WRITE_IO_FAILED: 'The PDF could not be written to disk.',
-    ORIGINAL_MISSING: 'The original file could not be used to make the PDF.',
-    ORIGINAL_UNREADABLE: 'The original file could not be used to make the PDF.',
-    UNSUPPORTED_MEDIA_TYPE: 'The original file could not be used to make the PDF.',
-    REVISION_NOT_PUBLIC: 'This revision is not published, so it has no PDF.',
-    SELECTABLE_PDF_NOT_READY: 'The PDF is not ready yet.',
+  /**
+   * Plain-English copy for the safe reason codes the backend can name, as a function of how many pages share
+   * it: one page reads "this page", several read "these pages". Unknown codes get the generic line.
+   */
+  const REASON_COPY: Record<string, (count: number) => string> = {
+    PDF_TEXT_ALIGNMENT_AMBIGUOUS: (n) => `The recognized text could not be matched to its position on ${n === 1 ? 'this page' : 'these pages'}.`,
+    PDF_TEXT_ALIGNMENT_LIMIT_EXCEEDED: (n) => `Positioning ${n === 1 ? 'this page' : 'these pages'} took more work than allowed.`,
+    LAYOUT_MISSING: (n) => `The text positions for ${n === 1 ? 'this page are' : 'these pages are'} missing.`,
+    LAYOUT_CORRUPT: (n) => `The saved text positions for ${n === 1 ? 'this page are' : 'these pages are'} damaged.`,
+    LAYOUT_PROVENANCE_MISMATCH: () => 'The saved text positions do not belong to this reading.',
+    READING_IMAGE_MISSING: () => 'The page image needed to place the text is missing.',
+    READING_IMAGE_UNREADABLE: () => 'The page image needed to place the text could not be read.',
+    READING_IMAGE_MISMATCH: () => 'The page image changed after the text was read.',
+    READING_IMAGE_PROVENANCE: () => 'The page image does not belong to this reading.',
+    SOURCE_IMAGE_PROVENANCE: () => 'The page image does not belong to this reading.',
+    PAGE_GEOMETRY_UNREADABLE: () => 'The page size could not be read.',
+    PAGE_GEOMETRY_MISMATCH: () => 'The page size does not match the reading.',
+    TRANSFORM_MISMATCH: () => 'The page image and its text positions do not line up.',
+    UNSUPPORTED_GLYPH: (n) => `${n === 1 ? 'This page has' : 'These pages have'} characters the PDF font cannot show.`,
+    UNAVAILABLE_WITHOUT_IMAGE: (n) => `There is no page image to show for ${n === 1 ? 'this page' : 'these pages'}.`,
+    BLANK_NOT_VERIFIED: (n) => `${n === 1 ? 'This page' : 'These pages'} could not be verified as blank.`,
+    BLANK_WITHOUT_IMAGE: (n) => `${n === 1 ? 'This page' : 'These pages'} could not be verified as blank.`,
+    ARTIFACT_VERIFICATION_FAILED: () => 'The generated PDF did not pass its check.',
+    OUTPUT_TEXT: () => 'The generated PDF did not match the published reading.',
+    OUTPUT_PAGE_COUNT: () => 'The generated PDF did not match the published reading.',
+    OUTPUT_GEOMETRY: () => 'The generated PDF did not match the published reading.',
+    PAGE_COUNT_MISMATCH: () => 'The generated PDF did not match the published reading.',
+    WRITE_IO_FAILED: () => 'The PDF could not be written to disk.',
+    ORIGINAL_MISSING: () => 'The original file could not be used to make the PDF.',
+    ORIGINAL_UNREADABLE: () => 'The original file could not be used to make the PDF.',
+    UNSUPPORTED_MEDIA_TYPE: () => 'The original file could not be used to make the PDF.',
+    REVISION_NOT_PUBLIC: () => 'This revision is not published, so it has no PDF.',
+    SELECTABLE_PDF_NOT_READY: () => 'The PDF is not ready yet.',
   };
   const GENERIC_FAILURE = 'The PDF with selectable text did not finish.';
   const OCR_NOTE = 'Pages read by OCR are copied as flat page images with a text layer on top. The original file is not changed.';
@@ -195,8 +198,51 @@
     documentHidden = document.hidden;
   }
 
-  function reasonOf(code: string | null): string {
-    return code === null ? GENERIC_FAILURE : REASON_COPY[code] ?? GENERIC_FAILURE;
+  function reasonOf(code: string | null, count = 1): string {
+    return code === null ? GENERIC_FAILURE : REASON_COPY[code]?.(count) ?? GENERIC_FAILURE;
+  }
+
+  /** One contiguous run of 1-based page numbers, formatted as "N" or "N-M". */
+  function pageRange(from: number, to: number): string {
+    return from === to ? `${from}` : `${from}-${to}`;
+  }
+
+  /** Collapses 0-based page ordinals into ranges, e.g. [44,45,46,56] -> "45-47, 57". */
+  function pageRanges(ordinals: number[]): string {
+    const pages = [...ordinals].sort((a, b) => a - b).map((ordinal) => ordinal + 1);
+    const ranges: string[] = [];
+    let start = pages[0];
+    let end = pages[0];
+    for (const page of pages.slice(1)) {
+      if (page === end + 1) {
+        end = page;
+        continue;
+      }
+      ranges.push(pageRange(start, end));
+      start = page;
+      end = page;
+    }
+    ranges.push(pageRange(start, end));
+    return ranges.join(', ');
+  }
+
+  /** Groups unavailable pages by reason, in first-seen order, so one line reports every page sharing it. */
+  function unavailableGroups(pages: { ordinal: number; reasonCode: string | null }[]): {
+    reasonCode: string | null;
+    count: number;
+    label: string;
+  }[] {
+    const ordinalsByReason = new Map<string | null, number[]>();
+    for (const page of pages) {
+      const ordinals = ordinalsByReason.get(page.reasonCode);
+      if (ordinals) ordinals.push(page.ordinal);
+      else ordinalsByReason.set(page.reasonCode, [page.ordinal]);
+    }
+    return Array.from(ordinalsByReason.entries()).map(([reasonCode, ordinals]) => ({
+      reasonCode,
+      count: ordinals.length,
+      label: pageRanges(ordinals),
+    }));
   }
 
   function fileLink(key: string | null, inline: boolean): string | null {
@@ -243,8 +289,8 @@
         <div class="pdf-block">
           <p>Pages without selectable text:</p>
           <ul class="pdf-unavailable" aria-label="Pages without selectable text" style="max-width: 100%;">
-            {#each status.unavailablePages as page (page.ordinal)}
-              <li style="min-width: 0; max-width: 100%; overflow-wrap: anywhere;">Page {page.ordinal + 1}: {reasonOf(page.reasonCode)}</li>
+            {#each unavailableGroups(status.unavailablePages) as group (group.reasonCode ?? 'null')}
+              <li style="min-width: 0; max-width: 100%; overflow-wrap: anywhere;">{group.count === 1 ? 'Page' : 'Pages'} {group.label}: {reasonOf(group.reasonCode, group.count)}</li>
             {/each}
           </ul>
         </div>
