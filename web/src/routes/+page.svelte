@@ -12,6 +12,12 @@
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
   import type { DocumentListViewState } from '../lib/documentListViewState';
   import CollectionsPanel from '../lib/CollectionsPanel.svelte';
+  import {
+    confirmConversationDeletion,
+    loadConversationHistory,
+    readConversationList,
+    storeConversationSelection,
+  } from '../lib/conversationHistory';
   import { DEFAULT_EFFORT_LEVEL, loadEffortLevel, saveEffortLevel } from '../lib/investigationLimits';
   import type { EffortLevel, ResolvedInvestigationLimits } from '../lib/api';
   import { profileOptionLabel, toolCallingRemedy, toolCallingState } from '../lib/toolCalling';
@@ -162,41 +168,18 @@
   /** A row delete that failed; shows the server's reason without any conversation content. */
   let deleteError: string | null = null;
 
-  /** The open conversation is remembered per collection and per view in browser storage. */
-  function historyStorageKey(view: 'ask' | 'investigate', collectionId: string): string {
-    return `infoscry-history:${view}:${collectionId}`;
-  }
-
-  function readStoredConversation(view: 'ask' | 'investigate', collectionId: string): string | null {
-    try { return window.localStorage.getItem(historyStorageKey(view, collectionId)); }
-    catch { return null; }
-  }
-
-  function storeConversationSelection(view: 'ask' | 'investigate', id: string | null): void {
-    const key = historyStorageKey(view, selectedCollectionId);
-    try {
-      if (id === null) window.localStorage.removeItem(key);
-      else window.localStorage.setItem(key, id);
-    } catch { /* Browser storage is optional; the current selection still works in memory. */ }
-  }
-
   function storeInvestigateSelection(): void {
-    storeConversationSelection('investigate', investigateConversationId);
+    storeConversationSelection('investigate', selectedCollectionId, investigateConversationId);
   }
 
   function storeAskSelection(): void {
-    storeConversationSelection('ask', askConversationId);
-  }
-
-  async function readInvestigateConversations(collectionId: string): Promise<InvestigationSummary[]> {
-    try { return await listInvestigations(collectionId); }
-    catch { return []; } // A list read that fails stays silent, as the panels behave today.
+    storeConversationSelection('ask', selectedCollectionId, askConversationId);
   }
 
   async function refreshInvestigateConversations(collectionId: string): Promise<void> {
     if (collectionId !== selectedCollectionId) return;
     const generation = ++investigateListGeneration;
-    const conversations = await readInvestigateConversations(collectionId);
+    const conversations = await readConversationList(listInvestigations, collectionId);
     if (generation !== investigateListGeneration || collectionId !== selectedCollectionId) return;
     investigateConversations = conversations;
     loadingInvestigationList = false;
@@ -217,13 +200,10 @@
     }
     loadingInvestigationList = true;
     investigateConversationId = null;
-    const conversations = await readInvestigateConversations(collectionId);
+    const { conversations, conversationId } = await loadConversationHistory('investigate', collectionId, listInvestigations);
     if (generation !== investigateListGeneration || collectionId !== selectedCollectionId) return;
     investigateConversations = conversations;
-    const saved = readStoredConversation('investigate', collectionId);
-    investigateConversationId = saved !== null && conversations.some((item) => item.id === saved)
-      ? saved
-      : null;
+    investigateConversationId = conversationId;
     loadingInvestigationList = false;
   }
 
@@ -259,15 +239,10 @@
     investigateWorking = working;
   }
 
-  async function readAskHistory(collectionId: string): Promise<AskHistoryEntry[]> {
-    try { return await listAsks(collectionId); }
-    catch { return []; } // A list read that fails stays silent, as the panels behave today.
-  }
-
   async function refreshAskHistory(collectionId: string): Promise<void> {
     if (collectionId !== selectedCollectionId) return;
     const generation = ++askListGeneration;
-    const conversations = await readAskHistory(collectionId);
+    const conversations = await readConversationList(listAsks, collectionId);
     if (generation !== askListGeneration || collectionId !== selectedCollectionId) return;
     askEntries = conversations;
     loadingAskHistory = false;
@@ -288,13 +263,10 @@
     }
     loadingAskHistory = true;
     askConversationId = null;
-    const conversations = await readAskHistory(collectionId);
+    const { conversations, conversationId } = await loadConversationHistory('ask', collectionId, listAsks);
     if (generation !== askListGeneration || collectionId !== selectedCollectionId) return;
     askEntries = conversations;
-    const saved = readStoredConversation('ask', collectionId);
-    askConversationId = saved !== null && conversations.some((item) => item.id === saved)
-      ? saved
-      : null;
+    askConversationId = conversationId;
     loadingAskHistory = false;
   }
 
@@ -334,8 +306,7 @@
    */
   async function deleteAskConversation(id: string): Promise<void> {
     const entry = askEntries.find((item) => item.id === id);
-    if (entry === undefined) return;
-    if (!window.confirm(`Delete conversation "${entry.title}"? This cannot be undone.`)) return;
+    if (!confirmConversationDeletion(entry)) return;
     deleteError = null;
     try {
       await deleteConversation(selectedCollectionId, id);
@@ -355,8 +326,7 @@
    */
   async function deleteInvestigateConversation(id: string): Promise<void> {
     const entry = investigateConversations.find((item) => item.id === id);
-    if (entry === undefined) return;
-    if (!window.confirm(`Delete conversation "${entry.title}"? This cannot be undone.`)) return;
+    if (!confirmConversationDeletion(entry)) return;
     deleteError = null;
     try {
       await deleteConversation(selectedCollectionId, id);

@@ -3,19 +3,14 @@
   import {
     ApiError,
     createCollection,
-    deleteCollection,
-    deleteDocuments,
     getCollectionDocument,
     getCollectionDocumentSummary,
     type CollectionDocumentSummary,
     getDeletion,
-    getCollectionIgnorePatterns,
     getImportItems,
     listCollectionDocuments,
     listCollectionImports,
     listUnfinishedDeletions,
-    renameCollection,
-    updateCollectionIgnorePatterns,
     type Collection,
     type DeletionOperation,
     type DocumentApiRow,
@@ -34,7 +29,9 @@
     type OcrOperation,
   } from './api';
   import { restoreDocumentListViewState, type DocumentListViewState } from './documentListViewState';
-  import CollectionOcrSettings from './CollectionOcrSettings.svelte';
+  import CollectionSettingsPanel from './CollectionSettingsPanel.svelte';
+  import DeleteCollectionDialog from './DeleteCollectionDialog.svelte';
+  import DeleteDocumentsDialog from './DeleteDocumentsDialog.svelte';
   import DocumentRescan from './DocumentRescan.svelte';
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
   import ImportPanel from './ImportPanel.svelte';
@@ -164,29 +161,6 @@
   let newDescription = '';
   let addingDocuments = false;
 
-  /**
-   * The settings draft for the selected collection: the two stored values the fields show, and what
-   * the last save of each one did. The stored values remain the server's; these are only what the
-   * reader is editing until a save answers.
-   */
-  let renameName = '';
-  let renameSaving = false;
-  let renameError: string | null = null;
-  let renameSaved = false;
-  // The ignore patterns draft: one pattern per line. `ignoreLoaded` is false until the saved list has been read, so a
-  // save can never replace a list the reader has not seen.
-  let ignoreText = '';
-  let ignoreLoaded = false;
-  let ignoreSaving = false;
-  let ignoreError: string | null = null;
-  let ignoreSaved = false;
-  /**
-   * The settings draft's generation. A save reads across an await and the reader can select another
-   * collection meanwhile, so the generation captured when a save starts is what decides whether its
-   * answer may still write into the fields and the status beside them.
-   */
-  let settingsGeneration = 0;
-
   let expanded = false;
   let disclosureButton: HTMLButtonElement;
   let documentsSection: HTMLElement;
@@ -265,27 +239,8 @@
   let deletionTimer: ReturnType<typeof setTimeout> | null = null;
   let deletionsGeneration = 0;
 
-  /** The exact-name confirmation: the collection it names, what was typed, and what the submission did. */
-  let deleting: Collection | null = null;
-  let confirmName = '';
-  let deleteSubmitting = false;
-  let deleteError: string | null = null;
-  let deleteDialog: HTMLElement | null = null;
-  let deleteNameInput: HTMLInputElement | null = null;
-  /** The control the dialog was opened from, so declining puts focus back where it was. */
-  let deleteOpener: HTMLElement | null = null;
-
-  /**
-   * The documents whose removal is being confirmed, and what the submission did. The list is a snapshot
-   * taken when the confirmation opened: what the dialog says and what it sends both come from it, so a
-   * refresh underneath cannot change the confirmed target set. [documentDeleteOpener] is the control
-   * focus returns to if it is declined. Nothing is sent until the confirmation is submitted.
-   */
-  let deletingDocuments: DocumentApiRow[] | null = null;
-  let documentDeleteSubmitting = false;
-  let documentDeleteError: string | null = null;
-  let documentDeleteDialog: HTMLElement | null = null;
-  let documentDeleteOpener: HTMLElement | null = null;
+  let deleteCollectionDialog: DeleteCollectionDialog;
+  let deleteDocumentsDialog: DeleteDocumentsDialog;
 
   /** The import whose per-file outcomes are shown, and what that read returned. */
   let itemsJobId: string | null = null;
@@ -316,7 +271,7 @@
     documentsError = null;
     clearSelection();
     closeDetails();
-    if (!documentDeleteSubmitting) deletingDocuments = null;
+    deleteDocumentsDialog?.closeUnlessSubmitting();
   }
 
   function toggleDocuments(): void {
@@ -479,7 +434,6 @@
    */
   function startListing(collectionId: string, cached?: DocumentListViewState): void {
     listingCollectionId = collectionId;
-    startSettings(collectionId);
     const restored = restoreDocumentListViewState(cached);
     expanded = restored.expanded;
     addingDocuments = false;
@@ -506,89 +460,6 @@
     startImports();
     void loadSummary();
     void loadDocuments();
-  }
-
-  /** The settings fields start from the selected collection's own stored name. */
-  function startSettings(collectionId: string): void {
-    settingsGeneration += 1;
-    const collection = collections.find((candidate) => candidate.id === collectionId);
-    renameName = collection?.name ?? '';
-    renameSaving = false;
-    renameError = null;
-    renameSaved = false;
-    ignoreText = '';
-    ignoreLoaded = false;
-    ignoreSaving = false;
-    ignoreError = null;
-    ignoreSaved = false;
-    void loadIgnorePatterns(collectionId, settingsGeneration);
-  }
-
-  /** Reads the saved ignore list into the draft; an answer for a collection no longer managed is dropped. */
-  async function loadIgnorePatterns(collectionId: string, generation: number): Promise<void> {
-    try {
-      const patterns = await getCollectionIgnorePatterns(collectionId);
-      if (generation !== settingsGeneration) return;
-      ignoreText = patterns.join('\n');
-      ignoreLoaded = true;
-    } catch (failure) {
-      if (generation !== settingsGeneration) return;
-      ignoreError = describe(failure);
-    }
-  }
-
-  /**
-   * Saves the ignore list. The server refuses an invalid pattern, and the draft is kept so it can be fixed. Only
-   * future imports use the new list: an import already queued or running keeps the list it was admitted with.
-   */
-  async function saveIgnorePatterns(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    const collection = selected;
-    if (collection === null || ignoreSaving || !ignoreLoaded) return;
-    const generation = settingsGeneration;
-    ignoreSaving = true;
-    ignoreError = null;
-    ignoreSaved = false;
-    try {
-      const saved = await updateCollectionIgnorePatterns(collection.id, ignoreText.split('\n'));
-      if (generation !== settingsGeneration) return;
-      ignoreText = saved.join('\n');
-      ignoreSaved = true;
-    } catch (failure) {
-      if (generation !== settingsGeneration) return;
-      ignoreError = describe(failure);
-    } finally {
-      if (generation === settingsGeneration) ignoreSaving = false;
-    }
-  }
-
-  /**
-   * Saves the name through the existing rename route. The collection keeps its id, its documents and
-   * its import history; the parent reloads the collection list, so Admin and the workspace selector
-   * both show the new name while the selection stays where it was.
-   */
-  async function saveName(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    const collection = selected;
-    if (collection === null || renameSaving) return;
-    const generation = settingsGeneration;
-    renameSaving = true;
-    renameError = null;
-    renameSaved = false;
-    try {
-      const updated = await renameCollection(collection.id, renameName.trim());
-      // A save of another collection's name is not this form's news: the draft the reader is looking at
-      // has been restarted since, so neither its field nor its status may take the answer.
-      if (generation !== settingsGeneration) return;
-      renameName = updated.name;
-      renameSaved = true;
-      await onCollectionsChanged();
-    } catch (failure) {
-      if (generation !== settingsGeneration) return;
-      renameError = describe(failure);
-    } finally {
-      if (generation === settingsGeneration) renameSaving = false;
-    }
   }
 
   /**
@@ -1293,215 +1164,42 @@
   }
 
   /** Opens the exact-name confirmation for the selected collection; nothing is sent until it is confirmed. */
-  async function openDeleteDialog(): Promise<void> {
+  function openDeleteDialog(): void {
     if (selected === null) return;
-    deleting = selected;
-    confirmName = '';
-    deleteError = null;
-    deleteOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    await tick();
-    deleteNameInput?.focus();
-  }
-
-  /** Declining removes nothing: closing the dialog sends no request at all. */
-  function closeDeleteDialog(): void {
-    if (deleteSubmitting) return;
-    deleting = null;
-    confirmName = '';
-    deleteError = null;
-    const opener = deleteOpener;
-    deleteOpener = null;
-    if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
-  }
-
-  function handleDeleteKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeDeleteDialog();
-    } else if (event.key === 'Tab') {
-      containDialogFocus(event, deleteDialog);
-    }
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    deleteCollectionDialog?.open(selected, opener);
   }
 
   /**
-   * Keep keyboard focus inside the open confirmation. The dialog is announced as modal, so Tab must not
-   * walk into the page behind the backdrop; the control that opened it gets focus back when it closes.
+   * One collection's deletion was admitted: it joins the followed list and the collection list is
+   * reloaded, since the server no longer offers it for management.
    */
-  function containDialogFocus(event: KeyboardEvent, dialog: HTMLElement | null): void {
-    if (dialog === null) return;
-    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
-      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    ));
-    if (focusable.length === 0) {
-      // A submitted removal disables every control inside, so there is nothing for Tab to move to: the
-      // dialog itself takes the key and keeps it, rather than letting go of it into the page behind.
-      event.preventDefault();
-      dialog.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement;
-    if (active === first && event.shiftKey) {
-      event.preventDefault();
-      last.focus();
-    } else if (active === last && !event.shiftKey) {
-      event.preventDefault();
-      first.focus();
-    } else if (active === dialog || !dialog.contains(active)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    }
-  }
-
-  /**
-   * A submission disables both dialog controls, and a disabled control cannot hold focus in a browser,
-   * so the dialog itself — which stays focusable — takes it once the flush has disabled them. The wait
-   * is not awaited by the submission: it only serves the keyboard, never the request.
-   */
-  function holdDialogFocus(dialog: HTMLElement | null): void {
-    void tick().then(() => dialog?.focus());
-  }
-
-  /**
-   * Confirms the deletion. The server admits it durably and answers with the operation, which is what
-   * the panel then follows; the collection leaves the manageable list immediately, so the same deletion
-   * cannot be submitted twice.
-   */
-  async function submitDelete(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    const collection = deleting;
-    if (collection === null || deleteSubmitting || confirmName.trim() !== collection.name) return;
-    deleteSubmitting = true;
-    deleteError = null;
-    holdDialogFocus(deleteDialog);
-    try {
-      const admitted = await deleteCollection(collection.id, confirmName.trim());
-      deletions = [
-        ...deletions.filter((deletion) => deletion.operationId !== admitted.operationId),
-        {
-          operationId: admitted.operationId,
-          kind: 'COLLECTION',
-          collectionId: admitted.collectionId,
-          collectionName: collection.name,
-          documentIds: [],
-          phase: admitted.phase,
-          terminal: false,
-          errorCode: null,
-        },
-      ];
-      deleteSubmitting = false;
-      closeDeleteDialog();
-      // The status is read now — one round trip, so the panel can say what the server recorded rather
-      // than only what it assumed — and then followed while it is unfinished.
-      void pollDeletions();
-      // The server no longer offers the collection for management, so the list the panel was handed is
-      // refreshed rather than left showing something that is on its way out.
-      await onCollectionsChanged();
-    } catch (failure) {
-      deleteSubmitting = false;
-      deleteError = describe(failure);
-    }
+  function handleCollectionDeleteAdmitted(operation: DeletionOperation): void {
+    deletions = [...deletions.filter((candidate) => candidate.operationId !== operation.operationId), operation];
+    // The status is read now — one round trip, so the panel can say what the server recorded rather
+    // than only what it assumed — and then followed while it is unfinished.
+    void pollDeletions();
   }
 
   /**
    * Opens the confirmation for exactly the rows it is handed — one row from the table, or the checked
    * ones — and snapshots them there; nothing is sent until it is confirmed.
    */
-  async function openDocumentDeleteDialog(rows: DocumentApiRow[]): Promise<void> {
+  function openDocumentDeleteDialog(rows: DocumentApiRow[]): void {
     if (selected === null || rows.length === 0) return;
-    deletingDocuments = [...rows];
-    documentDeleteError = null;
-    documentDeleteOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    await tick();
-    documentDeleteDialog?.focus();
-  }
-
-  /** Declining removes nothing: closing the dialog sends no request at all. */
-  function closeDocumentDeleteDialog(): void {
-    if (documentDeleteSubmitting) return;
-    deletingDocuments = null;
-    documentDeleteError = null;
-    const opener = documentDeleteOpener;
-    documentDeleteOpener = null;
-    if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
-  }
-
-  function handleDocumentDeleteKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeDocumentDeleteDialog();
-    } else if (event.key === 'Tab') {
-      containDialogFocus(event, documentDeleteDialog);
-    }
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    deleteDocumentsDialog?.open(rows, selected, opener);
   }
 
   /**
-   * Confirms the removal of the documents the confirmation snapshotted, as one admission. The server
-   * validates every id against the active collection before it records anything and answers with the
-   * one operation, which the panel then follows; the rows stay listed while the deletion runs, and the
-   * operation is added to the same followed list the reopened Admin restores its unfinished work from.
+   * One document deletion was admitted: it joins the followed list, and the admitted ids are no longer a
+   * selection waiting to be sent.
    */
-  async function submitDocumentDelete(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    const collection = selected;
-    const documentsToDelete = deletingDocuments;
-    if (collection === null || documentsToDelete === null || documentDeleteSubmitting) return;
-    documentDeleteSubmitting = true;
-    documentDeleteError = null;
-    holdDialogFocus(documentDeleteDialog);
-    try {
-      const admitted = await deleteDocuments(collection.id, documentsToDelete.map((row) => row.id));
-      deletions = [
-        ...deletions.filter((deletion) => deletion.operationId !== admitted.operationId),
-        {
-          operationId: admitted.operationId,
-          kind: 'DOCUMENT',
-          collectionId: admitted.collectionId,
-          collectionName: collection.name,
-          documentIds: admitted.documentIds,
-          phase: admitted.phase,
-          terminal: false,
-          errorCode: null,
-        },
-      ];
-      documentDeleteSubmitting = false;
-      closeDocumentDeleteDialog();
-      // The admitted documents are on their way out; they are no longer a selection waiting to be sent.
-      const targeted = new Set(admitted.documentIds);
-      selectedDocumentIds = new Set([...selectedDocumentIds].filter((id) => !targeted.has(id)));
-      void pollDeletions();
-    } catch (failure) {
-      documentDeleteSubmitting = false;
-      documentDeleteError = describe(failure);
-    }
-  }
-
-  /** The confirmation's own heading: one document is named, several are counted with their collection. */
-  function documentDeleteHeading(rows: DocumentApiRow[]): string {
-    if (rows.length === 1) return `Delete ${rows[0].originalFilename}?`;
-    return `Delete ${rows.length} documents from ${selected?.name ?? 'this collection'}?`;
-  }
-
-  /** The submit label: one document is a document, several are documents, and both say what is running. */
-  function documentDeleteSubmitLabel(rows: DocumentApiRow[]): string {
-    if (documentDeleteSubmitting) return 'Deleting…';
-    return rows.length === 1 ? 'Delete document' : 'Delete documents';
-  }
-
-  /**
-   * What the confirmation removes, in a reader's words. The names come from the snapshot, and the count
-   * is the snapshot's own, so what is confirmed is what was selected when the dialog opened.
-   */
-  function documentDeleteSentence(rows: DocumentApiRow[]): string {
-    const collectionName = selected?.name ?? 'this collection';
-    if (rows.length === 1) {
-      return `This permanently removes ${rows[0].originalFilename} from ${collectionName} and everything ` +
-        'InfoScry holds for it. The original file outside InfoScry is not touched, and there is no undo.';
-    }
-    return `This permanently removes the ${rows.length} selected documents from ${collectionName} and ` +
-      'everything InfoScry holds for them. The original files outside InfoScry are not touched, and there ' +
-      'is no undo.';
+  function handleDocumentDeleteAdmitted(operation: DeletionOperation): void {
+    deletions = [...deletions.filter((candidate) => candidate.operationId !== operation.operationId), operation];
+    const targeted = new Set(operation.documentIds);
+    selectedDocumentIds = new Set([...selectedDocumentIds].filter((id) => !targeted.has(id)));
+    void pollDeletions();
   }
 
   /**
@@ -1520,7 +1218,6 @@
     documentsGeneration += 1;
     detailGeneration += 1;
     summaryGeneration += 1;
-    settingsGeneration += 1;
     itemsGeneration += 1;
     importsGeneration += 1;
     if (refreshTimer !== null) clearTimeout(refreshTimer);
@@ -1775,7 +1472,7 @@
                       <button
                         type="button"
                         aria-label={`Delete ${row.originalFilename}`}
-                        onclick={() => void openDocumentDeleteDialog([row])}
+                        onclick={() => openDocumentDeleteDialog([row])}
                       >
                         Delete
                       </button>
@@ -1895,7 +1592,7 @@
                 type="button"
                 class="primary"
                 disabled={selectedDocumentIds.size === 0}
-                onclick={() => void openDocumentDeleteDialog(selectedDocuments())}
+                onclick={() => openDocumentDeleteDialog(selectedDocuments())}
               >
                 Delete selected
               </button>
@@ -1927,75 +1624,12 @@
           </section>
         {/if}
 
-        <details class="secondary-settings">
-          <summary>Settings</summary>
-        <section class="collection-settings" aria-label={`Settings for ${selected.name}`}>
-          <span class="eyebrow">SETTINGS</span>
-
-          <form class="settings-form" onsubmit={saveName}>
-            <div class="field">
-              <label for="collection-settings-name">Collection name</label>
-              <input
-                id="collection-settings-name"
-                bind:value={renameName}
-                oninput={() => (renameSaved = false)}
-                aria-invalid={renameError !== null}
-              />
-            </div>
-            <div class="actions">
-              <button type="submit" class="primary" disabled={renameSaving}>
-                {renameSaving ? 'Saving name…' : 'Save name'}
-              </button>
-            </div>
-            {#if renameError !== null}<p role="alert">{renameError}</p>{/if}
-            {#if renameSaved}<p role="status">Name saved.</p>{/if}
-          </form>
-
-          <form class="settings-form" onsubmit={saveIgnorePatterns}>
-            <div class="field">
-              <label for="collection-settings-ignore">Ignored files</label>
-              <textarea
-                id="collection-settings-ignore"
-                rows="8"
-                spellcheck="false"
-                autocapitalize="off"
-                bind:value={ignoreText}
-                oninput={() => (ignoreSaved = false)}
-                disabled={!ignoreLoaded}
-                aria-invalid={ignoreError !== null && ignoreLoaded}
-                aria-describedby="collection-settings-ignore-note"
-              ></textarea>
-            </div>
-            <div class="actions">
-              <button type="submit" class="primary" disabled={ignoreSaving || !ignoreLoaded}>
-                {ignoreSaving ? 'Saving ignored files…' : 'Save ignored files'}
-              </button>
-            </div>
-            {#if ignoreError !== null}<p role="alert">{ignoreError}</p>{/if}
-            {#if ignoreSaved}<p role="status">Ignored files saved.</p>{/if}
-            <p class="hint" id="collection-settings-ignore-note">
-              One pattern per line, like a .gitignore file: * and ? match within a name, ** matches across folders, a
-              trailing / matches a folder (its contents are never read), ! re-includes, and # starts a comment. Every
-              import into this collection skips matching files before anything else. A change applies to imports
-              started afterwards, not to one already queued or running.
-            </p>
-          </form>
-
-          <CollectionOcrSettings collection={selected} onChanged={() => onCollectionsChanged()} {onOpenLlmProfiles} />
-        </section>
-
-        <section class="collection-deletion" aria-label={`Delete ${selected.name}`}>
-          <span class="eyebrow">DELETE COLLECTION</span>
-          <p class="hint">
-            Deleting a collection removes every document InfoScry holds for it. Files outside InfoScry are
-            not touched, and there is no undo.
-          </p>
-          <div class="actions">
-            <button type="button" onclick={() => void openDeleteDialog()}>Delete collection</button>
-          </div>
-        </section>
-
-        </details>
+        <CollectionSettingsPanel
+          collection={selected}
+          {onCollectionsChanged}
+          {onOpenLlmProfiles}
+          onOpenDeleteDialog={openDeleteDialog}
+        />
 
         <section class="import-history" aria-label={`Import history for ${selected.name}`}>
           <details>
@@ -2109,85 +1743,8 @@
     {/if}
   {/if}
 
-  {#if deletingDocuments !== null}
-    <div class="confirm-backdrop" aria-hidden="true" onclick={closeDocumentDeleteDialog}></div>
-    <div
-      class="confirm-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="delete-document-heading"
-      bind:this={documentDeleteDialog}
-      tabindex="-1"
-      onkeydown={handleDocumentDeleteKeydown}
-    >
-      <form class="confirm-form" onsubmit={submitDocumentDelete}>
-        <h2 id="delete-document-heading">{documentDeleteHeading(deletingDocuments)}</h2>
-        <p>{documentDeleteSentence(deletingDocuments)}</p>
-        <p>
-          A running import or OCR pass for {deletingDocuments.length === 1 ? 'this document' : 'these documents'}
-          is interrupted after its current step. Other documents, including others in the same import, are
-          not affected.
-        </p>
-        {#if deletingDocuments.length > 1}
-          <ul class="confirm-list">
-            {#each deletingDocuments as row (row.id)}
-              <li>{row.originalFilename}</li>
-            {/each}
-          </ul>
-        {/if}
-        {#if documentDeleteError !== null}<p role="alert">{documentDeleteError}</p>{/if}
-        <div class="actions">
-          <button type="submit" class="primary" disabled={documentDeleteSubmitting}>
-            {documentDeleteSubmitLabel(deletingDocuments)}
-          </button>
-          <button type="button" onclick={closeDocumentDeleteDialog} disabled={documentDeleteSubmitting}>Cancel</button>
-        </div>
-      </form>
-    </div>
-  {/if}
-
-  {#if deleting !== null}
-    <div class="confirm-backdrop" aria-hidden="true" onclick={closeDeleteDialog}></div>
-    <div
-      class="confirm-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="delete-collection-heading"
-      bind:this={deleteDialog}
-      tabindex="-1"
-      onkeydown={handleDeleteKeydown}
-    >
-      <form class="confirm-form" onsubmit={submitDelete}>
-        <h2 id="delete-collection-heading">Delete {deleting.name}?</h2>
-        <p>
-          This permanently removes the collection and every document InfoScry holds for it. Original files
-          outside InfoScry are not touched, and there is no undo.
-        </p>
-        <p>
-          Work still running for this collection is cancelled after its current step, and no new import into
-          it can start.
-        </p>
-        <div class="field">
-          <label for="delete-collection-name">Type the collection name to confirm</label>
-          <input
-            id="delete-collection-name"
-            bind:this={deleteNameInput}
-            bind:value={confirmName}
-            autocomplete="off"
-            aria-describedby="delete-collection-hint"
-          />
-        </div>
-        <p class="hint" id="delete-collection-hint">The name has to match exactly.</p>
-        {#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}
-        <div class="actions">
-          <button type="submit" class="primary" disabled={deleteSubmitting || confirmName.trim() !== deleting.name}>
-            {deleteSubmitting ? 'Deleting…' : 'Delete collection'}
-          </button>
-          <button type="button" onclick={closeDeleteDialog} disabled={deleteSubmitting}>Cancel</button>
-        </div>
-      </form>
-    </div>
-  {/if}
+  <DeleteDocumentsDialog bind:this={deleteDocumentsDialog} onAdmitted={handleDocumentDeleteAdmitted} />
+  <DeleteCollectionDialog bind:this={deleteCollectionDialog} onAdmitted={handleCollectionDeleteAdmitted} {onCollectionsChanged} />
 </section>
 
 <style>
@@ -2216,10 +1773,6 @@
   .management-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.75rem; }
   .management-head .selected-name { margin: 0; font-size: 1.05rem; }
   .management p { margin: 0; }
-  .collection-settings { display: grid; gap: 0.9rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
-  .settings-form { display: grid; max-width: 65ch; gap: 0.6rem; }
-  .settings-form .actions { justify-content: start; }
-  .settings-form textarea { font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0.5rem; resize: vertical; width: 100%; box-sizing: border-box; }
   .hint { color: #929997; font-size: 0.82rem; }
   .ocr-quality { display: block; font-size: 0.82rem; }
   .ocr-quality.good { color: #85ad87; }
@@ -2251,7 +1804,6 @@
   table.documents .select-cell { width: 2rem; }
   .bulk-actions { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
   .bulk-actions p { margin: 0; }
-  .confirm-list { margin: 0; padding-left: 1.1rem; max-height: 8rem; overflow-y: auto; }
   .paging { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; }
   .document-details { display: grid; gap: 0.6rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .document-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.3rem 0.9rem; margin: 0; font-size: 0.85rem; }
@@ -2271,15 +1823,6 @@
   .deletions { display: grid; gap: 0.5rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .deletions ul { display: grid; gap: 0.3rem; margin: 0; padding-left: 1.1rem; }
   .deletions p { margin: 0; }
-  .collection-deletion { display: grid; justify-items: start; gap: 0.6rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
-  .collection-deletion p { margin: 0; }
-  .confirm-backdrop { position: fixed; inset: 0; background: rgba(8, 9, 10, 0.62); }
-  .confirm-dialog { position: fixed; top: 50%; left: 50%; z-index: 2; transform: translate(-50%, -50%); width: min(32rem, calc(100vw - 2rem)); border: 1px solid #3a3e3e; border-radius: 0.6rem; background: #1d2021; padding: 1.15rem; }
-  .confirm-form { display: grid; gap: 0.7rem; }
-  .confirm-dialog h2 { margin: 0; font-size: 1.05rem; }
-  .confirm-dialog p { margin: 0; }
-  .confirm-dialog .actions { justify-content: end; }
-  .confirm-dialog .confirm-list li { overflow-wrap: anywhere; }
   input[type='checkbox'] { width: 1rem; height: 1rem; accent-color: #c4a77d; }
   @media (max-width: 36rem) {
     .collection-form { grid-template-columns: minmax(0, 1fr); }
