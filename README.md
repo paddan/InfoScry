@@ -63,7 +63,7 @@ PDF/image review shows exact-revision images beside extracted text, including
 historical PDF page and image citations. Live review can mark pages and confirm an exact
 page set and reading method for rescanning. Stopped selected-page runs can resume
 from committed pages. Integrated browser verification passed 42 scenarios; the
-latest accumulated check passed 1,838 JVM and 471 frontend tests.
+latest accumulated check passed 1,838 JVM and 474 frontend tests.
 The latest Investigate browser run passed all nine scenarios against local fake
 providers. [Effort contracts](docs/investigate-effort.md) describe profile overrides
 and the fresh-database prerequisite; no existing archive was reset or migrated.
