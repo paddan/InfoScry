@@ -413,6 +413,9 @@ owner's confirmation. Earlier test records above describe their own run scope.
 - General keyboard/screen-reader checks outside the confirmed OCR/PDF scope.
 - A plain first import does not yet auto-queue selectable-PDF generation. Use
   **Create PDF with selectable text** until that integration decision is addressed.
+- Whether to refine the current per-page token cost estimate, and whether to
+  offer Restore as an immediate Undo action on the finished-run status, remain
+  undecided product choices, not implementation scope without a further request.
 
 Ambiguous legacy Investigate answer pairs are preserved by design rather than
 reconciled automatically. The project remains implementation in progress.
