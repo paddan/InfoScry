@@ -38,12 +38,30 @@ CREATE TABLE collections (
         CHECK (ocr_import_mode IN ('FILL_MISSING', 'CHECK_AND_IMPROVE')),
     ocr_transcription_profile_id TEXT REFERENCES ocr_profiles (id),
     ocr_review_profile_id TEXT REFERENCES ocr_profiles (id),
-    ocr_external_page_limit INTEGER NOT NULL DEFAULT 0 CHECK (ocr_external_page_limit >= 0)
+    ocr_external_page_limit INTEGER NOT NULL DEFAULT 0 CHECK (ocr_external_page_limit >= 0),
+    ask_prompt_id TEXT REFERENCES collection_prompts (id) ON DELETE SET NULL,
+    investigate_prompt_id TEXT REFERENCES collection_prompts (id) ON DELETE SET NULL
 );
 
 -- Collection names are unique case-insensitively, so "Default" and "default" cannot coexist. The
 -- index is the authority; the store translates its violation into a typed error.
 CREATE UNIQUE INDEX collections_name_unique ON collections (name COLLATE NOCASE);
+
+-- A collection's named Ask and Investigate prompts. The shipped Default is not a row; a NULL
+-- collections.ask_prompt_id / investigate_prompt_id means Default. Deleting the collection deletes its prompts.
+CREATE TABLE collection_prompts (
+    id             TEXT    NOT NULL PRIMARY KEY,
+    collection_id  TEXT    NOT NULL,
+    role           TEXT    NOT NULL CHECK (role IN ('ASK', 'INVESTIGATE')),
+    name           TEXT    NOT NULL CHECK (length(trim(name)) > 0),
+    body           TEXT    NOT NULL CHECK (length(trim(body)) > 0),
+    version        INTEGER NOT NULL CHECK (version > 0),
+    created_at     TEXT    NOT NULL,
+    updated_at     TEXT    NOT NULL,
+    FOREIGN KEY (collection_id) REFERENCES collections (id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX collection_prompts_name_unique
+    ON collection_prompts (collection_id, role, name COLLATE NOCASE);
 
 -- A collection's ignore patterns (ticket 07 of the local-testing feedback): one row per line of the list, in order.
 -- `position` is the line's place, because the last matching pattern wins. The rows belong to the collection and
@@ -362,15 +380,6 @@ CREATE TABLE app_defaults (
     role         TEXT    NOT NULL UNIQUE CHECK (role IN ('ASK', 'INVESTIGATE')),
     profile_id   TEXT    NOT NULL,
     FOREIGN KEY (profile_id) REFERENCES llm_profiles (id) ON DELETE CASCADE
-);
-
--- The editable, versioned Ask/Investigate prompt bodies. The immutable core rules live in
--- code/resources and cannot be replaced from here; this table only holds the user-editable bodies.
-CREATE TABLE prompt_overrides (
-    role             TEXT    NOT NULL PRIMARY KEY CHECK (role IN ('ASK', 'INVESTIGATE')),
-    body             TEXT    NOT NULL,
-    version          INTEGER NOT NULL,
-    updated_at       TEXT    NOT NULL
 );
 
 -- Conversations are fixed to one collection and one profile snapshot when created. The snapshot is

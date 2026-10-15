@@ -1055,7 +1055,7 @@ class InvestigationServiceTest {
         )
         val sv = service(tools(collection), provider)
 
-        val events = sv.investigate(InvestigateRequest(collection, "question", profile(contextWindow = 5600))).toList()
+        val events = sv.investigate(InvestigateRequest(collection, "question", profile(contextWindow = 5900))).toList()
 
         val citations = events.filterIsInstance<InvestigateEvent.Citation>()
         assertTrue(
@@ -1086,7 +1086,7 @@ class InvestigationServiceTest {
         val request = InvestigateRequest(
             collection,
             "question",
-            profile(contextWindow = 5_600),
+            profile(contextWindow = 5_900),
             limits = InvestigationLimits(maxToolRounds = 2),
         )
 

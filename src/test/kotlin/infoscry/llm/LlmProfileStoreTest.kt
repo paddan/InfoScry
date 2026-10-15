@@ -243,14 +243,8 @@ class LlmProfileStoreTest {
     }
 
     @Test
-    fun `prompt overrides are editable and resettable to the shipped default`() {
-        val shipped = store.effectiveBody(LlmPromptRole.ASK)
-        assertTrue(shipped.isNotBlank(), "a shipped Ask body exists")
-
-        store.savePromptBody(LlmPromptRole.ASK, "custom ask body")
-        assertEquals("custom ask body", store.effectiveBody(LlmPromptRole.ASK))
-
-        store.resetPromptBody(LlmPromptRole.ASK)
-        assertEquals(shipped, store.effectiveBody(LlmPromptRole.ASK), "resetting restores the shipped default")
+    fun `the shipped default body is always the effective body at version 1`() {
+        assertEquals(ShippedPrompts.body(LlmPromptRole.ASK), store.effectiveBody(LlmPromptRole.ASK))
+        assertEquals(1, store.effectivePromptVersion(LlmPromptRole.ASK))
     }
 }

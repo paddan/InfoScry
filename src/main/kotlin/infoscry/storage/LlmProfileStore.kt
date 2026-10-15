@@ -8,6 +8,7 @@ import infoscry.llm.LlmCapabilityProbe
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
+import infoscry.llm.ShippedPrompts
 import infoscry.llm.ValidEnvironmentVariableName
 import infoscry.llm.endpointCarriesUserInfo
 import infoscry.llm.sanitizedEndpoint
@@ -35,15 +36,13 @@ class LastLlmProfileException : ApiFaultException(
     "the last LLM profile cannot be deleted",
 )
 
-/** The shipped default body is version 1; user overrides increment from there. */
+/** The shipped default body is version 1. */
 private const val SHIPPED_PROMPT_VERSION = 1
 
 /**
- * Persistence for LLM profiles, per-role defaults, and the user-editable prompt bodies.
- *
- * The shipped prompt defaults are resources, not rows: an override row in [prompt_overrides]
- * replaces the shipped body, and deleting the row restores it. The immutable core prompt rules are
- * code in [infoscry.llm.PromptService] and cannot be replaced here at all.
+ * Persistence for LLM profiles and per-role profile defaults. Prompt bodies are not stored here:
+ * the shipped Default comes from [infoscry.llm.ShippedPrompts], and collection prompts are in
+ * [CollectionPromptStore]. The immutable core prompt rules are code in [infoscry.llm.PromptService].
  *
  * Profiles carry the name of an environment variable, never a value, and the capability probe
  * (measured by Task 20's adapters) is stored separately from the profile's declared switch so a
@@ -288,68 +287,11 @@ class LlmProfileStore(private val database: Database) {
         profile
     }
 
-    // ---- Prompt bodies (layer 2) ----
+    /** The shipped Default body for a role; overrides were removed with the collection prompts. */
+    fun effectiveBody(role: LlmPromptRole): String = ShippedPrompts.body(role)
 
-    /** The effective body for a role: the user's override, or the shipped default resource. */
-    fun effectiveBody(role: LlmPromptRole): String = database.read { connection ->
-        val override = connection.prepareStatement(
-            "SELECT body FROM prompt_overrides WHERE role = ?",
-        ).use { statement ->
-            statement.setString(1, role.name)
-            statement.executeQuery().use { results ->
-                if (results.next()) results.getString("body") else null
-            }
-        }
-        override ?: shippedPromptBody(role)
-    }
-
-    /** The effective prompt version: the override's version, or 1 for the shipped default body. */
-    fun effectivePromptVersion(role: LlmPromptRole): Int = database.read { connection ->
-        connection.prepareStatement(
-            "SELECT version FROM prompt_overrides WHERE role = ?",
-        ).use { statement ->
-            statement.setString(1, role.name)
-            statement.executeQuery().use { results ->
-                if (results.next()) results.getInt("version") else null
-            }
-        }
-    } ?: SHIPPED_PROMPT_VERSION
-
-    fun savePromptBody(role: LlmPromptRole, body: String): String {
-        require(body.isNotBlank()) { "a prompt body must not be blank" }
-        database.transaction { connection ->
-            connection.prepareStatement(
-                "INSERT INTO prompt_overrides (role, body, version, updated_at) VALUES (?, ?, ?, ?) " +
-                    "ON CONFLICT(role) DO UPDATE SET body = excluded.body, version = prompt_overrides.version + 1, " +
-                    "updated_at = excluded.updated_at",
-            ).use { statement ->
-                statement.setString(1, role.name)
-                statement.setString(2, body)
-                statement.setInt(3, SHIPPED_PROMPT_VERSION + 1)
-                statement.setString(4, Instants.now())
-                statement.executeUpdate()
-            }
-        }
-        return body
-    }
-
-    fun resetPromptBody(role: LlmPromptRole) {
-        database.transaction { connection ->
-            connection.prepareStatement("DELETE FROM prompt_overrides WHERE role = ?").use { statement ->
-                statement.setString(1, role.name)
-                statement.executeUpdate()
-            }
-        }
-    }
-
-    /** The shipped default body for a role, read from the classpath. */
-    private fun shippedPromptBody(role: LlmPromptRole): String {
-        val resource = "prompts/" + role.name.lowercase() + ".md"
-        return javaClass.classLoader.getResourceAsStream(resource)?.use { it.readBytes().decodeToString() }
-            ?: error("prompt resource $resource is missing from the classpath")
-    }
-
-    private val javaClass: Class<LlmProfileStore> get() = LlmProfileStore::class.java
+    /** The prompt version of the shipped Default body, which is always 1. Task 3 removes this with its callers. */
+    fun effectivePromptVersion(role: LlmPromptRole): Int = SHIPPED_PROMPT_VERSION
 
     private fun readProfile(results: ResultSet): LlmProfile {
         val storedEndpoint = results.getString("endpoint") ?: ""

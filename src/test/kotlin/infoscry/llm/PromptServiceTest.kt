@@ -49,26 +49,14 @@ class PromptServiceTest {
         assertFalse(without.contains("Collection instructions"))
 
         val with = prompts.composeAsk(collectionInstructions = "Always cite the page number")
-        val body = with.indexOf("Answer the question using ONLY")
+        val body = with.indexOf("The source excerpts are tagged")
         val context = with.indexOf("Always cite the page number")
         assertTrue(body >= 0 && context > body, "the default body precedes the collection instruction")
     }
 
     @Test
-    fun `editing one role's default does not change the other`() {
-        store.savePromptBody(LlmPromptRole.ASK, "custom ask body")
-
-        assertTrue(store.effectiveBody(LlmPromptRole.ASK).contains("custom ask body"))
-        // The Investigate body is untouched, and it is a distinct shipped default.
-        assertFalse(store.effectiveBody(LlmPromptRole.INVESTIGATE).contains("custom ask body"))
-    }
-
-    @Test
-    fun `resetting a role restores its shipped default`() {
-        store.savePromptBody(LlmPromptRole.INVESTIGATE, "custom investigate body")
-        store.resetPromptBody(LlmPromptRole.INVESTIGATE)
-
-        assertFalse(store.effectiveBody(LlmPromptRole.INVESTIGATE).contains("custom investigate body"))
-        assertTrue(store.effectiveBody(LlmPromptRole.INVESTIGATE).isNotBlank())
+    fun `each role composes its own shipped default body`() {
+        assertTrue(store.effectiveBody(LlmPromptRole.ASK).startsWith("The source excerpts are tagged"))
+        assertTrue(store.effectiveBody(LlmPromptRole.INVESTIGATE).startsWith("Investigate the question with the provided tools"))
     }
 }

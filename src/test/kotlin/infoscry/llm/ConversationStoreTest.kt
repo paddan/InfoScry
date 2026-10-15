@@ -149,7 +149,6 @@ class ConversationStoreTest {
                 statement.executeQuery("SELECT id FROM collections WHERE name = 'Default'").use { rows -> rows.next(); CollectionId(rows.getString(1)) }
             }
         }
-        profiles.savePromptBody(LlmPromptRole.ASK, "custom ask body")
         val evidence = Evidence(
             id = "S1", collectionId = collectionId.value, documentId = "document", unitId = "unit-42",
             locator = SourceLocation.TextLines(3, 4), locatorLabel = "lines 3-4", text = "evidence",
@@ -169,7 +168,7 @@ class ConversationStoreTest {
                 }
             }
         }
-        assertEquals(2, conversation[0], "the user override's version must be snapshotted")
+        assertEquals(1, conversation[0], "the shipped default's version must be snapshotted")
         assertEquals("{\"mode\":\"HYBRID\"}", conversation[1])
 
         val reopened = database.read { connection ->

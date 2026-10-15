@@ -100,7 +100,7 @@ class SchemaMigratorTest {
                         "ocr_profiles",
                         "ocr_profile_revisions",
                         "app_defaults",
-                        "prompt_overrides",
+                        "collection_prompts",
                         "conversations",
                         "messages",
                         "model_calls",
