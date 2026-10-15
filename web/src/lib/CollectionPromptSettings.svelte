@@ -18,21 +18,19 @@
 
   export let collection: Collection;
 
-  const ROLE_LISTS: { role: PromptRole; label: string }[] = [
-    { role: 'ASK', label: 'Ask' },
-    { role: 'INVESTIGATE', label: 'Investigate' },
-  ];
-
   /** The prompts as the server last listed them; null while a collection's list is loading. */
   let prompts: CollectionPrompts | null = null;
   let loading = false;
   let loadError: string | null = null;
+  /** A write that took effect whose list could not be refreshed; shown in the panel, not beside a button. */
+  let listError: string | null = null;
   let boundId = '';
   /**
    * The settings generation. Every answer that arrives after the reader selects another collection carries
    * an older generation, so it may not write into the draft, the status or the list.
    */
   let generation = 0;
+  let root: HTMLElement | null = null;
 
   /** The selected prompt: a stored one (by id) in the chosen role, or a new draft when `creating` is set. */
   let activeRole: PromptRole = 'ASK';
@@ -57,6 +55,14 @@
   let deleteOpener: HTMLElement | null = null;
 
   $: if (collection.id !== boundId) void load(collection.id);
+  /**
+   * The two role lists, derived at the top level so the template re-renders when `prompts` changes. A derivation
+   * made inside the markup did not update after the first render, which left a deleted prompt on screen.
+   */
+  $: roleSections = [
+    { role: 'ASK' as const, label: 'Ask', list: prompts?.ask ?? null },
+    { role: 'INVESTIGATE' as const, label: 'Investigate', list: prompts?.investigate ?? null },
+  ];
   $: selected = findSelected(prompts, activeRole, selectedId);
   $: readOnly = !creating && selected !== null && selected.builtIn;
   $: isCollectionDefault = selected !== null && section(activeRole)?.defaultId === selected.id;
@@ -64,6 +70,8 @@
     ? draftName.trim() !== '' && draftBody.trim() !== ''
     : selected !== null && !selected.builtIn && (draftName.trim() !== selected.name || draftBody !== selected.body);
   $: canSave = dirty && !saving;
+  /** Selection is frozen while a write is in flight, so a late answer cannot snap the editor to another prompt. */
+  $: busy = saving || deleting || defaultSaving;
 
   function section(target: PromptRole): RolePrompts | null {
     if (prompts === null) return null;
@@ -74,6 +82,12 @@
     if (list === null || id === null) return null;
     const role = target === 'ASK' ? list.ask : list.investigate;
     return role.prompts.find((prompt) => prompt.id === id) ?? null;
+  }
+
+  /** Applies an edit to one role of a list, leaving the other role as it is. */
+  function editRole(list: CollectionPrompts | null, target: PromptRole, edit: (role: RolePrompts) => RolePrompts): CollectionPrompts | null {
+    if (list === null) return null;
+    return target === 'ASK' ? { ...list, ask: edit(list.ask) } : { ...list, investigate: edit(list.investigate) };
   }
 
   function roleLabel(target: PromptRole): string {
@@ -116,6 +130,7 @@
     saved = false;
     defaultError = null;
     defaultSaved = false;
+    listError = null;
   }
 
   /** Reads the collection's prompts. A stale answer is dropped, and a new load clears every in-flight flag. */
@@ -158,6 +173,14 @@
     return list.prompts.find((prompt) => prompt.id === list.defaultId) ?? list.prompts.find((prompt) => prompt.builtIn) ?? null;
   }
 
+  /** Moves focus to the selected prompt in a role's list, or to that list's heading when nothing is selected. */
+  async function focusSelection(target: PromptRole): Promise<void> {
+    await tick();
+    const list = root?.querySelector<HTMLElement>(`[data-role="${target}"]`);
+    const option = list?.querySelector<HTMLElement>('.prompt-option.selected');
+    (option ?? list?.querySelector<HTMLElement>('h4'))?.focus();
+  }
+
   async function save(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (!canSave) return;
@@ -170,19 +193,31 @@
     const promptId = selectedId;
     saving = true;
     resetStatus();
+    let stored: CollectionPrompt;
     try {
-      const stored = isNew
+      stored = isNew
         ? await createCollectionPrompt(target, role, name, body)
         : await updateCollectionPrompt(target, promptId ?? '', name, body);
-      if (mine !== generation) return;
-      await reload(target, mine);
-      if (mine !== generation) return;
-      select(role, stored);
-      saved = true;
     } catch (failure) {
       if (mine === generation) saveError = describe(failure);
-    } finally {
       if (mine === generation) saving = false;
+      return;
+    }
+    if (mine !== generation) return;
+    saving = false;
+    // The write has taken effect, so the stored prompt is shown at once; the refresh only corrects the order.
+    prompts = editRole(prompts, role, (list) => ({
+      ...list,
+      prompts: list.prompts.some((prompt) => prompt.id === stored.id)
+        ? list.prompts.map((prompt) => (prompt.id === stored.id ? stored : prompt))
+        : [...list.prompts, stored],
+    }));
+    select(role, stored);
+    saved = true;
+    try {
+      await reload(target, mine);
+    } catch (failure) {
+      if (mine === generation) listError = `Saved, but the list could not be refreshed: ${describe(failure)}`;
     }
   }
 
@@ -212,6 +247,11 @@
     }
   }
 
+  /**
+   * Deletes the selected prompt. A failed delete keeps the dialog open with the error in it. Once the delete has
+   * taken effect the prompt leaves the list at once, the dialog closes, and focus moves to the new selection.
+   * A failed refresh after that is reported in the panel, so the list never shows a prompt that is gone.
+   */
   async function confirmDelete(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (selected === null || deleting) return;
@@ -224,22 +264,30 @@
     holdDialogFocus(deleteDialog);
     try {
       await deleteCollectionPrompt(target, promptId);
-      if (mine !== generation) return;
-      deleting = false;
-      confirmOpen = false;
-      deleteOpener = null;
-      await reload(target, mine);
-      if (mine !== generation) return;
-      const next = fallbackPrompt(role);
-      if (next !== null) {
-        select(role, next);
-      } else {
-        selectedId = null;
-      }
     } catch (failure) {
       if (mine === generation) deleteError = describe(failure);
-    } finally {
       if (mine === generation) deleting = false;
+      return;
+    }
+    if (mine !== generation) return;
+    deleting = false;
+    confirmOpen = false;
+    deleteOpener = null;
+    prompts = editRole(prompts, role, (list) => ({
+      defaultId: list.defaultId === promptId ? 'default' : list.defaultId,
+      prompts: list.prompts.filter((prompt) => prompt.id !== promptId),
+    }));
+    const next = fallbackPrompt(role);
+    if (next !== null) {
+      select(role, next);
+    } else {
+      selectedId = null;
+    }
+    void focusSelection(role);
+    try {
+      await reload(target, mine);
+    } catch (failure) {
+      if (mine === generation) listError = `The prompt was deleted, but the list could not be refreshed: ${describe(failure)}`;
     }
   }
 
@@ -254,14 +302,19 @@
     defaultSaved = false;
     try {
       await setCollectionPromptDefault(target, role, promptId);
-      if (mine !== generation) return;
-      await reload(target, mine);
-      if (mine !== generation) return;
-      defaultSaved = true;
     } catch (failure) {
       if (mine === generation) defaultError = describe(failure);
-    } finally {
       if (mine === generation) defaultSaving = false;
+      return;
+    }
+    if (mine !== generation) return;
+    defaultSaving = false;
+    prompts = editRole(prompts, role, (list) => ({ ...list, defaultId: promptId }));
+    defaultSaved = true;
+    try {
+      await reload(target, mine);
+    } catch (failure) {
+      if (mine === generation) listError = `The collection default was set, but the list could not be refreshed: ${describe(failure)}`;
     }
   }
 
@@ -271,11 +324,12 @@
   }
 </script>
 
-<section class="prompt-settings" aria-label={`Prompts for ${collection.name}`}>
+<section class="prompt-settings" aria-label={`Prompts for ${collection.name}`} bind:this={root}>
   <span class="eyebrow">PROMPTS</span>
 
   {#if loading}<p class="hint" role="status">Loading prompts…</p>{/if}
   {#if loadError !== null}<p role="alert">{loadError}</p>{/if}
+  {#if listError !== null}<p role="alert">{listError}</p>{/if}
 
   {#if prompts !== null}
     <div class="core-rules">
@@ -285,30 +339,30 @@
     </div>
 
     <div class="role-lists">
-      {#each ROLE_LISTS as entry (entry.role)}
-        {@const list = section(entry.role)}
-        {#if list !== null}
-          <section class="role-list" aria-label={`${entry.label} prompts`}>
-            <h4>{entry.label}</h4>
+      {#each roleSections as entry (entry.role)}
+        {#if entry.list !== null}
+          <section class="role-list" aria-label={`${entry.label} prompts`} data-role={entry.role}>
+            <h4 tabindex="-1">{entry.label}</h4>
             <ul class="prompt-list">
-              {#each list.prompts as prompt (prompt.id)}
+              {#each entry.list.prompts as prompt (prompt.id)}
                 <li>
                   <button
                     type="button"
                     class="prompt-option"
                     class:selected={!creating && selected !== null && activeRole === entry.role && selected.id === prompt.id}
                     aria-pressed={!creating && activeRole === entry.role && selected?.id === prompt.id}
+                    disabled={busy}
                     onclick={() => select(entry.role, prompt)}
                   >
                     <span class="prompt-name">{prompt.name}</span>
                     {#if prompt.builtIn}<span class="badge">Built-in</span>{/if}
-                    {#if prompt.id === list.defaultId}<span class="badge">Collection default</span>{/if}
+                    {#if prompt.id === entry.list.defaultId}<span class="badge">Collection default</span>{/if}
                   </button>
                 </li>
               {/each}
             </ul>
             <div class="actions">
-              <button type="button" onclick={() => startNew(entry.role)} disabled={saving}>New prompt</button>
+              <button type="button" onclick={() => startNew(entry.role)} disabled={busy}>New prompt</button>
             </div>
           </section>
         {/if}
@@ -357,12 +411,14 @@
         </details>
 
         <div class="actions">
-          <button type="submit" class="primary" disabled={!canSave}>{saving ? 'Saving prompt…' : 'Save prompt'}</button>
+          {#if !readOnly}
+            <button type="submit" class="primary" disabled={!canSave}>{saving ? 'Saving prompt…' : 'Save prompt'}</button>
+          {/if}
           {#if !creating && selected !== null}
-            <button type="button" onclick={duplicate} disabled={saving}>Duplicate</button>
+            <button type="button" onclick={duplicate} disabled={busy}>Duplicate</button>
           {/if}
           {#if !creating && selected !== null && !selected.builtIn}
-            <button type="button" onclick={openDelete} disabled={saving}>Delete prompt</button>
+            <button type="button" onclick={openDelete} disabled={busy}>Delete prompt</button>
           {/if}
         </div>
         {#if saveError !== null}<p role="alert">{saveError}</p>{/if}
@@ -374,7 +430,7 @@
           {#if isCollectionDefault}
             <span class="hint" role="status">This is the collection default for {roleLabel(activeRole)}.</span>
           {:else}
-            <button type="button" onclick={useAsDefault} disabled={defaultSaving}>
+            <button type="button" onclick={useAsDefault} disabled={busy}>
               {defaultSaving ? 'Saving default…' : 'Use as collection default'}
             </button>
           {/if}

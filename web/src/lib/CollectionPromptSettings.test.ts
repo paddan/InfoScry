@@ -72,7 +72,60 @@ describe('CollectionPromptSettings', () => {
     expect(body.value).toBe('Ask default body');
     expect(body.readOnly).toBe(true);
     expect((screen.getByLabelText('Prompt name') as HTMLInputElement).readOnly).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Save prompt' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Delete prompt' })).toBeNull();
+    const ask = screen.getByRole('region', { name: 'Ask prompts' });
+    await fireEvent.click(within(ask).getByRole('button', { name: /Board tone/ }));
+    expect(screen.getByRole('button', { name: 'Save prompt' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Delete prompt' })).toBeTruthy();
+  });
+
+  it('keeps a deleted prompt off screen and says so when the list cannot be refreshed', async () => {
+    let listCalls = 0;
+    vi.mocked(api.getCollectionPrompts).mockImplementation(async (id: string) => {
+      listCalls += 1;
+      if (listCalls > 1) throw new ApiError('UNAVAILABLE', 'the list is unavailable', 503);
+      return id === 'c1' ? prompts : otherPrompts;
+    });
+    render(CollectionPromptSettings, { collection: collection() });
+    const investigate = await screen.findByRole('region', { name: 'Investigate prompts' });
+    await fireEvent.click(within(investigate).getByRole('button', { name: /Thorough/ }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete prompt' }));
+    await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete prompt' }));
+
+    expect(await screen.findByText(/The prompt was deleted, but the list could not be refreshed/)).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Thorough/ })).toBeNull();
+  });
+
+  it('moves focus to the new selection after a delete', async () => {
+    render(CollectionPromptSettings, { collection: collection() });
+    const investigate = await screen.findByRole('region', { name: 'Investigate prompts' });
+    await fireEvent.click(within(investigate).getByRole('button', { name: /Thorough/ }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete prompt' }));
+    await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete prompt' }));
+
+    await waitFor(() => expect(api.deleteCollectionPrompt).toHaveBeenCalledWith('c1', 'p2'));
+    const fallback = within(screen.getByRole('region', { name: 'Investigate prompts' })).getByRole('button', { name: /Default/ });
+    await waitFor(() => expect(document.activeElement).toBe(fallback));
+  });
+
+  it('says a save was kept when only the list refresh fails', async () => {
+    let listCalls = 0;
+    vi.mocked(api.getCollectionPrompts).mockImplementation(async (id: string) => {
+      listCalls += 1;
+      if (listCalls > 1) throw new ApiError('UNAVAILABLE', 'the list is unavailable', 503);
+      return id === 'c1' ? prompts : otherPrompts;
+    });
+    render(CollectionPromptSettings, { collection: collection() });
+    const ask = await screen.findByRole('region', { name: 'Ask prompts' });
+    await fireEvent.click(within(ask).getByRole('button', { name: /Board tone/ }));
+    await fireEvent.input(screen.getByLabelText('Prompt text'), { target: { value: 'Changed.' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save prompt' }));
+
+    expect(await screen.findByText('Prompt saved.')).toBeTruthy();
+    expect(await screen.findByText(/Saved, but the list could not be refreshed/)).toBeTruthy();
+    expect(api.updateCollectionPrompt).toHaveBeenCalledWith('c1', 'p1', 'Board tone', 'Changed.');
   });
 
   it('pre-fills New prompt from Default and Duplicate copies the selected prompt', async () => {

@@ -1,6 +1,6 @@
 /**
  * The "How to write a prompt" help, kept as data so the copy lives in one place. The Admin prompt
- * settings render it; `docs/usage.md` repeats the same text.
+ * settings render it; `docs/usage.md` should repeat this text.
  */
 
 export type PromptHelpLead = { lead: string; text: string };

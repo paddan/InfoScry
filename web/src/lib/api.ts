@@ -1363,7 +1363,7 @@ export async function deleteCollectionPrompt(collectionId: string, promptId: str
 /** Makes a prompt the collection default for one role and answers with the id now in effect. */
 export async function setCollectionPromptDefault(collectionId: string, role: PromptRole, promptId: string): Promise<string> {
   const body = (await mutate(
-    `/api/collections/${encodeURIComponent(collectionId)}/prompt-defaults/${role.toLowerCase()}`,
+    `/api/collections/${encodeURIComponent(collectionId)}/prompt-defaults/${role}`,
     'PUT',
     { promptId },
   )) as { defaultId: string };

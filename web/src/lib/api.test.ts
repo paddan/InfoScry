@@ -484,7 +484,7 @@ describe('collection prompt requests', () => {
       const url = String(input);
       if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'token' }), { status: 200 });
       calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined });
-      if (url.endsWith('/prompt-defaults/ask')) return new Response(JSON.stringify({ role: 'ASK', defaultId: 'p1' }), { status: 200 });
+      if (url.endsWith('/prompt-defaults/ASK')) return new Response(JSON.stringify({ role: 'ASK', defaultId: 'p1' }), { status: 200 });
       if (init?.method === 'DELETE') return new Response(null, { status: 204 });
       if (init?.method === undefined) {
         return new Response(JSON.stringify({ coreRules: 'core', ask: { defaultId: 'default', prompts: [] }, investigate: { defaultId: 'default', prompts: [] } }), { status: 200 });
@@ -507,7 +507,7 @@ describe('collection prompt requests', () => {
       { url: '/api/collections/c/prompts', method: 'POST', body: { role: 'ASK', name: 'Board tone', body: 'Plain.' } },
       { url: '/api/collections/c/prompts/p%2F1', method: 'PUT', body: { name: 'Board tone', body: 'Plain.' } },
       { url: '/api/collections/c/prompts/p%2F1', method: 'DELETE', body: undefined },
-      { url: '/api/collections/c/prompt-defaults/ask', method: 'PUT', body: { promptId: 'p1' } },
+      { url: '/api/collections/c/prompt-defaults/ASK', method: 'PUT', body: { promptId: 'p1' } },
     ]);
   });
 
