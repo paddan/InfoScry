@@ -551,7 +551,7 @@ class CollectionDeletionRecoveryTest {
     private fun terminateHarnessAt(stopAfter: StopAfter, collectionId: CollectionId) {
         val process = ProcessBuilder(
             javaExecutable(),
-            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
             "-cp",
             System.getProperty("java.class.path"),
             DeletionHarness::class.java.name,

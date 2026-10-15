@@ -36,6 +36,10 @@ or GPU verification.
   `./gradlew test -PskipFrontend --tests <class>`, frontend
   `cd web && npm test -- --run && npm run check`; see `docs/development.md`.
   Run `./gradlew check` before reporting done.
+- Every JVM must run headless (`-Djava.awt.headless=true`) so macOS shows no
+  Dock icon per process: Gradle test and `JavaExec` tasks set it in
+  `build.gradle.kts`, and a test that spawns `java` passes it explicitly next to
+  `--enable-native-access=ALL-UNNAMED`. Run `java` by hand the same way.
 - Report what was actually verified and what remains unverified. Never mark a
   task or hardware gate complete from mock results alone.
 - Keep README status and commands current as implementation lands. Keep this

@@ -86,7 +86,7 @@ class ExplicitPageRescanRecoveryTest {
                 val ready = root.resolve("$stopAt-ready")
                 val log = root.resolve("$stopAt-child.log")
                 val process = ProcessBuilder(
-                    javaExecutable(), "--enable-native-access=ALL-UNNAMED", "-cp",
+                    javaExecutable(), "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true", "-cp",
                     System.getProperty("java.class.path"), ExplicitPageRescanRecoveryHarness::class.java.name,
                     root.toString(), picture.documentId.value, ready.toString(), stopAt,
                 ).redirectErrorStream(true).redirectOutput(log.toFile()).start()

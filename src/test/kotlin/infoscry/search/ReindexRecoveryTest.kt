@@ -675,7 +675,7 @@ class ReindexRecoveryTest {
     private fun terminateReindexAt(step: ReindexStep) {
         val process = ProcessBuilder(
             Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
             "-cp",
             System.getProperty("java.class.path"),
             ReindexHarness::class.java.name,

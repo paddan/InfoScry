@@ -131,7 +131,7 @@ class RevisionRestoreRecoveryTest {
     private fun terminateRestoreAt(step: RestoreStep) {
         val process = ProcessBuilder(
             Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
             "-cp",
             System.getProperty("java.class.path"),
             RevisionRestoreHarness::class.java.name,

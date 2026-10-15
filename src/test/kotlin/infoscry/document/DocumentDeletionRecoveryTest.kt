@@ -1305,7 +1305,7 @@ class DocumentDeletionRecoveryTest {
     private fun terminateHarnessAt(stopAfter: StopAfter, staged: Staged) {
         val process = ProcessBuilder(
             javaExecutable(),
-            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
             "-cp",
             System.getProperty("java.class.path"),
             DocumentDeletionHarness::class.java.name,

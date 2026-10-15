@@ -42,7 +42,7 @@ application {
     // The SQLite JDBC driver and, later, ONNX Runtime load their native libraries through
     // System.load. JDK 25 warns about that unless native access is granted, and a future JDK
     // blocks it, so the permission is part of how the application and its tests are started.
-    applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
+    applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true")
 }
 
 dependencies {
@@ -97,6 +97,10 @@ dependencies {
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
+// Every JVM a build task starts runs headless: on macOS a JVM that loads AWT (image and PDF work does) otherwise
+// shows its own Dock icon. Test JVMs and the processes tests spawn pass the same flag explicitly.
+tasks.withType<JavaExec>().configureEach { jvmArgs("-Djava.awt.headless=true") }
+
 tasks.test {
     // `external` is the tag for the tests that need a tool installed on this machine: the real OCR
     // reading, and later the real Calibre conversion. They are excluded here and run by `externalTest`,
@@ -108,7 +112,7 @@ tasks.test {
         excludeTags(EXTERNAL_TAG, MODEL_TAG, GPU_TAG)
         if (skipFrontend) excludeTags(FRONTEND_TAG)
     }
-    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true")
     // Point the Surya runtime at nothing so a machine that has it installed behaves like one that does not;
     // the tests that need the real runtime are `external` and run under `externalTest`.
     environment("INFOSCRY_SURYA_PYTHON", layout.buildDirectory.file("no-surya-python").get().asFile.path)
@@ -125,7 +129,7 @@ val externalTest = tasks.register<Test>("externalTest") {
     useJUnitPlatform { includeTags(EXTERNAL_TAG) }
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
-    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true")
     // These tests depend on tools installed on this machine (Tesseract, Chromium) that are not task inputs,
     // so a cached pass could be replayed where the tool is absent. They must run, never be restored.
     outputs.cacheIf { false }
@@ -250,7 +254,7 @@ val gpuIntegrationTest = tasks.register<Test>("gpuIntegrationTest") {
     outputs.upToDateWhen { false }
     // The gate proves the hardware, so a result restored from the build cache would prove nothing.
     outputs.cacheIf { false }
-    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true")
 }
 
 /**
@@ -265,7 +269,7 @@ val embeddingModel = tasks.register<JavaExec>("embeddingModel") {
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("infoscry.embedding.ModelInstaller")
     systemProperty("infoscry.dataDir", dataDir)
-    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true")
 }
 
 // The committed Office fixtures are evidence a reader can inspect, not build output: this task exists so

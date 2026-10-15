@@ -154,7 +154,7 @@ class JobRunnerRecoveryTest {
         val command = mutableListOf(
             javaExecutable(),
             // The SQLite driver loads a native library; without this the JDK warns on every run.
-            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
             "-cp",
             System.getProperty("java.class.path"),
             JobHarness::class.java.name,

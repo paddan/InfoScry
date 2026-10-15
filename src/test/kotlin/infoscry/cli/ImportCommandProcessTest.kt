@@ -555,7 +555,7 @@ class ImportCommandProcessTest {
     /** The command line a script would use: this JDK, the test classpath, and the CLI's main class. */
     private fun harnessArgs(vararg args: String): Array<String> = arrayOf(
         Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-        "--enable-native-access=ALL-UNNAMED",
+        "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
         "-cp",
         System.getProperty("java.class.path"),
         "infoscry.cli.ImportProcessHarness",
