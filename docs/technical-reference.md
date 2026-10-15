@@ -251,7 +251,9 @@ row) or a stored prompt of the collection and role.
 - `collection_prompts` holds stored prompts: `id`, `collection_id`, `role` (`ASK` or
   `INVESTIGATE`), `name`, `body`, `version`, and timestamps. Names are unique per
   collection and role, case-insensitively, and `Default` is reserved. Deleting the
-  collection deletes its prompts.
+  collection deletes its prompts. A taken name answers `409 PROMPT_NAME_TAKEN`, also
+  when a racing write meets the unique index; a prompt reference outside the collection
+  and role answers `400 INVALID_REQUEST`.
 - `collections.ask_prompt_id` and `collections.investigate_prompt_id` hold each role's
   collection default. `NULL` means Default. They reference `collection_prompts` with
   `ON DELETE SET NULL`, so deleting a prompt falls back to Default.

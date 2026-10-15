@@ -1,6 +1,6 @@
 # Collection prompts for Ask and Investigate
 
-Status: design approved 2026-10-15, not implemented.
+Status: implemented 2026-10-15.
 
 ## Goal
 
@@ -167,7 +167,7 @@ OCR settings:
 - Selecting a prompt shows its body: read-only for Default, editable name and body for a stored
   prompt.
 - Actions: **New prompt** (pre-filled with Default's text, or **Duplicate** from the selected
-  prompt), **Save prompt** (enabled only when the draft differs), **Delete** (with confirmation that names
+  prompt), **Save prompt** (enabled only when the draft differs), **Delete prompt** (with confirmation that names
   the prompt; it says when the prompt is the collection default and that Default will then be used),
   **Use as collection default**.
 - "Always applied first": the core rules, read-only.
@@ -186,7 +186,7 @@ OCR settings:
   to it when the workspace collection changes.
 - While continuing an Investigate conversation, the select is disabled and shows the locked prompt's
   name.
-- A **Manage prompts** link opens Admin → Collections with that collection selected.
+- A **Manage prompts** button opens Admin → Collections with that collection selected.
 
 ## Shipped Default bodies
 

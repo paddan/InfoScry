@@ -4,7 +4,8 @@
 
 The backend, CLI, and reader-focused web UI exist. The format-specific
 source-viewer finish line remains open. Ask, document paging and page selection
-have `externalTest` Playwright coverage (`DocumentBrowserAcceptanceTest`). Ask's per-collection prompt choice is covered there too.
+have `externalTest` Playwright coverage (`DocumentBrowserAcceptanceTest`).
+Ask's per-collection prompt choice is covered there too.
 Investigate's browser flow is covered by `InvestigateBrowserAcceptanceTest`.
 These browser tests use local fake providers and embeddings, not real providers
 or GPU verification.
