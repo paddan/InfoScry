@@ -1204,6 +1204,29 @@ class InvestigationRoutesTest {
         assertContains(body, "\"title\":\"Who signed it?\"", message = "a row without a title must fall back to its question")
     }
 
+    @Test
+    fun `the investigation list names the prompt each conversation started with`() = runBlocking {
+        createProfile(endpoint = "https://provider.invalid/v1")
+        val defaultCollection = harness.context.collectionService.requireActiveByNameOrId("Default")
+        val profile = harness.context.llm.findByName("investigator")!!
+        val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
+            collectionId = defaultCollection.id,
+            profile = profile,
+            prompt = infoscry.llm.ResolvedPrompt(id = null, name = "Locked", version = 1, body = "Investigate carefully."),
+            retrievalSnapshot = RetrievalSnapshot.value(),
+        )
+        harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
+
+        val list = harness.request(
+            HttpMethod.Get,
+            "/api/collections/${defaultCollection.id.value}/investigations",
+            credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.OK, list.status, list.bodyAsText())
+        assertContains(list.bodyAsText(), "\"promptName\":\"Locked\"", message = "the history must name the prompt")
+    }
+
     // ---- Cancel ----
 
     @Test

@@ -632,6 +632,38 @@ class AskRoutesTest {
     }
 
     @Test
+    fun `the Ask list names the prompt each conversation was answered with`() = runBlocking {
+        val dataDir = Files.createTempDirectory("infoscry-ask-prompt-name")
+        try {
+            ApiTestServer(dataDir).use { harness ->
+                val collection = harness.context.collectionService.create("Default")
+                val profile = createLlmProfile(harness, name = "named-asker", model = "named-model", endpoint = "https://provider.invalid/v1")
+                harness.context.conversations.persistAsk(
+                    collectionId = collection.id,
+                    profile = profile,
+                    prompt = infoscry.llm.ResolvedPrompt(id = null, name = "Short", version = 1, body = "Answer in one line."),
+                    question = "Who signed it?",
+                    answer = "Mira signed it.",
+                    evidence = emptyList(),
+                    initialUsage = TokenUsage(inputTokens = 1, outputTokens = 1, cacheReadTokens = 0),
+                    initialCitations = CitationValidation(valid = emptyList(), invalid = emptyList()),
+                )
+
+                val list = harness.request(
+                    HttpMethod.Get,
+                    "/api/collections/${collection.id.value}/asks",
+                    credential = Credential.BEARER,
+                )
+
+                assertEquals(HttpStatusCode.OK, list.status, list.bodyAsText())
+                assertContains(list.bodyAsText(), "\"promptName\":\"Short\"", message = "the history must name the prompt")
+            }
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `a profile whose address was repaired is refused instead of dispatched to`() = runBlocking {
         val dataDir = Files.createTempDirectory("infoscry-ask-repaired-profile")
         try {

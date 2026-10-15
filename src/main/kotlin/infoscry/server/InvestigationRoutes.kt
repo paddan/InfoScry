@@ -58,7 +58,14 @@ data class InvestigationApiRequest(
 data class CancelInvestigationResponse(val cancelled: Boolean = true)
 
 @Serializable
-data class InvestigationSummaryResponse(val id: String, val createdAt: String, val question: String, val title: String)
+data class InvestigationSummaryResponse(
+    val id: String,
+    val createdAt: String,
+    val question: String,
+    val title: String,
+    /** The prompt's name as it was when the investigation started. */
+    val promptName: String,
+)
 
 @Serializable
 data class InvestigationMessageResponse(val role: String, val text: String)
@@ -88,7 +95,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             val collection = context.collectionService.requireActiveByNameOrId(call.collectionId().value)
             val investigations = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT c.id, c.created_at, c.title, COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '') AS question " +
+                    "SELECT c.id, c.created_at, c.title, c.prompt_name, COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '') AS question " +
                         "FROM conversations c WHERE c.collection_id = ? AND c.mode = 'INVESTIGATE' ORDER BY c.created_at DESC LIMIT 50",
                 ).use { statement ->
                     statement.setString(1, collection.id.value)
@@ -103,6 +110,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                                         question = question,
                                         // The title falls back server-side, so the reader never handles an empty value.
                                         title = rows.getString("title")?.takeIf { it.isNotBlank() } ?: question,
+                                        promptName = rows.getString("prompt_name"),
                                     ),
                                 )
                             }

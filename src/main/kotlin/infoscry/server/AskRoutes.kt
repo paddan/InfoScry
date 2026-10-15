@@ -102,6 +102,8 @@ internal data class AskSummaryWire(
     /** The title written from the opening question; a conversation without one shows the question. */
     val title: String,
     val answer: String,
+    /** The prompt's name as it was when the conversation started; the prompt may have been edited or deleted since. */
+    val promptName: String,
     val evidence: List<EvidenceWire>,
     val inputTokens: Long,
     val outputTokens: Long,
@@ -117,6 +119,7 @@ private class AskHistoryRow(
     val question: String,
     val title: String,
     val answer: String,
+    val promptName: String,
 )
 
 /**
@@ -134,7 +137,8 @@ private fun loadAskHistory(connection: Connection, collectionId: String): List<A
     val conversations = connection.prepareStatement(
         "SELECT c.id, c.created_at, c.title, " +
             "COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '') AS question, " +
-            "COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'assistant' ORDER BY m.seq DESC LIMIT 1), '') AS answer " +
+            "COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'assistant' ORDER BY m.seq DESC LIMIT 1), '') AS answer, " +
+            "c.prompt_name " +
             "FROM conversations c WHERE c.collection_id = ? AND c.mode = 'ASK' ORDER BY c.created_at DESC LIMIT 50",
     ).use { statement ->
         statement.setString(1, collectionId)
@@ -150,6 +154,7 @@ private fun loadAskHistory(connection: Connection, collectionId: String): List<A
                             // The title falls back server-side, so the reader never handles an empty value.
                             title = rows.getString("title")?.takeIf { it.isNotBlank() } ?: question,
                             answer = rows.getString("answer"),
+                            promptName = rows.getString("prompt_name"),
                         ),
                     )
                 }
@@ -167,6 +172,7 @@ private fun loadAskHistory(connection: Connection, collectionId: String): List<A
             question = conversation.question,
             title = conversation.title,
             answer = conversation.answer,
+            promptName = conversation.promptName,
             evidence = evidence[conversation.id].orEmpty(),
             inputTokens = usage[conversation.id]?.first ?: 0L,
             outputTokens = usage[conversation.id]?.second ?: 0L,

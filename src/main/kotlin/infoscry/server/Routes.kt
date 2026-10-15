@@ -329,6 +329,8 @@ fun Application.configureRoutes(
                 }
             }
 
+            collectionPromptRoutes(context)
+
             patch("/ocr-languages") {
                 call.handle {
                     val id = call.collectionId()
