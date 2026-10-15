@@ -51,6 +51,9 @@
   export let onCollectionsChanged: (selectedId?: string) => Promise<void> | void;
   /** Opens Admin → LLM profiles, where a profile is checked for image reading before OCR can use it. */
   export let onOpenLlmProfiles: (() => void) | undefined = undefined;
+  /** The collection whose Prompts section Manage prompts asked to show; cleared once it is revealed. */
+  export let promptsPendingFor: string | null = null;
+  export let onPromptsRevealed: () => void = () => {};
   /**
    * Opens one managed document in the page's source viewer at the unit its detail named. The page owns
    * the viewer; this forwards the ids and the action button so focus can return to a live opener.
@@ -1629,6 +1632,8 @@
           {onCollectionsChanged}
           {onOpenLlmProfiles}
           onOpenDeleteDialog={openDeleteDialog}
+          {promptsPendingFor}
+          {onPromptsRevealed}
         />
 
         <section class="import-history" aria-label={`Import history for ${selected.name}`}>

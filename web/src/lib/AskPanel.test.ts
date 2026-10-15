@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AskPanel from './AskPanel.svelte';
-import { ApiError, type AskEvent, type AskHistoryEntry, type CollectionPrompts } from './api';
+import { ApiError, type AskEvent, type AskHistoryEntry } from './api';
 
 /**
  * The Ask panel takes the open conversation from the page: the page owns the id and the stored
@@ -13,7 +13,6 @@ const api = vi.hoisted(() => ({
   listLlmProfilePrices: vi.fn(async () => [{ name: 'local-cheap', inputPricePerMillion: 1, outputPricePerMillion: 2 }]),
   startAsk: vi.fn(),
   readAskEvents: vi.fn(),
-  getCollectionPrompts: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -29,20 +28,7 @@ vi.mock('./api', () => ({
   listLlmProfilePrices: api.listLlmProfilePrices,
   startAsk: api.startAsk,
   readAskEvents: api.readAskEvents,
-  getCollectionPrompts: api.getCollectionPrompts,
 }));
-
-const defaultPrompt = { id: 'default', name: 'Default', body: 'Default body', version: 1, builtIn: true };
-const boardPrompt = { id: 'p-board', name: 'Board tone', body: 'Plain language.', version: 1, builtIn: false };
-
-/** The collection's prompts for both roles, sharing one default and one list for brevity. */
-function collectionPrompts(defaultId: string, rows = [defaultPrompt, boardPrompt]): CollectionPrompts {
-  return {
-    coreRules: 'Core rules',
-    ask: { defaultId, prompts: rows },
-    investigate: { defaultId, prompts: rows },
-  };
-}
 
 const events = (...items: AskEvent[]) => async function* () {
   for (const item of items) yield item;
@@ -66,7 +52,6 @@ describe('Ask panel', () => {
     vi.resetAllMocks();
     api.askDefaultProfile.mockResolvedValue('local-cheap');
     api.listLlmProfilePrices.mockResolvedValue([{ name: 'local-cheap', inputPricePerMillion: 1, outputPricePerMillion: 2 }]);
-    api.getCollectionPrompts.mockResolvedValue(collectionPrompts('default'));
   });
 
   afterEach(cleanup);
@@ -208,69 +193,45 @@ describe('Ask panel', () => {
     expect(screen.queryByLabelText('Stored question')).toBeNull();
     expect(screen.queryByRole('button', { name: /Open source S2/ })).toBeNull();
   });
-
-  it('pre-selects the collection default and sends its id with the question', async () => {
-    api.getCollectionPrompts.mockResolvedValue(collectionPrompts('p-board'));
+  it('sends the prompt the page selected with the question', async () => {
     api.startAsk.mockResolvedValue(new Response());
     api.readAskEvents.mockReturnValue(events({ type: 'done', text: 'Plain answer.', evidence: [], conversationId: 'ask-2' })());
 
-    render(AskPanel, { props: { collectionId: 'collection-1', onOpenSource: vi.fn() } });
-
-    const select = (await screen.findByLabelText('Prompt')) as HTMLSelectElement;
-    await waitFor(() => expect(select.value).toBe('p-board'));
+    render(AskPanel, { props: { collectionId: 'collection-1', prompt: 'p-board', onOpenSource: vi.fn() } });
     await fireEvent.input(screen.getByLabelText('Question'), { target: { value: 'Who signed it?' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+    const ask = screen.getByRole('button', { name: 'Ask' }) as HTMLButtonElement;
+    await waitFor(() => expect(ask.disabled).toBe(false));
+    await fireEvent.click(ask);
 
     await waitFor(() => expect(api.startAsk).toHaveBeenCalledWith('collection-1', 'Who signed it?', 'local-cheap', expect.any(AbortSignal), 'p-board'));
   });
 
-  it('a collection change selects that collection default and ignores a late answer for the previous collection', async () => {
-    let releaseFirst!: (value: CollectionPrompts) => void;
-    api.getCollectionPrompts.mockImplementation((id: string) => (id === 'collection-1'
-      ? new Promise<CollectionPrompts>((resolve) => { releaseFirst = resolve; })
-      : Promise.resolve(collectionPrompts('p-board'))));
+  it('a prompt refused on the stream reports the error and asks the page to read the prompts again', async () => {
+    const onPromptRefused = vi.fn();
     api.startAsk.mockResolvedValue(new Response());
-    api.readAskEvents.mockReturnValue(events({ type: 'done', text: 'Answer.', evidence: [], conversationId: 'ask-3' })());
+    api.readAskEvents.mockReturnValue(events({ type: 'error', code: 'INVALID_REQUEST', message: 'the chosen prompt is no longer available' })());
 
-    const { rerender } = render(AskPanel, { props: { collectionId: 'collection-1', onOpenSource: vi.fn() } });
-    await rerender({ collectionId: 'collection-2' });
-
-    const select = (await screen.findByLabelText('Prompt')) as HTMLSelectElement;
-    await waitFor(() => expect(select.value).toBe('p-board'));
-    releaseFirst(collectionPrompts('default'));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(select.value).toBe('p-board');
-
-    await fireEvent.input(screen.getByLabelText('Question'), { target: { value: 'Which?' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
-    await waitFor(() => expect(api.startAsk).toHaveBeenCalledWith('collection-2', 'Which?', 'local-cheap', expect.any(AbortSignal), 'p-board'));
-  });
-
-  it('a prompt deleted before the question is sent shows the error and falls back to the collection default', async () => {
-    api.getCollectionPrompts
-      .mockResolvedValueOnce(collectionPrompts('default'))
-      .mockResolvedValueOnce(collectionPrompts('default', [defaultPrompt]));
-    api.startAsk.mockRejectedValue(new ApiError('INVALID_REQUEST', 'the chosen prompt is no longer available', 400));
-
-    render(AskPanel, { props: { collectionId: 'collection-1', onOpenSource: vi.fn() } });
-
-    const select = (await screen.findByLabelText('Prompt')) as HTMLSelectElement;
-    await waitFor(() => expect(select.querySelectorAll('option').length).toBe(2));
-    await fireEvent.change(select, { target: { value: 'p-board' } });
+    render(AskPanel, { props: { collectionId: 'collection-1', prompt: 'p-gone', onOpenSource: vi.fn(), onPromptRefused } });
     await fireEvent.input(screen.getByLabelText('Question'), { target: { value: 'Who?' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+    const ask = screen.getByRole('button', { name: 'Ask' }) as HTMLButtonElement;
+    await waitFor(() => expect(ask.disabled).toBe(false));
+    await fireEvent.click(ask);
 
     expect((await screen.findByRole('alert')).textContent).toContain('the chosen prompt is no longer available');
-    await waitFor(() => expect(select.value).toBe('default'));
-    expect(api.getCollectionPrompts).toHaveBeenCalledTimes(2);
+    expect(onPromptRefused).toHaveBeenCalledTimes(1);
   });
 
-  it('Manage prompts asks the page to open Admin for the same collection', async () => {
-    const onManagePrompts = vi.fn();
+  it('a prompt refused at the start asks the page to read the prompts again', async () => {
+    const onPromptRefused = vi.fn();
+    api.startAsk.mockRejectedValue(new ApiError('INVALID_REQUEST', 'the chosen prompt is no longer available', 400));
 
-    render(AskPanel, { props: { collectionId: 'collection-1', onOpenSource: vi.fn(), onManagePrompts } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Manage prompts' }));
+    render(AskPanel, { props: { collectionId: 'collection-1', prompt: 'p-gone', onOpenSource: vi.fn(), onPromptRefused } });
+    await fireEvent.input(screen.getByLabelText('Question'), { target: { value: 'Who?' } });
+    const ask = screen.getByRole('button', { name: 'Ask' }) as HTMLButtonElement;
+    await waitFor(() => expect(ask.disabled).toBe(false));
+    await fireEvent.click(ask);
 
-    expect(onManagePrompts).toHaveBeenCalledWith('collection-1');
+    expect((await screen.findByRole('alert')).textContent).toContain('the chosen prompt is no longer available');
+    expect(onPromptRefused).toHaveBeenCalledTimes(1);
   });
 });

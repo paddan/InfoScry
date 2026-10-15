@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import {
     ApiError,
     getCollectionIgnorePatterns,
@@ -15,6 +15,21 @@
   /** Opens Admin → LLM profiles, where a profile is checked for image reading before OCR can use it. */
   export let onOpenLlmProfiles: (() => void) | undefined = undefined;
   export let onOpenDeleteDialog: () => void;
+  /**
+   * Manage prompts names the collection whose Prompts section must open. The section is revealed once
+   * this panel shows that collection, and the page then clears the request so a later remount does not
+   * open the settings again.
+   */
+  export let promptsPendingFor: string | null = null;
+  export let onPromptsRevealed: () => void = () => {};
+
+  let settingsOpen = false;
+  let promptSettings: CollectionPromptSettings;
+  $: if (promptsPendingFor !== null && promptsPendingFor === collection.id) {
+    settingsOpen = true;
+    onPromptsRevealed();
+    void tick().then(() => promptSettings?.reveal());
+  }
 
   /**
    * The settings draft for the selected collection: the two stored values the fields show, and what
@@ -135,7 +150,7 @@
   });
 </script>
 
-<details class="secondary-settings">
+<details class="secondary-settings" bind:open={settingsOpen}>
   <summary>Settings</summary>
   <section class="collection-settings" aria-label={`Settings for ${collection.name}`}>
     <span class="eyebrow">SETTINGS</span>
@@ -191,7 +206,7 @@
 
     <CollectionOcrSettings {collection} onChanged={() => onCollectionsChanged()} {onOpenLlmProfiles} />
 
-    <CollectionPromptSettings {collection} />
+    <CollectionPromptSettings bind:this={promptSettings} {collection} />
   </section>
 
   <section class="collection-deletion" aria-label={`Delete ${collection.name}`}>

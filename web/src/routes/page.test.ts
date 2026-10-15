@@ -159,6 +159,39 @@ describe('app shell', () => {
     expect(screen.getByRole('tab', { name: 'Collections' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.getByRole('button', { name: 'Default 0 documents' }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('button', { name: 'Nightfall 0 documents' }).getAttribute('aria-pressed')).toBe('false');
+    // The collection's Settings disclosure is open and the Prompts section has the focus, not just the list.
+    const settings = document.querySelector('details.secondary-settings') as HTMLDetailsElement;
+    await waitFor(() => expect(settings.open).toBe(true));
+    await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Prompts for Default'));
+    expect(within(settings).getByRole('region', { name: 'Prompts for Default' })).toBeTruthy();
+  });
+
+  it('places the Prompt select beside the profile select and the Manage prompts link beside it', async () => {
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default')] }) });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+
+    await waitFor(() => expect(document.getElementById('llm-profile')).not.toBeNull());
+    const profile = document.getElementById('llm-profile') as HTMLSelectElement;
+    const prompt = screen.getByLabelText('Prompt') as HTMLSelectElement;
+    expect(prompt.closest('.sidebar-note')).toBe(profile.closest('.sidebar-note'));
+    expect(screen.getByRole('button', { name: 'Manage prompts' }).closest('.sidebar-note')).toBe(profile.closest('.sidebar-note'));
+  });
+
+  it('shows Prompt locked until the conversation list names the locked prompt', async () => {
+    window.localStorage.setItem('infoscry-history:investigate:default', 'conv-1');
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({ investigations: [investigationSummary('conv-1', 'The treaty')] }),
+      investigation: () => jsonResponse({ investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it.') }),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+
+    await waitFor(() => expect((screen.getByLabelText('Prompt') as HTMLSelectElement).textContent).toContain('Prompt locked'));
+    expect((screen.getByLabelText('Prompt') as HTMLSelectElement).disabled).toBe(true);
   });
 
   it('shows the prompt name in Ask history only when it is not Default', async () => {
@@ -193,11 +226,9 @@ describe('app shell', () => {
     render(Page);
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
-    const panel = screen.getByRole('tabpanel', { name: 'Investigate' });
-
     // The select element changes when the locked name arrives, so each check reads it again.
-    await waitFor(() => expect((within(panel).getByLabelText('Prompt') as HTMLSelectElement).value).toBe('Board tone'));
-    expect((within(panel).getByLabelText('Prompt') as HTMLSelectElement).disabled).toBe(true);
+    await waitFor(() => expect((screen.getByLabelText('Prompt') as HTMLSelectElement).textContent).toContain('Board tone'));
+    expect((screen.getByLabelText('Prompt') as HTMLSelectElement).disabled).toBe(true);
   });
 
   it('keeps the Admin view reachable before any collection exists', async () => {

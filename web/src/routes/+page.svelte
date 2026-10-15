@@ -9,6 +9,7 @@
   import DocumentRescan from '../lib/DocumentRescan.svelte';
   import StartReadingDialog from '../lib/StartReadingDialog.svelte';
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
+  import PromptSelect from '../lib/PromptSelect.svelte';
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
   import type { DocumentListViewState } from '../lib/documentListViewState';
   import CollectionsPanel from '../lib/CollectionsPanel.svelte';
@@ -81,6 +82,13 @@
   let ocrOnly = false;
   let askProfile = '';
   let investigateProfile = '';
+  /** The prompt each mode's Prompt select holds; undefined until that collection's prompts load. */
+  let askPrompt: string | undefined = undefined;
+  let investigatePrompt: string | undefined = undefined;
+  let askPromptSelect: PromptSelect;
+  let investigatePromptSelect: PromptSelect;
+  /** The collection Manage prompts asked Admin to show the Prompts section of; cleared once it is shown. */
+  let promptsPendingFor: string | null = null;
   let askProfiles: LlmProfilePrice[] = [];
   let investigateProfiles: LlmProfilePrice[] = [];
   let askProfileStatus = 'Loading profiles…';
@@ -588,10 +596,14 @@
   /** The prompt the open Investigate conversation was started with; its continued turns keep it. */
   $: investigateLockedPromptName = investigateConversations.find((item) => item.id === investigateConversationId)?.promptName ?? null;
 
-  /** Manage prompts: Admin → Collections with that collection selected, through the same selection Admin uses. */
+  /**
+   * Manage prompts: Admin → Collections with that collection selected, through the same selection Admin
+   * uses. The pending collection makes its settings open and its Prompts section take focus.
+   */
   function openPromptManagement(collectionId: string): void {
     selectManagedCollection(collectionId);
     adminTab = 'COLLECTIONS';
+    promptsPendingFor = collectionId;
     selectMode('ADMIN');
   }
 
@@ -979,6 +991,10 @@
               {#each askProfiles as profile (profile.name)}<option value={profile.name}>{profile.name}</option>{/each}
             </select>
             {#if askProfiles.length === 0}<p>{askProfileStatus}</p>{/if}
+            <div class="prompt-control">
+              <PromptSelect bind:this={askPromptSelect} collectionId={selectedCollectionId} role="ASK" bind:value={askPrompt} />
+              <button type="button" class="manage-prompts" onclick={() => openPromptManagement(selectedCollectionId)}>Manage prompts</button>
+            </div>
             <p>Ask retrieves evidence for one answer. Search filters apply to Search only.</p>
           {:else}
             <select id="llm-profile" bind:value={investigateProfile} disabled={investigateProfiles.length === 0}>
@@ -986,6 +1002,17 @@
               {#each investigateProfiles as profile (profile.name)}<option value={profile.name}>{profileOptionLabel(profile.name, toolCallingState(profile))}</option>{/each}
             </select>
             {#if investigateProfiles.length === 0}<p>{investigateProfileStatus}</p>{/if}
+            <div class="prompt-control">
+              <PromptSelect
+                bind:this={investigatePromptSelect}
+                collectionId={selectedCollectionId}
+                role="INVESTIGATE"
+                locked={investigateConversationId !== null}
+                lockedName={investigateLockedPromptName}
+                bind:value={investigatePrompt}
+              />
+              <button type="button" class="manage-prompts" onclick={() => openPromptManagement(selectedCollectionId)}>Manage prompts</button>
+            </div>
             {#if investigateRemedy !== null}<p class="profile-remedy" role="note">{investigateRemedy}</p>{/if}
             <p>Investigate can search the selected collection as needed. Search filters apply to Search only.</p>
             <fieldset class="limit-settings">
@@ -1117,6 +1144,8 @@
                 onRetryDocument={retryManagedDocument}
                 onRetryAllDocuments={retryAllManagedDocuments}
                 onOpenLlmProfiles={() => (adminTab = 'LLM')}
+                promptsPendingFor={promptsPendingFor}
+                onPromptsRevealed={() => (promptsPendingFor = null)}
               />
             {/if}
           </div>
@@ -1125,8 +1154,8 @@
       </div>
 
     {#key selectedCollectionId}
-      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onManagePrompts={openPromptManagement} onOpenSource={(evidence) => openEvidence(evidence, evidenceHit(evidence))} /></div>
-      <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} effortLevel={investigateEffort} onResolvedLimits={handleResolvedLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} conversationPromptName={investigateLockedPromptName} onManagePrompts={openPromptManagement} onOpenSource={openInvestigationSource} /></div>
+      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} prompt={askPrompt} onPromptRefused={() => askPromptSelect?.reload()} onOpenSource={(evidence) => openEvidence(evidence, evidenceHit(evidence))} /></div>
+      <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} effortLevel={investigateEffort} onResolvedLimits={handleResolvedLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} prompt={investigatePrompt} onPromptRefused={() => investigatePromptSelect?.reload()} onOpenSource={openInvestigationSource} /></div>
     {/key}
     </div>
     </div>
@@ -1254,6 +1283,9 @@
   .sidebar-note { padding: 0.85rem; border: 1px solid #303535; border-radius: 0.55rem; background: #1d2021; }
   .sidebar-note p { margin: 0; color: #b0b5b3; font-size: 0.8rem; }
   .limit-settings { display: grid; gap: 0.45rem; margin: 0; border: 0; border-top: 1px solid #2d3131; padding: 0.85rem 0 0; }
+  .prompt-control { display: grid; gap: 0.4rem; justify-items: start; }
+  .prompt-control :global(.prompt-select) { width: 100%; }
+  .manage-prompts { background: transparent; border: 0; color: #c4a77d; cursor: pointer; font: inherit; font-size: 0.85rem; padding: 0.2rem 0; text-decoration: underline; }
   .limit-settings legend { padding: 0; color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
   .sidebar-footer { display: flex; align-items: center; gap: 0.5rem; margin-top: auto; border-top: 1px solid #2d3131; padding: 1rem 0.35rem 0; color: #89908e; font-size: 0.76rem; }
   .status-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: #85ad87; box-shadow: 0 0 0 3px #85ad8720; }

@@ -11,7 +11,6 @@
     type AskHistoryEntry,
     type LlmProfilePrice,
   } from './api';
-  import PromptSelect from './PromptSelect.svelte';
 
   export let collectionId: string;
   export let onOpenSource: (evidence: AskEvidence) => void | Promise<void>;
@@ -28,13 +27,12 @@
   export let onAskStarted: () => void = () => {};
   /** The stream closed, so the server has finished titling; the page refreshes that collection's list. */
   export let onAnswerFinished: (collectionId: string) => void = () => {};
-  /** The Manage prompts link: the page opens Admin → Collections on this collection. */
-  export let onManagePrompts: (collectionId: string) => void = () => {};
+  /** The prompt id the page's Prompt select holds; undefined sends no choice and the server uses the default. */
+  export let prompt: string | undefined = undefined;
+  /** A refused prompt (deleted or foreign): the page reads the prompt list again and selects the default. */
+  export let onPromptRefused: () => void = () => {};
 
   let question = '';
-  /** The prompt id the reader chose; undefined until the collection's prompts load. */
-  let promptId: string | undefined = undefined;
-  let promptSelect: PromptSelect;
   let asking = false;
   let answerText = '';
   let requestProfile = '';
@@ -126,7 +124,7 @@
     if (text === '' || collectionId === '' || askProfile === '' || asking) return;
     const generation = ++askGeneration;
     const streamCollection = collectionId;
-    const streamPrompt = promptId;
+    const streamPrompt = prompt;
     requestProfile = askProfile;
     streamStartedFrom = conversationId;
     const controller = new AbortController();
@@ -155,7 +153,7 @@
     } catch (failure) {
       if (generation === askGeneration) {
         askError = describe(failure);
-        if (failure instanceof ApiError && failure.code === 'INVALID_REQUEST') void promptSelect?.reload();
+        if (failure instanceof ApiError && failure.code === 'INVALID_REQUEST') onPromptRefused();
       }
     } finally {
       activeControllers.delete(controller);
@@ -197,7 +195,7 @@
         askStatus = null;
         askError = event.message;
         // A refused prompt is reported on the stream; the list is read again so the default is selected.
-        if (event.code === 'INVALID_REQUEST') void promptSelect?.reload();
+        if (event.code === 'INVALID_REQUEST') onPromptRefused();
         break;
     }
   }
@@ -239,10 +237,6 @@
 <section aria-labelledby="ask-heading">
   <h2 id="ask-heading">Ask</h2>
   {#if storedQuestion !== ''}<p class="stored-question" aria-label="Stored question">{storedQuestion}</p>{/if}
-  <div class="prompt-row">
-    <PromptSelect bind:this={promptSelect} collectionId={collectionId} role="ASK" bind:value={promptId} />
-    <button type="button" class="manage-prompts" onclick={() => onManagePrompts(collectionId)}>Manage prompts</button>
-  </div>
   <form class="ask-form" onsubmit={ask}>
     <label for="question">Question</label>
     <textarea id="question" name="question" bind:value={question} rows="3" required></textarea>
@@ -280,8 +274,6 @@
   button { font: inherit; padding: 0.45rem; }
   textarea { padding: 0.5rem; resize: vertical; }
   .stored-question { font-weight: 600; margin: 1rem 0 0; }
-  .prompt-row { align-items: end; display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; margin-top: 1rem; }
-  .manage-prompts { background: transparent; border: 0; color: #1558a6; cursor: pointer; font: inherit; padding: 0.45rem 0; text-decoration: underline; }
   .answer {
     line-height: 1.6;
     margin-top: 1rem;

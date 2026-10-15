@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import InvestigatePanel from './InvestigatePanel.svelte';
-import { ApiError, type CollectionPrompts, type InvestigateEvent } from './api';
+import { ApiError, type InvestigateEvent } from './api';
 
 /**
  * The panel takes the open conversation from the page: the page owns the id, the panel loads and
@@ -15,7 +15,6 @@ const api = vi.hoisted(() => ({
   continueInvestigation: vi.fn(),
   cancelInvestigation: vi.fn(async () => undefined),
   readInvestigationEvents: vi.fn(),
-  getCollectionPrompts: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -34,20 +33,7 @@ vi.mock('./api', () => ({
   continueInvestigation: api.continueInvestigation,
   cancelInvestigation: api.cancelInvestigation,
   readInvestigationEvents: api.readInvestigationEvents,
-  getCollectionPrompts: api.getCollectionPrompts,
 }));
-
-const defaultPrompt = { id: 'default', name: 'Default', body: 'Default body', version: 1, builtIn: true };
-const boardPrompt = { id: 'p-board', name: 'Board tone', body: 'Plain language.', version: 1, builtIn: false };
-
-/** The collection's prompts for both roles, sharing one default and one list for brevity. */
-function collectionPrompts(defaultId: string, rows = [defaultPrompt, boardPrompt]): CollectionPrompts {
-  return {
-    coreRules: 'Core rules',
-    ask: { defaultId, prompts: rows },
-    investigate: { defaultId, prompts: rows },
-  };
-}
 
 const events = (...items: InvestigateEvent[]) => async function* () {
   for (const item of items) yield item;
@@ -67,7 +53,6 @@ describe('Investigate panel', () => {
     api.investigateDefaultProfile.mockResolvedValue('local-cheap');
     api.listLlmProfilePrices.mockResolvedValue([{ name: 'local-cheap', inputPricePerMillion: 1, outputPricePerMillion: 2 }]);
     api.getInvestigation.mockResolvedValue(null);
-    api.getCollectionPrompts.mockResolvedValue(collectionPrompts('default'));
   });
 
   afterEach(cleanup);
@@ -99,7 +84,7 @@ describe('Investigate panel', () => {
 
     expect(await screen.findByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
     expect(api.startInvestigation).toHaveBeenCalledTimes(1);
-    expect(api.startInvestigation).toHaveBeenCalledWith('collection-1', 'What happened?', 'local-cheap', expect.any(AbortSignal), { effortLevel: 'MEDIUM' }, 'default');
+    expect(api.startInvestigation).toHaveBeenCalledWith('collection-1', 'What happened?', 'local-cheap', expect.any(AbortSignal), { effortLevel: 'MEDIUM' }, undefined);
     expect(onConversationStarted).toHaveBeenCalledWith('conversation-1');
     expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeTruthy();
 
@@ -239,7 +224,7 @@ describe('Investigate panel', () => {
     await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
     await screen.findByText('First answer');
-    expect(api.startInvestigation).toHaveBeenCalledWith('collection-1', 'What happened?', 'local-cheap', expect.any(AbortSignal), limits, 'default');
+    expect(api.startInvestigation).toHaveBeenCalledWith('collection-1', 'What happened?', 'local-cheap', expect.any(AbortSignal), limits, undefined);
 
     await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'When?' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
@@ -650,56 +635,31 @@ describe('Investigate panel', () => {
     expect(document.querySelectorAll('li.assistant').length).toBe(0);
     expect(screen.getByText('What happened?')).toBeTruthy();
   });
-
-  it('pre-selects the collection default and sends the chosen prompt id to a new investigation', async () => {
-    api.getCollectionPrompts.mockResolvedValue(collectionPrompts('default'));
+  it('sends the prompt the page selected only with a new investigation', async () => {
     api.startInvestigation.mockResolvedValue(new Response());
     api.readInvestigationEvents.mockReturnValueOnce(events({ type: 'started', id: 'conversation-9' }, { type: 'done', text: 'Done.', evidence: [] })());
 
-    render(InvestigatePanel, { props: { ...props, onOpenSource: vi.fn() } });
-    const select = (await screen.findByLabelText('Prompt')) as HTMLSelectElement;
-    await waitFor(() => expect(select.querySelectorAll('option').length).toBe(2));
-    await fireEvent.change(select, { target: { value: 'p-board' } });
+    render(InvestigatePanel, { props: { ...props, prompt: 'p-board', onOpenSource: vi.fn() } });
     await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What happened?' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+    const submit = screen.getByRole('button', { name: 'Investigate' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await fireEvent.click(submit);
 
     await waitFor(() => expect(api.startInvestigation).toHaveBeenCalledWith('collection-1', 'What happened?', 'local-cheap', expect.any(AbortSignal), { effortLevel: 'MEDIUM' }, 'p-board'));
   });
 
-  it('disables the prompt select and shows the locked prompt name while a conversation continues', async () => {
-    api.getInvestigation.mockResolvedValue({ id: 'conversation-1', messages: [], evidence: [], inputTokens: 0, outputTokens: 0, costUsd: 0, activity: [] });
-
-    render(InvestigatePanel, { props: { ...props, conversationId: 'conversation-1', conversationPromptName: 'Board tone', onOpenSource: vi.fn() } });
-
-    const select = (await screen.findByLabelText('Prompt')) as HTMLSelectElement;
-    expect(select.disabled).toBe(true);
-    expect(select.value).toBe('Board tone');
-  });
-
-  it('Manage prompts asks the page to open Admin for the same collection', async () => {
-    const onManagePrompts = vi.fn();
-
-    render(InvestigatePanel, { props: { ...props, onOpenSource: vi.fn(), onManagePrompts } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Manage prompts' }));
-
-    expect(onManagePrompts).toHaveBeenCalledWith('collection-1');
-  });
-
-  it('a prompt deleted before the question is sent shows the error and falls back to the collection default', async () => {
-    api.getCollectionPrompts
-      .mockResolvedValueOnce(collectionPrompts('default'))
-      .mockResolvedValueOnce(collectionPrompts('default', [defaultPrompt]));
+  it('a prompt refused at the start asks the page to read the prompts again', async () => {
+    const onPromptRefused = vi.fn();
     api.startInvestigation.mockRejectedValue(new ApiError('INVALID_REQUEST', 'the chosen prompt is no longer available', 400));
 
-    render(InvestigatePanel, { props: { ...props, onOpenSource: vi.fn() } });
-    const select = (await screen.findByLabelText('Prompt')) as HTMLSelectElement;
-    await waitFor(() => expect(select.querySelectorAll('option').length).toBe(2));
-    await fireEvent.change(select, { target: { value: 'p-board' } });
+    render(InvestigatePanel, { props: { ...props, prompt: 'p-gone', onOpenSource: vi.fn(), onPromptRefused } });
     await fireEvent.input(screen.getByLabelText('Investigate question'), { target: { value: 'What?' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
+    const submit = screen.getByRole('button', { name: 'Investigate' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await fireEvent.click(submit);
 
     expect((await screen.findByRole('alert')).textContent).toContain('the chosen prompt is no longer available');
-    await waitFor(() => expect(select.value).toBe('default'));
-    expect(api.getCollectionPrompts).toHaveBeenCalledTimes(2);
+    expect(onPromptRefused).toHaveBeenCalledTimes(1);
   });
 });
+

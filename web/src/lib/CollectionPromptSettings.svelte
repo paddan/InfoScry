@@ -32,6 +32,12 @@
   let generation = 0;
   let root: HTMLElement | null = null;
 
+  /** Bring the Prompts section into view and focus it, so Manage prompts lands on the prompts themselves. */
+  export function reveal(): void {
+    root?.scrollIntoView?.({ block: 'start' });
+    root?.focus();
+  }
+
   /** The selected prompt: a stored one (by id) in the chosen role, or a new draft when `creating` is set. */
   let activeRole: PromptRole = 'ASK';
   let selectedId: string | null = null;
@@ -324,7 +330,7 @@
   }
 </script>
 
-<section class="prompt-settings" aria-label={`Prompts for ${collection.name}`} bind:this={root}>
+<section class="prompt-settings" aria-label={`Prompts for ${collection.name}`} tabindex="-1" bind:this={root}>
   <span class="eyebrow">PROMPTS</span>
 
   {#if loading}<p class="hint" role="status">Loading prompts…</p>{/if}
