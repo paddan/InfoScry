@@ -34,19 +34,19 @@ import infoscry.jobs.ImportSelection
 import infoscry.jobs.ImportStartService
 import infoscry.jobs.enumerateImportSources
 import infoscry.library.ManagedLibrary
+import infoscry.llm.PromptService
 import infoscry.logging.LoggingBootstrap
 import infoscry.ocr.OcrProfileService
 import infoscry.ocr.OcrReadingMethodCatalog
 import infoscry.ocr.StaleOcrStateCleanup
 import infoscry.pdf.SelectablePdfService
-import infoscry.llm.PromptService
-import infoscry.storage.CollectionPromptStore
 import infoscry.storage.SelectablePdfStore
 import infoscry.search.IndexIdentity
 import infoscry.search.LuceneIndex
 import infoscry.search.LuceneSchema
 import infoscry.search.RevisionSnapshotGate
 import infoscry.search.SearchService
+import infoscry.storage.CollectionPromptStore
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
 import infoscry.storage.Database
@@ -389,11 +389,13 @@ class AppContext private constructor(
         blockers = blockers,
     )
 
+    private val promptService = PromptService(llm)
+
     val collectionPrompts: CollectionPromptService = CollectionPromptService(
         store = CollectionPromptStore(database),
         collections = collectionService,
         mutations = mutations,
-        coreRules = { PromptService(llm).coreRules() },
+        coreRules = { promptService.coreRules() },
     )
 
     /**

@@ -243,6 +243,51 @@ class CollectionPromptServiceTest {
     }
 
     @Test
+    fun `rename-only update keeps version 1`() {
+        val created = create("Minutes", "body").prompt
+
+        val renamed = runBlocking { service.update(collectionId, created.id, "Renamed", "body") }
+
+        assertEquals(1, renamed.version)
+        assertEquals("Renamed", renamed.name)
+    }
+
+    @Test
+    fun `deleting the collection default resets the role to Default`() {
+        val created = create("Minutes", "body").prompt
+        runBlocking { service.setDefault(collectionId, LlmPromptRole.ASK, created.id) }
+
+        runBlocking { service.delete(collectionId, created.id) }
+
+        assertEquals("default", service.list(collectionId).ask.defaultId)
+        assertNull(service.resolve(collectionId, LlmPromptRole.ASK, null).id)
+    }
+
+    @Test
+    fun `update of an unknown id or an id from another collection throws InvalidPromptRequest`() {
+        val otherCollection = runBlocking { context.collectionService.create("Other").id }
+        val foreign = runBlocking { service.create(otherCollection, LlmPromptRole.ASK, "Minutes", "body").prompt }
+
+        assertFailsWith<InvalidPromptRequest> {
+            runBlocking { service.update(collectionId, "no-such-id", "Minutes", "changed") }
+        }
+        assertFailsWith<InvalidPromptRequest> {
+            runBlocking { service.update(collectionId, foreign.id, "Minutes", "changed") }
+        }
+    }
+
+    @Test
+    fun `reserved Default name is refused on update and rename`() {
+        val created = create("Minutes", "body").prompt
+
+        for (name in listOf("Default", " default ", "DEFAULT")) {
+            assertFailsWith<InvalidPromptRequest>("name '$name'") {
+                runBlocking { service.update(collectionId, created.id, name, "body") }
+            }
+        }
+    }
+
+    @Test
     fun `writes on a DELETING collection are refused`() {
         context.collectionService.beginDeletion(collectionId, "Acme")
 
