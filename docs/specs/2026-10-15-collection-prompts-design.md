@@ -167,7 +167,7 @@ OCR settings:
 - Selecting a prompt shows its body: read-only for Default, editable name and body for a stored
   prompt.
 - Actions: **New prompt** (pre-filled with Default's text, or **Duplicate** from the selected
-  prompt), **Save** (enabled only when the draft differs), **Delete** (with confirmation that names
+  prompt), **Save prompt** (enabled only when the draft differs), **Delete** (with confirmation that names
   the prompt; it says when the prompt is the collection default and that Default will then be used),
   **Use as collection default**.
 - "Always applied first": the core rules, read-only.
