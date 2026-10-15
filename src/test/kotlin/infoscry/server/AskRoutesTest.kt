@@ -18,6 +18,7 @@ import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
+import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
@@ -786,6 +787,9 @@ class AskRoutesTest {
                     createLlmProfile(harness, name = "log-asker", model = "log-model", endpoint = fake.url)
 
                     val logger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+                    // The test config keeps the root at WARN; lower it so INFO and DEBUG records reach the appender.
+                    val previousLevel = logger.level
+                    logger.level = Level.TRACE
                     val records = ListAppender<ILoggingEvent>().apply { start() }
                     logger.addAppender(records)
                     val response = try {
@@ -797,6 +801,7 @@ class AskRoutesTest {
                         )
                     } finally {
                         logger.detachAppender(records)
+                        logger.level = previousLevel
                     }
 
                     assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())

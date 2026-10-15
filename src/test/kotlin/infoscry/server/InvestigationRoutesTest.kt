@@ -845,12 +845,12 @@ class InvestigationRoutesTest {
             val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
             val collectionId = CollectionId(collection.id.value)
             val locked = harness.context.collectionPrompts.create(collectionId, LlmPromptRole.INVESTIGATE, "Locked", "LOCKED-BODY investigate.").prompt
-            harness.context.collectionPrompts.create(collectionId, LlmPromptRole.INVESTIGATE, "Other", "OTHER-BODY investigate.")
+            val other = harness.context.collectionPrompts.create(collectionId, LlmPromptRole.INVESTIGATE, "Other", "OTHER-BODY investigate.").prompt
 
             val created = harness.request(
                 HttpMethod.Post,
                 "/api/investigations",
-                body = createBody().dropLast(1) + ",\"prompt\":\"Locked\"}",
+                body = createBody().dropLast(1) + ",\"prompt\":\"${locked.id!!}\"}",
                 credential = Credential.BEARER,
             )
             assertEquals(HttpStatusCode.OK, created.status, created.bodyAsText())
@@ -861,7 +861,7 @@ class InvestigationRoutesTest {
             val continued = harness.request(
                 HttpMethod.Post,
                 "/api/investigations/$conversationId/continue",
-                body = createBody(question = "and then?").dropLast(1) + ",\"prompt\":\"Other\"}",
+                body = createBody(question = "and then?").dropLast(1) + ",\"prompt\":\"${other.id!!}\"}",
                 credential = Credential.BEARER,
             )
 

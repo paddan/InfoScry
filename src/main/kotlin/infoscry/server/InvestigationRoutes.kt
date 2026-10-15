@@ -20,6 +20,7 @@ import infoscry.llm.LlmProvider
 import infoscry.llm.OpenAiCompatibleClient
 import infoscry.llm.PromptService
 import infoscry.llm.ResolvedPrompt
+import infoscry.llm.ShippedPrompts
 import infoscry.llm.requireDispatchable
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -289,7 +290,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                         CollectionId(collection.id.value),
                         body.question,
                         profile,
-                        prompt = history?.prompt ?: context.collectionPrompts.resolve(lockedCollectionId, LlmPromptRole.INVESTIGATE, null),
+                        prompt = history?.prompt ?: shippedPromptFallback(lockedCollectionId),
                         conversationId = conversationId,
                         limits = preset.limits,
                         reasoning = preset.reasoning,
@@ -524,4 +525,14 @@ internal fun InvestigateEvent.toWire() = when (this) {
     is InvestigateEvent.Error -> InvestigateWire("error", code = code, message = message)
     is InvestigateEvent.Limit -> InvestigateWire("limit", code = code, message = message)
     is InvestigateEvent.AnswerStart -> InvestigateWire("answer-start")
+}
+
+/**
+ * The prompt handed to a continue whose conversation is unknown. The service answers
+ * CONVERSATION_NOT_FOUND before it reads the prompt, so this builds the shipped Default without
+ * touching the collection's prompt rows.
+ */
+private fun shippedPromptFallback(collectionId: CollectionId): ResolvedPrompt {
+    val shipped = ShippedPrompts.prompt(collectionId, LlmPromptRole.INVESTIGATE)
+    return ResolvedPrompt(id = null, name = shipped.name, version = shipped.version, body = shipped.body)
 }
