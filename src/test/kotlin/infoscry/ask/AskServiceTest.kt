@@ -1,5 +1,7 @@
 package infoscry.ask
 
+import infoscry.llm.defaultTestPrompt
+
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
@@ -82,7 +84,7 @@ class AskServiceTest {
         val provider = ScriptedProvider(listOf(LlmEvent.TextDelta("unused")), LlmCompletion("unused"))
         val service = service(CapturedSearch(listOf(hit())), provider) { _, _, _, _, _, _, _ -> error("must not persist") }
 
-        val events = service.ask(AskRequest(CollectionId("collection"), "   ", profile())).toList()
+        val events = service.ask(AskRequest(CollectionId("collection"), "   ", profile(), prompt = defaultTestPrompt())).toList()
 
         assertEquals("INVALID_REQUEST", assertIs<AskEvent.Error>(events.single()).code)
         assertTrue(provider.streamRequests.isEmpty())
@@ -96,7 +98,7 @@ class AskServiceTest {
         val service = service(CapturedSearch(listOf(hit())), provider) { _, _, _, _, _, _, _ -> error("must not persist") }
 
         val events = service.ask(
-            AskRequest(CollectionId("collection"), "a question", profile().copy(enabled = false)),
+            AskRequest(CollectionId("collection"), "a question", profile().copy(enabled = false), prompt = defaultTestPrompt()),
         ).toList()
 
         val refusal = assertIs<AskEvent.Error>(events.single())
@@ -167,9 +169,9 @@ class AskServiceTest {
     }
 
     private fun service(search: AskSearch, provider: AskProvider, persistence: AskPersistence): AskService =
-        AskService(search, PromptService(store), client = { provider }, persistence = persistence)
+        AskService(search, PromptService(), client = { provider }, persistence = persistence)
 
-    private fun request(profile: LlmProfile = profile()) = AskRequest(CollectionId("collection"), "question", profile)
+    private fun request(profile: LlmProfile = profile()) = AskRequest(CollectionId("collection"), "question", profile, prompt = defaultTestPrompt())
 
     private fun profile(contextWindow: Int = 10_000) = LlmProfile(
         id = "profile", name = "test", provider = LlmProvider.OPENAI_COMPATIBLE, model = "model",

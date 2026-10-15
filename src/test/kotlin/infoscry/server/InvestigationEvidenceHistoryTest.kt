@@ -1,5 +1,7 @@
 package infoscry.server
 
+import infoscry.llm.defaultTestPrompt
+
 import infoscry.ask.RetrievalSnapshot
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
@@ -99,7 +101,7 @@ class InvestigationEvidenceHistoryTest {
                 val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
                     profile = profile,
-                    promptVersion = 1,
+                    prompt = defaultTestPrompt(1),
                     retrievalSnapshot = RetrievalSnapshot.value(),
                 )
                 harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "What did the page say?")

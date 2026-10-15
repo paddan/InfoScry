@@ -242,9 +242,4 @@ class LlmProfileStoreTest {
         assertNull(updated?.capabilityCheckedAt)
     }
 
-    @Test
-    fun `the shipped default body is always the effective body at version 1`() {
-        assertEquals(ShippedPrompts.body(LlmPromptRole.ASK), store.effectiveBody(LlmPromptRole.ASK))
-        assertEquals(1, store.effectivePromptVersion(LlmPromptRole.ASK))
-    }
 }

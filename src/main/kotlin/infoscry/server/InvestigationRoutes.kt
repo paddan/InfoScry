@@ -19,6 +19,7 @@ import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
 import infoscry.llm.OpenAiCompatibleClient
 import infoscry.llm.PromptService
+import infoscry.llm.ResolvedPrompt
 import infoscry.llm.requireDispatchable
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -48,6 +49,8 @@ data class InvestigationApiRequest(
     val question: String,
     val profile: String,
     val limits: InvestigationLimitsRequest = InvestigationLimitsRequest(),
+    /** A collection prompt by id or name; omitted uses the collection default. A continue ignores it. */
+    val prompt: String? = null,
 )
 
 @Serializable
@@ -224,6 +227,8 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             // stream: retired by a person, or because its address carried a credential.
             val preset = EffortResolver.resolve(profile, body.limits.effortLevel)
             profile.requireDispatchable()
+            val collectionId = CollectionId(collection.id.value)
+            val prompt = context.collectionPrompts.resolve(collectionId, LlmPromptRole.INVESTIGATE, body.prompt)
             if (!profile.toolCallingSupported) {
                 // The gate fires before the service is built, so no provider call and no conversation
                 // row can exist for a profile whose tool capability was never measured as true.
@@ -237,14 +242,13 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                     ),
                 )
             } else {
-                val collectionId = CollectionId(collection.id.value)
                 val titler = ConversationTitler(
-                    prompt = PromptService(context.llm),
+                    prompt = PromptService(),
                     persist = context.conversations::setConversationTitle,
                 )
                 call.streamInvestigation(
                     investigationService(context, collectionId, profile),
-                    InvestigateRequest(collectionId, body.question, profile, limits = preset.limits, reasoning = preset.reasoning),
+                    InvestigateRequest(collectionId, body.question, profile, prompt = prompt, limits = preset.limits, reasoning = preset.reasoning),
                     runningTurns,
                     activeTurnIds,
                     // Titled once, from the opening question, when the first turn has finished and
@@ -281,7 +285,15 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             try {
                 call.streamInvestigation(
                     investigationService(context, lockedCollectionId, profile),
-                    InvestigateRequest(CollectionId(collection.id.value), body.question, profile, conversationId = conversationId, limits = preset.limits, reasoning = preset.reasoning),
+                    InvestigateRequest(
+                        CollectionId(collection.id.value),
+                        body.question,
+                        profile,
+                        prompt = history?.prompt ?: context.collectionPrompts.resolve(lockedCollectionId, LlmPromptRole.INVESTIGATE, null),
+                        conversationId = conversationId,
+                        limits = preset.limits,
+                        reasoning = preset.reasoning,
+                    ),
                     runningTurns,
                     activeTurnIds,
                     reservedId = conversationId,
@@ -319,12 +331,12 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
         override fun createConversation(
             collectionId: CollectionId,
             profile: LlmProfile,
-            promptVersion: Int,
+            prompt: ResolvedPrompt,
             retrievalSnapshot: String,
         ): String = context.investigationLedger.persistInvestigateConversation(
             collectionId = collectionId,
             profile = profile,
-            promptVersion = promptVersion,
+            prompt = prompt,
             retrievalSnapshot = retrievalSnapshot,
         )
 
@@ -389,8 +401,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
             collectionId, context.search, context.content, context.documents,
             activeRevisionId = context.revisions::activeRevisionId,
         ),
-        prompt = PromptService(context.llm),
-        promptVersion = context.llm.effectivePromptVersion(LlmPromptRole.INVESTIGATE),
+        prompt = PromptService(),
         streamingClient = { selected ->
             when (selected.provider) {
                 LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(selected, System::getenv)

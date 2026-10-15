@@ -71,7 +71,7 @@ class ConversationTitlerTest {
     }
 
     private fun titler(written: MutableMap<String, String>) =
-        ConversationTitler(PromptService(LlmProfileStore(database))) { id, title -> written[id] = title }
+        ConversationTitler(PromptService()) { id, title -> written[id] = title }
 
     private fun profile(endpoint: String, enabled: Boolean) = LlmProfile(
         id = "profile",

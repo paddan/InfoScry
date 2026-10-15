@@ -1,5 +1,7 @@
 package infoscry.server
 
+import infoscry.llm.defaultTestPrompt
+
 import infoscry.ask.CitationValidation
 import infoscry.ask.Evidence
 import infoscry.ask.RetrievalSnapshot
@@ -51,7 +53,7 @@ class ConversationRoutesTest {
                 val investigateId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
                     profile = profile,
-                    promptVersion = 1,
+                    prompt = defaultTestPrompt(1),
                     retrievalSnapshot = RetrievalSnapshot.value(),
                 )
                 harness.context.investigationLedger.persistInvestigateMessage(investigateId, 0, "user", "Who signed it?")
@@ -82,6 +84,7 @@ class ConversationRoutesTest {
                 val askId = harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
+                    prompt = defaultTestPrompt(),
                     question = "Who signed it?",
                     answer = "Mira signed it [S1].",
                     evidence = listOf(
@@ -166,7 +169,7 @@ class ConversationRoutesTest {
                 val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
                     profile = profile,
-                    promptVersion = 1,
+                    prompt = defaultTestPrompt(1),
                     retrievalSnapshot = RetrievalSnapshot.value(),
                 )
                 harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")

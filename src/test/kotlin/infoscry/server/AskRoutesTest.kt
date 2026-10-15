@@ -1,5 +1,7 @@
 package infoscry.server
 
+import infoscry.llm.defaultTestPrompt
+
 import infoscry.ask.AskEvent
 import infoscry.ask.CitationValidation
 import infoscry.ask.Evidence
@@ -16,8 +18,12 @@ import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmProvider
+import infoscry.llm.LlmPromptRole
 import infoscry.llm.TokenUsage
 import infoscry.search.vectorFor
 import infoscry.storage.Instants
@@ -30,6 +36,7 @@ import io.ktor.http.HttpStatusCode
 import java.nio.file.Files
 import java.util.UUID
 import kotlin.concurrent.thread
+import org.slf4j.LoggerFactory
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -148,6 +155,7 @@ class AskRoutesTest {
                 harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
+                    prompt = defaultTestPrompt(),
                     question = "Who signed it?",
                     answer = "Mira signed it [S1].",
                     evidence = listOf(
@@ -286,6 +294,7 @@ class AskRoutesTest {
                 harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
+                    prompt = defaultTestPrompt(),
                     question = "What did the page say?",
                     answer = "It said three things [S1] [S2] [S3].",
                     evidence = listOf(
@@ -586,6 +595,7 @@ class AskRoutesTest {
                 harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
+                    prompt = defaultTestPrompt(),
                     question = "Who signed it?",
                     answer = "Mira signed it.",
                     evidence = emptyList(),
@@ -595,6 +605,7 @@ class AskRoutesTest {
                 val titled = harness.context.conversations.persistAsk(
                     collectionId = collection.id,
                     profile = profile,
+                    prompt = defaultTestPrompt(),
                     question = "What day was it?",
                     answer = "Sunday.",
                     evidence = emptyList(),
@@ -669,6 +680,138 @@ class AskRoutesTest {
     }
 
     /** One document with one extracted unit, as the import path leaves it: text, chunks and no revision. */
+    @Test
+    fun `a named prompt is composed after the core rules and reaches the provider`() = runBlocking {
+        val dataDir = Files.createTempDirectory("infoscry-ask-prompt")
+        try {
+            ApiTestServer(dataDir, queryEmbedder = { QueryEmbedder { vectorFor(it) } }).use { harness ->
+                FakeOpenAiServer(
+                    listOf(
+                        FakeOpenAiResponse(stream = true, body = answerSse()),
+                        FakeOpenAiResponse(statusCode = 200, body = titleCompletion("Prompted")),
+                    ),
+                ).use { fake ->
+                    val collection = harness.context.collectionService.create("Default")
+                    harness.context.collectionPrompts.create(CollectionId(collection.id.value), LlmPromptRole.ASK, "Short", "Answer in one line please.")
+                    createLlmProfile(harness, name = "prompt-asker", model = "prompt-model", endpoint = fake.url)
+
+                    val response = harness.request(
+                        HttpMethod.Post,
+                        "/api/ask",
+                        body = """{"collection":"Default","question":"Who signed it?","profile":"prompt-asker","prompt":"Short"}""",
+                        credential = Credential.BEARER,
+                    )
+
+                    assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+                    assertContains(response.bodyAsText(), "\"type\":\"done\"")
+                    assertContains(fake.requestBodies[0], "Answer in one line please.", message = "the selected prompt must reach the provider")
+                    assertContains(fake.requestBodies[0], "You are answering questions", message = "the core rules must come first")
+                }
+            }
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `an unknown or foreign prompt is refused with INVALID_REQUEST before any provider call`() = runBlocking {
+        val dataDir = Files.createTempDirectory("infoscry-ask-prompt-refused")
+        try {
+            ApiTestServer(dataDir, queryEmbedder = { QueryEmbedder { vectorFor(it) } }).use { harness ->
+                FakeOpenAiServer(listOf(FakeOpenAiResponse(stream = true, body = answerSse()))).use { fake ->
+                    harness.context.collectionService.create("Default")
+                    val other = harness.context.collectionService.create("Other")
+                    val foreign = harness.context.collectionPrompts.create(CollectionId(other.id.value), LlmPromptRole.ASK, "Foreign", "Other collection body.").prompt
+                    createLlmProfile(harness, name = "prompt-asker", model = "prompt-model", endpoint = fake.url)
+
+                    for (ref in listOf("Missing", foreign.id!!)) {
+                        val response = harness.request(
+                            HttpMethod.Post,
+                            "/api/ask",
+                            body = """{"collection":"Default","question":"Who signed it?","profile":"prompt-asker","prompt":"$ref"}""",
+                            credential = Credential.BEARER,
+                        )
+                        assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
+                        assertContains(response.bodyAsText(), "INVALID_REQUEST")
+                    }
+                    assertEquals(0, fake.handledRequests, "a refused prompt must make no provider call")
+                }
+            }
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a prompt too large for the context window ends with the budget error and no provider call`() = runBlocking {
+        val dataDir = Files.createTempDirectory("infoscry-ask-prompt-budget")
+        try {
+            ApiTestServer(dataDir, queryEmbedder = { QueryEmbedder { vectorFor(it) } }).use { harness ->
+                FakeOpenAiServer(listOf(FakeOpenAiResponse(stream = true, body = answerSse()))).use { fake ->
+                    val collection = harness.context.collectionService.create("Default")
+                    harness.context.collectionPrompts.create(CollectionId(collection.id.value), LlmPromptRole.ASK, "Huge", "x".repeat(20_000))
+                    createLlmProfile(harness, name = "small-window", model = "small-model", endpoint = fake.url, contextWindow = 2_000)
+
+                    val response = harness.request(
+                        HttpMethod.Post,
+                        "/api/ask",
+                        body = """{"collection":"Default","question":"Who signed it?","profile":"small-window","prompt":"Huge"}""",
+                        credential = Credential.BEARER,
+                    )
+
+                    assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+                    assertContains(response.bodyAsText(), "\"code\":\"CONTEXT_BUDGET_EXCEEDED\"")
+                    assertEquals(0, fake.handledRequests, "an irreducible prompt must make zero provider calls")
+                }
+            }
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a prompt body never reaches the logs`() = runBlocking {
+        val marker = "PROMPT-BODY-MARKER-7f3a"
+        val dataDir = Files.createTempDirectory("infoscry-ask-prompt-logs")
+        try {
+            ApiTestServer(dataDir, queryEmbedder = { QueryEmbedder { vectorFor(it) } }).use { harness ->
+                FakeOpenAiServer(
+                    listOf(
+                        FakeOpenAiResponse(stream = true, body = answerSse()),
+                        FakeOpenAiResponse(statusCode = 200, body = titleCompletion("Logged")),
+                    ),
+                ).use { fake ->
+                    val collection = harness.context.collectionService.create("Default")
+                    harness.context.collectionPrompts.create(CollectionId(collection.id.value), LlmPromptRole.ASK, "Marked", "Answer briefly. $marker")
+                    createLlmProfile(harness, name = "log-asker", model = "log-model", endpoint = fake.url)
+
+                    val logger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+                    val records = ListAppender<ILoggingEvent>().apply { start() }
+                    logger.addAppender(records)
+                    val response = try {
+                        harness.request(
+                            HttpMethod.Post,
+                            "/api/ask",
+                            body = """{"collection":"Default","question":"Who signed it?","profile":"log-asker","prompt":"Marked"}""",
+                            credential = Credential.BEARER,
+                        )
+                    } finally {
+                        logger.detachAppender(records)
+                    }
+
+                    assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+                    assertContains(fake.requestBodies[0], marker, message = "the marker must have reached the provider")
+                    assertTrue(
+                        records.list.none { event -> event.formattedMessage.contains(marker) || event.throwableProxy?.message?.contains(marker) == true },
+                        "a prompt body must never be logged",
+                    )
+                }
+            }
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
     private fun seedAskDocument(
         harness: ApiTestServer,
         collectionId: CollectionId,
@@ -752,12 +895,13 @@ class AskRoutesTest {
         name: String,
         model: String,
         endpoint: String,
+        contextWindow: Int = 10_000,
     ): LlmProfile = LlmProfile(
         id = UUID.randomUUID().toString(),
         name = name,
         provider = LlmProvider.OPENAI_COMPATIBLE,
         model = model,
-        contextWindow = 10_000,
+        contextWindow = contextWindow,
         maxOutputTokens = 64,
         inputPricePerMillion = 1.0,
         outputPricePerMillion = 2.0,

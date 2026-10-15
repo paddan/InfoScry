@@ -1,21 +1,13 @@
 package infoscry.llm
 
-import infoscry.llm.LlmPromptRole.ASK
-import infoscry.llm.LlmPromptRole.INVESTIGATE
-import infoscry.storage.LlmProfileStore
-
 /**
- * Composes the three prompt layers in order:
+ * Composes the two prompt layers of an Ask or Investigate system prompt:
  *
  * 1. the immutable core rules (source discipline, citation rules, tool rules), shipped in code and
- *    never replaceable from SQLite;
- * 2. the versioned, user-editable Ask/Investigate default bodies, stored as overrides or falling back
- *    to the shipped resource;
- * 3. optional per-collection instructions, appended last so they can never bracket out the core.
- *
- * The core always comes first and is always present; the other two layers may be empty.
+ *    never replaceable from SQLite, always first;
+ * 2. the selected prompt body: the collection's chosen prompt, or the shipped Default.
  */
-class PromptService(private val store: LlmProfileStore) {
+class PromptService {
 
     /** Layer 1 — code/resource controlled, immutable, never read from the database. */
     private val CORE_RULES: String = buildString {
@@ -50,17 +42,6 @@ class PromptService(private val store: LlmProfileStore) {
     /** The title completion's system prompt; [ConversationTitler] is its only caller. */
     fun titlePrompt(): String = TITLE_RULES
 
-    fun composeAsk(collectionInstructions: String? = null): String =
-        compose(ASK, collectionInstructions)
-
-    fun composeInvestigate(collectionInstructions: String? = null): String =
-        compose(INVESTIGATE, collectionInstructions)
-
-    private fun compose(role: LlmPromptRole, collectionInstructions: String?): String {
-        val layers = mutableListOf(CORE_RULES, store.effectiveBody(role))
-        if (!collectionInstructions.isNullOrBlank()) {
-            layers.add("Collection instructions:\n$collectionInstructions")
-        }
-        return layers.joinToString("\n\n")
-    }
+    /** The system prompt: the core rules, a blank line, then the selected prompt [body]. */
+    fun compose(body: String): String = CORE_RULES + "\n\n" + body
 }

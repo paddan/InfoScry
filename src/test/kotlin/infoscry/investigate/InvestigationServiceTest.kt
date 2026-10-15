@@ -1,5 +1,7 @@
 package infoscry.investigate
 
+import infoscry.llm.defaultTestPrompt
+
 import infoscry.ask.RetrievalSnapshot
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
@@ -89,8 +91,7 @@ class InvestigationServiceTest {
         nanoTime: () -> Long = System::nanoTime,
     ) = InvestigationService(
         tools,
-        PromptService(store),
-        promptVersion = 1,
+        PromptService(),
         streamingClient = { provider },
         persistence = persistence,
         turnTimeoutMs = turnTimeoutMs,
@@ -98,7 +99,7 @@ class InvestigationServiceTest {
         nanoTime = nanoTime,
     )
 
-    private fun request() = InvestigateRequest(CollectionId("collection"), "question", profile())
+    private fun request() = InvestigateRequest(CollectionId("collection"), "question", profile(), prompt = defaultTestPrompt())
 
     @Test
     fun `native research echoes signed content but persistence and synthesis never receive it`() = runBlocking {
@@ -113,7 +114,7 @@ class InvestigationServiceTest {
         ))
         val persistence = FakePersistence()
         val native = NativeReasoning.AnthropicThinkingBudget(1024)
-        service(tools(collection), provider, persistence).investigate(InvestigateRequest(collection, "When?", profile().copy(provider = LlmProvider.ANTHROPIC, maxOutputTokens = 2048, contextWindow = 20000), limits = InvestigationLimits(maxToolRounds = 2), reasoning = native)).toList()
+        service(tools(collection), provider, persistence).investigate(InvestigateRequest(collection, "When?", profile().copy(provider = LlmProvider.ANTHROPIC, maxOutputTokens = 2048, contextWindow = 20000), limits = InvestigationLimits(maxToolRounds = 2), reasoning = native, prompt = defaultTestPrompt())).toList()
         assertEquals(native, provider.streamRequests[0].reasoning)
         assertTrue(provider.streamRequests[1].messages.any { it.assistantContent === envelope })
         assertEquals(NativeReasoning.None, provider.streamRequests.last().reasoning)
@@ -126,7 +127,7 @@ class InvestigationServiceTest {
         val provider = ScriptedProvider()
         val sv = service(tools(CollectionId("collection")), provider)
 
-        val events = sv.investigate(InvestigateRequest(CollectionId("collection"), "   ", profile())).toList()
+        val events = sv.investigate(InvestigateRequest(CollectionId("collection"), "   ", profile(), prompt = defaultTestPrompt())).toList()
 
         assertEquals("INVALID_REQUEST", assertIs<InvestigateEvent.Error>(events.single()).code)
         assertEquals(0, provider.streamRequests.size)
@@ -159,7 +160,7 @@ class InvestigationServiceTest {
         )
 
         val events = service(tools(collection), provider)
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = InvestigationLimits(maxToolRounds = 2)))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = InvestigationLimits(maxToolRounds = 2), prompt = defaultTestPrompt()))
             .toList()
 
         assertEquals(3, provider.streamRequests.size, "two configured rounds then exactly one synthesis request")
@@ -186,7 +187,7 @@ class InvestigationServiceTest {
         )
 
         val events = service(tools(collection), provider)
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = InvestigationLimits(maxToolCalls = 1)))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = InvestigationLimits(maxToolCalls = 1), prompt = defaultTestPrompt()))
             .toList()
 
         val results = events.filterIsInstance<InvestigateEvent.ToolResult>()
@@ -254,7 +255,7 @@ class InvestigationServiceTest {
         val created = persistence.created.single()
         assertEquals(CollectionId("collection"), created.collectionId)
         assertEquals(profile(), created.profile)
-        assertEquals(1, created.promptVersion)
+        assertEquals(defaultTestPrompt(1), created.prompt)
         assertEquals(RetrievalSnapshot.value(), created.retrievalSnapshot, "the locked retrieval snapshot must be the shared helper's value, not \"{}\"")
         val appended = persistence.appended.single().second
         assertEquals(CollectionId("collection"), appended.collectionId)
@@ -268,7 +269,7 @@ class InvestigationServiceTest {
         val history = InvestigateHistory(
             collectionId = CollectionId("collection"),
             profile = profile(),
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
             messages = listOf(
                 LlmMessage("user", "prior question"),
@@ -280,7 +281,7 @@ class InvestigationServiceTest {
         val provider = ScriptedProvider(LlmEvent.TextDelta("answer"), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed)
         val sv = service(tools(CollectionId("collection")), provider, persistence = persistence)
 
-        val events = sv.investigate(InvestigateRequest(CollectionId("collection"), "follow-up", profile(), conversationId = "conv-1")).toList()
+        val events = sv.investigate(InvestigateRequest(CollectionId("collection"), "follow-up", profile(), conversationId = "conv-1", prompt = defaultTestPrompt())).toList()
 
         val firstRequest = provider.streamRequests[0]
         assertTrue(firstRequest.messages.any { it.content == "prior answer" }, "the outbound request must seed the prior answer")
@@ -294,12 +295,53 @@ class InvestigationServiceTest {
     }
 
     @Test
+    fun `a new conversation locks the selected prompt and composes its body after the core rules`() = runBlocking {
+        val prompt = infoscry.llm.ResolvedPrompt(id = "p1", name = "Short", version = 2, body = "Answer in one line.")
+        val persistence = FakePersistence()
+        val provider = ScriptedProvider(LlmEvent.TextDelta("answer"), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed)
+
+        service(tools(CollectionId("collection")), provider, persistence = persistence)
+            .investigate(InvestigateRequest(CollectionId("collection"), "question", profile(), prompt = prompt)).toList()
+
+        assertEquals(prompt, persistence.created.single().prompt, "the new conversation locks the selected prompt")
+        val system = provider.streamRequests[0].messages.first { it.role == "system" }.content
+        assertTrue(system.startsWith("You are answering questions"), "the core rules come first")
+        assertTrue(system.endsWith("\n\nAnswer in one line."), "the selected body follows the core rules")
+        assertFalse(system.contains("Collection instructions"))
+    }
+
+    @Test
+    fun `a continuation composes from the locked prompt body, not the prompt the reader now sends`() = runBlocking {
+        val locked = infoscry.llm.ResolvedPrompt(id = "p1", name = "Short", version = 1, body = "LOCKED BODY")
+        val history = InvestigateHistory(
+            collectionId = CollectionId("collection"),
+            profile = profile(),
+            prompt = locked,
+            retrievalSnapshot = RetrievalSnapshot.value(),
+            messages = listOf(LlmMessage("user", "prior question"), LlmMessage("assistant", "prior answer")),
+            evidenceIds = emptyList(),
+        )
+        val persistence = FakePersistence(mapOf("conv-1" to history))
+        val provider = ScriptedProvider(LlmEvent.TextDelta("answer"), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed)
+        val edited = infoscry.llm.ResolvedPrompt(id = "p1", name = "Short", version = 2, body = "EDITED BODY")
+
+        service(tools(CollectionId("collection")), provider, persistence = persistence).investigate(
+            InvestigateRequest(CollectionId("collection"), "follow-up", profile(), prompt = edited, conversationId = "conv-1"),
+        ).toList()
+
+        val system = provider.streamRequests[0].messages.first { it.role == "system" }.content
+        assertTrue(system.endsWith("\n\nLOCKED BODY"), "the continuation keeps the locked body")
+        assertFalse(system.contains("EDITED BODY"), "the edited prompt is not read again")
+        assertTrue(persistence.created.isEmpty())
+    }
+
+    @Test
     fun `continuing an unknown conversation emits CONVERSATION_NOT_FOUND without provider calls`() = runBlocking {
         val provider = ScriptedProvider()
         val persistence = FakePersistence()
         val sv = service(tools(CollectionId("collection")), provider, persistence = persistence)
 
-        val events = sv.investigate(InvestigateRequest(CollectionId("collection"), "question", profile(), conversationId = "missing")).toList()
+        val events = sv.investigate(InvestigateRequest(CollectionId("collection"), "question", profile(), conversationId = "missing", prompt = defaultTestPrompt())).toList()
 
         assertEquals("CONVERSATION_NOT_FOUND", assertIs<InvestigateEvent.Error>(events.single()).code)
         assertEquals(0, provider.streamRequests.size, "an unknown conversation must make zero provider calls")
@@ -314,7 +356,7 @@ class InvestigationServiceTest {
         val history = InvestigateHistory(
             collectionId = CollectionId("collection"),
             profile = profile().copy(enabled = false),
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
             messages = listOf(LlmMessage("user", "prior question")),
             evidenceIds = emptyList(),
@@ -327,7 +369,7 @@ class InvestigationServiceTest {
         // off — or a direct caller that never ran one — would: the turn dispatches through the locked snapshot,
         // so the service itself has to refuse it, before any call leaves the process.
         val events = sv.investigate(
-            InvestigateRequest(CollectionId("collection"), "follow-up", profile(), conversationId = "conv-1"),
+            InvestigateRequest(CollectionId("collection"), "follow-up", profile(), conversationId = "conv-1", prompt = defaultTestPrompt()),
         ).toList()
 
         // Asserted before the event shape: a dispatch that should not have happened still emits well-formed
@@ -365,7 +407,7 @@ class InvestigationServiceTest {
         val history = InvestigateHistory(
             collectionId = CollectionId("collection"),
             profile = locked,
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
             messages = listOf(LlmMessage("user", "prior question")),
             evidenceIds = emptyList(),
@@ -374,7 +416,7 @@ class InvestigationServiceTest {
         val provider = ScriptedProvider(LlmEvent.TextDelta("answer"), LlmEvent.Usage(TokenUsage(1L, 1L)), LlmEvent.Completed)
         val sv = service(tools(CollectionId("collection")), provider, persistence = persistence)
 
-        val disagreeing = InvestigateRequest(CollectionId("other"), "question", profile(contextWindow = 4000), conversationId = "conv-1")
+        val disagreeing = InvestigateRequest(CollectionId("other"), "question", profile(contextWindow = 4000), conversationId = "conv-1", prompt = defaultTestPrompt())
         sv.investigate(disagreeing).toList()
 
         val appended = persistence.appended.single().second
@@ -400,7 +442,7 @@ class InvestigationServiceTest {
         )
 
         val events = service(withRevision, provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "When?", profile())).toList()
+            .investigate(InvestigateRequest(collection, "When?", profile(), prompt = defaultTestPrompt())).toList()
 
         val entry = persistence.appended.single().second.evidenceEntries.single()
         assertEquals("The meeting began at noon.", entry.excerpt)
@@ -418,7 +460,7 @@ class InvestigationServiceTest {
         val history = InvestigateHistory(
             collectionId = collection,
             profile = profile(),
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
             messages = listOf(LlmMessage("user", "prior question"), LlmMessage("assistant", "prior answer")),
             evidenceIds = listOf("S1", "S2"),
@@ -432,7 +474,7 @@ class InvestigationServiceTest {
         )
         val sv = service(tools(collection), provider, persistence = persistence)
 
-        sv.investigate(InvestigateRequest(collection, "follow-up", profile(), conversationId = "conv-1")).toList()
+        sv.investigate(InvestigateRequest(collection, "follow-up", profile(), conversationId = "conv-1", prompt = defaultTestPrompt())).toList()
 
         val ids = persistence.appended.single().second.evidenceEntries.map { it.evidenceId }
         assertTrue(ids.isNotEmpty(), "the continued turn must allocate evidence, got $ids")
@@ -483,7 +525,7 @@ class InvestigationServiceTest {
             listOf(LlmEvent.TextDelta("The meeting began at noon [S1]."), LlmEvent.Completed),
         ))
         val nativeProfile = profile().copy(provider = LlmProvider.ANTHROPIC, maxOutputTokens = 2048, contextWindow = 20000)
-        val events = service(tools(collection), provider).investigate(InvestigateRequest(collection, "When?", nativeProfile, reasoning = NativeReasoning.AnthropicThinkingBudget(1024))).toList()
+        val events = service(tools(collection), provider).investigate(InvestigateRequest(collection, "When?", nativeProfile, reasoning = NativeReasoning.AnthropicThinkingBudget(1024), prompt = defaultTestPrompt())).toList()
         assertEquals(2, provider.streamRequests.size, "the oversize native request is never dispatched")
         assertEquals(NativeReasoning.None, provider.streamRequests.last().reasoning)
         assertTrue(provider.streamRequests.last().messages.all { it.assistantContent == null })
@@ -551,7 +593,7 @@ class InvestigationServiceTest {
         assertTrue(toolResults.isNotEmpty(), "expected ToolResult events")
     }
 
-    private fun request(profile: LlmProfile) = InvestigateRequest(CollectionId("collection"), "question", profile)
+    private fun request(profile: LlmProfile) = InvestigateRequest(CollectionId("collection"), "question", profile, prompt = defaultTestPrompt())
 
     @Test
     fun `exactly twenty admitted calls stops research before another tool-enabled request`() = runBlocking {
@@ -571,7 +613,7 @@ class InvestigationServiceTest {
         )
 
         val events = service(tools(collection), provider)
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = InvestigationLimits(maxToolCalls = 20)))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = InvestigationLimits(maxToolCalls = 20), prompt = defaultTestPrompt()))
             .toList()
 
         assertEquals(2, provider.streamRequests.size, "the cap is reached by the twentieth admitted call")
@@ -602,7 +644,7 @@ class InvestigationServiceTest {
         val service = service(tools(collection), provider, persistence = persistence)
 
         val events = service
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = InvestigationLimits(maxToolCalls = 20)))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = InvestigationLimits(maxToolCalls = 20), prompt = defaultTestPrompt()))
             .toList()
 
         assertEquals(2, provider.streamRequests.size, "one research request and one tool-free synthesis request are allowed")
@@ -641,7 +683,7 @@ class InvestigationServiceTest {
         val persistence = FakePersistence()
 
         val events = service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "question", profile(), limits = InvestigationLimits(maxToolCalls = 20)))
+            .investigate(InvestigateRequest(collection, "question", profile(), limits = InvestigationLimits(maxToolCalls = 20), prompt = defaultTestPrompt()))
             .toList()
 
         val limit = assertIs<InvestigateEvent.Limit>(events.filterIsInstance<InvestigateEvent.Limit>().single())
@@ -669,7 +711,7 @@ class InvestigationServiceTest {
         )
         val persistence = FakePersistence()
         val events = service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile()))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), prompt = defaultTestPrompt()))
             .toList()
 
         assertEquals(3, provider.streamRequests.size, "the repeated call must stop research and permit only synthesis")
@@ -706,7 +748,7 @@ class InvestigationServiceTest {
         val persistence = FakePersistence(onAppendTurn = { eventsWhenPersisted = events.size })
 
         service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = roundCapLimits()))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), limits = roundCapLimits(), prompt = defaultTestPrompt()))
             .collect { events += it }
 
         assertEquals(
@@ -829,7 +871,7 @@ class InvestigationServiceTest {
         val persistence = FakePersistence()
 
         val events = service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "question", profile(), limits = roundLimit(rounds)))
+            .investigate(InvestigateRequest(collection, "question", profile(), limits = roundLimit(rounds), prompt = defaultTestPrompt()))
             .toList()
 
         assertEquals("SYNTHESIS_TOOL_CALL", assertIs<InvestigateEvent.Error>(events.last()).code)
@@ -864,7 +906,7 @@ class InvestigationServiceTest {
         val persistence = FakePersistence()
 
         val events = service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "question", profile(), limits = roundLimit(rounds)))
+            .investigate(InvestigateRequest(collection, "question", profile(), limits = roundLimit(rounds), prompt = defaultTestPrompt()))
             .toList()
 
         assertEquals("LLM_REQUEST_FAILED", assertIs<InvestigateEvent.Error>(events.last()).code)
@@ -968,7 +1010,7 @@ class InvestigationServiceTest {
         val persistence = FakePersistence()
 
         service(tools(collection), provider, persistence = persistence).investigate(
-            InvestigateRequest(collection, "When did it begin?", profile()),
+            InvestigateRequest(collection, "When did it begin?", profile(), prompt = defaultTestPrompt()),
         ).toList()
 
         val result = provider.streamRequests[1].messages.single { it.role == "tool" }
@@ -1055,7 +1097,7 @@ class InvestigationServiceTest {
         )
         val sv = service(tools(collection), provider)
 
-        val events = sv.investigate(InvestigateRequest(collection, "question", profile(contextWindow = 5900))).toList()
+        val events = sv.investigate(InvestigateRequest(collection, "question", profile(contextWindow = 5900), prompt = defaultTestPrompt())).toList()
 
         val citations = events.filterIsInstance<InvestigateEvent.Citation>()
         assertTrue(
@@ -1088,6 +1130,7 @@ class InvestigationServiceTest {
             "question",
             profile(contextWindow = 5_900),
             limits = InvestigationLimits(maxToolRounds = 2),
+            prompt = defaultTestPrompt(),
         )
 
         val events = service(tools(collection), provider).investigate(request).toList()
@@ -1154,7 +1197,7 @@ class InvestigationServiceTest {
             persistence = persistence,
             turnTimeoutMs = 10_000,
             nanoTime = { nowNanos },
-        ).investigate(InvestigateRequest(collection, "When did it begin?", profile())).collect { event ->
+        ).investigate(InvestigateRequest(collection, "When did it begin?", profile(), prompt = defaultTestPrompt())).collect { event ->
             events += event
             if (event is InvestigateEvent.ToolResult) nowNanos = 8_000_000_000L
         }
@@ -1242,7 +1285,7 @@ class InvestigationServiceTest {
             persistence = persistence,
             turnTimeoutMs = 10_000,
             nanoTime = { nowNanos },
-        ).investigate(InvestigateRequest(collection, "When did it begin?", profile())).collect { event ->
+        ).investigate(InvestigateRequest(collection, "When did it begin?", profile(), prompt = defaultTestPrompt())).collect { event ->
             events += event
             // Research stops at eight seconds; the clock then runs past the ten-second total budget
             // while the reserved final answer is being prepared, so no provider call may start.
@@ -1353,7 +1396,7 @@ class InvestigationServiceTest {
             persistence = persistence,
             turnTimeoutMs = 50,
             nanoTime = { nowNanos },
-        ).investigate(InvestigateRequest(collection, "When did it begin?", profile())).collect { event ->
+        ).investigate(InvestigateRequest(collection, "When did it begin?", profile(), prompt = defaultTestPrompt())).collect { event ->
             events += event
             if (event is InvestigateEvent.ToolResult) nowNanos = 40_000_000L
         }
@@ -1388,7 +1431,7 @@ class InvestigationServiceTest {
             persistence = persistence,
             turnTimeoutMs = 50,
             nanoTime = { nowNanos },
-        ).investigate(InvestigateRequest(collection, "When did it begin?", profile())).collect { event ->
+        ).investigate(InvestigateRequest(collection, "When did it begin?", profile(), prompt = defaultTestPrompt())).collect { event ->
             events += event
             if (event is InvestigateEvent.ToolResult) nowNanos = 40_000_000L
         }
@@ -1408,7 +1451,7 @@ class InvestigationServiceTest {
         val history = InvestigateHistory(
             collectionId = collection,
             profile = profile(),
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
             messages = listOf(
                 LlmMessage("user", "first question"),
@@ -1429,7 +1472,7 @@ class InvestigationServiceTest {
         val persistence = FakePersistence(mapOf("conv-1" to history))
 
         val events = service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), conversationId = "conv-1"))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), conversationId = "conv-1", prompt = defaultTestPrompt()))
             .toList()
 
         assertEquals(1, provider.streamRequests.size, "a retained-evidence follow-up must not research again")
@@ -1448,7 +1491,7 @@ class InvestigationServiceTest {
         val history = InvestigateHistory(
             collectionId = collection,
             profile = profile(contextWindow = 6_000),
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
             messages = listOf(
                 LlmMessage("user", "prior question $padding"),
@@ -1469,7 +1512,7 @@ class InvestigationServiceTest {
         )
 
         val events = service(tools(collection), provider, persistence = FakePersistence(mapOf("conv-1" to history)))
-            .investigate(InvestigateRequest(collection, "And?", profile(contextWindow = 6_000), conversationId = "conv-1"))
+            .investigate(InvestigateRequest(collection, "And?", profile(contextWindow = 6_000), conversationId = "conv-1", prompt = defaultTestPrompt()))
             .toList()
 
         assertTrue(
@@ -1502,7 +1545,7 @@ class InvestigationServiceTest {
         val persistence = FakePersistence()
 
         service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile()))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), prompt = defaultTestPrompt()))
             .toList()
 
         val snapshot = persistence.appended.single().second
@@ -1529,7 +1572,7 @@ class InvestigationServiceTest {
         val persistence = FakePersistence()
 
         val events = service(tools(collection), provider, persistence = persistence)
-            .investigate(InvestigateRequest(collection, "When did it begin?", profile()))
+            .investigate(InvestigateRequest(collection, "When did it begin?", profile(), prompt = defaultTestPrompt()))
             .toList()
 
         val snapshot = persistence.appended.single().second
@@ -1824,7 +1867,7 @@ class InvestigationServiceTest {
         data class CreatedConversation(
             val collectionId: CollectionId,
             val profile: LlmProfile,
-            val promptVersion: Int,
+            val prompt: infoscry.llm.ResolvedPrompt,
             val retrievalSnapshot: String,
         )
 
@@ -1835,10 +1878,10 @@ class InvestigationServiceTest {
         override fun createConversation(
             collectionId: CollectionId,
             profile: LlmProfile,
-            promptVersion: Int,
+            prompt: infoscry.llm.ResolvedPrompt,
             retrievalSnapshot: String,
         ): String {
-            created += CreatedConversation(collectionId, profile, promptVersion, retrievalSnapshot)
+            created += CreatedConversation(collectionId, profile, prompt, retrievalSnapshot)
             return "conv-id"
         }
 

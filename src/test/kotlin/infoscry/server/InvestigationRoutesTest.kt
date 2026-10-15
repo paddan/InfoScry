@@ -1,7 +1,10 @@
 package infoscry.server
 
+import infoscry.llm.defaultTestPrompt
+
 import infoscry.ask.Evidence
 import infoscry.ask.RetrievalSnapshot
+import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
@@ -548,7 +551,7 @@ class InvestigationRoutesTest {
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
             profile = retired,
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
         harness.context.llm.update(retired.id, retired.copy(enabled = false))
@@ -578,7 +581,7 @@ class InvestigationRoutesTest {
             val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                 collectionId = collection.id,
                 profile = profile,
-                promptVersion = 1,
+                prompt = defaultTestPrompt(1),
                 retrievalSnapshot = RetrievalSnapshot.value(),
             )
             // The conversation locked an address carrying a credential, and the profile row was repaired
@@ -830,6 +833,63 @@ class InvestigationRoutesTest {
     }
 
     @Test
+    fun `a conversation keeps the prompt it started with after the prompt is deleted and another is sent`() = runBlocking {
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = turnSse()),
+                FakeOpenAiResponse(statusCode = 200, body = titleCompletion("Locked")),
+                FakeOpenAiResponse(stream = true, body = turnSse()),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url)
+            val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+            val collectionId = CollectionId(collection.id.value)
+            val locked = harness.context.collectionPrompts.create(collectionId, LlmPromptRole.INVESTIGATE, "Locked", "LOCKED-BODY investigate.").prompt
+            harness.context.collectionPrompts.create(collectionId, LlmPromptRole.INVESTIGATE, "Other", "OTHER-BODY investigate.")
+
+            val created = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = createBody().dropLast(1) + ",\"prompt\":\"Locked\"}",
+                credential = Credential.BEARER,
+            )
+            assertEquals(HttpStatusCode.OK, created.status, created.bodyAsText())
+            val conversationId = created.bodyAsText().substringAfter("\"type\":\"started\"").substringAfter("\"id\":\"").substringBefore('"')
+            assertTrue(conversationId.isNotBlank(), "expected a started event carrying the conversation id")
+            harness.context.collectionPrompts.delete(collectionId, locked.id!!)
+
+            val continued = harness.request(
+                HttpMethod.Post,
+                "/api/investigations/$conversationId/continue",
+                body = createBody(question = "and then?").dropLast(1) + ",\"prompt\":\"Other\"}",
+                credential = Credential.BEARER,
+            )
+
+            assertEquals(HttpStatusCode.OK, continued.status, continued.bodyAsText())
+            assertContains(fake.requestBodies[2], "LOCKED-BODY investigate.", message = "the continue must use the locked body")
+            assertFalse(fake.requestBodies[2].contains("OTHER-BODY"), "the prompt sent on a continue is ignored")
+        }
+    }
+
+    @Test
+    fun `an unknown prompt is refused with 400 before any conversation or provider call`() = runBlocking {
+        FakeOpenAiServer(listOf(FakeOpenAiResponse(stream = true, body = turnSse()))).use { fake ->
+            createProfile(endpoint = fake.url)
+
+            val response = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = createBody().dropLast(1) + ",\"prompt\":\"Missing\"}",
+                credential = Credential.BEARER,
+            )
+
+            assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
+            assertContains(response.bodyAsText(), "INVALID_REQUEST")
+            assertEquals(0, fake.handledRequests, "a refused prompt must make no provider call")
+        }
+    }
+
+    @Test
     fun `a create request streams a started event whose id continues the conversation`() = runBlocking {
         createProfile()
 
@@ -887,7 +947,7 @@ class InvestigationRoutesTest {
             val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                 collectionId = collection.id,
                 profile = profile,
-                promptVersion = 1,
+                prompt = defaultTestPrompt(1),
                 retrievalSnapshot = RetrievalSnapshot.value(),
             )
             val body = createBody(question = "continue me")
@@ -944,7 +1004,7 @@ class InvestigationRoutesTest {
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
             profile = profile,
-            promptVersion = 3,
+            prompt = defaultTestPrompt(3),
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
         harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
@@ -1117,7 +1177,7 @@ class InvestigationRoutesTest {
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
             profile = profile,
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
         harness.context.investigationLedger.persistInvestigateMessage(conversationId, 0, "user", "Who signed it?")
@@ -1125,7 +1185,7 @@ class InvestigationRoutesTest {
         val titledId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
             profile = profile,
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
         harness.context.investigationLedger.persistInvestigateMessage(titledId, 0, "user", "What day was it?")
@@ -1250,11 +1310,7 @@ class InvestigationRoutesTest {
                 assertEquals(fake.url, conversation.endpoint, "the conversation locks the profile's endpoint")
                 assertEquals("model", conversation.model)
                 assertEquals("investigator", conversation.profileName)
-                assertEquals(
-                    harness.context.llm.effectivePromptVersion(LlmPromptRole.INVESTIGATE),
-                    conversation.promptVersion,
-                    "the conversation persists the real prompt version",
-                )
+                assertEquals(1, conversation.promptVersion, "the conversation persists the shipped Default's version")
                 assertEquals(RetrievalSnapshot.value(), conversation.retrievalSnapshot)
                 assertNotEquals("{}", conversation.retrievalSnapshot, "the retrieval snapshot must be the real one")
 
@@ -1463,7 +1519,7 @@ class InvestigationRoutesTest {
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
             profile = profile,
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
         val locatorJson = Json.encodeToString(SourceLocation.serializer(), SourceLocation.TextLines(1, 1))
@@ -1593,7 +1649,7 @@ class InvestigationRoutesTest {
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
             profile = profile,
-            promptVersion = 1,
+            prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
         )
         val locatorJson = Json.encodeToString(SourceLocation.serializer(), SourceLocation.TextLines(1, 1))

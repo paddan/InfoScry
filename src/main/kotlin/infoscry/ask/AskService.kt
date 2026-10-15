@@ -10,6 +10,7 @@ import infoscry.llm.LlmStreamingClient
 import infoscry.llm.requireDispatchable
 import infoscry.llm.LlmCompletionClient
 import infoscry.llm.PromptService
+import infoscry.llm.ResolvedPrompt
 import infoscry.llm.RequestBudget
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
@@ -18,7 +19,12 @@ import infoscry.search.SearchService
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
-data class AskRequest(val collectionId: CollectionId, val question: String, val profile: LlmProfile)
+data class AskRequest(
+    val collectionId: CollectionId,
+    val question: String,
+    val profile: LlmProfile,
+    val prompt: ResolvedPrompt,
+)
 
 sealed interface AskEvent {
     data class Delta(val text: String) : AskEvent
@@ -58,15 +64,13 @@ class AskService(
     private val prompt: PromptService,
     private val client: (LlmProfile) -> LlmStreamingClient,
     private val persistence: AskPersistence,
-    private val collectionInstructions: (CollectionId) -> String? = { null },
 ) {
     constructor(
         search: SearchService,
         prompt: PromptService,
         client: (LlmProfile) -> LlmStreamingClient,
         persistence: AskPersistence,
-        collectionInstructions: (CollectionId) -> String? = { null },
-    ) : this(AskSearch(search::search), prompt, client, persistence, collectionInstructions)
+    ) : this(AskSearch(search::search), prompt, client, persistence)
 
     fun ask(request: AskRequest): Flow<AskEvent> = flow {
         if (request.question.isBlank()) {
@@ -83,7 +87,7 @@ class AskService(
             val budget = RequestBudget(request.profile.contextWindow)
             val packed = ContextPacker().pack(
                 request.question,
-                prompt.composeAsk(collectionInstructions(request.collectionId)),
+                prompt.compose(request.prompt.body),
                 outcome.hits.take(RetrievalSnapshot.TOP_HITS),
                 budget,
                 request.profile.maxOutputTokens,

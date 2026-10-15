@@ -33,7 +33,7 @@ class ConversationStoreTest {
         database = Database(directory.resolve("state.db"))
         SchemaMigrator(database).migrate()
         profiles = LlmProfileStore(database)
-        store = ConversationStore(database, profiles)
+        store = ConversationStore(database)
         // A new archive has no automatic Default collection, and these tests name one: create it the way
         // a person would rather than seeding a row the product no longer creates.
         CollectionStore(database).create("Default")
@@ -83,7 +83,7 @@ class ConversationStoreTest {
         )
 
         store.persistAsk(
-            collectionId, priced, "question", "initial [S999]", listOf(evidence),
+            collectionId, priced, defaultTestPrompt(), "question", "initial [S999]", listOf(evidence),
             initialUsage = TokenUsage(11, 13, 17),
             initialCitations = CitationValidation(emptyList(), listOf("S999")),
             retrievalSnapshot = "{\"mode\":\"HYBRID\",\"topHits\":30,\"maxEvidence\":12}",
@@ -155,7 +155,7 @@ class ConversationStoreTest {
         )
 
         store.persistAsk(
-            collectionId, askProfile, "question", "answer [S1]", listOf(evidence),
+            collectionId, askProfile, defaultTestPrompt(), "question", "answer [S1]", listOf(evidence),
             initialUsage = TokenUsage(1, 2, 0),
             initialCitations = CitationValidation(listOf("S1"), emptyList()),
             retrievalSnapshot = "{\"mode\":\"HYBRID\"}",
@@ -180,5 +180,58 @@ class ConversationStoreTest {
         }
         assertEquals("unit-42", reopened.first)
         assertEquals(SourceLocation.TextLines(3, 4), Json.decodeFromString<SourceLocation>(reopened.second))
+    }
+
+    @Test
+    fun `persistAsk stores the prompt id, name, version and body of the conversation`() {
+        val askProfile = profile("prompt-snapshot")
+        profiles.create(askProfile)
+        val collectionId = database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT id FROM collections WHERE name = 'Default'").use { rows -> rows.next(); CollectionId(rows.getString(1)) }
+            }
+        }
+        val prompt = ResolvedPrompt(id = "prompt-7", name = "Short", version = 4, body = "Answer in one line.")
+
+        store.persistAsk(
+            collectionId, askProfile, prompt, "question", "answer", emptyList(),
+            initialUsage = TokenUsage(1, 2, 0),
+            initialCitations = CitationValidation(emptyList(), emptyList()),
+        )
+
+        val stored = database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT prompt_id, prompt_name, prompt_version, prompt_body FROM conversations").use { rows ->
+                    rows.next(); listOf(rows.getString(1), rows.getString(2), rows.getInt(3), rows.getString(4))
+                }
+            }
+        }
+        assertEquals(listOf("prompt-7", "Short", 4, "Answer in one line."), stored)
+    }
+
+    @Test
+    fun `persistAsk stores the shipped Default with a null prompt id`() {
+        val askProfile = profile("default-snapshot")
+        profiles.create(askProfile)
+        val collectionId = database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT id FROM collections WHERE name = 'Default'").use { rows -> rows.next(); CollectionId(rows.getString(1)) }
+            }
+        }
+
+        store.persistAsk(
+            collectionId, askProfile, defaultTestPrompt(), "question", "answer", emptyList(),
+            initialUsage = TokenUsage(1, 2, 0),
+            initialCitations = CitationValidation(emptyList(), emptyList()),
+        )
+
+        val stored = database.read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT prompt_id, prompt_name FROM conversations WHERE profile_name = 'default-snapshot'").use { rows ->
+                    rows.next(); listOf(rows.getString(1), rows.getString(2))
+                }
+            }
+        }
+        assertEquals(listOf<String?>(null, "Default"), stored)
     }
 }

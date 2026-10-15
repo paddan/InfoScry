@@ -15,6 +15,7 @@ import infoscry.config.AppPaths
 import infoscry.domain.CollectionId
 import infoscry.llm.AnthropicClient
 import infoscry.llm.LlmProvider
+import infoscry.llm.LlmPromptRole
 import infoscry.llm.OpenAiCompatibleClient
 import infoscry.llm.PromptService
 import infoscry.llm.requireDispatchable
@@ -43,18 +44,21 @@ class AskCommand : CliktCommand(name = "ask") {
             } catch (refused: IllegalArgumentException) {
                 throw CliFailure(refused.message ?: "the LLM profile '$profile' is disabled", refused)
             }
-            val service = AskService(open.search, PromptService(open.llm), client = { p ->
+            val service = AskService(open.search, PromptService(), client = { p ->
                 when (p.provider) {
                     LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(p, System::getenv)
                     LlmProvider.ANTHROPIC -> AnthropicClient(p, System::getenv)
                 }
             }, persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
-                open.conversations.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+                open.conversations.persistAsk(ask.collectionId, ask.profile, ask.prompt, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
             })
             runBlocking {
                 val events = mutableListOf<AskEvent>()
                 val streamed = StringBuilder()
-                service.ask(AskRequest(CollectionId(open.collectionService.requireActiveByNameOrId(collection).id.value), question, selected)).collect { event ->
+                val collectionId = CollectionId(open.collectionService.requireActiveByNameOrId(collection).id.value)
+                // The prompt option arrives with the prompt CLI task; until then the collection default is used.
+                val prompt = open.collectionPrompts.resolve(collectionId, LlmPromptRole.ASK, null)
+                service.ask(AskRequest(collectionId, question, selected, prompt)).collect { event ->
                     if (options.json) events += event else when (event) {
                         is AskEvent.Delta -> { streamed.append(event.text); echo(event.text, trailingNewline = false) }
                         is AskEvent.Citation -> echo(" [${event.evidenceId}]")

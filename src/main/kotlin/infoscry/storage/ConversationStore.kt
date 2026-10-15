@@ -5,7 +5,7 @@ import infoscry.ask.CorrectionSnapshot
 import infoscry.ask.Evidence
 import infoscry.domain.CollectionId
 import infoscry.llm.LlmProfile
-import infoscry.llm.LlmPromptRole
+import infoscry.llm.ResolvedPrompt
 import java.sql.Connection
 import java.util.UUID
 import kotlinx.serialization.encodeToString
@@ -19,7 +19,7 @@ import kotlinx.serialization.json.Json
  * [persistAsk] is Ask-specific — Investigate's own turn-by-turn writes are
  * [InvestigationLedgerStore]'s.
  */
-class ConversationStore(private val database: Database, private val profiles: LlmProfileStore) {
+class ConversationStore(private val database: Database) {
 
     /**
      * Durable Ask snapshot; payloads contain source snippets but never credentials. Returns the
@@ -28,6 +28,7 @@ class ConversationStore(private val database: Database, private val profiles: Ll
     fun persistAsk(
         collectionId: CollectionId,
         profile: LlmProfile,
+        prompt: ResolvedPrompt,
         question: String,
         answer: String,
         evidence: List<Evidence>,
@@ -39,24 +40,23 @@ class ConversationStore(private val database: Database, private val profiles: Ll
         val conversationId = UUID.randomUUID().toString()
         val callId = UUID.randomUUID().toString()
         val persistedAnswer = correction?.answer ?: answer
-        val promptVersion = profiles.effectivePromptVersion(LlmPromptRole.ASK)
         database.transaction { connection ->
-            connection.prepareStatement("INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,retrieval_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)").use { s ->
-                listOf(conversationId, collectionId.value, "ASK", profile.provider.name, profile.endpoint, profile.model, profile.name, promptVersion.toString(), retrievalSnapshot, Instants.now()).forEachIndexed { i, v -> s.setString(i + 1, v) }; s.executeUpdate()
+            connection.prepareStatement("INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,prompt_id,prompt_name,prompt_body,retrieval_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
+                listOf(conversationId, collectionId.value, "ASK", profile.provider.name, profile.endpoint, profile.model, profile.name, prompt.version.toString(), prompt.id, prompt.name, prompt.body, retrievalSnapshot, Instants.now()).forEachIndexed { i, v -> s.setString(i + 1, v) }; s.executeUpdate()
             }
             connection.prepareStatement("INSERT INTO messages (id,conversation_id,seq,role,content,created_at) VALUES (?,?,?,?,?,?)").use { s ->
                 listOf(UUID.randomUUID().toString() to question, UUID.randomUUID().toString() to persistedAnswer).forEachIndexed { i, pair -> s.setString(1,pair.first); s.setString(2,conversationId); s.setInt(3,i); s.setString(4,if(i==0) "user" else "assistant"); s.setString(5,pair.second); s.setString(6,Instants.now()); s.addBatch() }; s.executeBatch()
             }
             val initialCost = cost(profile, initialUsage)
             connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
-                listOf(callId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,promptVersion.toString(),Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,initialUsage.inputTokens); s.setLong(12,initialUsage.outputTokens); s.setLong(13,initialUsage.cacheReadTokens); s.setDouble(14,initialCost); s.executeUpdate()
+                listOf(callId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,prompt.version.toString(),Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,initialUsage.inputTokens); s.setLong(12,initialUsage.outputTokens); s.setLong(13,initialUsage.cacheReadTokens); s.setDouble(14,initialCost); s.executeUpdate()
             }
             persistCitationAudit(connection, conversationId, callId, evidence, initialCitations)
             val correctionUsage = correction?.usage
             correction?.let { c ->
                 val correctionId = UUID.randomUUID().toString(); val correctionCost = cost(profile, c.usage)
                 connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd,correction_of) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
-                    listOf(correctionId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,promptVersion.toString(),Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,c.usage.inputTokens); s.setLong(12,c.usage.outputTokens); s.setLong(13,c.usage.cacheReadTokens); s.setDouble(14,correctionCost); s.setString(15,callId); s.executeUpdate()
+                    listOf(correctionId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,prompt.version.toString(),Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,c.usage.inputTokens); s.setLong(12,c.usage.outputTokens); s.setLong(13,c.usage.cacheReadTokens); s.setDouble(14,correctionCost); s.setString(15,callId); s.executeUpdate()
                 }
                 persistCitationAudit(connection, conversationId, correctionId, evidence, c.citations)
             }

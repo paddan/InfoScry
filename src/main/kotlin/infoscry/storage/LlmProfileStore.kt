@@ -8,7 +8,6 @@ import infoscry.llm.LlmCapabilityProbe
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
-import infoscry.llm.ShippedPrompts
 import infoscry.llm.ValidEnvironmentVariableName
 import infoscry.llm.endpointCarriesUserInfo
 import infoscry.llm.sanitizedEndpoint
@@ -35,9 +34,6 @@ class LastLlmProfileException : ApiFaultException(
     "LAST_LLM_PROFILE",
     "the last LLM profile cannot be deleted",
 )
-
-/** The shipped default body is version 1. */
-private const val SHIPPED_PROMPT_VERSION = 1
 
 /**
  * Persistence for LLM profiles and per-role profile defaults. Prompt bodies are not stored here:
@@ -286,12 +282,6 @@ class LlmProfileStore(private val database: Database) {
         }
         profile
     }
-
-    /** The shipped Default body for a role; overrides were removed with the collection prompts. */
-    fun effectiveBody(role: LlmPromptRole): String = ShippedPrompts.body(role)
-
-    /** The prompt version of the shipped Default body, which is always 1. Task 3 removes this with its callers. */
-    fun effectivePromptVersion(role: LlmPromptRole): Int = SHIPPED_PROMPT_VERSION
 
     private fun readProfile(results: ResultSet): LlmProfile {
         val storedEndpoint = results.getString("endpoint") ?: ""

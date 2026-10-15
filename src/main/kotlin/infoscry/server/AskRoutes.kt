@@ -11,6 +11,7 @@ import infoscry.llm.ConversationTitler
 import infoscry.llm.LlmProfile
 import infoscry.llm.OpenAiCompatibleClient
 import infoscry.llm.requireDispatchable
+import infoscry.llm.LlmPromptRole
 import infoscry.llm.PromptService
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -26,7 +27,7 @@ import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 
-@Serializable data class AskApiRequest(val collection: String, val question: String, val profile: String)
+@Serializable data class AskApiRequest(val collection: String, val question: String, val profile: String, val prompt: String? = null)
 
 fun Routing.configureAskRoutes(context: AppContext) {
     post("/api/ask") {
@@ -38,15 +39,17 @@ fun Routing.configureAskRoutes(context: AppContext) {
             // that was removed and has not been reviewed — is refused before any dispatch, as a 400 the
             // caller can act on rather than an answer from an address nobody chose.
             profile.requireDispatchable()
-            val prompt = PromptService(context.llm)
+            val collectionId = CollectionId(collection.id.value)
+            val prompt = context.collectionPrompts.resolve(collectionId, LlmPromptRole.ASK, body.prompt)
+            val promptService = PromptService()
             val titler = ConversationTitler(
-                prompt = prompt,
+                prompt = promptService,
                 persist = context.conversations::setConversationTitle,
             )
             var conversationId: String? = null
             val service = AskService(
                 context.search,
-                prompt,
+                promptService,
                 client = { selected ->
                     when (selected.provider) {
                         infoscry.llm.LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(selected, System::getenv)
@@ -54,12 +57,12 @@ fun Routing.configureAskRoutes(context: AppContext) {
                     }
                 },
                 persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
-                    context.conversations.persistAsk(ask.collectionId, ask.profile, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+                    context.conversations.persistAsk(ask.collectionId, ask.profile, ask.prompt, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
                         .also { conversationId = it }
                 },
             )
             call.respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {
-                service.ask(AskRequest(CollectionId(collection.id.value), body.question, profile)).collect { event ->
+                service.ask(AskRequest(collectionId, body.question, profile, prompt)).collect { event ->
                     // [conversationId] is only ever set by the persistence seam above, and persistence
                     // runs before the done event, so the reader can mark the row it just streamed.
                     write("data: ${ApiJson.encodeToString(event.toWire(conversationId))}\n\n".toByteArray(StandardCharsets.UTF_8)); flush()

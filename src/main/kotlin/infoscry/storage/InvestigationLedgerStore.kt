@@ -6,6 +6,7 @@ import infoscry.investigate.InvestigateHistory
 import infoscry.llm.LlmMessage
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmProvider
+import infoscry.llm.ResolvedPrompt
 import infoscry.llm.ToolCall
 import infoscry.llm.endpointCarriesUserInfo
 import infoscry.llm.sanitizedEndpoint
@@ -30,20 +31,22 @@ class InvestigationLedgerStore(private val database: Database, private val profi
         collectionId: CollectionId,
         profile: LlmProfile,
         mode: String = "INVESTIGATE",
-        promptVersion: Int,
+        prompt: ResolvedPrompt,
         retrievalSnapshot: String,
     ): String {
         val conversationId = UUID.randomUUID().toString()
         database.transaction { connection ->
             connection.prepareStatement(
-                "INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,retrieval_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,prompt_id,prompt_name,prompt_body,retrieval_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ).use { s ->
                 s.setString(1, conversationId); s.setString(2, collectionId.value)
                 s.setString(3, mode); s.setString(4, profile.provider.name)
                 s.setString(5, profile.endpoint.takeIf { it.isNotBlank() })
                 s.setString(6, profile.model); s.setString(7, profile.name)
-                s.setString(8, promptVersion.toString()); s.setString(9, retrievalSnapshot)
-                s.setString(10, Instants.now()); s.executeUpdate()
+                s.setString(8, prompt.version.toString()); s.setString(9, prompt.id)
+                s.setString(10, prompt.name); s.setString(11, prompt.body)
+                s.setString(12, retrievalSnapshot)
+                s.setString(13, Instants.now()); s.executeUpdate()
             }
         }
         return conversationId
@@ -233,12 +236,15 @@ class InvestigationLedgerStore(private val database: Database, private val profi
             val profileEndpoint: String?,
             val profileModel: String,
             val profileName: String,
+            val promptId: String?,
+            val promptName: String,
             val promptVersion: Int,
+            val promptBody: String,
             val retrievalSnapshot: String,
         )
 
         val conversation = connection.prepareStatement(
-            "SELECT collection_id, mode, profile_provider, profile_endpoint, profile_model, profile_name, prompt_version, retrieval_snapshot FROM conversations WHERE id = ?",
+            "SELECT collection_id, mode, profile_provider, profile_endpoint, profile_model, profile_name, prompt_id, prompt_name, prompt_version, prompt_body, retrieval_snapshot FROM conversations WHERE id = ?",
         ).use { statement ->
             statement.setString(1, conversationId)
             statement.executeQuery().use { results ->
@@ -250,7 +256,10 @@ class InvestigationLedgerStore(private val database: Database, private val profi
                     profileEndpoint = results.getString("profile_endpoint"),
                     profileModel = results.getString("profile_model"),
                     profileName = results.getString("profile_name"),
+                    promptId = results.getString("prompt_id"),
+                    promptName = results.getString("prompt_name"),
                     promptVersion = results.getInt("prompt_version"),
+                    promptBody = results.getString("prompt_body"),
                     retrievalSnapshot = results.getString("retrieval_snapshot"),
                 )
             }
@@ -382,7 +391,7 @@ class InvestigationLedgerStore(private val database: Database, private val profi
                 // then names the address this conversation stored.
                 enabled = profile.enabled && !repairedSnapshot,
             ),
-            promptVersion = conversation.promptVersion,
+            prompt = ResolvedPrompt(conversation.promptId, conversation.promptName, conversation.promptVersion, conversation.promptBody),
             retrievalSnapshot = conversation.retrievalSnapshot,
             messages = messages,
             evidenceIds = resolvedEvidence.map { it.evidenceId },

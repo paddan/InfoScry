@@ -389,7 +389,7 @@ class AppContext private constructor(
         blockers = blockers,
     )
 
-    private val promptService = PromptService(llm)
+    private val promptService = PromptService()
 
     val collectionPrompts: CollectionPromptService = CollectionPromptService(
         store = CollectionPromptStore(database),
@@ -619,7 +619,7 @@ class AppContext private constructor(
                     val importItems = ImportItemStore(database)
                     val mutations = MutationCoordinator()
                     val llm = LlmProfileStore(database)
-                    val conversations = ConversationStore(database, llm)
+                    val conversations = ConversationStore(database)
                     val investigationLedger = InvestigationLedgerStore(database, llm)
 
                     // The search index is part of the data directory, so every open has exactly one. It is

@@ -15,6 +15,7 @@ import infoscry.llm.LlmProfile
 import infoscry.llm.LlmRequest
 import infoscry.llm.LlmStreamingClient
 import infoscry.llm.PromptService
+import infoscry.llm.ResolvedPrompt
 import infoscry.llm.RequestBudget
 import infoscry.llm.TokenUsage
 import infoscry.llm.requireDispatchable
@@ -31,6 +32,8 @@ data class InvestigateRequest(
     val collectionId: CollectionId,
     val question: String,
     val profile: LlmProfile,
+    /** The prompt a new conversation locks; a continue uses the conversation's locked prompt instead. */
+    val prompt: ResolvedPrompt,
     val conversationId: String? = null,
     /** The current turn's research limits; a continue keeps its conversation locks but uses these. */
     val limits: InvestigationLimits = InvestigationLimits(),
@@ -41,7 +44,7 @@ data class InvestigateRequest(
 data class InvestigateHistory(
     val collectionId: CollectionId,
     val profile: LlmProfile,
-    val promptVersion: Int,
+    val prompt: ResolvedPrompt,
     val retrievalSnapshot: String,
     /** Prior turns in provider-neutral form, including tool-call structure. */
     val messages: List<LlmMessage>,
@@ -87,13 +90,13 @@ sealed interface InvestigateEvent {
  */
 interface InvestigatePersistence {
     /**
-     * Creates a conversation locked to [collectionId]/[profile]/[promptVersion]/[retrievalSnapshot]
+     * Creates a conversation locked to [collectionId]/[profile]/[prompt]/[retrievalSnapshot]
      * and returns its new id.
      */
     fun createConversation(
         collectionId: CollectionId,
         profile: LlmProfile,
-        promptVersion: Int,
+        prompt: ResolvedPrompt,
         retrievalSnapshot: String,
     ): String
 
@@ -171,10 +174,8 @@ private data class ToolCallKey(val name: String, val arguments: String)
 class InvestigationService(
     private val tools: InvestigationTools,
     private val prompt: PromptService,
-    private val promptVersion: Int,
     private val streamingClient: (LlmProfile) -> LlmStreamingClient,
     private val persistence: InvestigatePersistence,
-    private val collectionInstructions: (CollectionId) -> String? = { null },
     /**
      * Test seam: a fixed turn budget in milliseconds. Production passes null so each turn uses its
      * request's [InvestigationLimits.maxTurnSeconds].
@@ -208,12 +209,13 @@ class InvestigationService(
             return@flow
         }
 
-        // A conversation locks its collection, profile, prompt version and retrieval settings when it
+        // A conversation locks its collection, profile, prompt and retrieval settings when it
         // is created; a continue reuses the locked snapshot and ignores disagreeing request fields,
         // so a caller cannot switch collections mid-conversation.
         val collectionId = history?.collectionId ?: request.collectionId
         val profile = history?.profile ?: request.profile
-        val lockedPromptVersion = history?.promptVersion ?: promptVersion
+        val lockedPrompt = history?.prompt ?: request.prompt
+        val lockedPromptVersion = lockedPrompt.version
         val retrievalSnapshot = history?.retrievalSnapshot ?: RetrievalSnapshot.value()
 
         // A route checks this before it builds the service, but the profile this turn dispatches through is
@@ -233,7 +235,7 @@ class InvestigationService(
         val conversationId = request.conversationId ?: persistence.createConversation(
             collectionId = collectionId,
             profile = profile,
-            promptVersion = lockedPromptVersion,
+            prompt = lockedPrompt,
             retrievalSnapshot = retrievalSnapshot,
         )
         emit(InvestigateEvent.Started(conversationId, limits))
@@ -310,7 +312,7 @@ class InvestigationService(
         }
 
         try {
-            val systemPrompt = prompt.composeInvestigate(collectionInstructions(collectionId))
+            val systemPrompt = prompt.compose(lockedPrompt.body)
             val budget = RequestBudget(profile.contextWindow)
 
             val conversationMessages = mutableListOf<LlmMessage>()
