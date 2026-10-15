@@ -11,6 +11,7 @@ import infoscry.AppContext
 import infoscry.ask.AskEvent
 import infoscry.ask.AskRequest
 import infoscry.ask.AskService
+import infoscry.collection.InvalidPromptRequest
 import infoscry.config.AppPaths
 import infoscry.domain.CollectionId
 import infoscry.llm.AnthropicClient
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.collect
 class AskCommand : CliktCommand(name = "ask") {
     private val collection by option("--collection").required()
     private val profile by option("--profile").required()
+    private val promptRef by option("--prompt", help = "The Ask prompt's name or id (default: the collection default)")
     private val question by argument()
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
     private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
@@ -56,8 +58,11 @@ class AskCommand : CliktCommand(name = "ask") {
                 val events = mutableListOf<AskEvent>()
                 val streamed = StringBuilder()
                 val collectionId = CollectionId(open.collectionService.requireActiveByNameOrId(collection).id.value)
-                // The prompt option arrives with the prompt CLI task; until then the collection default is used.
-                val prompt = open.collectionPrompts.resolve(collectionId, LlmPromptRole.ASK, null)
+                val prompt = try {
+                    open.collectionPrompts.resolve(collectionId, LlmPromptRole.ASK, promptRef)
+                } catch (refused: InvalidPromptRequest) {
+                    throw CliFailure("no Ask prompt named or identified by '${promptRef ?: "default"}' in collection '$collection'", refused)
+                }
                 service.ask(AskRequest(collectionId, question, selected, prompt)).collect { event ->
                     if (options.json) events += event else when (event) {
                         is AskEvent.Delta -> { streamed.append(event.text); echo(event.text, trailingNewline = false) }

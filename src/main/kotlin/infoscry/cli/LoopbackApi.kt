@@ -1,13 +1,25 @@
 package infoscry.cli
 
+import infoscry.collection.CollectionPrompts
+import infoscry.collection.RolePrompts
 import infoscry.config.RuntimeInfo
+import infoscry.domain.CollectionId
 import infoscry.domain.Collection
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.llm.CollectionPrompt
+import infoscry.llm.LlmPromptRole
 import infoscry.server.ApiErrorResponse
 import infoscry.server.ApiJson
 import infoscry.server.CollectionResponse
+import infoscry.server.CollectionPromptsWire
 import infoscry.server.CollectionsResponse
+import infoscry.server.CreatePromptRequest
+import infoscry.server.PromptDefaultWire
+import infoscry.server.PromptWire
+import infoscry.server.RolePromptsWire
+import infoscry.server.SetPromptDefaultRequest
+import infoscry.server.UpdatePromptRequest
 import infoscry.server.CreateCollectionRequest
 import infoscry.server.IgnorePatternsBody
 import infoscry.server.ImportAcceptedResponse
@@ -18,6 +30,7 @@ import infoscry.server.ReindexAcceptedResponse
 import infoscry.server.SearchResponse
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.put
@@ -87,6 +100,76 @@ class LoopbackApi(
         }
         return ApiJson.decodeFromString<IgnorePatternsBody>(expect(response)).patterns
     }
+
+    /** The prompts of the collection named or identified by [collection], the shipped Default first in each role. */
+    suspend fun listPrompts(collection: String): CollectionPrompts {
+        val id = resolveCollectionId(collection)
+        val response = client.get("$base/api/collections/$id/prompts") { header() }
+        val wire = ApiJson.decodeFromString<CollectionPromptsWire>(expect(response))
+        val collectionId = CollectionId(id)
+        return CollectionPrompts(
+            coreRules = wire.coreRules,
+            ask = wire.ask.toDomain(collectionId, LlmPromptRole.ASK),
+            investigate = wire.investigate.toDomain(collectionId, LlmPromptRole.INVESTIGATE),
+        )
+    }
+
+    suspend fun createPrompt(collection: String, role: LlmPromptRole, name: String, body: String): CollectionPrompt {
+        val id = resolveCollectionId(collection)
+        val response = client.post("$base/api/collections/$id/prompts") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(CreatePromptRequest(role = role, name = name, body = body)))
+        }
+        return ApiJson.decodeFromString<PromptWire>(expect(response)).toDomain(CollectionId(id), role)
+    }
+
+    suspend fun updatePrompt(
+        collection: String,
+        role: LlmPromptRole,
+        promptId: String,
+        name: String,
+        body: String,
+    ): CollectionPrompt {
+        val id = resolveCollectionId(collection)
+        val response = client.put("$base/api/collections/$id/prompts/$promptId") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(UpdatePromptRequest(name = name, body = body)))
+        }
+        return ApiJson.decodeFromString<PromptWire>(expect(response)).toDomain(CollectionId(id), role)
+    }
+
+    suspend fun deletePrompt(collection: String, promptId: String) {
+        val id = resolveCollectionId(collection)
+        expect(client.delete("$base/api/collections/$id/prompts/$promptId") { header() })
+    }
+
+    /** Selects the default for [role]; the server answers with the id it now holds. */
+    suspend fun setPromptDefault(collection: String, role: LlmPromptRole, promptId: String): String {
+        val id = resolveCollectionId(collection)
+        val response = client.put("$base/api/collections/$id/prompt-defaults/${role.name.lowercase()}") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(SetPromptDefaultRequest(promptId = promptId)))
+        }
+        return ApiJson.decodeFromString<PromptDefaultWire>(expect(response)).defaultId
+    }
+
+    private fun RolePromptsWire.toDomain(collectionId: CollectionId, role: LlmPromptRole) = RolePrompts(
+        defaultId = defaultId,
+        prompts = prompts.map { it.toDomain(collectionId, role) },
+    )
+
+    private fun PromptWire.toDomain(collectionId: CollectionId, role: LlmPromptRole) = CollectionPrompt(
+        id = id,
+        collectionId = collectionId,
+        role = role,
+        name = name,
+        body = body,
+        version = version,
+        builtIn = builtIn,
+    )
 
     private suspend fun resolveCollectionId(reference: String): String {
         val all = listCollections()

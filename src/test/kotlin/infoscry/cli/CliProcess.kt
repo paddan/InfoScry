@@ -22,8 +22,11 @@ internal object CliProcess {
     fun run(
         vararg args: String,
         timeout: Long = DEFAULT_TIMEOUT_MILLIS,
+        stdin: String? = null,
     ): CliResult {
         val process = start(*args)
+        // Always closed, so a command that reads standard input sees its end instead of waiting forever.
+        process.outputStream.use { input -> stdin?.let { input.write(it.toByteArray(Charsets.UTF_8)) } }
         val stdout = Collections.synchronizedList(mutableListOf<String>())
         val stderr = Collections.synchronizedList(mutableListOf<String>())
         pump(process.inputStream, stdout)

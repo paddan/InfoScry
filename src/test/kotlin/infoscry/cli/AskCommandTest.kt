@@ -69,4 +69,52 @@ class AskCommandTest {
         assertEquals("corrected [S1]", correctedTail("initial [S999]", "corrected [S1]"))
         assertEquals(null, correctedTail("same text [S1]", "same text [S1]"))
     }
+
+    @Test
+    fun `ask --prompt Unknown fails with a message naming the prompt`() {
+        addProfile("asker", endpoint = "http://127.0.0.1:1")
+
+        val result = CliProcess.run(
+            "ask", "--data-dir", directory.toString(),
+            "--collection", "Default", "--profile", "asker", "--prompt", "Unknown", "question",
+        )
+
+        assertNotEquals(0, result.exitCode)
+        assertContains(result.stdout + result.stderr, "Unknown")
+        assertFalse(result.stderr.contains("Exception in thread"), "a refusal is a message, not a stack trace")
+    }
+
+    @Test
+    fun `ask --prompt Short resolves the stored prompt instead of refusing it`() {
+        // The answer itself needs a query embedder, which the CLI process does not have under test, so this
+        // checks only that the named prompt is found. Composing its body into the request is covered by the
+        // Ask service tests.
+        val short = directory.resolve("short.txt")
+        Files.writeString(short, "Answer in one sentence.")
+        val created = CliProcess.run(
+            "collection", "prompt", "create", "Default", "--data-dir", directory.toString(),
+            "--role", "ask", "--name", "Short", "--file", short.toString(),
+        )
+        assertEquals(0, created.exitCode, created.stderr)
+        addProfile("asker", endpoint = "http://127.0.0.1:1")
+
+        val result = CliProcess.run(
+            "ask", "--data-dir", directory.toString(),
+            "--collection", "Default", "--profile", "asker", "--prompt", "Short", "question",
+        )
+
+        assertFalse(
+            (result.stdout + result.stderr).contains("no Ask prompt named"),
+            "a stored prompt must be found by name: ${result.stderr}",
+        )
+    }
+
+    private fun addProfile(name: String, endpoint: String) {
+        val added = CliProcess.run(
+            "llm", "add", "--data-dir", directory.toString(),
+            "--name", name, "--provider", "openai-compatible", "--model", "test-model",
+            "--endpoint", endpoint,
+        )
+        assertEquals(0, added.exitCode, "adding the profile failed: stderr=${added.stderr}")
+    }
 }

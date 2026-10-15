@@ -1,6 +1,9 @@
 package infoscry.cli
 
+import infoscry.llm.LlmPromptRole
+import infoscry.llm.ShippedPrompts
 import infoscry.server.ApiJson
+import infoscry.server.PromptWire
 import infoscry.server.CollectionResponse
 import infoscry.server.CollectionsResponse
 import java.nio.file.Files
@@ -161,6 +164,103 @@ class CollectionCommandTest {
         assertNotEquals(0, nothing.exitCode, "an empty set must say --clear, not silently empty the list")
         assertNotEquals(0, unknown.exitCode)
         assertContains(CliProcess.run(*args("collection", "ignore", "Acme", "list")).stdout, ".DS_Store")
+    }
+
+    @Test
+    fun `create from file then list shows it`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val file = dataDir.resolve("short.txt")
+        Files.writeString(file, "Answer in one sentence.")
+
+        val created = CliProcess.run(*args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Short", "--file", file.toString()))
+        val listed = CliProcess.run(*args("collection", "prompt", "list", "Acme", "--role", "ask"))
+
+        assertEquals(0, created.exitCode, created.stderr)
+        assertEquals(0, listed.exitCode, listed.stderr)
+        assertContains(listed.stdout, "Short\t1")
+    }
+
+    @Test
+    fun `create from stdin with dash`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+
+        val created = CliProcess.run(
+            *args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Piped", "--file", "-"),
+            stdin = "Piped body.",
+        )
+        val shown = CliProcess.run(*args("collection", "prompt", "show", "Acme", "--role", "ask", "--prompt", "Piped"))
+
+        assertEquals(0, created.exitCode, created.stderr)
+        assertEquals("Piped body.", shown.stdout.trim())
+    }
+
+    @Test
+    fun `a CRLF file is stored with LF and re-sending the same text is not a new version`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val crlf = dataDir.resolve("crlf.txt")
+        Files.writeString(crlf, "Line one\r\nLine two")
+        val lf = dataDir.resolve("lf.txt")
+        Files.writeString(lf, "Line one\nLine two")
+
+        val created = CliProcess.run(*args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Lines", "--file", crlf.toString()))
+        val shown = CliProcess.run(*args("collection", "prompt", "show", "Acme", "--role", "ask", "--prompt", "Lines", "--json"))
+        val updated = CliProcess.run(*args("collection", "prompt", "update", "Acme", "--role", "ask", "--prompt", "Lines", "--file", lf.toString()))
+        val afterUpdate = CliProcess.run(*args("collection", "prompt", "show", "Acme", "--role", "ask", "--prompt", "Lines", "--json"))
+
+        assertEquals(0, created.exitCode, created.stderr)
+        assertEquals("Line one\nLine two", ApiJson.decodeFromString<PromptWire>(shown.stdout.trim()).body)
+        assertEquals(0, updated.exitCode, updated.stderr)
+        assertEquals(1, ApiJson.decodeFromString<PromptWire>(afterUpdate.stdout.trim()).version)
+    }
+
+    @Test
+    fun `show without --prompt prints the collection default body`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val file = dataDir.resolve("short.txt")
+        Files.writeString(file, "Answer in one sentence.")
+        CliProcess.run(*args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Short", "--file", file.toString()))
+
+        val before = CliProcess.run(*args("collection", "prompt", "show", "Acme", "--role", "ask"))
+        CliProcess.run(*args("collection", "prompt", "use", "Acme", "--role", "ask", "--prompt", "Short"))
+        val after = CliProcess.run(*args("collection", "prompt", "show", "Acme", "--role", "ask"))
+
+        assertEquals(ShippedPrompts.body(LlmPromptRole.ASK).trim(), before.stdout.trim())
+        assertEquals("Answer in one sentence.", after.stdout.trim())
+    }
+
+    @Test
+    fun `use Default resets the collection to the shipped prompt`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val file = dataDir.resolve("short.txt")
+        Files.writeString(file, "Answer in one sentence.")
+        CliProcess.run(*args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Short", "--file", file.toString()))
+        CliProcess.run(*args("collection", "prompt", "use", "Acme", "--role", "ask", "--prompt", "Short"))
+
+        val reset = CliProcess.run(*args("collection", "prompt", "use", "Acme", "--role", "ask", "--prompt", "Default"))
+        val shown = CliProcess.run(*args("collection", "prompt", "show", "Acme", "--role", "ask"))
+        val listed = CliProcess.run(*args("collection", "prompt", "list", "Acme", "--role", "ask"))
+
+        assertEquals(0, reset.exitCode, reset.stderr)
+        assertEquals(ShippedPrompts.body(LlmPromptRole.ASK).trim(), shown.stdout.trim())
+        assertContains(listed.stdout, "Default\t1\t(default)")
+    }
+
+    @Test
+    fun `delete twice exits 0 and the Default prompt cannot be deleted`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val file = dataDir.resolve("short.txt")
+        Files.writeString(file, "Answer in one sentence.")
+        CliProcess.run(*args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Short", "--file", file.toString()))
+
+        val first = CliProcess.run(*args("collection", "prompt", "delete", "Acme", "--role", "ask", "--prompt", "Short"))
+        val second = CliProcess.run(*args("collection", "prompt", "delete", "Acme", "--role", "ask", "--prompt", "Short"))
+        val defaultDelete = CliProcess.run(*args("collection", "prompt", "delete", "Acme", "--role", "ask", "--prompt", "Default"))
+        val listed = CliProcess.run(*args("collection", "prompt", "list", "Acme", "--role", "ask"))
+
+        assertEquals(0, first.exitCode, first.stderr)
+        assertEquals(0, second.exitCode, second.stderr)
+        assertNotEquals(0, defaultDelete.exitCode)
+        assertTrue(!listed.stdout.contains("Short"), "the deleted prompt must not be listed: ${listed.stdout}")
     }
 
     private fun args(vararg extra: String): Array<String> =

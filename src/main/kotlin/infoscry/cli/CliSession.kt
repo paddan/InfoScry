@@ -1,11 +1,14 @@
 package infoscry.cli
 
 import infoscry.AppContext
+import infoscry.collection.CollectionPrompts
 import infoscry.config.AppPaths
 import infoscry.config.RuntimeInfo
 import infoscry.domain.Collection
 import infoscry.domain.Job
 import infoscry.domain.JobId
+import infoscry.llm.CollectionPrompt
+import infoscry.llm.LlmPromptRole
 
 /**
  * Where a CLI command does its work: in this process, or through the server that already owns the data
@@ -34,6 +37,25 @@ sealed interface CliSession : AutoCloseable {
     /** Replaces the ignore patterns of [collection]; an invalid pattern fails and changes nothing. */
     suspend fun setIgnorePatterns(collection: String, patterns: List<String>): List<String>
 
+    /** Every prompt of [collection] by role, with the shipped Default first in each role. */
+    suspend fun listPrompts(collection: String): CollectionPrompts
+
+    suspend fun createPrompt(collection: String, role: LlmPromptRole, name: String, body: String): CollectionPrompt
+
+    suspend fun updatePrompt(
+        collection: String,
+        role: LlmPromptRole,
+        promptId: String,
+        name: String,
+        body: String,
+    ): CollectionPrompt
+
+    /** Deletes a stored prompt; deleting one that is already gone succeeds. */
+    suspend fun deletePrompt(collection: String, promptId: String)
+
+    /** Selects the default prompt for [role] and returns the id now selected. */
+    suspend fun setPromptDefault(collection: String, role: LlmPromptRole, promptId: String): String
+
     suspend fun listJobs(limit: Int): List<Job>
 
     /** Persists the cancellation request and, when this process owns the attempt, interrupts it. */
@@ -57,6 +79,41 @@ sealed interface CliSession : AutoCloseable {
                 context.collectionService.requireActiveByNameOrId(collection).id,
                 patterns,
             ).patterns
+
+        override suspend fun listPrompts(collection: String): CollectionPrompts =
+            context.collectionPrompts.list(context.collectionService.requireActiveByNameOrId(collection).id)
+
+        override suspend fun createPrompt(collection: String, role: LlmPromptRole, name: String, body: String): CollectionPrompt =
+            context.collectionPrompts.create(
+                context.collectionService.requireActiveByNameOrId(collection).id,
+                role,
+                name,
+                body,
+            ).prompt
+
+        override suspend fun updatePrompt(
+            collection: String,
+            role: LlmPromptRole,
+            promptId: String,
+            name: String,
+            body: String,
+        ): CollectionPrompt = context.collectionPrompts.update(
+            context.collectionService.requireActiveByNameOrId(collection).id,
+            promptId,
+            name,
+            body,
+        )
+
+        override suspend fun deletePrompt(collection: String, promptId: String) {
+            context.collectionPrompts.delete(context.collectionService.requireActiveByNameOrId(collection).id, promptId)
+        }
+
+        override suspend fun setPromptDefault(collection: String, role: LlmPromptRole, promptId: String): String =
+            context.collectionPrompts.setDefault(
+                context.collectionService.requireActiveByNameOrId(collection).id,
+                role,
+                promptId,
+            )
 
         override suspend fun listJobs(limit: Int): List<Job> = context.jobs.list(limit = limit)
 
@@ -83,6 +140,24 @@ sealed interface CliSession : AutoCloseable {
 
         override suspend fun setIgnorePatterns(collection: String, patterns: List<String>): List<String> =
             api.setIgnorePatterns(collection, patterns)
+
+        override suspend fun listPrompts(collection: String): CollectionPrompts = api.listPrompts(collection)
+
+        override suspend fun createPrompt(collection: String, role: LlmPromptRole, name: String, body: String): CollectionPrompt =
+            api.createPrompt(collection, role, name, body)
+
+        override suspend fun updatePrompt(
+            collection: String,
+            role: LlmPromptRole,
+            promptId: String,
+            name: String,
+            body: String,
+        ): CollectionPrompt = api.updatePrompt(collection, role, promptId, name, body)
+
+        override suspend fun deletePrompt(collection: String, promptId: String) = api.deletePrompt(collection, promptId)
+
+        override suspend fun setPromptDefault(collection: String, role: LlmPromptRole, promptId: String): String =
+            api.setPromptDefault(collection, role, promptId)
 
         override suspend fun listJobs(limit: Int): List<Job> = api.listJobs(limit)
 
