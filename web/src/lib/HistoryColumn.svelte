@@ -2,7 +2,8 @@
   /** Conversation history disclosure in the workspace sidebar. */
 
   export let label: string;
-  export let entries: { id: string; title: string }[] = [];
+  /** `promptName` is shown beside the title only when it is not the shipped Default. */
+  export let entries: { id: string; title: string; promptName?: string }[] = [];
   export let openId: string | null = null;
   export let loading = false;
   /** A live Investigate turn owns the selection; the rows, New and delete wait until done. */
@@ -31,7 +32,7 @@
               aria-current={entry.id === openId}
               disabled={disabled}
               onclick={() => onSelect(entry.id)}
-            >{entry.title}</button>
+            >{entry.title}{#if entry.promptName !== undefined && entry.promptName !== 'Default'}<span class="history-prompt">{entry.promptName}</span>{/if}</button>
             <button
               type="button"
               class="history-delete"
@@ -95,6 +96,7 @@
     cursor: pointer;
   }
   .history-row:hover { background: #1c2020; }
+  .history-prompt { display: block; color: #929997; font-size: 0.78rem; margin-top: 0.15rem; }
   .history-row[aria-current="true"] { background: #242827; box-shadow: inset 2px 0 #c4a77d; color: #f3e6d1; }
   /* Always visible, sibling to the title button: keyboard- and touch-reachable without a hover state. */
   .history-delete {

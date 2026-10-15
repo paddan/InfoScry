@@ -585,6 +585,16 @@
     }
   }
 
+  /** The prompt the open Investigate conversation was started with; its continued turns keep it. */
+  $: investigateLockedPromptName = investigateConversations.find((item) => item.id === investigateConversationId)?.promptName ?? null;
+
+  /** Manage prompts: Admin → Collections with that collection selected, through the same selection Admin uses. */
+  function openPromptManagement(collectionId: string): void {
+    selectManagedCollection(collectionId);
+    adminTab = 'COLLECTIONS';
+    selectMode('ADMIN');
+  }
+
   $: selectedInvestigateProfile = investigateProfiles.find((profile) => profile.name === investigateProfile) ?? null;
   $: investigateRemedy = selectedInvestigateProfile === null ? null : toolCallingRemedy(toolCallingState(selectedInvestigateProfile));
 
@@ -886,7 +896,7 @@
       {#if activeMode === 'INVESTIGATE'}
         <HistoryColumn
           label="Conversation history"
-          entries={investigateConversations.map((item) => ({ id: item.id, title: item.title || item.question || 'Untitled conversation' }))}
+          entries={investigateConversations.map((item) => ({ id: item.id, title: item.title || item.question || 'Untitled conversation', promptName: item.promptName }))}
           openId={investigateConversationId}
           loading={loadingInvestigationList}
           disabled={investigateWorking}
@@ -897,7 +907,7 @@
       {:else if activeMode === 'ASK'}
         <HistoryColumn
           label="Ask history"
-          entries={askEntries.map((item) => ({ id: item.id, title: item.title }))}
+          entries={askEntries.map((item) => ({ id: item.id, title: item.title, promptName: item.promptName }))}
           openId={askConversationId}
           loading={loadingAskHistory}
           onSelect={openAskConversation}
@@ -1115,8 +1125,8 @@
       </div>
 
     {#key selectedCollectionId}
-      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onOpenSource={(evidence) => openEvidence(evidence, evidenceHit(evidence))} /></div>
-      <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} effortLevel={investigateEffort} onResolvedLimits={handleResolvedLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} onOpenSource={openInvestigationSource} /></div>
+      <div id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden={activeMode !== 'ASK'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<AskPanel collectionId={selectedCollectionId} bind:askProfile bind:availableProfiles={askProfiles} bind:profileStatus={askProfileStatus} bind:conversationId={askConversationId} entries={askEntries} onAnswerStored={handleAskStored} onAskStarted={handleAskStarted} onAnswerFinished={handleAskFinished} onManagePrompts={openPromptManagement} onOpenSource={(evidence) => openEvidence(evidence, evidenceHit(evidence))} /></div>
+      <div id="panel-investigate" role="tabpanel" aria-labelledby="tab-investigate" hidden={activeMode !== 'INVESTIGATE'}>{#if deleteError !== null}<p role="alert">{deleteError}</p>{/if}<InvestigatePanel collectionId={selectedCollectionId} bind:conversationId={investigateConversationId} onConversationStarted={handleInvestigationStarted} onConversationFinished={handleInvestigationFinished} onWorkingChanged={handleInvestigateWorking} effortLevel={investigateEffort} onResolvedLimits={handleResolvedLimits} bind:profile={investigateProfile} bind:availableProfiles={investigateProfiles} bind:profileStatus={investigateProfileStatus} conversationPromptName={investigateLockedPromptName} onManagePrompts={openPromptManagement} onOpenSource={openInvestigationSource} /></div>
     {/key}
     </div>
     </div>

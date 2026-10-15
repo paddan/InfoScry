@@ -144,6 +144,62 @@ describe('app shell', () => {
     }
   });
 
+  it('Manage prompts opens Admin Collections with the workspace collection selected', async () => {
+    stubFetch({ list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall')] }) });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Nightfall 0 documents' }));
+    await fireEvent.click(screen.getByRole('tab', { name: 'Search' }));
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Manage prompts' }));
+
+    expect(screen.getByRole('tab', { name: 'Admin' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'Collections' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Default 0 documents' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Nightfall 0 documents' }).getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('shows the prompt name in Ask history only when it is not Default', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      asks: () => jsonResponse({
+        asks: [
+          { ...askHistoryEntry('ask-1', 'The signer', 'Who signed it?'), promptName: 'Board tone' },
+          { ...askHistoryEntry('ask-2', 'The date', 'When?'), promptName: 'Default' },
+        ],
+      }),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    const history = await screen.findByRole('navigation', { name: 'Ask history' });
+    await fireEvent.click(within(history).getByText('Conversation history', { selector: 'summary' }));
+
+    expect(await within(history).findByText('Board tone')).toBeTruthy();
+    expect(within(history).queryByText('Default')).toBeNull();
+  });
+
+  it('shows the locked prompt name of an open Investigate conversation and disables the prompt select', async () => {
+    window.localStorage.setItem('infoscry-history:investigate:default', 'conv-1');
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      investigations: () => jsonResponse({
+        investigations: [{ ...investigationSummary('conv-1', 'The treaty'), promptName: 'Board tone' }],
+      }),
+      investigation: () => jsonResponse({ investigation: investigationHistory('conv-1', 'Who signed it?', 'Mira signed it.') }),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
+    const panel = screen.getByRole('tabpanel', { name: 'Investigate' });
+
+    // The select element changes when the locked name arrives, so each check reads it again.
+    await waitFor(() => expect((within(panel).getByLabelText('Prompt') as HTMLSelectElement).value).toBe('Board tone'));
+    expect((within(panel).getByLabelText('Prompt') as HTMLSelectElement).disabled).toBe(true);
+  });
+
   it('keeps the Admin view reachable before any collection exists', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [] }),
@@ -448,7 +504,7 @@ describe('app shell', () => {
     expect(await screen.findByText('No results found.')).toBeTruthy();
     finishSearch(jsonResponse({ hits: [hit('Default', 'Page 3')], staleFiltered: 0 }));
 
-    expect(screen.queryByText('Default')).toBeTruthy(); // Still present as the collection option.
+    expect(within(screen.getByLabelText('Collection')).getByText('Default')).toBeTruthy(); // Still present as the collection option.
     expect(screen.queryByText('Page 3')).toBeNull();
   });
 
@@ -1805,7 +1861,7 @@ describe('app shell', () => {
     expect(document.querySelector('.app-shell')?.classList.contains('source-open')).toBe(true);
     expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-ask?offset=0&limit=16384')).toBe(true);
     const askCall = calls.find((call) => call.url === '/api/ask');
-    expect(JSON.parse(String(askCall?.init?.body))).toEqual({ collection: 'default', question: 'What happened?', profile: 'Local' });
+    expect(JSON.parse(String(askCall?.init?.body))).toEqual({ collection: 'default', question: 'What happened?', profile: 'Local', prompt: 'default' });
     expect((askCall?.init?.headers as Record<string, string>)['X-InfoScry-Csrf']).toBe('session-token');
   });
 
@@ -2770,6 +2826,12 @@ function jsonResponse(body: unknown, status = 200): Response {
   } as unknown as Response;
 }
 
+/** A collection whose prompts are only the shipped Default, for both roles. */
+function defaultOnlyCollectionPrompts() {
+  const role = { defaultId: 'default', prompts: [{ id: 'default', name: 'Default', body: 'Default body', version: 1, builtIn: true }] };
+  return { coreRules: 'Core rules', ask: role, investigate: role };
+}
+
 function stubFetch(overrides: {
   list?: (url: string) => Response | Promise<Response>;
   documents?: (url: string) => Response | Promise<Response>;
@@ -2801,6 +2863,7 @@ function stubFetch(overrides: {
   rescanOperations?: (url: string) => Response | Promise<Response>;
   documentRevisions?: (url: string) => Response | Promise<Response>;
   session?: () => Response;
+  prompts?: (url: string) => Response | Promise<Response>;
 }) {
   const calls: { url: string; init?: RequestInit }[] = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2808,6 +2871,9 @@ function stubFetch(overrides: {
     calls.push({ url, init });
     if (url.endsWith('/api/session')) {
       return (overrides.session ?? (() => jsonResponse({ product: 'InfoScry', csrfToken: 'session-token' })))();
+    }
+    if (url.endsWith('/prompts') && (init?.method === undefined || init.method === 'GET')) {
+      return (overrides.prompts ?? (() => jsonResponse(defaultOnlyCollectionPrompts())))(url);
     }
     if (url.includes('/conversations/') && init?.method === 'DELETE') {
       return (overrides.deleteConversation ?? (() => jsonResponse({}, 204)))(url);

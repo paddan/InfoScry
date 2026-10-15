@@ -16,6 +16,7 @@
     type LlmProfilePrice,
   } from './api';
   import { DEFAULT_EFFORT_LEVEL, isEffortLevel } from './investigationLimits';
+  import PromptSelect from './PromptSelect.svelte';
   import type { EffortLevel, ResolvedInvestigationLimits } from './api';
 
   export let collectionId: string;
@@ -33,8 +34,17 @@
   /** The sidebar's per-question limits; each turn sends the snapshot this prop holds at submit. */
   export let effortLevel: EffortLevel = DEFAULT_EFFORT_LEVEL;
   export let onResolvedLimits: (snapshot: { profile: string; effortLevel: EffortLevel; limits: ResolvedInvestigationLimits }) => void = () => {};
+  /** The Manage prompts link: the page opens Admin → Collections on this collection. */
+  export let onManagePrompts: (collectionId: string) => void = () => {};
+  /** The prompt name the open conversation was started with; a continued conversation keeps it. */
+  export let conversationPromptName: string | null = null;
 
   let question = '';
+  /** The prompt id a new conversation starts with; undefined until the collection's prompts load. */
+  let promptId: string | undefined = undefined;
+  let promptSelect: PromptSelect;
+  /** A continued conversation is locked to the prompt it started with, so its select cannot change. */
+  $: promptLocked = conversationId !== null;
   let prices: LlmProfilePrice[] = [];
   let messages: InvestigateMessage[] = [];
   let evidence: InvestigateEvidence[] = [];
@@ -129,6 +139,8 @@
     if (text === '' || collectionId === '' || profile === '' || working || loadingHistory) return;
     if (!isEffortLevel(effortLevel)) return;
     const turnLimits = { effortLevel };
+    // A continued turn composes from the prompt the conversation stored; only a new one sends a choice.
+    const turnPrompt = conversationId === null ? promptId : undefined;
     // No in-flight history read may land over this turn's streamed messages.
     historyGeneration += 1;
     loadingHistory = false;
@@ -153,7 +165,7 @@
     const liveActivity = new Map<string, InvestigateActivity>();
     try {
       const response = conversationId === null
-        ? await startInvestigation(collectionId, text, turnProfile, signalController.signal, turnLimits)
+        ? await startInvestigation(collectionId, text, turnProfile, signalController.signal, turnLimits, turnPrompt)
         : await continueInvestigation(conversationId, collectionId, text, turnProfile, signalController.signal, turnLimits);
       for await (const event of readInvestigationEvents(response, signalController.signal)) {
         if (turn !== generation) return;
@@ -204,6 +216,8 @@
           finished = true;
           status = null;
           error = event.message;
+          // A refused prompt is reported on the stream; the list is read again so the default is selected.
+          if (event.code === 'INVALID_REQUEST') void promptSelect?.reload();
         }
       }
       // A stream that ends without a done or an error event is an interruption, never a completion:
@@ -214,7 +228,10 @@
         error = 'The investigation was interrupted before it finished. You can send another question.';
       }
     } catch (failure) {
-      if (turn === generation && !signalController.signal.aborted) error = describeTurnFailure(failure);
+      if (turn === generation && !signalController.signal.aborted) {
+        error = describeTurnFailure(failure);
+        if (failure instanceof ApiError && failure.code === 'INVALID_REQUEST') void promptSelect?.reload();
+      }
     } finally {
       activeControllers.delete(signalController);
       if (turn === generation) {
@@ -302,6 +319,17 @@
 <section aria-labelledby="investigate-heading">
   <h2 id="investigate-heading">Investigate</h2>
   {#if loadingHistory}<p role="status">Loading conversation…</p>{/if}
+  <div class="prompt-row">
+    <PromptSelect
+      bind:this={promptSelect}
+      collectionId={collectionId}
+      role="INVESTIGATE"
+      disabled={promptLocked}
+      lockedName={promptLocked ? conversationPromptName : null}
+      bind:value={promptId}
+    />
+    <button type="button" class="manage-prompts" onclick={() => onManagePrompts(collectionId)}>Manage prompts</button>
+  </div>
   <ol class="messages" aria-label="Conversation">
     {#each messages as message, index (`${index}-${message.role}`)}
       <li class:assistant={message.role === 'assistant'}>
@@ -350,6 +378,8 @@
   label, textarea { grid-column: 1 / -1; }
   textarea, button { font: inherit; padding: 0.45rem; }
   .meta { color: #555; font-size: 0.9rem; }
+  .prompt-row { align-items: end; display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; margin-top: 0.75rem; }
+  .manage-prompts { background: transparent; border: 0; color: #1558a6; cursor: pointer; font: inherit; padding: 0.45rem 0; text-decoration: underline; }
   .notice { background: #2b261d; border-left: 3px solid #c98a10; color: #f0d49f; margin: 0.75rem 0 0; padding: 0.4rem 0.6rem; }
   [role='alert'] { color: #a4232b; }
   @media (max-width: 38rem) { form { grid-template-columns: 1fr; } }
