@@ -95,6 +95,7 @@ class InvestigationRoutesTest {
         model: String = "model",
         inputPricePerMillion: Double = 0.0,
         outputPricePerMillion: Double = 0.0,
+        contextWindow: Int = 10_000,
     ) {
         harness.context.llm.create(
             LlmProfile(
@@ -102,7 +103,7 @@ class InvestigationRoutesTest {
                 name = name,
                 provider = LlmProvider.OPENAI_COMPATIBLE,
                 model = model,
-                contextWindow = 10_000,
+                contextWindow = contextWindow,
                 maxOutputTokens = 64,
                 inputPricePerMillion = inputPricePerMillion,
                 outputPricePerMillion = outputPricePerMillion,
@@ -886,6 +887,33 @@ class InvestigationRoutesTest {
             assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
             assertContains(response.bodyAsText(), "INVALID_REQUEST")
             assertEquals(0, fake.handledRequests, "a refused prompt must make no provider call")
+        }
+    }
+
+    @Test
+    fun `a prompt too large for the context window ends with the budget error and no provider call`() = runBlocking {
+        // The only call a failed turn can make is the conversation titler, which sends the opening question
+        // alone; the oversized prompt body must never reach the provider.
+        FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(stream = true, body = turnSse()),
+                FakeOpenAiResponse(statusCode = 200, body = titleCompletion("Huge")),
+            ),
+        ).use { fake ->
+            createProfile(endpoint = fake.url, contextWindow = 2_000)
+            val collection = harness.context.collectionService.requireActiveByNameOrId("Default")
+            harness.context.collectionPrompts.create(CollectionId(collection.id.value), LlmPromptRole.INVESTIGATE, "Huge", "x".repeat(20_000))
+
+            val response = harness.request(
+                HttpMethod.Post,
+                "/api/investigations",
+                body = createBody().dropLast(1) + ",\"prompt\":\"Huge\"}",
+                credential = Credential.BEARER,
+            )
+
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            assertContains(response.bodyAsText(), "\"code\":\"CONTEXT_BUDGET_EXCEEDED\"")
+            assertTrue(fake.requestBodies.none { it.contains("x".repeat(1_000)) }, "the oversized prompt must never reach a provider")
         }
     }
 
