@@ -87,6 +87,13 @@
   let investigatePrompt: string | undefined = undefined;
   let askPromptSelect: PromptSelect;
   let investigatePromptSelect: PromptSelect;
+  /** The collection the prompt choices above were made for; a choice never follows the workspace to another collection. */
+  let promptChoicesCollectionId = '';
+  $: if (selectedCollectionId !== promptChoicesCollectionId) {
+    promptChoicesCollectionId = selectedCollectionId;
+    askPrompt = undefined;
+    investigatePrompt = undefined;
+  }
   /** The collection Manage prompts asked Admin to show the Prompts section of; cleared once it is shown. */
   let promptsPendingFor: string | null = null;
   let askProfiles: LlmProfilePrice[] = [];

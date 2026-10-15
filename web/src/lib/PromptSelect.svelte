@@ -52,6 +52,8 @@
       if (value === undefined || !prompts.some((prompt) => prompt.id === value)) value = rolePrompts.defaultId;
     } catch (failure) {
       if (attempt !== generation || id !== collectionId) return;
+      // Without the list, no prompt can be vouched for: the new question uses the collection default.
+      value = undefined;
       loadError = failure instanceof Error && failure.message !== '' ? failure.message : 'Could not load prompts.';
     } finally {
       if (attempt === generation) loading = false;
@@ -71,7 +73,13 @@
       <option>{lockedName ?? 'Prompt locked'}</option>
     </select>
   {:else}
-    <select id={selectId} bind:value disabled={disabled || loading || prompts.length === 0}>
+    <!-- Not bind:value: a select with no chosen prompt would write its placeholder "" back as the choice. -->
+    <select
+      id={selectId}
+      value={value ?? ''}
+      onchange={(event) => { value = event.currentTarget.value === '' ? undefined : event.currentTarget.value; }}
+      disabled={disabled || loading || prompts.length === 0}
+    >
       {#if prompts.length === 0}<option value="">{loading ? 'Loading prompts…' : 'Prompts unavailable'}</option>{/if}
       {#each prompts as prompt (prompt.id)}<option value={prompt.id}>{prompt.name}</option>{/each}
     </select>

@@ -194,6 +194,63 @@ describe('app shell', () => {
     expect((screen.getByLabelText('Prompt') as HTMLSelectElement).disabled).toBe(true);
   });
 
+  it('never sends a prompt chosen in another collection while the new collection prompts are loading', async () => {
+    let releaseNightfall: (response: Response) => void = () => undefined;
+    const nightfallPrompts = new Promise<Response>((resolve) => { releaseNightfall = resolve; });
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default'), collection('Nightfall')] }),
+      prompts: (url) => (url.includes('/nightfall/') ? nightfallPrompts : jsonResponse(promptsWithBoardTone())),
+      ask: () => eventResponse([{ type: 'done', text: 'Answer.', evidence: [] }]),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await waitFor(() => expect(screen.getByRole('option', { name: 'Board tone' })).toBeTruthy());
+    await fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'p-board' } });
+
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    await fireEvent.change(screen.getByLabelText('Collection'), { target: { value: 'nightfall' } });
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'Still asking?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/ask')).toBe(true));
+    const askCall = calls.find((call) => call.url === '/api/ask');
+    expect(JSON.parse(String(askCall?.init?.body))).not.toHaveProperty('prompt');
+    releaseNightfall(jsonResponse(defaultOnlyCollectionPrompts()));
+  });
+
+  it('a refused prompt reads the list again and the next question uses the collection default', async () => {
+    let boardOffered = true;
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      prompts: () => jsonResponse(promptsWithBoardTone(boardOffered)),
+      ask: () => {
+        if (calls.filter((call) => call.url === '/api/ask').length === 1) {
+          boardOffered = false;
+          return jsonResponse({ error: { code: 'INVALID_REQUEST', message: 'no prompt with that name or id in this collection and role' } }, 400);
+        }
+        return eventResponse([{ type: 'done', text: 'Answer.', evidence: [] }]);
+      },
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
+    await waitFor(() => expect(screen.getByRole('option', { name: 'Board tone' })).toBeTruthy());
+    await fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'p-board' } });
+    await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'First?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+
+    await waitFor(() => expect((screen.getByLabelText('Prompt') as HTMLSelectElement).value).toBe('default'));
+    await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'Second?' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+
+    await waitFor(() => expect(calls.filter((call) => call.url === '/api/ask')).toHaveLength(2));
+    const bodies = calls.filter((call) => call.url === '/api/ask').map((call) => JSON.parse(String(call.init?.body)));
+    expect(bodies[0].prompt).toBe('p-board');
+    expect(bodies[1].prompt).toBe('default');
+  });
+
   it('shows the prompt name in Ask history only when it is not Default', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
@@ -2855,6 +2912,16 @@ function jsonResponse(body: unknown, status = 200): Response {
     statusText: '',
     text: async () => JSON.stringify(body),
   } as unknown as Response;
+}
+
+/** The Default plus a stored "Board tone" prompt for Ask; the stored one is left out once it is deleted. */
+function promptsWithBoardTone(boardOffered = true) {
+  const prompts = [
+    { id: 'default', name: 'Default', body: 'Default body', version: 1, builtIn: true },
+    ...(boardOffered ? [{ id: 'p-board', name: 'Board tone', body: 'Board body', version: 1, builtIn: false }] : []),
+  ];
+  const role = { defaultId: 'default', prompts };
+  return { coreRules: 'Core rules', ask: role, investigate: role };
 }
 
 /** A collection whose prompts are only the shipped Default, for both roles. */
