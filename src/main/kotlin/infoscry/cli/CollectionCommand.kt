@@ -14,6 +14,9 @@ import infoscry.collection.CollectionPrompts
 import infoscry.collection.RolePrompts
 import infoscry.jobs.IgnorePatterns
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
@@ -285,7 +288,7 @@ class ShowPromptCommand : CliktCommand(name = "show") {
         try {
             CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
                 val selected = selectPrompt(runBlocking { session.listPrompts(collection) }, role, prompt, collection)
-                if (options.json) echo(ApiJson.encodeToString(selected.toWire())) else writeExact(selected.body)
+                if (options.json) echo(ApiJson.encodeToString(selected.toWire())) else writeStdout(selected.body)
             }
         } catch (failure: Exception) {
             throw CliFailure(failure.message ?: "the prompt could not be shown", failure)
@@ -353,7 +356,7 @@ class UpdatePromptCommand : CliktCommand(name = "update") {
 
     override fun run() {
         val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
-        if (name == null && file == null) throw CliFailure("name --name or --file to change, or both")
+        if (name == null && file == null) throw CliFailure("Give --name or --file to change, or both.")
 
         try {
             val newBody = file?.let { readPromptBody(it) }
@@ -472,12 +475,24 @@ private fun CollectionPrompts.roleOf(role: LlmPromptRole): RolePrompts = when (r
     LlmPromptRole.INVESTIGATE -> investigate
 }
 
-/** Reads a prompt body: `-` is standard input. The text is UTF-8, and CRLF line endings are stored as LF. */
+/**
+ * Reads a prompt body: `-` is standard input. The bytes must be valid UTF-8 (rejected, not replaced), and CRLF line
+ * endings are stored as LF.
+ */
 private fun readPromptBody(file: String): String {
-    val text = try {
-        if (file == "-") String(System.`in`.readBytes(), Charsets.UTF_8) else Files.readString(Path.of(file))
+    val bytes = try {
+        if (file == "-") System.`in`.readBytes() else Files.readAllBytes(Path.of(file))
     } catch (failure: IOException) {
-        throw CliFailure("the prompt file '$file' could not be read as UTF-8 text", failure)
+        throw CliFailure("the prompt ${if (file == "-") "on standard input" else "file '$file'"} could not be read", failure)
+    }
+    val text = try {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+            .toString()
+    } catch (failure: CharacterCodingException) {
+        throw CliFailure("the prompt ${if (file == "-") "on standard input" else "file '$file'"} is not valid UTF-8 text", failure)
     }
     return text.replace("\r\n", "\n")
 }
@@ -487,17 +502,19 @@ private fun printPromptLines(prompts: CollectionPrompts, only: LlmPromptRole?) {
         val rolePrompts = prompts.roleOf(role)
         rolePrompts.prompts.forEach { prompt ->
             val columns = listOf(prompt.name, prompt.version.toString(), if (prompt.id == rolePrompts.defaultId) "(default)" else "")
-            writeExact((if (only == null) listOf(role.name.lowercase(Locale.ROOT)) + columns else columns).joinToString("\t"))
+            writeStdout((if (only == null) listOf(role.name.lowercase(Locale.ROOT)) + columns else columns).joinToString("\t") + "\n")
         }
     }
 }
 
 /**
- * Writes [text] exactly as given, tabs included. Clikt's terminal expands a tab to spaces, which would break the
- * TAB-separated columns of `list` and change a prompt body that contains a tab.
+ * Writes [text] to standard output as UTF-8, exactly as given: no added newline, tabs kept. Clikt's terminal expands
+ * a tab to spaces (seen in `list` output, where the TAB columns came back padded), and the JVM's stdout encoding
+ * depends on the locale when output is redirected, so the bytes are written directly.
  */
-private fun writeExact(text: String) {
-    println(text)
+private fun writeStdout(text: String) {
+    System.out.write(text.toByteArray(Charsets.UTF_8))
+    System.out.flush()
 }
 
 private fun CollectionPrompts.toWire() = CollectionPromptsWire(coreRules, ask.toWire(), investigate.toWire())

@@ -61,7 +61,10 @@ class AskCommand : CliktCommand(name = "ask") {
                 val prompt = try {
                     open.collectionPrompts.resolve(collectionId, LlmPromptRole.ASK, promptRef)
                 } catch (refused: InvalidPromptRequest) {
-                    throw CliFailure("no Ask prompt named or identified by '${promptRef ?: "default"}' in collection '$collection'", refused)
+                    // With a reference, the service refuses only a name or id it did not find; without one, its
+                    // message is the explanation.
+                    val reference = promptRef ?: throw CliFailure(refused.message ?: "the Ask prompt is not available", refused)
+                    throw CliFailure("no Ask prompt named or identified by '$reference' in collection '$collection'", refused)
                 }
                 service.ask(AskRequest(collectionId, question, selected, prompt)).collect { event ->
                     if (options.json) events += event else when (event) {

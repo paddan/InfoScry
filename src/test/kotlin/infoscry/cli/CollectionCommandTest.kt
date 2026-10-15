@@ -8,6 +8,7 @@ import infoscry.server.CollectionResponse
 import infoscry.server.CollectionsResponse
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -186,7 +187,7 @@ class CollectionCommandTest {
 
         val created = CliProcess.run(
             *args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Piped", "--file", "-"),
-            stdin = "Piped body.",
+            stdin = "Piped body.".toByteArray(Charsets.UTF_8),
         )
         val shown = CliProcess.run(*args("collection", "prompt", "show", "Acme", "--role", "ask", "--prompt", "Piped"))
 
@@ -261,6 +262,73 @@ class CollectionCommandTest {
         assertEquals(0, second.exitCode, second.stderr)
         assertNotEquals(0, defaultDelete.exitCode)
         assertTrue(!listed.stdout.contains("Short"), "the deleted prompt must not be listed: ${listed.stdout}")
+    }
+
+    @Test
+    fun `show prints the stored body byte for byte, with no added newline`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val body = "Svenska: åäö — kept.\n\tIndented line\n"
+        val file = dataDir.resolve("body.txt")
+        Files.write(file, body.toByteArray(Charsets.UTF_8))
+        CliProcess.run(*args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Exact", "--file", file.toString()))
+
+        val shown = showBytes("Acme", "--role", "ask", "--prompt", "Exact")
+
+        assertTrue(shown.contentEquals(body.toByteArray(Charsets.UTF_8)), "show must print the body exactly: ${String(shown, Charsets.UTF_8)}")
+    }
+
+    @Test
+    fun `show redirected to a file and sent back with update keeps the version`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val original = dataDir.resolve("original.txt")
+        Files.write(original, "Line one\nLine two\n".toByteArray(Charsets.UTF_8))
+        CliProcess.run(*args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Round", "--file", original.toString()))
+
+        val roundTrip = dataDir.resolve("round.txt")
+        Files.write(roundTrip, showBytes("Acme", "--role", "ask", "--prompt", "Round"))
+        val updated = CliProcess.run(*args("collection", "prompt", "update", "Acme", "--role", "ask", "--prompt", "Round", "--file", roundTrip.toString()))
+        val listed = CliProcess.run(*args("collection", "prompt", "list", "Acme", "--role", "ask"))
+
+        assertEquals(0, updated.exitCode, updated.stderr)
+        assertContains(listed.stdout, "Round\t1\t")
+        assertTrue(!listed.stdout.contains("Round\t2"), "a round trip must not create a new version: ${listed.stdout}")
+    }
+
+    @Test
+    fun `a file that is not valid UTF-8 is refused, not stored with replacement characters`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+        val bad = dataDir.resolve("bad.txt")
+        Files.write(bad, byteArrayOf(0x41, 0xFF.toByte(), 0x42))
+
+        val created = CliProcess.run(*args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Bad", "--file", bad.toString()))
+
+        assertNotEquals(0, created.exitCode)
+        assertContains(created.stderr, "not valid UTF-8")
+        assertTrue(!CliProcess.run(*args("collection", "prompt", "list", "Acme", "--role", "ask")).stdout.contains("Bad"))
+    }
+
+    @Test
+    fun `standard input that is not valid UTF-8 is refused`() {
+        CliProcess.run(*args("collection", "create", "Acme"))
+
+        val created = CliProcess.run(
+            *args("collection", "prompt", "create", "Acme", "--role", "ask", "--name", "Piped", "--file", "-"),
+            stdin = byteArrayOf(0x41, 0xFF.toByte()),
+        )
+
+        assertNotEquals(0, created.exitCode)
+        assertContains(created.stderr, "not valid UTF-8")
+    }
+
+    /** The exact bytes `show` writes to standard output, read without the line handling of [CliProcess.run]. */
+    private fun showBytes(vararg extra: String): ByteArray {
+        val process = CliProcess.start(*args("collection", "prompt", "show", *extra))
+        process.outputStream.close()
+        val bytes = process.inputStream.readBytes()
+        val errors = process.errorStream.readBytes()
+        assertTrue(process.waitFor(60, TimeUnit.SECONDS), "show did not finish")
+        assertEquals(0, process.exitValue(), String(errors, Charsets.UTF_8))
+        return bytes
     }
 
     private fun args(vararg extra: String): Array<String> =
