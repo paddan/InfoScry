@@ -3,7 +3,9 @@ package infoscry.collection
 import infoscry.AppContext
 import infoscry.domain.ApiStatus
 import infoscry.domain.CollectionId
+import infoscry.llm.CollectionPrompt
 import infoscry.llm.LlmPromptRole
+import infoscry.storage.CollectionPromptStore
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -69,6 +71,42 @@ class CollectionPromptServiceTest {
 
         assertEquals(ApiStatus.CONFLICT, error.apiStatus)
         assertEquals("PROMPT_NAME_TAKEN", error.code)
+    }
+
+    /**
+     * A store whose list reads miss a row another writer committed after the service's pre-check, so the
+     * write itself meets the schema's unique index.
+     */
+    private fun racingService(): CollectionPromptService {
+        val blindStore = object : CollectionPromptStore(context.database) {
+            override fun list(collectionId: CollectionId, role: LlmPromptRole): List<CollectionPrompt> = emptyList()
+        }
+        return CollectionPromptService(blindStore, context.collectionService, context.mutations) { "core rules" }
+    }
+
+    @Test
+    fun `a unique-index violation on create from a racing writer throws PromptNameTaken`() {
+        create("Minutes", "first body")
+
+        val error = assertFailsWith<PromptNameTaken> {
+            runBlocking { racingService().create(collectionId, LlmPromptRole.ASK, "Minutes", "other body") }
+        }
+
+        assertEquals(ApiStatus.CONFLICT, error.apiStatus)
+        assertEquals("PROMPT_NAME_TAKEN", error.code)
+    }
+
+    @Test
+    fun `a unique-index violation on update from a racing writer throws PromptNameTaken`() {
+        create("Minutes", "first body")
+        val other = create("Agenda", "second body").prompt
+
+        val error = assertFailsWith<PromptNameTaken> {
+            runBlocking { racingService().update(collectionId, other.id, "minutes", "second body") }
+        }
+
+        assertEquals("PROMPT_NAME_TAKEN", error.code)
+        assertEquals("Agenda", service.list(collectionId).ask.prompts.single { it.id == other.id }.name)
     }
 
     @Test

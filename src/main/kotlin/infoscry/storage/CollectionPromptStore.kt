@@ -11,10 +11,10 @@ import java.util.UUID
  * selected default prompt id. It does no validation; the service layer owns the rules, the reserved
  * name and repeat handling. Prompt bodies are user content and never appear in exception messages.
  */
-class CollectionPromptStore(private val database: Database) {
+open class CollectionPromptStore(private val database: Database) {
 
     /** Stored prompts for [collectionId] and [role], by name case-insensitively. The shipped Default is not included. */
-    fun list(collectionId: CollectionId, role: LlmPromptRole): List<CollectionPrompt> = database.read { connection ->
+    open fun list(collectionId: CollectionId, role: LlmPromptRole): List<CollectionPrompt> = database.read { connection ->
         connection.prepareStatement(
             "SELECT id, collection_id, role, name, body, version FROM collection_prompts " +
                 "WHERE collection_id = ? AND role = ? ORDER BY name COLLATE NOCASE",

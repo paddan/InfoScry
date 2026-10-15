@@ -9,6 +9,7 @@ import infoscry.llm.ResolvedPrompt
 import infoscry.llm.ShippedPrompts
 import infoscry.storage.CollectionPromptStore
 import infoscry.storage.MutationCoordinator
+import java.sql.SQLException
 import java.util.Locale
 
 /** A stored prompt's name is already used in this collection and role by a prompt with a different body. */
@@ -67,7 +68,7 @@ class CollectionPromptService(
             if (existing.body == body) return@withMutation PromptWrite(existing, created = false)
             throw PromptNameTaken()
         }
-        PromptWrite(store.insert(collectionId, role, cleanName, body), created = true)
+        PromptWrite(withNameConflictTranslated { store.insert(collectionId, role, cleanName, body) }, created = true)
     }
 
     suspend fun update(
@@ -89,7 +90,7 @@ class CollectionPromptService(
             it.id != promptId && sameName(it.name, cleanName)
         }
         if (clash != null) throw PromptNameTaken()
-        store.update(promptId, cleanName, body)
+        withNameConflictTranslated { store.update(promptId, cleanName, body) }
     }
 
     /** Deletes a stored prompt. A prompt that is already gone is not an error. */
@@ -183,6 +184,17 @@ class CollectionPromptService(
         if (body.codePointCount(0, body.length) > MAX_BODY_CHARS) {
             throw InvalidPromptRequest("a prompt body must be at most $MAX_BODY_CHARS characters")
         }
+    }
+
+    /**
+     * The schema's unique index on (collection, role, name) is the final authority on duplicate names. The
+     * pre-check can miss a row another process committed after it read, so the index violation is
+     * answered as [PromptNameTaken] rather than as a raw SQL error.
+     */
+    private fun <T> withNameConflictTranslated(write: () -> T): T = try {
+        write()
+    } catch (failure: SQLException) {
+        if (failure.message?.contains("UNIQUE", ignoreCase = true) == true) throw PromptNameTaken() else throw failure
     }
 
     private fun sameName(a: String, b: String): Boolean =
