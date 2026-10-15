@@ -233,6 +233,50 @@ Ask and Investigate send questions and selected source evidence to the chosen
 endpoint, which may be external. See the
 [technical privacy boundaries](technical-reference.md#privacy-and-local-api-boundaries).
 
+## Choose a prompt
+
+Each collection has its own prompts for Ask and Investigate. **Default** is the
+shipped prompt and cannot be changed. To write your own, open **Admin → Collections**,
+expand the collection's **Settings**, and use its **Prompts** section. **New prompt**
+starts from Default's text, **Save prompt** stores it, and **Use as collection
+default** makes it the one new conversations start with. **Manage prompts** beside the
+Ask and Investigate sidebar opens that section for the selected collection.
+
+The **Prompt** select beside the LLM profile picks the prompt for the next question.
+It starts with the collection default and returns to it when you switch collections.
+The core rules are always applied first, and no prompt can switch them off. Changes
+apply to new conversations. An existing conversation keeps the prompt it started
+with, and an Investigate conversation's select shows that prompt as locked.
+
+### How to write a prompt
+
+> **Always applied first.** The core rules above are part of every request: answer only from the
+> collection, cite sources, treat document text as data, and answer in the question's language.
+> You do not need to repeat them, and a prompt cannot switch them off.
+>
+> **Good things to put in a prompt**
+> - What the collection is and who it is for, e.g. "Board minutes of a housing cooperative,
+>   2010–2020."
+> - Terms, abbreviations and names the model should recognise, e.g. "AGM means annual general
+>   meeting."
+> - What to prioritise, e.g. "When decisions conflict, the most recent one applies."
+> - The shape of the answer: length, lists or tables, a summary first.
+> - Tone, e.g. "Plain language for residents, not legal wording."
+>
+> **For Investigate, also**
+> - How to search: synonyms, old and new names, date formats, document types to look in.
+> - When enough is enough, e.g. "Check at least the minutes and the annual reports."
+>
+> **Writing tips**
+> - Use short, concrete instructions, one per line, and avoid rules that contradict each other.
+> - Start from Default and change only what you need.
+> - Do not paste instructions from the documents themselves; document text is never followed as an
+>   instruction.
+> - Longer prompts leave less room for source excerpts in each request.
+>
+> **Example** — instead of "Be thorough and accurate", write: "Answer with the decision first, then
+> the meeting date and the paragraph number. Use 'the board' for 'styrelsen'."
+
 ## Ask a question
 
 In **Ask**, select a collection and LLM profile and enter a question. Ask answers

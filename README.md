@@ -35,7 +35,7 @@ which may be an external service.
 | Guide | Contents |
 |---|---|
 | [Installation](docs/installation.md) | Requirements, local build, model setup and first start |
-| [Using InfoScry](docs/usage.md) | Collections, import, search, Ask, Investigate and LLM profiles |
+| [Using InfoScry](docs/usage.md) | Collections, import, search, prompts, Ask, Investigate and LLM profiles |
 | [Development](docs/development.md) | Project layout, build tasks, tests and contribution workflow |
 | [Technical reference](docs/technical-reference.md) | Architecture, storage, embeddings, security and LLM contracts |
 | [CLI reference](docs/cli.md) | Commands, options and examples |
@@ -59,6 +59,8 @@ width, and the compact document list has live filename search, inline details an
 The adaptive source view preserves context and supports narrow-screen Back.
 Ask and Investigate keep conversation history closed in the left panel, with
 New conversation always available.
+Ask and Investigate choose a per-collection prompt (Default, or one stored in Admin →
+Collections); the Ask prompt flow has browser coverage in `DocumentBrowserAcceptanceTest`.
 PDF/image review shows exact-revision images beside extracted text, including
 historical PDF page and image citations. Live review can mark pages and confirm an exact
 page set and reading method for rescanning. Stopped selected-page runs can resume

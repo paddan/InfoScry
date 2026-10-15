@@ -33,7 +33,7 @@ infoscry collection create Notes --json
 ```
 
 Subcommands: `list` (shows name, id, OCR languages, description),
-`create <name>` with `--description`, and `ignore <collection> list|set`.
+`create <name>` with `--description`, `ignore <collection> list|set`, and `prompt` (below).
 Options: `--json`, `--data-dir`.
 
 ### collection ignore
@@ -70,6 +70,38 @@ ignores letter case, and `[abc]` classes are not supported.
 
 An import uses the list as it was when the import was queued: editing the list
 afterwards does not change an import that is queued, running or resumed.
+
+### collection prompt
+
+Lists, shows and changes a collection's Ask and Investigate prompts, through the
+same service as the web UI. A prompt is named by its name or id (the name is
+case-insensitive). `Default` is the shipped prompt every collection can select.
+Prompt bodies are never printed in messages.
+
+```bash
+infoscry collection prompt list Notes --role ask
+infoscry collection prompt create Notes --role ask --name Short --file short.md
+infoscry collection prompt show Notes --role ask --prompt Short
+infoscry collection prompt update Notes --role ask --prompt Short --file short-v2.md
+infoscry collection prompt use Notes --role ask --prompt Short
+infoscry collection prompt delete Notes --role ask --prompt Short
+```
+
+- `list <collection> [--role ask|investigate]` prints one line per prompt:
+  name, version, and `(default)` on the role's collection default.
+- `show <collection> --role … [--prompt …]` prints the body alone; `--json` prints
+  the prompt. Without `--prompt` it shows the collection default.
+- `create <collection> --role … --name <name> --file <path|->` stores a new prompt
+  at version 1. `-` reads the body from standard input.
+- `update <collection> --role … --prompt … [--name …] [--file <path|->]` changes the
+  name, the body, or both. The version grows only when the body changes.
+- `delete <collection> --role … --prompt …` removes a prompt. A prompt already gone
+  is reported as nothing to delete, not as an error.
+- `use <collection> --role … --prompt <name|id|Default>` sets the collection default
+  for the role. `Default` resets it.
+
+Options: `--role` (`ask` or `investigate`; required except for `list`), `--prompt`,
+`--name`, `--file`, `--json`, `--data-dir`.
 
 ## import
 
@@ -149,7 +181,8 @@ infoscry ask --collection Notes --profile my-profile "What does the contract say
 infoscry ask --collection Notes --profile my-profile --json "Summarize this document"
 ```
 
-Options: `--collection`, `--profile`, `--json`, `--data-dir`.
+Options: `--collection`, `--profile`, `--prompt` (the Ask prompt's name or id;
+default: the collection default), `--json`, `--data-dir`.
 
 ## jobs
 

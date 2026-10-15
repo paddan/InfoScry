@@ -241,6 +241,29 @@ Anthropic, and zero pricing for loopback endpoints such as Ollama. Unknown value
 remain blank for manual entry. Catalog/unit/route/component coverage does not
 establish real-provider browser acceptance.
 
+## Collection prompts
+
+Ask and Investigate send the system message `CORE_RULES + "\n\n" + <selected prompt body>`.
+`CORE_RULES` is code, always first and unchanged. The selected prompt is either the
+shipped Default (id `default`, name `Default`, version 1, read from the classpath; not a
+row) or a stored prompt of the collection and role.
+
+- `collection_prompts` holds stored prompts: `id`, `collection_id`, `role` (`ASK` or
+  `INVESTIGATE`), `name`, `body`, `version`, and timestamps. Names are unique per
+  collection and role, case-insensitively, and `Default` is reserved. Deleting the
+  collection deletes its prompts.
+- `collections.ask_prompt_id` and `collections.investigate_prompt_id` hold each role's
+  collection default. `NULL` means Default. They reference `collection_prompts` with
+  `ON DELETE SET NULL`, so deleting a prompt falls back to Default.
+- `version` grows only when the body changes. Each write is one SQLite transaction and
+  every operation is idempotent.
+- A conversation records its prompt when it is created: `prompt_id` (nullable and
+  without a foreign key, so it survives the prompt's deletion), `prompt_name`,
+  `prompt_body`, and `prompt_version`. A continued Investigate turn composes from the
+  stored `prompt_body` and does not read the prompt rows again.
+- Prompt bodies are user content. Like questions and answers, they stay out of logs
+  and error messages.
+
 ## Request budgets and citation validation
 
 Budget the full LLM request and reserved output, including history, tools and

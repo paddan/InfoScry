@@ -444,6 +444,31 @@ async function scenarioAskOldCitation(page) {
   }
 }
 
+async function scenarioAskPromptFromAdmin(page) {
+  await enterAdmin(page);
+  const settings = page.locator('details.secondary-settings:has(section[aria-label="Settings for Default"])');
+  if (!(await settings.evaluate((node) => node.open))) await settings.locator(':scope > summary').click();
+  const promptSection = page.locator('section.prompt-settings[aria-label="Prompts for Default"]');
+  await promptSection.waitFor({ timeout: 20_000 });
+  await promptSection.locator('section[data-role="ASK"]').getByRole('button', { name: 'New prompt' }).click();
+  await promptSection.locator('#collection-prompt-name').fill('Short');
+  await promptSection.locator('#collection-prompt-body').fill('Answer in one line.');
+  await promptSection.getByRole('button', { name: 'Save prompt' }).click();
+  await promptSection.getByText('Prompt saved.', { exact: true }).waitFor({ timeout: 20_000 });
+  console.log('PASS prompt-created ask role=Short');
+
+  await page.waitForSelector('#tab-ask', { timeout: 20_000 });
+  await page.click('#tab-ask');
+  await page.waitForSelector('#question', { timeout: 20_000 });
+  await page.waitForFunction(() => [...document.querySelectorAll('#prompt-ask option')].some((option) => option.textContent === 'Short'), null, { timeout: 20_000 });
+  await page.locator('#prompt-ask').selectOption({ label: 'Short' });
+  await page.fill('#question', 'What is on the first page?');
+  await page.waitForFunction(() => !document.querySelector('#panel-ask button[type="submit"]')?.disabled, null, { timeout: 20_000 });
+  await page.locator('#panel-ask button[type="submit"]').click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Answer"]')?.textContent.includes('Short answer'), null, { timeout: 30_000 });
+  console.log('PASS ask-with-prompt answer=Short');
+}
+
 async function scenarioAskImageOldCitation(page) {
   const pageRequests = [];
   page.on('request', (request) => {
@@ -966,6 +991,7 @@ try {
   if (SCENARIO === 'page-browser') await scenarioPageBrowser(page);
   else if (SCENARIO === 'page-resources') await scenarioPageResources(page);
   else if (SCENARIO === 'ask-old-citation') await scenarioAskOldCitation(page);
+  else if (SCENARIO === 'ask-prompt-from-admin') await scenarioAskPromptFromAdmin(page);
   else if (SCENARIO === 'ask-image-old-citation') await scenarioAskImageOldCitation(page);
   else if (SCENARIO === 'ask-image-create') await scenarioAskImageCreate(page);
   else if (SCENARIO === 'ask-image-unknown-citation') await scenarioAskImageUnknownCitation(page);

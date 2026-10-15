@@ -28,6 +28,7 @@ import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
 import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
+import infoscry.llm.LlmJson
 import infoscry.llm.LlmProvider
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrEngine
@@ -50,6 +51,9 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.delay
@@ -163,6 +167,30 @@ class DocumentBrowserAcceptanceTest {
             }
             runScenario("ask-image-unknown-citation")
             assertTrue(fake.handledRequests >= 2, "the local provider answered and titled the Ask")
+        }
+    }
+
+    @Test
+    fun `Ask uses a prompt created in Admin`() {
+        // Opening Admin reads the provider's model catalog first, so that answer is the fake's first response.
+        FakeOpenAiServer(listOf(catalogResponse(), answerStream("Short answer [S1]."), titleCompletion("Short prompt"))).use { fake ->
+            startServer()
+            createAskProfile(fake.url)
+            runScenario("ask-prompt-from-admin")
+            assertTrue(fake.handledRequests >= 2, "the local provider answered and titled the Ask")
+            val promptsBody = runBlocking {
+                harness!!.request(io.ktor.http.HttpMethod.Get, "/api/collections/default/prompts", body = null, credential = Credential.BEARER).bodyAsText()
+            }
+            val coreRules = LlmJson.parseToJsonElement(promptsBody).jsonObject.getValue("coreRules").jsonPrimitive.content
+            val answerRequest = LlmJson.parseToJsonElement(fake.requests.first { it.path.endsWith("/chat/completions") }.body).jsonObject
+            val systemMessages = answerRequest.getValue("messages").jsonArray
+                .map { it.jsonObject }
+                .filter { it.getValue("role").jsonPrimitive.content == "system" }
+            assertEquals(
+                coreRules + "\n\n" + "Answer in one line.",
+                systemMessages.last().getValue("content").jsonPrimitive.content,
+                "the answer's system message is the core rules followed by the selected Admin prompt",
+            )
         }
     }
 
@@ -554,6 +582,7 @@ class DocumentBrowserAcceptanceTest {
             stream = true,
             body = "data: {\"choices\":[{\"delta\":{\"content\":\"$text\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":8}}\n\ndata: [DONE]\n\n",
         )
+        fun catalogResponse() = FakeOpenAiResponse(body = """{"data":[{"id":"fake-chat"}]}""")
         fun titleCompletion(title: String) = FakeOpenAiResponse(
             body = """{"choices":[{"message":{"role":"assistant","content":"$title"}}],"usage":{"prompt_tokens":9,"completion_tokens":3}}""",
         )
