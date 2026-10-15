@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { createCollectionPrompt, deleteCollectionPrompt, getCollectionPrompts, setCollectionPromptDefault, updateCollectionPrompt, fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -472,5 +472,63 @@ describe('stale-session retry', () => {
     expect(response.ok).toBe(true);
     expect(postAttempts).toBe(2);
     expect((calls[1].init?.headers as Record<string, string>)['X-InfoScry-Csrf']).toBe('csrf-retry-ask');
+  });
+});
+
+describe('collection prompt requests', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses the prompt routes with the role and body fields the server expects', async () => {
+    const calls: { url: string; method: string; body?: unknown }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'token' }), { status: 200 });
+      calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (url.endsWith('/prompt-defaults/ask')) return new Response(JSON.stringify({ role: 'ASK', defaultId: 'p1' }), { status: 200 });
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+      if (init?.method === undefined) {
+        return new Response(JSON.stringify({ coreRules: 'core', ask: { defaultId: 'default', prompts: [] }, investigate: { defaultId: 'default', prompts: [] } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ id: 'p1', name: 'Board tone', body: 'Plain.', version: 1, builtIn: false }), { status: 201 });
+    }));
+
+    const prompts = await getCollectionPrompts('a/b');
+    const created = await createCollectionPrompt('c', 'ASK', 'Board tone', 'Plain.');
+    const updated = await updateCollectionPrompt('c', 'p/1', 'Board tone', 'Plain.');
+    await deleteCollectionPrompt('c', 'p/1');
+    const defaultId = await setCollectionPromptDefault('c', 'ASK', 'p1');
+
+    expect(prompts.coreRules).toBe('core');
+    expect(created).toMatchObject({ id: 'p1', builtIn: false });
+    expect(updated.name).toBe('Board tone');
+    expect(defaultId).toBe('p1');
+    expect(calls).toEqual([
+      { url: '/api/collections/a%2Fb/prompts', method: 'GET', body: undefined },
+      { url: '/api/collections/c/prompts', method: 'POST', body: { role: 'ASK', name: 'Board tone', body: 'Plain.' } },
+      { url: '/api/collections/c/prompts/p%2F1', method: 'PUT', body: { name: 'Board tone', body: 'Plain.' } },
+      { url: '/api/collections/c/prompts/p%2F1', method: 'DELETE', body: undefined },
+      { url: '/api/collections/c/prompt-defaults/ask', method: 'PUT', body: { promptId: 'p1' } },
+    ]);
+  });
+
+  it('sends the prompt on Ask and Investigate starts only when one is given', async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/session') return new Response(JSON.stringify({ csrfToken: 'token' }), { status: 200 });
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response('', { status: 200 });
+    }));
+
+    await startAsk('Archive', 'question', 'profile-1');
+    await startAsk('Archive', 'question', 'profile-1', undefined, 'Board tone');
+    await startInvestigation('Archive', 'question', 'profile-1');
+    await startInvestigation('Archive', 'question', 'profile-1', undefined, undefined, 'Thorough');
+
+    expect(bodies).toEqual([
+      { collection: 'Archive', question: 'question', profile: 'profile-1' },
+      { collection: 'Archive', question: 'question', profile: 'profile-1', prompt: 'Board tone' },
+      { collection: 'Archive', question: 'question', profile: 'profile-1' },
+      { collection: 'Archive', question: 'question', profile: 'profile-1', prompt: 'Thorough' },
+    ]);
   });
 });

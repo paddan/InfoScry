@@ -32,6 +32,7 @@ const stored: AskHistoryEntry = {
   createdAt: '2026-09-26T15:21:42Z',
   question: 'Who signed it?',
   title: 'The signer',
+  promptName: 'Default',
   answer: 'Mira signed it [S2].',
   evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8' }],
   inputTokens: 20,

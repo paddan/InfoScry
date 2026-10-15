@@ -181,6 +181,8 @@ export type AskHistoryEntry = {
   createdAt: string;
   question: string;
   title: string;
+  /** The name of the prompt the answer was written with; Default's name when none was chosen. */
+  promptName: string;
   answer: string;
   evidence: AskEvidence[];
   inputTokens: number;
@@ -191,7 +193,7 @@ export type AskHistoryEntry = {
 export type InvestigateEvidence = AskEvidence & { locatorLabel: string };
 export type InvestigateMessage = { role: 'user' | 'assistant'; text: string };
 export type InvestigateActivity = { name: string; resultCode: string; durationMs: number };
-export type InvestigationSummary = { id: string; createdAt: string; question: string; title: string };
+export type InvestigationSummary = { id: string; createdAt: string; question: string; title: string; promptName: string };
 export type InvestigationHistory = {
   id: string;
   messages: InvestigateMessage[];
@@ -736,11 +738,12 @@ export async function startAsk(
   question: string,
   profile: string,
   signal?: AbortSignal,
+  prompt?: string,
 ): Promise<Response> {
   const send = async (): Promise<Response> => fetch('/api/ask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: await csrfToken() },
-    body: JSON.stringify({ collection, question, profile }),
+    body: JSON.stringify({ collection, question, profile, ...(prompt === undefined ? {} : { prompt }) }),
     signal,
   });
   return sendWithSessionRetry(send, 'MUTATION_REQUIRES_CREDENTIALS', signal);
@@ -814,7 +817,8 @@ export async function getInvestigation(collectionId: string, conversationId: str
 
 /**
  * Start an Investigate turn. `limits` carries the reader's per-question settings; a caller that
- * omits it keeps the server defaults, so `limits` reaches the wire only when it is provided.
+ * omits it keeps the server defaults, so `limits` reaches the wire only when it is provided. `prompt`
+ * (an id or a name) is sent only when given, so the server applies the collection default otherwise.
  */
 export async function startInvestigation(
   collection: string,
@@ -822,8 +826,15 @@ export async function startInvestigation(
   profile: string,
   signal?: AbortSignal,
   limits?: { effortLevel: EffortLevel },
+  prompt?: string,
 ): Promise<Response> {
-  return investigateRequest('/api/investigations', { collection, question, profile, ...(limits === undefined ? {} : { limits }) }, signal);
+  return investigateRequest('/api/investigations', {
+    collection,
+    question,
+    profile,
+    ...(limits === undefined ? {} : { limits }),
+    ...(prompt === undefined ? {} : { prompt }),
+  }, signal);
 }
 
 /** Continue an existing conversation; the collection and profile are re-validated against its locked snapshot. */
@@ -1293,6 +1304,70 @@ export async function updateCollectionIgnorePatterns(collectionId: string, patte
     { patterns },
   )) as { patterns: string[] };
   return body.patterns;
+}
+
+/** Which of Ask and Investigate a prompt is written for. */
+export type PromptRole = 'ASK' | 'INVESTIGATE';
+
+/** One prompt a collection can use. Default is `id: "default"`, `builtIn: true`, and is never stored. */
+export type CollectionPrompt = {
+  id: string;
+  name: string;
+  body: string;
+  version: number;
+  builtIn: boolean;
+};
+
+/** The prompts for one role, Default first, and the id of the one new conversations start with. */
+export type RolePrompts = { defaultId: string; prompts: CollectionPrompt[] };
+
+/** Every prompt a collection can use, plus the core rules that always come first. */
+export type CollectionPrompts = { coreRules: string; ask: RolePrompts; investigate: RolePrompts };
+
+const promptsPath = (collectionId: string): string => `/api/collections/${encodeURIComponent(collectionId)}/prompts`;
+
+/** The collection's prompts for Ask and Investigate, Default first in each role. */
+export async function getCollectionPrompts(collectionId: string): Promise<CollectionPrompts> {
+  return (await readJson(await fetch(promptsPath(collectionId)))) as CollectionPrompts;
+}
+
+/**
+ * Stores a new prompt. The server answers 201 when it was stored and 200 when an identical prompt
+ * already existed, so the caller gets the stored prompt either way; a different prompt with the same
+ * name is refused with `PROMPT_NAME_TAKEN`.
+ */
+export async function createCollectionPrompt(
+  collectionId: string,
+  role: PromptRole,
+  name: string,
+  body: string,
+): Promise<CollectionPrompt> {
+  return (await mutate(promptsPath(collectionId), 'POST', { role, name, body })) as CollectionPrompt;
+}
+
+/** Renames or rewrites a stored prompt. The version moves only when the body changes. */
+export async function updateCollectionPrompt(
+  collectionId: string,
+  promptId: string,
+  name: string,
+  body: string,
+): Promise<CollectionPrompt> {
+  return (await mutate(`${promptsPath(collectionId)}/${encodeURIComponent(promptId)}`, 'PUT', { name, body })) as CollectionPrompt;
+}
+
+/** Removes a stored prompt; a prompt already gone is not an error. */
+export async function deleteCollectionPrompt(collectionId: string, promptId: string): Promise<void> {
+  await mutate(`${promptsPath(collectionId)}/${encodeURIComponent(promptId)}`, 'DELETE');
+}
+
+/** Makes a prompt the collection default for one role and answers with the id now in effect. */
+export async function setCollectionPromptDefault(collectionId: string, role: PromptRole, promptId: string): Promise<string> {
+  const body = (await mutate(
+    `/api/collections/${encodeURIComponent(collectionId)}/prompt-defaults/${role.toLowerCase()}`,
+    'PUT',
+    { promptId },
+  )) as { defaultId: string };
+  return body.defaultId;
 }
 
 /**
