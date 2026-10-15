@@ -44,6 +44,9 @@ class PromptService(private val store: LlmProfileStore) {
         appendLine("4. Write in the language of the user's question.")
     }
 
+    /** Layer 1 as text: the immutable core rules that always come first in a composed prompt. */
+    fun coreRules(): String = CORE_RULES
+
     /** The title completion's system prompt; [ConversationTitler] is its only caller. */
     fun titlePrompt(): String = TITLE_RULES
 

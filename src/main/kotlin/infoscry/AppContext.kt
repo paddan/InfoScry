@@ -1,6 +1,7 @@
 package infoscry
 
 import infoscry.collection.CollectionIndexRemover
+import infoscry.collection.CollectionPromptService
 import infoscry.collection.CollectionService
 import infoscry.collection.DeletionBlockers
 import infoscry.collection.DeletionRecoveryReport
@@ -38,6 +39,8 @@ import infoscry.ocr.OcrProfileService
 import infoscry.ocr.OcrReadingMethodCatalog
 import infoscry.ocr.StaleOcrStateCleanup
 import infoscry.pdf.SelectablePdfService
+import infoscry.llm.PromptService
+import infoscry.storage.CollectionPromptStore
 import infoscry.storage.SelectablePdfStore
 import infoscry.search.IndexIdentity
 import infoscry.search.LuceneIndex
@@ -384,6 +387,13 @@ class AppContext private constructor(
         ocrProfiles = ocr,
         index = indexRemover,
         blockers = blockers,
+    )
+
+    val collectionPrompts: CollectionPromptService = CollectionPromptService(
+        store = CollectionPromptStore(database),
+        collections = collectionService,
+        mutations = mutations,
+        coreRules = { PromptService(llm).coreRules() },
     )
 
     /**
