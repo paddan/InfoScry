@@ -3,7 +3,9 @@ package infoscry.server
 import infoscry.investigate.EffortLevel
 import infoscry.investigate.EffortResolver
 import infoscry.AppContext
+import infoscry.ask.StructuredEvidenceSource
 import infoscry.domain.CollectionId
+import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
 import infoscry.investigate.InvestigateEvent
 import infoscry.investigate.InvestigatePersistence
@@ -152,7 +154,8 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             }
             val evidence = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT e.evidence_id, e.source_unit_id, e.locator_json, e.excerpt, r.id AS placed_revision_id, d.id AS document_id " +
+                    "SELECT e.evidence_id, e.source_unit_id, e.locator_json, e.excerpt, r.id AS placed_revision_id, d.id AS document_id, " +
+                        "d.title AS document_title, d.original_filename " +
                         "FROM evidence_ledger e " +
                         // The excerpt and revision come from the ledger entry itself, so the unit is only needed to
                         // find the document, and an entry whose unit a replacement removed must not drop out. A
@@ -182,6 +185,11 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                                         // Absent when nobody recorded one: revision unknown, never a guess.
                                         revisionId = rows.getString("placed_revision_id"),
                                         excerpt = rows.getString("excerpt"),
+                                        documentTitle = documentDisplayTitle(
+                                            rows.getString("document_title"),
+                                            rows.getString("original_filename"),
+                                            rows.getString("document_id"),
+                                        ),
                                     ),
                                 )
                             }
@@ -260,6 +268,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                     InvestigateRequest(collectionId, body.question, profile, prompt = prompt, limits = preset.limits, reasoning = preset.reasoning),
                     runningTurns,
                     activeTurnIds,
+                    context::documentTitleOf,
                     // Titled once, from the opening question, when the first turn has finished and
                     // been persisted. Continue never re-titles, and a failed title call is silent.
                     onFinished = { conversationId -> titler.title(conversationId, body.question, profile) },
@@ -305,6 +314,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                     ),
                     runningTurns,
                     activeTurnIds,
+                    context::documentTitleOf,
                     reservedId = conversationId,
                 )
             } catch (failure: Exception) {
@@ -409,6 +419,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
         tools = InvestigationTools(
             collectionId, context.search, context.content, context.documents,
             activeRevisionId = context.revisions::activeRevisionId,
+            structured = StructuredEvidenceSource(context.content, context.paths),
         ),
         prompt = PromptService(),
         streamingClient = { selected ->
@@ -431,6 +442,8 @@ private suspend fun ApplicationCall.streamInvestigation(
     request: InvestigateRequest,
     runningTurns: ConcurrentHashMap<String, Job>,
     activeTurnIds: MutableSet<String>,
+    /** The display name of a cited document, for the evidence the done event carries. */
+    documentTitle: (documentId: String) -> String,
     reservedId: String? = null,
     /** Runs once the stream has ended and been persisted, with the conversation id, for new conversations only. */
     onFinished: (suspend (conversationId: String) -> Unit)? = null,
@@ -448,7 +461,7 @@ private suspend fun ApplicationCall.streamInvestigation(
                     registeredId = event.conversationId
                     runningTurns[event.conversationId] = job
                 }
-                write("data: ${ApiJson.encodeToString(event.toWire())}\n\n".toByteArray(StandardCharsets.UTF_8)); flush()
+                write("data: ${ApiJson.encodeToString(event.toWire(documentTitle))}\n\n".toByteArray(StandardCharsets.UTF_8)); flush()
             }
         } finally {
             registeredId?.let {
@@ -488,7 +501,19 @@ data class EvidenceWire(
     /** The excerpt as the citation saved it; absent on a live citation, which never had one to save. */
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val excerpt: String? = null,
+    /** The name the reader knows the cited document by, so a citation says which document and not only which page. */
+    val documentTitle: String,
 )
+
+/** A document's display name: its title when it has one, else its file name, else its id. */
+internal fun documentDisplayTitle(title: String?, originalFilename: String?, documentId: String): String =
+    title?.takeIf(String::isNotBlank) ?: originalFilename?.takeIf(String::isNotBlank) ?: documentId
+
+/** Looks up the display name of each document a live citation names. */
+internal fun AppContext.documentTitleOf(documentId: String): String {
+    val document = documents.get(DocumentId(documentId))
+    return documentDisplayTitle(document?.title, document?.originalFilename, documentId)
+}
 
 @Serializable
 internal data class InvestigateWire(
@@ -513,7 +538,7 @@ internal data class InvestigateWire(
     val resolvedLimits: InvestigationLimits? = null,
 )
 
-internal fun InvestigateEvent.toWire() = when (this) {
+internal fun InvestigateEvent.toWire(documentTitle: (documentId: String) -> String = { it }) = when (this) {
     is InvestigateEvent.Started -> InvestigateWire("started", id = conversationId, resolvedLimits = resolvedLimits)
     is InvestigateEvent.Delta -> InvestigateWire("delta", text = text)
     is InvestigateEvent.ToolCall -> InvestigateWire("tool", callId = callId, name = name, arguments = arguments)
@@ -528,6 +553,7 @@ internal fun InvestigateEvent.toWire() = when (this) {
             locator = it.locator,
             locatorLabel = it.locatorLabel,
             revisionId = it.revisionId,
+            documentTitle = documentTitle(it.documentId),
         )
     })
     is InvestigateEvent.Error -> InvestigateWire("error", code = code, message = message)

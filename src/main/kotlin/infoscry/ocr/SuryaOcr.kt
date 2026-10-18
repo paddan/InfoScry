@@ -376,18 +376,40 @@ class SuryaOcr(
                     "${page.ordinal + 1}, ordinal ${page.ordinal})",
             )
         }
-        val boxes = reply.blocks.map { block -> wordBoxOf(page, block) }
+        // Every block is held to its box and its confidence, because the structure is located by every block.
+        // A word box is the block a match is shown in, so only a block with text gets one: a block with markup
+        // and no text of its own is read by the structure parser, which keeps only what has text, and must not
+        // fail the page.
+        val regions = reply.blocks.map { block -> regionOf(page, block) }
+        val boxes = reply.blocks.zip(regions)
+            .filter { (block, _) -> block.text.isNotBlank() }
+            .map { (block, region) -> wordBoxOf(block, region) }
         val confidences = boxes.mapNotNull { box -> box.confidence }
-        // Whitespace is not a page's text: an empty reading is what the caller's blankness question is asked
-        // about, and a reading of nothing but spaces must not look like a reading with text. It is not an
-        // unqualified success either: this engine cannot tell blank paper from ink it missed, so an empty
-        // reading carries OCR_EMPTY and the blankness question stays with the caller that holds the raster.
-        val text = if (reply.text.isBlank()) "" else reply.text
+        val derived = StructureDerivation.derive(
+            SuryaStructureParser.parse(
+                reply.blocks.zip(regions) { block, region ->
+                    SuryaBlockInput(
+                        html = block.html,
+                        label = block.label,
+                        readingOrder = block.readingOrder,
+                        bbox = region,
+                    )
+                },
+            ),
+            page.sha256,
+        )
+        // The reading's text is the structure's text, which is what its ranges point into. Whitespace is not a
+        // page's text, and an empty reading is not an unqualified success: this engine cannot tell blank paper
+        // from ink it missed, so it carries OCR_EMPTY and the blankness question stays with the caller that
+        // holds the raster.
+        val text = derived.extractedText
         return OcrPageResult(
             text = text,
             engine = engine,
             imageSha256 = page.sha256,
             boxes = boxes,
+            structure = derived.structure,
+            warnings = if (derived.degraded) listOf(STRUCTURE_DEGRADED) else emptyList(),
             // Absent when the engine reported none, which is not a confidence of zero: a mean of nothing is
             // not evidence that the model was sure of nothing.
             meanConfidence = if (confidences.isEmpty()) null else confidences.average(),
@@ -397,16 +419,16 @@ class SuryaOcr(
     }
 
     /**
-     * One block of the model's answer as the box the seam carries, or a refusal that names the field.
+     * One block's region in the page's own pixels, and its confidence, or a refusal that names the field.
      *
-     * The box has to lie inside the page the reading is about. A box outside those pixels is not a region of
-     * this page: a comparison that highlighted it, or a reviewer sent to it, would be sent somewhere the
-     * reading has no evidence for, and the whole reading's boxes are what a citation is drawn from. The
-     * page's own dimensions are what the model was handed, so the check is against measured pixels rather
-     * than against a bound this engine chose. A page image whose dimensions could not be measured has none
-     * to check against, and is read as before rather than refused for being unmeasurable.
+     * The region has to lie inside the page the reading is about. A box outside those pixels is not a region of
+     * this page: a comparison that highlighted it, or a reviewer sent to it, would be sent somewhere the reading
+     * has no evidence for, and the whole reading's boxes are what a citation is drawn from. The page's own
+     * dimensions are what the model was handed, so the check is against measured pixels rather than against a
+     * bound this engine chose. A page image whose dimensions could not be measured has none to check against,
+     * and is read as before rather than refused for being unmeasurable.
      */
-    private fun wordBoxOf(page: PageImage, block: SuryaBlock): OcrWordBox {
+    private fun regionOf(page: PageImage, block: SuryaBlock): PixelBox {
         if (block.bbox.size != BBOX_FIELDS) {
             throw SuryaWorkerException(
                 SuryaWorkerException.MALFORMED_OUTPUT,
@@ -433,12 +455,6 @@ class SuryaOcr(
                     "a region this reading has evidence for",
             )
         }
-        if (block.text.isBlank()) {
-            throw SuryaWorkerException(
-                SuryaWorkerException.MALFORMED_OUTPUT,
-                "a Surya block came back with no text, so it is not a box a match can be shown in",
-            )
-        }
         val confidence = block.confidence
         if (confidence != null && (!confidence.isFinite() || confidence !in 0.0..1.0)) {
             throw SuryaWorkerException(
@@ -446,15 +462,18 @@ class SuryaOcr(
                 "a Surya block came back with a confidence that is not a fraction",
             )
         }
-        return OcrWordBox(
-            text = block.text,
-            left = left,
-            top = top,
-            width = right - left,
-            height = bottom - top,
-            confidence = confidence,
-        )
+        return PixelBox(left = left, top = top, right = right, bottom = bottom)
     }
+
+    /** A block with text, as the word box a match is shown in, over the region the block was located at. */
+    private fun wordBoxOf(block: SuryaBlock, region: PixelBox): OcrWordBox = OcrWordBox(
+        text = block.text,
+        left = region.left,
+        top = region.top,
+        width = region.right - region.left,
+        height = region.bottom - region.top,
+        confidence = block.confidence,
+    )
 
     /**
      * What a worker's error code means for the document, in the words of what has to be installed.
@@ -819,7 +838,7 @@ class SuryaOcr(
          * It travels in every request and every result, so a worker of another version is refused instead of
          * being read as though the fields it left out had said nothing.
          */
-        const val PROTOCOL_VERSION: Int = 1
+        const val PROTOCOL_VERSION: Int = 2
 
         /** How much of one page's result line is kept. A page's text is far below it. */
         const val MAX_RESULT_BYTES: Int = 4 * 1024 * 1024
@@ -989,12 +1008,15 @@ private class SuryaPageReply(
  *
  * Surya reports a page's reading as blocks rather than as words, with one box per block, and one
  * confidence for the page's single full-page call: the confidence here is that call's mean token
- * probability, which is the same for every block of one page. A block with no text is not sent at all,
- * so a box in a reading is always a region a match can be shown in.
+ * probability, which is the same for every block of one page.
+ *
+ * The HTML is what the structure is read from. A block with neither text nor markup is not sent at all. A
+ * block with markup and no text of its own gets no word box, and the structure parser keeps only what has text.
  */
 @Serializable
 private class SuryaBlock(
     val text: String,
+    val html: String,
     val bbox: List<Int>,
     val confidence: Double? = null,
     val label: String? = null,

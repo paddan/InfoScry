@@ -5,6 +5,7 @@
   import HistoryColumn from '../lib/HistoryColumn.svelte';
   import SourceWorkspace from '../lib/SourceWorkspace.svelte';
   import PageReview from '../lib/PageReview.svelte';
+  import StructuredPage from '../lib/StructuredPage.svelte';
   import SelectablePdfActions from '../lib/SelectablePdfActions.svelte';
   import DocumentRescan from '../lib/DocumentRescan.svelte';
   import StartReadingDialog from '../lib/StartReadingDialog.svelte';
@@ -138,6 +139,8 @@
   ]);
   let source: SourceContentResponse | null = null;
   let sourceText = '';
+  /** The fetched windows of the open source, in order; a window with structure is drawn by StructuredPage. */
+  let sourceWindows: SourceContentResponse[] = [];
   /**
    * The excerpt a saved citation or ledger entry kept, shown instead of any fetched text when the evidence
    * names no revision. Null for everything that is read from the server.
@@ -472,6 +475,7 @@
       sourceCollectionId = hit.collectionId;
       source = null;
       sourceText = '';
+      sourceWindows = [];
       savedExcerpt = null;
       loadingSource = false;
       sourceError = null;
@@ -498,6 +502,7 @@
     sourceCollectionId = hit.collectionId;
     source = null;
     sourceText = '';
+    sourceWindows = [];
     savedExcerpt = saved;
     sourceError = null;
     if (saved !== null) {
@@ -511,6 +516,7 @@
       if (generation !== sourceGeneration || hit.collectionId !== sourceCollectionId) return;
       source = page;
       sourceText = page.text;
+      sourceWindows = [page];
     } catch (failure) {
       if (generation === sourceGeneration) sourceError = describe(failure);
     } finally {
@@ -544,6 +550,7 @@
       if (generation !== sourceGeneration || hit.collectionId !== sourceCollectionId) return;
       source = page;
       sourceText += page.text;
+      sourceWindows = [...sourceWindows, page];
     } catch (failure) {
       if (generation === sourceGeneration) sourceError = describe(failure);
     } finally {
@@ -651,6 +658,7 @@
     pageReviewDocument = null;
     source = null;
     sourceText = '';
+    sourceWindows = [];
     savedExcerpt = null;
     loadingSource = false;
     sourceError = null;
@@ -698,7 +706,7 @@
     return {
       collectionId: selectedCollectionId,
       documentId: evidence.documentId,
-      title: evidence.locatorLabel,
+      title: evidence.documentTitle || evidence.locatorLabel,
       unitId: evidence.unitId,
       chunkOrdinal: 0,
       text: '',
@@ -739,6 +747,7 @@
     sourceCollectionId = managedCollectionId;
     source = null;
     sourceText = '';
+    sourceWindows = [];
     savedExcerpt = null;
     loadingSource = false;
     sourceError = null;
@@ -1224,7 +1233,13 @@
       {:else if source !== null}
         {@const quality = qualityLabel(source.qualityScore)}
         {#if quality !== null}<p class="ocr-quality {quality.level}">{quality.text}</p>{/if}
-        <pre class="source-text">{sourceText}</pre>
+        {#if sourceWindows.some((chunk) => chunk.structure !== undefined)}
+          {#each sourceWindows as chunk (chunk.offset)}
+            <StructuredPage text={chunk.text} structure={chunk.structure ?? null} />
+          {/each}
+        {:else}
+          <pre class="source-text">{sourceText}</pre>
+        {/if}
         {#if sourceError !== null}<p role="alert">{sourceError}</p>{/if}
         {#if source.truncated}
           <button type="button" onclick={loadMoreSource} disabled={loadingSource}>

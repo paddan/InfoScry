@@ -125,7 +125,7 @@ pages.
 
 InfoScry runs that runtime as a worker process it owns. `SuryaOcr` spawns
 `scripts/ocr/surya_worker.py` through the configured interpreter, writes one
-versioned JSON request line per page on the worker's stdin — the page's stable
+versioned JSON request line per page (protocol 2) on the worker's stdin — the page's stable
 unit id, its ordinal, its page number and the managed image path that
 `PageImage` already validated inside its root — and reads one result line per
 page from its stdout. There is no shell anywhere in that exchange, and no
@@ -201,6 +201,50 @@ the server is stopped, llama.cpp 0.5.0 logs an assertion and a native backtrace
 in `~/.cache/datalab/surya/llamacpp_server.log` while tearing its Metal buffers
 down; the process is gone either way, which `SuryaRealToolTest` asserts by
 comparing the `llama-server` processes before and after.
+
+### Page structure
+
+An engine's reading carries an optional `PageStructure` (`infoscry.ocr`,
+`STRUCTURE_VERSION` 1): blocks in reading order, each with its kind (heading,
+paragraph, list item, table, formula, code, caption, footnote, page header or
+footer, figure), its level, rows and cells for tables, and two ranges for each
+block and cell, one into `extractedText` and one into `searchText`. The text is
+derived from the blocks, never the other way round, so the structure can be
+dropped and rebuilt without changing what is searched or cited.
+
+| Engine | Parser | Input |
+|---|---|---|
+| Surya | `surya-html/1` | Worker protocol 2 sends each block's `html`, `label`, `readingOrder` and `bbox` (from the polygon). The parser allowlists `table`, `thead`/`tbody`, `tr`, `th`/`td` (`rowspan`, `colspan`), headings, lists, `math` and `code`, and the block order is `readingOrder` |
+| LLM reader | `markdown/1` | Transcription prompt version 2 asks for GitHub-flavoured Markdown with page header and footer comment markers; a hand-written, line-based Markdown parser with no library builds the blocks |
+| Tesseract | `tesseract-tsv/1` | Lines grouped by Tesseract's own block and paragraph numbers; no tables or headings |
+
+- Derivation invariants (ranges fit both texts, do not overlap, cover every
+  non-whitespace character, never split a surrogate pair) are checked when a
+  reading is made and again when it is committed. A structure that breaks them
+  is not committed; the page keeps a paragraph-only structure marked degraded.
+- The artifact is `structure/page-%06d.<sha256>.structure.json.gz` under the
+  document's artifact root, written atomically and content-addressed, with its
+  reference and hash on the content unit (`structureRelativePath`,
+  `structureSha256`, complete or both absent). A hash mismatch is treated as
+  missing structure: the page is shown and cited without it.
+- `STRUCTURE_DEGRADED` is the `degraded` flag on the structure artifact, shown
+  by page review. There is no separate table for it.
+- The reader's source-page API sends `structure` with `start`/`end` ranges only, in
+  the `extracted` text's space, shifted by the window offset and clamped to the
+  window. It sends no `search` ranges. Hit highlighting is not wired: the reader
+  does not mark hits today, and `StructuredPage` has a highlight prop that nothing
+  sets.
+- The structure version and the parser version are part of the reading's
+  identity and the extraction fingerprint, so a changed version reads the page
+  again on rescan, and the previous reading stays in history.
+- Chunking, evidence rendering and the selectable-PDF text layer read the
+  structure only when it is present and verified against the unit's text;
+  otherwise they behave as they did before structure existed.
+
+The contract is tested by the parser suites, the derivation and chunker tests,
+`StructuredEvidenceSourceTest`, the selectable-PDF text-layer tests, the
+`DocumentBrowserAcceptanceTest` scanned-table scenario (fake engine) and
+`SuryaRealToolTest`'s table page on the real runtime.
 
 ## Privacy and local API boundaries
 

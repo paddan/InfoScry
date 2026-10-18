@@ -8,7 +8,7 @@ describe('document page review API client', () => {
     const metadata: PageReviewResponse = {
       documentId: 'document/1', unitId: 'unit-1', revisionId: 'revision A', ordinal: 1,
       documentPages: 3, previousOrdinal: 0, nextOrdinal: 2, text: 'A😀B', offset: 0, totalChars: 4, truncated: false,
-      qualityScore: null, readingMethod: 'Tesseract', imageKind: 'ocr',
+      qualityScore: null, readingMethod: 'Tesseract', imageKind: 'ocr', structureDegraded: false,
     };
     const urls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -33,7 +33,7 @@ describe('document page review API client', () => {
       documentId: 'document', unitId: 'unit-2', ordinal: 2, revisionId: 'revision-old',
       documentPages: null, previousOrdinal: 0, nextOrdinal: null,
       text: 'recorded page', offset: 0, totalChars: 13, truncated: false,
-      qualityScore: null, readingMethod: null, imageKind: 'ocr',
+      qualityScore: null, readingMethod: null, imageKind: 'ocr', structureDegraded: false,
     };
     expect(documentPageReviewImageUrl('default', metadata)).toBe(
       '/api/collections/default/documents/document/page-review/image?ordinal=2&kind=ocr&revision=revision-old',

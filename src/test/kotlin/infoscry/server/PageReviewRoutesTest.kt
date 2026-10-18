@@ -8,9 +8,15 @@ import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
+import infoscry.ocr.BlockDraft
+import infoscry.ocr.BlockKind
+import infoscry.ocr.CellDraft
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.PageStructureDraft
+import infoscry.ocr.PageStructureStore
+import infoscry.ocr.StructureDerivation
 import infoscry.storage.PageApproval
 import infoscry.storage.RevisionPageDraft
 import io.ktor.client.statement.bodyAsText
@@ -53,6 +59,7 @@ class PageReviewRoutesTest {
             assertEquals(2, metadata["nextOrdinal"]!!.jsonPrimitive.int)
             assertEquals(revision, metadata["revisionId"]!!.jsonPrimitive.content)
             assertEquals("original", metadata["imageKind"]!!.jsonPrimitive.content)
+            assertEquals("false", metadata["structureDegraded"]!!.jsonPrimitive.content)
             val image = server.get(path(document) + "/image?ordinal=1&revision=$revision&kind=original")
             assertEquals(HttpStatusCode.OK, image.status)
             val pixels = ImageIO.read(image.readRawBytes().inputStream())
@@ -204,6 +211,81 @@ class PageReviewRoutesTest {
             assertTrue(originalImage.status in listOf(HttpStatusCode.NotFound, HttpStatusCode.Conflict))
         }
     }
+
+    @Test fun `page review serves the structure windowed to the served slice and omits it when there is none or it does not verify`() = runBlocking {
+        val document = fixture.pdf()
+        val first = fixture.publish(document, listOf(structured(document, 0, layout), fixture.page(1, "plain page")))
+        val full = metadata(document, "ordinal=0")
+        val text = full["text"]!!.jsonPrimitive.content
+        val blocks = full.structure()
+        assertEquals(listOf("HEADING", "TABLE", "PAGE_FOOTER"), blocks.map { it["kind"]!!.jsonPrimitive.content })
+        assertEquals("Quarterly report", text.substring(blocks[0].int("start"), blocks[0].int("end")))
+
+        // A window that starts in the heading's last characters and ends inside the table: the heading and the
+        // table overlap it, the footer does not, and every range is measured from the window's start.
+        val from = blocks[0].int("end") - 4
+        val to = blocks[1].int("start") + 6
+        val window = metadata(document, "ordinal=0&offset=$from&limit=${to - from}")
+        assertEquals(text.substring(from, to), window["text"]!!.jsonPrimitive.content)
+        val served = window.structure()
+        assertEquals(listOf("HEADING", "TABLE"), served.map { it["kind"]!!.jsonPrimitive.content })
+        assertEquals(0, served[0].int("start"))
+        assertEquals(4, served[0].int("end"))
+        assertEquals(blocks[1].int("start") - from, served[1].int("start"))
+        assertEquals(to - from, served[1].int("end"))
+        for (cell in served[1].rows(0)) {
+            assertTrue(cell.int("start") in 0..(to - from) && cell.int("end") in 0..(to - from))
+        }
+
+        assertFalse(metadata(document, "ordinal=1").containsKey("structure"), "a page without structure omits the field")
+        assertEquals(3, metadata(document, "ordinal=0&revision=$first").structure().size)
+
+        val later = fixture.publish(document, listOf(fixture.page(0, "later plain reading")))
+        assertEquals(3, metadata(document, "ordinal=0&revision=$first").structure().size, "a pinned read keeps its own revision's structure")
+        assertFalse(metadata(document, "ordinal=0&revision=$later").containsKey("structure"))
+        assertFalse(metadata(document, "ordinal=0").containsKey("structure"))
+    }
+
+    @Test fun `page review omits a structure that does not verify against the stored text`() = runBlocking {
+        val document = fixture.pdf()
+        val page = structured(document, 0, layout)
+        fixture.publish(document, listOf(page.copy(structureReference = page.structureReference!!.copy(sha256 = "0".repeat(64)))))
+        val body = metadata(document, "ordinal=0")
+        assertEquals("Quarterly report\nName\tScore\nAda\t10\nPage 1 of 3", body["text"]!!.jsonPrimitive.content)
+        assertFalse(body.containsKey("structure"))
+    }
+
+    private val layout = PageStructureDraft(
+        parser = "markdown/1",
+        blocks = listOf(
+            BlockDraft(BlockKind.HEADING, "Quarterly report", level = 1),
+            BlockDraft(
+                BlockKind.TABLE,
+                "",
+                rows = listOf(
+                    listOf(CellDraft("Name", header = true), CellDraft("Score", header = true)),
+                    listOf(CellDraft("Ada", header = false), CellDraft("10", header = false)),
+                ),
+            ),
+            BlockDraft(BlockKind.PAGE_FOOTER, "Page 1 of 3"),
+        ),
+    )
+
+    private fun structured(document: Document, ordinal: Int, draft: PageStructureDraft): RevisionPageDraft {
+        val derived = StructureDerivation.derive(draft, "a".repeat(64))
+        val reference = PageStructureStore.write(
+            server.context.paths.artifactsDir(document.collectionId, document.id), ordinal, derived.structure,
+        )
+        return fixture.page(ordinal, derived.extractedText).copy(structureReference = reference)
+    }
+
+    private fun JsonObject.structure(): List<JsonObject> =
+        this["structure"]!!.jsonObject["blocks"]!!.jsonArray.map { it.jsonObject }
+
+    private fun JsonObject.int(key: String): Int = this[key]!!.jsonPrimitive.int
+
+    private fun JsonObject.rows(index: Int): List<JsonObject> =
+        this["rows"]!!.jsonArray[index].jsonObject["cells"]!!.jsonArray.map { it.jsonObject }
 
     private fun path(document: Document, collection: String = document.collectionId.value) =
         "/api/collections/$collection/documents/${document.id.value}/page-review"

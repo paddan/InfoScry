@@ -11,6 +11,7 @@ import infoscry.AppContext
 import infoscry.ask.AskEvent
 import infoscry.ask.AskRequest
 import infoscry.ask.AskService
+import infoscry.ask.StructuredEvidenceSource
 import infoscry.collection.InvalidPromptRequest
 import infoscry.config.AppPaths
 import infoscry.domain.CollectionId
@@ -53,7 +54,7 @@ class AskCommand : CliktCommand(name = "ask") {
                 }
             }, persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
                 open.conversations.persistAsk(ask.collectionId, ask.profile, ask.prompt, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
-            })
+            }, evidenceSession = StructuredEvidenceSource(open.content, open.paths).let { source -> { id -> source.session(id)::textOf } })
             runBlocking {
                 val events = mutableListOf<AskEvent>()
                 val streamed = StringBuilder()

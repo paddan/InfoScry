@@ -23,6 +23,8 @@ import infoscry.extract.ExtractionInput
 import infoscry.extract.ExtractionSettings
 import infoscry.extract.OCR_FAILED_CODE
 import infoscry.llm.LlmProvider
+import infoscry.ocr.BlockDraft
+import infoscry.ocr.BlockKind
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.ExternalDispatchPermitRequest
 import infoscry.ocr.ImageLlmException
@@ -36,6 +38,8 @@ import infoscry.ocr.OcrOperationStage
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrProfileRevision
 import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.PageStructureDraft
+import infoscry.ocr.StructureDerivation
 import infoscry.ocr.ReadingMethod
 import infoscry.ocr.PageDispatchIdentity
 import infoscry.ocr.PageImage
@@ -397,6 +401,101 @@ class RescanJobHandlerTest {
     }
 
     @Test
+    fun preservedLegacyPageKeepsNoStructure() {
+        withHarness { harness ->
+            val cleanText = "The committee approved the annual budget after a long discussion of the transport plan."
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = cleanText,
+                scannedText = "the published reading of the scanned page",
+            )
+            val result = harness.rescan(
+                picture,
+                engine = FakePageEngine(readings = listOf("the new reading of the scanned page"), structured = true),
+            )
+            assertEquals(OcrOperationStage.COMPLETE, result.operation.stage)
+
+            AppContext.open(harness.archiveDir).use { context ->
+                val root = context.paths.artifactsDir(CollectionId("default"), picture.documentId)
+                val published = context.revisions.pages(assertNotNull(context.revisions.activeRevisionId(picture.documentId)))
+                assertNull(published[0].structureReference, "a preserved legacy page invented a structure")
+                assertNotNull(published[1].structureReference, "the page the engine read lost its structure")
+                val units = context.content.listUnits(picture.documentId, afterOrdinal = -1, limit = 10)
+                assertNull(context.content.structureOf(units[0], root))
+                assertNotNull(context.content.structureOf(units[1], root))
+
+                // Restoring the legacy revision returns the pages exactly as they were: no structure appears.
+                val restore = context.revisions.stageRestore(
+                    CollectionId("default"), picture.documentId, "restore-legacy", "c".repeat(64),
+                    assertNotNull(context.revisions.activeRevisionId(picture.documentId)), picture.baselineRevisionId,
+                )
+                val restored = context.revisions.pages(restore.newRevisionId)
+                assertEquals(listOf(null, null), restored.map { page -> page.structureReference })
+                fun shapeOf(revisionId: String) = context.revisions.chunks(revisionId)
+                    .map { chunk -> Triple(chunk.unitOrdinal, chunk.ordinal, chunk.text) }
+                assertEquals(shapeOf(picture.baselineRevisionId), shapeOf(restore.newRevisionId))
+            }
+        }
+    }
+
+    @Test
+    fun `a rescan with identical text adopts the new reading's structure and a reading without one keeps the baseline`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val structured = harness.rescan(
+                picture,
+                engine = FakePageEngine(readings = listOf("first reading"), structured = true),
+            )
+            assertEquals(OcrOperationStage.COMPLETE, structured.operation.stage, "${structured.operation.errorCode}")
+            val adopted = assertNotNull(structured.candidatePage)
+            assertEquals("first reading", adopted.extractedText)
+            assertNotNull(adopted.structureReference, "a legacy page did not gain a structure on a same-text rescan")
+
+            // A later reading of the same text without a structure keeps the reference the page already has.
+            val plain = harness.rescan(picture, engine = FakePageEngine(readings = listOf("first reading")))
+            assertEquals(OcrOperationStage.COMPLETE, plain.operation.stage, "${plain.operation.errorCode}")
+            assertEquals(adopted.structureReference, plain.candidatePage?.structureReference)
+        }
+    }
+
+    @Test
+    fun interruptAfterStructureWriteResumes() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            val firstEngine = FakePageEngine(readings = listOf("second reading"), structured = true)
+            val resumedEngine = FakePageEngine(readings = listOf("second reading"), structured = true)
+
+            val (interrupted, resumed) = harness.rescanThenResume(
+                picture,
+                firstEngine = firstEngine,
+                resumedEngine = resumedEngine,
+                // The artifact is on disk and the page's row is not: the crash window the spec names.
+                afterPageStaged = { _, _ -> throw kotlinx.coroutines.CancellationException("simulate a crash") },
+            )
+
+            assertTrue(interrupted.failure is kotlinx.coroutines.CancellationException)
+            AppContext.open(harness.archiveDir).use { context ->
+                val directory = context.paths.artifactsDir(CollectionId("default"), picture.documentId)
+                    .resolve("structure")
+                val written = Files.list(directory).use { files -> files.map { it.fileName.toString() }.toList() }
+                assertEquals(1, written.size, "the interrupted attempt wrote no structure artifact")
+                assertEquals(1, firstEngine.calls)
+                assertEquals(1, resumedEngine.calls, "the page that never committed was not read again")
+
+                assertEquals(OcrOperationStage.COMPLETE, resumed.operation.stage, "${resumed.operation.errorCode}")
+                assertEquals(
+                    written,
+                    Files.list(directory).use { files -> files.map { it.fileName.toString() }.toList() },
+                    "the rerun's structure directory differs from the one the interrupted attempt left",
+                )
+                val unit = context.content.listUnits(picture.documentId, afterOrdinal = -1, limit = 10).single()
+                assertEquals("second reading", unit.extractedText)
+                assertEquals(written.single(), unit.structureRelativePath?.substringAfter("structure/"))
+                assertNotNull(context.content.structureOf(unit, context.paths.artifactsDir(CollectionId("default"), picture.documentId)))
+            }
+        }
+    }
+
+    @Test
     fun `a resumed attempt counts the selected page staged before interruption only once`() {
         withHarness { harness ->
             val picture = harness.importCleanAndScannedPdf(
@@ -630,6 +729,8 @@ internal class FakePageEngine(
     private val readings: List<String> = emptyList(),
     private val failWith: String? = null,
     private val onRead: suspend () -> Unit = {},
+    /** Reads each page into a one-paragraph structure, the way a structured engine answers. */
+    private val structured: Boolean = false,
 ) : PageOcrEngine {
 
     override val engine: OcrEngine = OcrEngine.SURYA
@@ -649,11 +750,20 @@ internal class FakePageEngine(
             throw ImageLlmException(failWith, "the fake engine refused this page")
         }
         val text = readings.getOrElse((calls - 1).coerceAtMost(readings.size - 1).coerceAtLeast(0)) { "" }
+        val derived = if (structured) {
+            StructureDerivation.derive(
+                PageStructureDraft("markdown/1", listOf(BlockDraft(BlockKind.PARAGRAPH, text))),
+                page.sha256,
+            )
+        } else {
+            null
+        }
         return OcrPageResult(
-            text = text,
+            text = derived?.extractedText ?: text,
             engine = engine,
             imageSha256 = page.sha256,
             modelVersion = "fake-surya-1",
+            structure = derived?.structure,
         )
     }
 
@@ -904,8 +1014,9 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
         picture: Picture,
         firstEngine: FakePageEngine,
         resumedEngine: FakePageEngine,
-        afterPageCommit: suspend (AppContext, Int) -> Unit,
-        onResumedInitialProgress: suspend (AppContext, JobId) -> Unit,
+        afterPageCommit: (suspend (AppContext, Int) -> Unit)? = null,
+        onResumedInitialProgress: suspend (AppContext, JobId) -> Unit = { _, _ -> },
+        afterPageStaged: (suspend (AppContext, Int) -> Unit)? = null,
     ): Pair<Attempt, Attempt> = AppContext.open(harness.dataDir).use { context ->
         val operationId = admitFor(context, picture)
         val interrupted = runAttempt(
@@ -916,6 +1027,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
             beforePageCommit = null,
             picture = picture,
             afterPageCommit = afterPageCommit,
+            afterPageStaged = afterPageStaged,
         )
         val resumed = runAttempt(
             context,
@@ -1057,6 +1169,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
         onInitialProgress: (suspend (JobId) -> Unit)? = null,
         useAdmittedJob: Boolean = false,
         beforeCandidatePublication: (suspend (AppContext, JobId) -> Unit)? = null,
+        afterPageStaged: (suspend (AppContext, Int) -> Unit)? = null,
     ): Attempt {
         val before = assertNotNull(context.ocrOperations.operation(operationId))
         val claimed = runBlocking {
@@ -1100,6 +1213,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
             profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
             afterCandidatePublished = { jobId -> afterPublication?.invoke(context, jobId) },
             afterPageCommitted = { jobId, ordinal -> afterPageCommit?.invoke(context, ordinal) },
+            afterPageStaged = { jobId, ordinal -> afterPageStaged?.invoke(context, ordinal) },
             afterInitialProgressReported = { jobId -> onInitialProgress?.invoke(jobId) },
             beforeCandidatePublication = { jobId -> beforeCandidatePublication?.invoke(context, jobId) },
         )

@@ -982,6 +982,33 @@ async function scenarioPageSelectionRetry(page) {
     `resumed text is paired with selected page 3 in the candidate revision: ${JSON.stringify({ resumedPair, operation: resumedOperation })}`);
 }
 
+async function scenarioScannedTable(page) {
+  // The scanned page has no text layer, so its words reach the reader and Ask only through the table structure.
+  await page.waitForSelector('#tab-search', { timeout: 20_000 });
+  await page.click('#tab-search');
+  await page.fill('#query', 'Archive scanning');
+  await page.locator('.result').first().waitFor({ timeout: 20_000 });
+  await page.locator('.result').first().click();
+  const source = page.locator('.source-pane');
+  await source.waitFor({ timeout: 20_000 });
+  const table = source.locator('table');
+  await table.waitFor({ timeout: 20_000 });
+  assert(await source.locator('th[scope="col"]', { hasText: 'Amount' }).count() === 1, 'the source shows the table header row as column headers');
+  assert((await table.locator('td').allTextContents()).includes('1480 SEK'), 'the source shows the table cell values');
+  assert((await source.textContent()).includes('Approved payments'), 'the source shows the heading above the table');
+  console.log('PASS scanned-table-source headers=Item,Amount');
+  console.log('MARK: table-source-checked');
+
+  await page.click('#tab-ask');
+  await page.waitForSelector('#question', { timeout: 20_000 });
+  await page.fill('#question', 'What amount was approved for archive scanning?');
+  await page.waitForFunction(() => !document.querySelector('#panel-ask button[type="submit"]')?.disabled, null, { timeout: 20_000 });
+  await page.locator('#panel-ask button[type="submit"]').click();
+  await page.locator('#panel-ask button.citation').waitFor({ timeout: 30_000 });
+  assert((await page.locator('[aria-label="Answer"]').textContent()).includes('approved'), 'Ask shows the cited answer');
+  console.log('PASS scanned-table-ask');
+}
+
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext();
@@ -998,6 +1025,7 @@ try {
   else if (SCENARIO === 'selectable-pdf') await scenarioSelectablePdf(page);
   else if (SCENARIO === 'page-selection') await scenarioPageSelection(page);
   else if (SCENARIO === 'page-selection-retry') await scenarioPageSelectionRetry(page);
+  else if (SCENARIO === 'scanned-table') await scenarioScannedTable(page);
   else throw new Error(`unknown scenario ${SCENARIO}`);
   await context.close();
 } finally {

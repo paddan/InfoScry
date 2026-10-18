@@ -95,8 +95,58 @@ class LlmOcrTest {
                 reading.text,
                 "the reading is the model's text, not a normalised version of it",
             )
-            assertEquals(listOf(UnreadableSpan(32, 43)), reading.unreadableSpans)
+            val marker = reading.text.indexOf(UNREADABLE)
+            assertEquals(listOf(UnreadableSpan(marker, marker + UNREADABLE.length)), reading.unreadableSpans)
             assertNull(reading.errorCode)
+            assertEquals(emptyList(), reading.warnings)
+        }
+    }
+
+    @Test
+    fun `unreadable spans address the derived text, not the model's offsets`() = runBlocking {
+        val page = page()
+        withEngine(
+            mapOf(REVISION_ID to revision(REVISION_ID)),
+            script = listOf(FakeOpenAiResponse(body = openAiAnswer(transcription(page, "# T\n\n$UNREADABLE x", unreadable = listOf(5 to 16))))),
+        ) { _, engine ->
+            val reading = engine.transcribe(page, settings())
+
+            assertEquals("T\n$UNREADABLE x", reading.text)
+            val span = reading.unreadableSpans.single()
+            assertEquals(UNREADABLE, reading.text.substring(span.startOffset, span.endOffset))
+            assertEquals(BlockKind.HEADING, reading.structure!!.blocks.first().kind)
+            assertEquals(emptyList(), reading.warnings)
+        }
+    }
+
+    @Test
+    fun `markers in a reading that reported no spans are the spans, without degradation`() = runBlocking {
+        val page = page()
+        withEngine(
+            mapOf(REVISION_ID to revision(REVISION_ID)),
+            script = listOf(FakeOpenAiResponse(body = openAiAnswer(transcription(page, "a $UNREADABLE b", unreadable = emptyList())))),
+        ) { _, engine ->
+            val reading = engine.transcribe(page, settings())
+
+            val marker = reading.text.indexOf(UNREADABLE)
+            assertEquals(listOf(UnreadableSpan(marker, marker + UNREADABLE.length)), reading.unreadableSpans)
+            assertEquals(emptyList(), reading.warnings)
+        }
+    }
+
+    @Test
+    fun `a reported span count that differs from the markers degrades the page and drops the spans`() = runBlocking {
+        val page = page()
+        withEngine(
+            mapOf(REVISION_ID to revision(REVISION_ID)),
+            script = listOf(FakeOpenAiResponse(body = openAiAnswer(transcription(page, "$UNREADABLE a $UNREADABLE b", unreadable = listOf(0 to 11))))),
+        ) { _, engine ->
+            val reading = engine.transcribe(page, settings())
+
+            assertEquals(emptyList(), reading.unreadableSpans)
+            assertEquals(listOf(STRUCTURE_DEGRADED), reading.warnings)
+            assertEquals("$UNREADABLE a $UNREADABLE b", reading.text)
+            assertTrue(reading.structure!!.degraded)
         }
     }
 
@@ -240,6 +290,25 @@ class LlmOcrTest {
                 assertFailsWith<ImageLlmException> { engine.transcribe(second, settings()) }.code,
             )
         }
+    }
+
+    @Test
+    fun `the shipped transcription prompt is version two and asks for Markdown`() {
+        assertEquals(2, OCR_TRANSCRIPTION_PROMPT_VERSION)
+        assertEquals(2, OcrTranscriptionPrompt.version)
+        val body = requireNotNull(LlmOcrTest::class.java.getResourceAsStream("/prompts/ocr-transcription.txt")) {
+            "the transcription prompt resource is missing"
+        }.use { it.readBytes().decodeToString() }
+        assertTrue(
+            body.contains(
+                "2. Write the page as GitHub-flavored Markdown that keeps its layout: `#` to `######` for headings,\n" +
+                    "   `-` or `1.` for list items, pipe tables with a header row and a `---` separator row, `\$…\$` or\n" +
+                    "   `\$\$…\$\$` for formulas, fenced code blocks for code. Wrap the page's running header in\n" +
+                    "   `<!-- page-header -->` … `<!-- /page-header -->` and its footer in `<!-- page-footer -->` …\n" +
+                    "   `<!-- /page-footer -->`. Keep paragraph breaks as blank lines.\n",
+            ),
+        )
+        assertFalse(body.contains("Keep the page's line structure"))
     }
 
     // ---- helpers ----
@@ -396,6 +465,7 @@ class LlmOcrTest {
 
     private companion object {
         const val REVISION_ID = "revision-1"
+        const val UNREADABLE = "[unreadable]"
         const val RESOLVED_MODEL = "vision-model-2026-02-01"
         const val KEY_VARIABLE = "FAKE_OCR_KEY"
         const val KEY_VALUE = "key-from-the-lookup"

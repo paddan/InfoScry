@@ -162,6 +162,8 @@ export type AskEvidence = {
   revisionId?: string;
   /** The excerpt as the citation saved it; absent on a live citation, which has none to save. */
   excerpt?: string;
+  /** The name the reader knows the cited document by: its title, else its file name. */
+  documentTitle: string;
 };
 
 export type AskEvent =
@@ -356,7 +358,37 @@ export type SourceContentResponse = {
   /** This unit's 1-based place among [unitCount]; absent on a revision-pinned read. */
   position?: number;
   unitCount?: number;
+  /** The page's structure, absent when the text has none. Ranges are in this response's `text`, shifted by `offset`. */
+  structure?: StructureView;
 };
+
+/** Kinds the parsers emit, as the server names them (the enum's name). */
+export type StructureBlockKind =
+  | 'HEADING' | 'PARAGRAPH' | 'LIST_ITEM' | 'TABLE' | 'FORMULA' | 'CODE'
+  | 'CAPTION' | 'FOOTNOTE' | 'PAGE_HEADER' | 'PAGE_FOOTER' | 'FIGURE';
+
+export type StructureCellView = {
+  header: boolean;
+  rowSpan: number;
+  colSpan: number;
+  start: number;
+  end: number;
+};
+
+export type StructureRowView = { cells: StructureCellView[] };
+
+/** One block of a page, clamped to the served window: `text.slice(start, end)` is its text in that window. */
+export type StructureBlockView = {
+  kind: StructureBlockKind;
+  level?: number;
+  order: number;
+  start: number;
+  end: number;
+  rows?: StructureRowView[];
+  latex?: string;
+};
+
+export type StructureView = { blocks: StructureBlockView[] };
 
 export const SOURCE_PAGE_CHARS = 16_384;
 
@@ -959,6 +991,10 @@ export type PageReviewResponse = {
   qualityScore: number | null;
   readingMethod: string | null;
   imageKind: 'ocr' | 'original' | 'none';
+  /** True when the page's structure could not be kept and the page was reduced to paragraphs. */
+  structureDegraded: boolean;
+  /** The structure over this served slice, absent when the page has none or it does not verify. */
+  structure?: StructureView;
 };
 
 export async function getDocumentPageReview(

@@ -76,10 +76,14 @@ def drive_main(payload: bytes) -> list:
 
 
 class FakeBlock:
-    """One of the model's blocks, as the attributes this worker reads from it."""
+    """One of the model's blocks, as the attributes this worker reads from it.
 
-    def __init__(self, text: str, polygon=None, confidence: float | None = None):
-        self.html = f"<p>{text}</p>"
+    Its HTML is the text itself unless a test gives markup, so a block's text and its HTML have the same length
+    and a bound on both is easy to place.
+    """
+
+    def __init__(self, text: str, polygon=None, confidence: float | None = None, html: str | None = None):
+        self.html = text if html is None else html
         self.polygon = polygon if polygon is not None else [(0, 0), (10, 0), (10, 10), (0, 10)]
         self.confidence = confidence
         self.label = "Text"
@@ -117,7 +121,7 @@ class FakeEngine(worker.Engine):
         return "a stand-in"
 
 
-def main() -> int:
+def test_page_bounds() -> None:
     # A reading inside the bound is collected, in the order the model wrote it.
     blocks = worker.collect_blocks(FakePage(blocks_of(3, 4)), None)
     assert [block["text"] for block in blocks] == ["xxxx"] * 3, blocks
@@ -131,13 +135,15 @@ def main() -> int:
     assert refused(FakePage(blocks_of(worker.MAX_BLOCKS + 1))), "an over-long block count was collected"
     assert not refused(FakePage(blocks_of(worker.MAX_BLOCKS))), "a page at the block bound was refused"
 
-    # The text bound is about the page's text, which is these blocks joined by newlines: one block at the
-    # bound fits, one character more does not, and two blocks that would fit without the separator do not.
-    assert not refused(FakePage(blocks_of(1, worker.MAX_PAGE_TEXT_CHARS)))
-    assert refused(FakePage(blocks_of(1, worker.MAX_PAGE_TEXT_CHARS + 1))), "an over-long text was collected"
+    # The bound is about a page's text and its HTML together. A block here has text and HTML of the same
+    # length, so one block of half the bound fits and one character more does not; and two blocks whose
+    # characters exactly fill the bound are refused, because the newline the blocks are joined with counts.
     half = worker.MAX_PAGE_TEXT_CHARS // 2
-    assert refused(FakePage(blocks_of(2, half))), "the newline the blocks are joined with was not counted"
-    assert not refused(FakePage(blocks_of(2, half - 1)))
+    assert not refused(FakePage(blocks_of(1, half)))
+    assert refused(FakePage(blocks_of(1, half + 1))), "an over-long page was collected"
+    quarter = worker.MAX_PAGE_TEXT_CHARS // 4
+    assert refused(FakePage(blocks_of(2, quarter))), "the newline the blocks are joined with was not counted"
+    assert not refused(FakePage(blocks_of(2, quarter - 1)))
 
     # A result line inside the bound survives the round trip, whole — checked on a result this test can
     # build without a model, because what is under test here is the line's bound and not the runtime.
@@ -209,6 +215,33 @@ def main() -> int:
     else:
         print("over-bound raster: not checked, this environment has no image decoder")
 
+def test_block_carries_html() -> None:
+    # A block keeps the model's HTML beside its text: the structure is read from the HTML, and the text is what
+    # a search and a citation are about, so the two are sent together.
+    block = worker.block_result(FakeBlock("hello", html="<p>hello</p>"), None)
+    assert block is not None
+    assert block["html"] == "<p>hello</p>", block
+    assert block["text"] == "hello", block
+
+    # A block with no text of its own but with markup is still part of the reading: it is dropped only when
+    # both its text and its HTML are blank.
+    markup_only = worker.block_result(FakeBlock("", html="<img src='figure.png'>"), None)
+    assert markup_only is not None and markup_only["text"] == "", markup_only
+    assert worker.block_result(FakeBlock("", html="  "), None) is None
+
+
+def test_html_counts_toward_bound() -> None:
+    # A block whose text is one character but whose HTML is past the page's bound is refused: the bound is
+    # about what the parent has to hold, and that is the HTML as well as the text.
+    padded = "<p>a</p>" + " " * worker.MAX_PAGE_TEXT_CHARS
+    assert refused(FakePage([FakeBlock("a", html=padded)])), "markup past the bound was collected"
+    assert not refused(FakePage([FakeBlock("a", html="<p>a</p>")]))
+
+
+def main() -> int:
+    test_page_bounds()
+    test_block_carries_html()
+    test_html_counts_toward_bound()
     print("surya_worker bounds: ok")
     return 0
 

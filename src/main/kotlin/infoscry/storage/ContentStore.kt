@@ -12,6 +12,9 @@ import infoscry.domain.UnitKind
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
 import infoscry.ocr.OcrQualityScorer
+import infoscry.ocr.PageStructure
+import infoscry.ocr.PageStructureStore
+import infoscry.ocr.StructureReference
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -88,11 +91,17 @@ data class RevisionPage(
     val artifactRelativePath: String?,
     val artifactSha256: String?,
     val chunks: List<ChunkDraft>,
+    /** The page's structure artifact, complete or absent; a published page keeps what its revision recorded. */
+    val structureRelativePath: String? = null,
+    val structureSha256: String? = null,
 ) {
     init {
         require(ordinal >= 0) { "RevisionPage.ordinal must not be negative, was $ordinal" }
         require((artifactRelativePath == null) == (artifactSha256 == null)) {
             "a page's artifact reference is either complete or absent"
+        }
+        require((structureRelativePath == null) == (structureSha256 == null)) {
+            "a page's structure reference is either complete or absent"
         }
     }
 }
@@ -162,6 +171,10 @@ class ContentStore(private val database: Database) {
         val storedSha = if (issue == null) draft.artifactSha256 else null
         val storedConfidence = if (issue == null) draft.meanConfidence else null
         val storedMethod = if (issue == null) draft.method else null
+        // The structure is an optional extra: one that does not verify is dropped, never a reason to fail the unit.
+        val storedStructure = draft.structureReference?.takeIf {
+            PageStructureStore.read(artifactRoot, it, draft.extractedText) != null
+        }
         val now = Instants.now()
 
         val existing = connection.selectUnit(documentId, ordinal)
@@ -177,6 +190,7 @@ class ContentStore(private val database: Database) {
             artifactSha256 = storedSha,
             meanConfidence = storedConfidence,
             extractionMethod = storedMethod,
+            structure = storedStructure,
             now = now,
         )
 
@@ -776,6 +790,19 @@ class ContentStore(private val database: Database) {
         }
     }
 
+    /**
+     * The structure [unit] was committed with, or `null` when it has none or the artifact is missing, damaged
+     * or not made for the unit's text. Structure is an optional extra on top of the text: a caller that gets
+     * `null` shows and cites the unit without it, and the next rescan reads the page again.
+     *
+     * [artifactRoot] is the document's artifact root, which this store does not know (it keeps rows, not paths).
+     */
+    fun structureOf(unit: ContentUnit, artifactRoot: Path): PageStructure? {
+        val relativePath = unit.structureRelativePath ?: return null
+        val sha256 = unit.structureSha256 ?: return null
+        return PageStructureStore.read(artifactRoot, StructureReference(relativePath, sha256), unit.extractedText)
+    }
+
     private fun artifactIssue(draft: ContentUnitDraft, artifactRoot: Path): ArtifactIssue? {
         val relative = draft.artifactRelativePath ?: return null
         val sha = draft.artifactSha256 ?: return ArtifactIssue(
@@ -974,19 +1001,23 @@ class ContentStore(private val database: Database) {
         artifactSha256: String?,
         meanConfidence: Double?,
         extractionMethod: ExtractionMethod?,
+        structure: StructureReference?,
         now: String,
     ): ContentUnit {
         val id = existing?.id ?: ContentUnitId.new()
         connection.prepareStatement(
             "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
                 "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "created_at, updated_at, structure_relative_path, structure_sha256) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (document_id, ordinal) DO UPDATE SET locator_type = excluded.locator_type, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, " +
                 "artifact_relative_path = excluded.artifact_relative_path, " +
                 "artifact_sha256 = excluded.artifact_sha256, mean_confidence = excluded.mean_confidence, " +
-                "extraction_method = excluded.extraction_method, updated_at = excluded.updated_at",
+                "extraction_method = excluded.extraction_method, updated_at = excluded.updated_at, " +
+                "structure_relative_path = excluded.structure_relative_path, " +
+                "structure_sha256 = excluded.structure_sha256",
         ).use { statement ->
             statement.setString(1, id.value)
             statement.setString(2, documentId.value)
@@ -1005,6 +1036,8 @@ class ContentStore(private val database: Database) {
             statement.setString(11, extractionMethod?.name)
             statement.setString(12, now)
             statement.setString(13, now)
+            statement.setString(14, structure?.relativePath)
+            statement.setString(15, structure?.sha256)
             statement.executeUpdate()
         }
         return checkNotNull(connection.selectUnit(documentId, ordinal)) {
@@ -1091,14 +1124,17 @@ class ContentStore(private val database: Database) {
         prepareStatement(
             "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
                 "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "created_at, updated_at, structure_relative_path, structure_sha256) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (id) DO UPDATE SET document_id = excluded.document_id, " +
                 "ordinal = excluded.ordinal, locator_type = excluded.locator_type, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, " +
                 "artifact_relative_path = excluded.artifact_relative_path, " +
                 "artifact_sha256 = excluded.artifact_sha256, mean_confidence = excluded.mean_confidence, " +
-                "extraction_method = excluded.extraction_method, updated_at = excluded.updated_at",
+                "extraction_method = excluded.extraction_method, updated_at = excluded.updated_at, " +
+                "structure_relative_path = excluded.structure_relative_path, " +
+                "structure_sha256 = excluded.structure_sha256",
         ).use { statement ->
             statement.setString(1, page.unitId.value)
             statement.setString(2, documentId.value)
@@ -1117,6 +1153,8 @@ class ContentStore(private val database: Database) {
             statement.setString(11, page.extractionMethod?.name)
             statement.setString(12, now)
             statement.setString(13, now)
+            statement.setString(14, page.structureRelativePath)
+            statement.setString(15, page.structureSha256)
             statement.executeUpdate()
         }
     }
@@ -1200,6 +1238,8 @@ class ContentStore(private val database: Database) {
         artifactRelativePath = getString("artifact_relative_path"),
         artifactSha256 = getString("artifact_sha256"),
         meanConfidence = getDouble("mean_confidence").takeUnless { wasNull() },
+        structureRelativePath = getString("structure_relative_path"),
+        structureSha256 = getString("structure_sha256"),
         extractionMethod = getString("extraction_method")?.let(ExtractionMethod::valueOf),
     )
 
@@ -1245,7 +1285,8 @@ class ContentStore(private val database: Database) {
 
         private const val UNIT_COLUMNS =
             "id, document_id, ordinal, locator_type, locator, extracted_text, search_text, " +
-                "artifact_relative_path, artifact_sha256, mean_confidence, extraction_method"
+                "artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
+                "structure_relative_path, structure_sha256"
 
         /** The current attempt's own row, written by the migration that made it possible to keep one. */
         private const val SELECT_PROGRESS =

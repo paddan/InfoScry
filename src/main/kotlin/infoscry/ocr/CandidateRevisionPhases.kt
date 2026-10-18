@@ -41,6 +41,12 @@ internal data class StagedCandidatePage(
      * honest answer for a page with nothing to position, never a guess.
      */
     val layoutReference: LayoutReference? = null,
+    /**
+     * This page's structure artifact, bound to [text] the same way [layoutReference] is. Inherited exactly,
+     * including absence, when [text] is the page's unchanged baseline, and written fresh only for a reading
+     * that genuinely replaces it.
+     */
+    val structureReference: StructureReference? = null,
 )
 
 /**
@@ -125,6 +131,14 @@ internal class CandidateRevisionPhases(
                 artifactRelativePath = baseline.artifactRelativePath,
                 artifactSha256 = baseline.artifactSha256,
                 layoutReference = baseline.layoutReference,
+                // The reading's structure describes this same text, so it is adopted when it has one; a legacy
+                // page then gains structure on rescan. A reading without one keeps the baseline's reference.
+                structureReference = writtenStructureReferenceFor(
+                    reading = reading,
+                    canonicalText = TextNormalizer.normalize(reading.text).extracted,
+                    ordinal = page.ordinal,
+                    artifactRoot = documentArtifactRoot,
+                ) ?: baseline.structureReference,
             )
         } else {
             val image = page.image
@@ -139,6 +153,12 @@ internal class CandidateRevisionPhases(
                     artifactRoot = documentArtifactRoot,
                 )
             }
+            val structureReference = writtenStructureReferenceFor(
+                reading = reading,
+                canonicalText = TextNormalizer.normalize(reading.text).extracted,
+                ordinal = page.ordinal,
+                artifactRoot = documentArtifactRoot,
+            )
             StagedCandidatePage(
                 text = reading.text,
                 extractionMethod = ExtractionMethod.OCR,
@@ -147,6 +167,7 @@ internal class CandidateRevisionPhases(
                 artifactRelativePath = reading.artifactRelativePath,
                 artifactSha256 = reading.artifactSha256,
                 layoutReference = layoutReference,
+                structureReference = structureReference,
             )
         }
     }
@@ -180,6 +201,7 @@ internal class CandidateRevisionPhases(
             approval = stagedPage.approval,
             producerRevisionId = producerRevisionId,
             layoutReference = stagedPage.layoutReference,
+            structureReference = stagedPage.structureReference,
         )
     }
 
@@ -221,6 +243,7 @@ internal class CandidateRevisionPhases(
         candidate: String,
         document: Document,
         stage: JobStage,
+        artifactRoot: Path,
     ) {
         val staged = revisions.pages(candidate)
         val chunked = revisions.chunks(candidate).mapTo(mutableSetOf()) { chunk -> chunk.unitOrdinal }
@@ -237,10 +260,17 @@ internal class CandidateRevisionPhases(
                     artifactRelativePath = page.artifactRelativePath,
                     artifactSha256 = page.artifactSha256,
                     meanConfidence = page.meanConfidence,
+                    structureRelativePath = page.structureReference?.relativePath,
+                    structureSha256 = page.structureReference?.sha256,
                     extractionMethod = page.extractionMethod,
                 ),
                 maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
                 overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
+                // The structure ContentStore.structureOf reads once the unit is committed, so a page chunks
+                // the same way here as when it is re-chunked later.
+                structure = page.structureReference?.let { reference ->
+                    PageStructureStore.read(artifactRoot, reference, page.extractedText)
+                },
             )
             stage.run(STAGE_CHUNK) { revisions.recordPageChunks(candidate, page.ordinal, plan.drafts) }
         }

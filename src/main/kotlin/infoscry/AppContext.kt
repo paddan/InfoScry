@@ -38,6 +38,7 @@ import infoscry.llm.PromptService
 import infoscry.logging.LoggingBootstrap
 import infoscry.ocr.OcrProfileService
 import infoscry.ocr.OcrReadingMethodCatalog
+import infoscry.ocr.OrphanedStructureSweep
 import infoscry.ocr.StaleOcrStateCleanup
 import infoscry.pdf.SelectablePdfService
 import infoscry.storage.SelectablePdfStore
@@ -701,6 +702,7 @@ class AppContext private constructor(
                             revisions,
                             documents,
                             hasLiveAttempt = { false },
+                            structureSweep = OrphanedStructureSweep(database, paths),
                         ).run()
                         // After deletions are finished, because finishing one cascades its jobs away: an
                         // attempt that a previous process was inside is queued again, and a cancellation

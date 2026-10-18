@@ -5,15 +5,21 @@ import infoscry.domain.DocumentId
 import infoscry.extract.EXTRACTOR_SCHEMA_VERSION
 import infoscry.extract.ExternalProcess
 import infoscry.extract.ExternalToolMissingException
+import java.awt.Color
+import java.awt.Font
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.Duration
+import javax.imageio.ImageIO
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -124,6 +130,90 @@ class SuryaRealToolTest {
             emptySet(),
             leftBehind,
             "the engine left llama-server processes behind: $leftBehind",
+        )
+    }
+
+    /**
+     * The table page: a small grid with a header row, drawn here rather than committed, so the image is
+     * redistributable by construction (the synthetic text carries no one's data).
+     *
+     * The gate is the structure, not the words: the reading must contain a `TABLE` block whose header cells
+     * name the columns, which proves the runtime's table HTML reached the structure parser as a table.
+     */
+    @Tag(EXTERNAL_TAG)
+    @Test
+    fun `the installed runtime reads a table page as a table with a header row`() = runBlocking {
+        val engine = SuryaOcr.configured()
+        assertNotNull(
+            engine,
+            "this test needs the local Surya runtime: install it with '${SuryaOcr.installRemedy()}' and " +
+                "point ${SuryaOcr.INTERPRETER_ENV} and ${SuryaOcr.WORKER_SCRIPT_ENV} at it",
+        )
+        val table = renderTablePage()
+        try {
+            val reading = engine.transcribe(table, settings())
+            assertReading(reading)
+            val structure = assertNotNull(reading.structure, "the reading carries no structure, so no table can be shown")
+            assertFalse(structure.degraded, "the table page fell back to paragraphs: ${reading.text}")
+            val tables = structure.blocks.filter { it.kind == BlockKind.TABLE }
+            assertTrue(tables.isNotEmpty(), "no TABLE block was recognised; blocks=${structure.blocks.map { it.kind }} text=${reading.text}")
+            val headers = tables.first().rows.orEmpty().firstOrNull()?.cells.orEmpty()
+                .filter { it.header }
+                .map { reading.text.substring(it.extracted.start, it.extracted.endExclusive).trim() }
+            assertTrue(
+                headers.any { it.contains("Item") } && headers.any { it.contains("Amount") },
+                "the table's header row names its columns: headers=$headers text=${reading.text}",
+            )
+            println("surya runtime: table page header cells=$headers")
+        } finally {
+            engine.close()
+        }
+    }
+
+    /** A committed-free table page, written under the test directory and read through the normal page path. */
+    private fun renderTablePage(): PageImage {
+        val root = directory.resolve("pages")
+        Files.createDirectories(root)
+        val reference = "table-page.png"
+        val image = BufferedImage(1200, 800, BufferedImage.TYPE_INT_RGB)
+        val graphics = image.createGraphics()
+        try {
+            graphics.color = Color.WHITE
+            graphics.fillRect(0, 0, image.width, image.height)
+            graphics.color = Color.BLACK
+            graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+            graphics.font = Font(Font.SANS_SERIF, Font.BOLD, 40)
+            graphics.drawString("Approved payments", 80, 110)
+            val columns = intArrayOf(80, 560, 880, 1120)
+            val rows = listOf(
+                listOf("Item", "Quantity", "Amount"),
+                listOf("Archive scanning", "12", "1480 SEK"),
+                listOf("Document binding", "4", "320 SEK"),
+            )
+            graphics.font = Font(Font.SANS_SERIF, Font.PLAIN, 34)
+            rows.forEachIndexed { row, cells ->
+                val top = TABLE_TOP + row * ROW_HEIGHT
+                cells.forEachIndexed { column, text ->
+                    if (row == 0) graphics.font = Font(Font.SANS_SERIF, Font.BOLD, 34)
+                    graphics.drawString(text, columns[column] + 12, top + 60)
+                }
+                graphics.font = Font(Font.SANS_SERIF, Font.PLAIN, 34)
+            }
+            for (row in 0..rows.size) graphics.drawLine(columns.first(), TABLE_TOP + row * ROW_HEIGHT, columns.last(), TABLE_TOP + row * ROW_HEIGHT)
+            for (column in columns) graphics.drawLine(column, TABLE_TOP, column, TABLE_TOP + rows.size * ROW_HEIGHT)
+        } finally {
+            graphics.dispose()
+        }
+        ImageIO.write(image, "png", root.resolve(reference).toFile())
+        return PageImage.ofFile(
+            documentId = DocumentId("doc-surya-real"),
+            unitId = "page:table",
+            ordinal = 0,
+            imageRoot = root,
+            imageReference = reference,
+            artifactRoot = directory.resolve("artifacts"),
+            renderDpi = null,
+            rotationDegrees = 0,
         )
     }
 
@@ -283,5 +373,9 @@ class SuryaRealToolTest {
         val PROBE_TIMEOUT: Duration = Duration.ofSeconds(60)
 
         val WHITESPACE: Regex = Regex("\\s+")
+
+        /** Where the rendered table starts and how tall each row is, in pixels of the table page. */
+        const val TABLE_TOP: Int = 170
+        const val ROW_HEIGHT: Int = 110
     }
 }

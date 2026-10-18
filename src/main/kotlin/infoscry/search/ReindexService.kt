@@ -330,7 +330,7 @@ class ReindexService(
         collectionId: CollectionId,
         documentId: DocumentId,
     ): BuiltDocument {
-        ensureChunksUnderTarget(documentId)
+        ensureChunksUnderTarget(collectionId, documentId)
         // The revision the database publishes, so a rebuilt row and a staged row are told apart by the
         // same tag and no document can end up with rows of two readings in one generation.
         val revisionId = revisions.activeRevisionId(documentId)
@@ -378,7 +378,8 @@ class ReindexService(
      * next rebuild and the next citation agree on. The document's extraction checkpoints are untouched:
      * re-chunking is not re-reading.
      */
-    private suspend fun ensureChunksUnderTarget(documentId: DocumentId) {
+    private suspend fun ensureChunksUnderTarget(collectionId: CollectionId, documentId: DocumentId) {
+        val artifactRoot = paths.artifactsDir(collectionId, documentId)
         val version = chunker.version
         val tokenizerId = chunker.counterId
         val maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS
@@ -391,7 +392,7 @@ class ReindexService(
             val batch = content.listUnits(documentId, afterOrdinal = afterOrdinal, limit = UNIT_BATCH)
             if (batch.isEmpty()) break
             batch.forEach { unit ->
-                val plan = chunker.chunk(unit, maxSequenceTokens, overlapTokens)
+                val plan = chunker.chunk(unit, maxSequenceTokens, overlapTokens, content.structureOf(unit, artifactRoot))
                 content.replaceUnitChunks(
                     unitId = unit.id,
                     drafts = plan.drafts,

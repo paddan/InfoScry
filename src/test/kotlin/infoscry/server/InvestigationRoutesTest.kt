@@ -1433,11 +1433,11 @@ class InvestigationRoutesTest {
                         text = "excerpt text",
                     ),
                 ),
-            ).toWire(),
+            ).toWire(documentTitle = { "Report" }),
         )
 
         assertEquals(
-            """{"type":"done","text":"final [S1]","evidence":[{"id":"S1","documentId":"doc-1","unitId":"unit-7","locator":{"type":"word_section","headingPath":["Chapter 1"],"paragraphStart":2,"paragraphEnd":4},"locatorLabel":"Chapter 1, paragraphs 2-4"}]}""",
+            """{"type":"done","text":"final [S1]","evidence":[{"id":"S1","documentId":"doc-1","unitId":"unit-7","locator":{"type":"word_section","headingPath":["Chapter 1"],"paragraphStart":2,"paragraphEnd":4},"locatorLabel":"Chapter 1, paragraphs 2-4","documentTitle":"Report"}]}""",
             json,
         )
     }
@@ -1616,6 +1616,11 @@ class InvestigationRoutesTest {
         assertEquals(
             keptDocument.value,
             evidence.getValue("S2")["documentId"]?.jsonPrimitive?.content,
+        )
+        assertEquals(
+            listOf("replaced-notes.txt", "kept-notes.txt", "replaced-notes.txt"),
+            listOf("S1", "S2", "S3").map { evidence.getValue(it)["documentTitle"]?.jsonPrimitive?.content },
+            "each entry names the document it came from, not only its page",
         )
         assertFalse(
             body.contains(replacementText),

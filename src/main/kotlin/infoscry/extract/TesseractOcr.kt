@@ -1,11 +1,17 @@
 package infoscry.extract
 
+import infoscry.ocr.BlockDraft
+import infoscry.ocr.BlockKind
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.OcrWordBox
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageOcrEngine
+import infoscry.ocr.PageStructureDraft
+import infoscry.ocr.PixelBox
+import infoscry.ocr.STRUCTURE_DEGRADED
+import infoscry.ocr.StructureDerivation
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -112,8 +118,15 @@ class TesseractOcr(
             val relativePath = boxesArtifactPath(page.ordinal)
             val artifact = page.artifactRoot.resolve(relativePath)
             writeArtifact(artifact, run.tsv)
+            // The reading's text is the text its paragraph structure was derived into, which is what the
+            // structure's ranges point into. The TSV artifact and the word boxes are the tool's output and stay
+            // exactly as they were.
+            val derived = StructureDerivation.derive(
+                PageStructureDraft(TesseractTsv.PARSER, run.reading.paragraphs, degraded = false),
+                page.sha256,
+            )
             return OcrPageResult(
-                text = run.reading.text,
+                text = derived.extractedText,
                 engine = engine,
                 imageSha256 = page.sha256,
                 boxes = run.reading.boxes,
@@ -124,7 +137,9 @@ class TesseractOcr(
                 // paper may be blank or the tool may have missed what is on it, and only the raster can
                 // tell the two apart. The reading is therefore this code rather than an unqualified
                 // success, exactly as the Surya engine answers an empty page.
-                errorCode = if (run.reading.text.isBlank()) OcrPageResult.EMPTY_READING_CODE else null,
+                errorCode = if (derived.extractedText.isBlank()) OcrPageResult.EMPTY_READING_CODE else null,
+                structure = derived.structure,
+                warnings = if (derived.degraded) listOf(STRUCTURE_DEGRADED) else emptyList(),
             )
         } finally {
             workingDirectory.toFile().deleteRecursively()
@@ -345,6 +360,11 @@ internal data class TesseractReading(
     val text: String,
     val meanConfidence: Double?,
     val boxes: List<OcrWordBox> = emptyList(),
+    /**
+     * The same lines grouped into paragraphs, in reading order: a paragraph's text is its lines joined by `\n`,
+     * and its box is the union of its words' boxes. [text] stays line based for the callers that want lines.
+     */
+    val paragraphs: List<BlockDraft> = emptyList(),
 )
 
 /**
@@ -362,6 +382,9 @@ internal data class TesseractReading(
  */
 internal object TesseractTsv {
 
+    /** The parser id a paragraph structure derived from this TSV carries. */
+    const val PARSER: String = "tesseract-tsv/1"
+
     /** The level a row carrying a word has. */
     private const val WORD_LEVEL: Int = 5
 
@@ -372,6 +395,7 @@ internal object TesseractTsv {
         val lines = linkedMapOf<LineKey, MutableList<String>>()
         val confidences = mutableListOf<Double>()
         val boxes = mutableListOf<OcrWordBox>()
+        val paragraphBoxes = linkedMapOf<ParagraphKey, MutableList<PixelBox>>()
         for (row in tsv.lineSequence()) {
             val fields = row.split('\t')
             if (fields.size < COLUMN_COUNT) continue
@@ -387,28 +411,64 @@ internal object TesseractTsv {
             lines.getOrPut(key) { mutableListOf() }.add(text)
             val confidence = fields[CONFIDENCE_COLUMN].trim().toDoubleOrNull()?.takeIf { value -> value >= 0 }
             confidence?.let { value -> confidences.add(value) }
+            val left = fields[LEFT_COLUMN].trim().toIntOrNull() ?: 0
+            val top = fields[TOP_COLUMN].trim().toIntOrNull() ?: 0
+            val width = fields[WIDTH_COLUMN].trim().toIntOrNull() ?: 0
+            val height = fields[HEIGHT_COLUMN].trim().toIntOrNull() ?: 0
             boxes += OcrWordBox(
                 text = text,
-                left = fields[LEFT_COLUMN].trim().toIntOrNull() ?: 0,
-                top = fields[TOP_COLUMN].trim().toIntOrNull() ?: 0,
-                width = fields[WIDTH_COLUMN].trim().toIntOrNull() ?: 0,
-                height = fields[HEIGHT_COLUMN].trim().toIntOrNull() ?: 0,
+                left = left,
+                top = top,
+                width = width,
+                height = height,
                 // The same fraction the mean is in, so one confidence can be compared with the other.
                 confidence = confidence?.div(PERCENT),
             )
+            // A word with no area cannot make a box, and a paragraph's box is the union of the words that can.
+            if (width > 0 && height > 0) {
+                paragraphBoxes.getOrPut(key.paragraphKey) { mutableListOf() }
+                    .add(PixelBox(left, top, left + width, top + height))
+            }
         }
         val ordered = lines.entries.sortedWith(
             compareBy({ it.key.page }, { it.key.block }, { it.key.paragraph }, { it.key.line }),
         )
+        val paragraphs = ordered
+            .groupBy { (key, _) -> key.paragraphKey }
+            .map { (paragraphKey, entries) ->
+                BlockDraft(
+                    kind = BlockKind.PARAGRAPH,
+                    text = entries.joinToString("\n") { (_, words) -> words.joinToString(" ") },
+                    bbox = union(paragraphBoxes[paragraphKey].orEmpty()),
+                )
+            }
         return TesseractReading(
             text = ordered.joinToString("\n") { (_, words) -> words.joinToString(" ") },
             meanConfidence = if (confidences.isEmpty()) null else confidences.average() / PERCENT,
             boxes = boxes,
+            paragraphs = paragraphs,
+        )
+    }
+
+    /** The smallest box that holds every one of [boxes], or null when there are none. */
+    private fun union(boxes: List<PixelBox>): PixelBox? = if (boxes.isEmpty()) {
+        null
+    } else {
+        PixelBox(
+            left = boxes.minOf { it.left },
+            top = boxes.minOf { it.top },
+            right = boxes.maxOf { it.right },
+            bottom = boxes.maxOf { it.bottom },
         )
     }
 
     /** Where a word belongs: the page, block, paragraph, and line coordinates Tesseract gave it. */
-    private data class LineKey(val page: Int, val block: Int, val paragraph: Int, val line: Int)
+    private data class LineKey(val page: Int, val block: Int, val paragraph: Int, val line: Int) {
+        val paragraphKey: ParagraphKey get() = ParagraphKey(page, block, paragraph)
+    }
+
+    /** A paragraph is one block of the page's TSV: the page, block, and paragraph coordinates together. */
+    private data class ParagraphKey(val page: Int, val block: Int, val paragraph: Int)
 
     private const val LEVEL_COLUMN: Int = 0
     private const val PAGE_COLUMN: Int = 1

@@ -1,6 +1,9 @@
 package infoscry.server
 
 import infoscry.ocr.OcrQualityScorer
+import infoscry.ocr.PageStructureStore
+import infoscry.ocr.StructureView
+import infoscry.ocr.windowStructure
 import infoscry.AppContext
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
@@ -57,6 +60,13 @@ data class SourceContentResponse(
     val position: Int? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val unitCount: Int? = null,
+    /**
+     * The page's structure, present only when the text has one. Its ranges are in the same text as [text] and
+     * shifted by [offset], so `text.substring(start, end)` is the block's text inside this window. Every block
+     * that overlaps the window is sent, and every range is clamped to the window, so a range may be empty.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val structure: StructureView? = null,
 )
 
 /** Reader-only endpoints. Both identifiers are opaque IDs resolved inside the selected collection. */
@@ -128,6 +138,12 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                 } else requestedEnd
                 val page = sourceText.substring(offset, end)
                 val neighbours = if (revisionPage == null) context.content.neighboursOf(documentId, ordinal) else null
+                val artifactRoot = context.paths.artifactsDir(collection.id, documentId)
+                val structure = if (revisionPage != null) {
+                    revisionPage.structureReference?.let { PageStructureStore.read(artifactRoot, it, sourceText) }
+                } else {
+                    unit?.let { context.content.structureOf(it, artifactRoot) }
+                }
                 call.respondJson(
                     HttpStatusCode.OK,
                     SourceContentResponse(
@@ -145,6 +161,7 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                         nextId = neighbours?.next?.value,
                         position = neighbours?.position,
                         unitCount = neighbours?.total,
+                        structure = structure?.let { windowStructure(it, offset, end) },
                     ),
                 )
             }

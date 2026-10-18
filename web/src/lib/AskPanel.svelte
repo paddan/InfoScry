@@ -11,6 +11,7 @@
     type AskHistoryEntry,
     type LlmProfilePrice,
   } from './api';
+  import { evidenceSourceLabel } from './evidenceLabel';
 
   export let collectionId: string;
   export let onOpenSource: (evidence: AskEvidence) => void | Promise<void>;
@@ -42,6 +43,10 @@
   let usage: { inputTokens: number; outputTokens: number } | null = null;
   let answerEvidence: AskEvidence[] = [];
   let renderedAnswerParts: { text: string; evidence: AskEvidence | null }[] = [];
+  /** The sources the answer actually cites, once each and in the order they were supplied. */
+  function citedEvidence(evidence: AskEvidence[], parts: { evidence: AskEvidence | null }[]): AskEvidence[] {
+    return evidence.filter((item) => parts.some((part) => part.evidence?.id === item.id));
+  }
   let askGeneration = 0;
   /** Every in-flight stream's controller; a destroyed panel aborts them all so no drain leaks. */
   let activeControllers = new Set<AbortController>();
@@ -250,10 +255,17 @@
     <div class="answer" aria-label="Answer">
       {#each renderedAnswerParts as part, index (`${index}-${part.text}`)}
         {#if part.evidence !== null}
-          <button class="citation" type="button" onclick={() => onOpenSource(part.evidence!)} aria-label={`Open source ${part.text.slice(1, -1)}, ${part.evidence.locatorLabel}`}>{part.text}</button>
+          <button class="citation" type="button" onclick={() => onOpenSource(part.evidence!)} title={evidenceSourceLabel(part.evidence)} aria-label={`Open source ${part.text.slice(1, -1)}, ${evidenceSourceLabel(part.evidence)}`}>{part.text}</button>
         {:else}{part.text}{/if}
       {/each}
     </div>
+    {#if citedEvidence(answerEvidence, renderedAnswerParts).length > 0}
+      <ul class="sources" aria-label="Sources">
+        {#each citedEvidence(answerEvidence, renderedAnswerParts) as item (item.id)}
+          <li><button class="citation" type="button" onclick={() => onOpenSource(item)}>[{item.id}] {evidenceSourceLabel(item)}</button></li>
+        {/each}
+      </ul>
+    {/if}
   {/if}
   {#if usage !== null}
     <p class="meta" aria-label="Token usage">{usage.inputTokens.toLocaleString()} input tokens · {usage.outputTokens.toLocaleString()} output tokens</p>
@@ -289,6 +301,8 @@
     padding: 0;
     text-decoration: underline;
   }
+  .sources { font-size: 0.9rem; list-style: none; margin: 0.75rem 0 0; padding: 0; }
+  .sources li + li { margin-top: 0.25rem; }
   .meta { color: #555; font-size: 0.9rem; }
   [role='alert'] { color: #a4232b; }
   @media (max-width: 38rem) { .ask-form { grid-template-columns: 1fr; } }

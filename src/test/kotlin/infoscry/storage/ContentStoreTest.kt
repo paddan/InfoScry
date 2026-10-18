@@ -14,6 +14,13 @@ import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
+import infoscry.ocr.BlockDraft
+import infoscry.ocr.BlockKind
+import infoscry.ocr.DerivedPage
+import infoscry.ocr.PageStructureDraft
+import infoscry.ocr.PageStructureStore
+import infoscry.ocr.StructureDerivation
+import infoscry.ocr.StructureReference
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -216,6 +223,114 @@ class ContentStoreTest {
         assertNull(store.readUnit(ok.unit.id)?.artifactRelativePath)
         assertEquals(setOf("page-2"), store.reusableCheckpoints(document, fingerprint, root).skipKeys)
         assertTrue(store.reusableCheckpoints(document, fingerprint, root).repaired.isEmpty(), "repairs are reported once")
+    }
+
+    @Test
+    fun structureReferenceRoundTrips() {
+        val document = newDocument()
+        val root = artifactRoot(document)
+        val derived = derivedPage("Heading\nA paragraph of text.")
+        val reference = PageStructureStore.write(root, 0, derived.structure)
+
+        val commit = store.commitExtractedUnit(
+            document, fingerprint, "page-1", 0,
+            draftOf(extracted = derived.extractedText, search = derived.searchText)
+                .copy(structureReference = reference),
+            root,
+        )
+
+        val stored = assertNotNull(store.readUnit(commit.unit.id))
+        assertEquals(reference.relativePath, stored.structureRelativePath)
+        assertEquals(reference.sha256, stored.structureSha256)
+        assertEquals(derived.structure, store.structureOf(stored, root))
+
+        // Committing the same unit again is a repeat, not a second artifact or a different reference.
+        val again = store.commitExtractedUnit(
+            document, fingerprint, "page-1", 0,
+            draftOf(extracted = derived.extractedText, search = derived.searchText)
+                .copy(structureReference = PageStructureStore.write(root, 0, derived.structure)),
+            root,
+        )
+        assertEquals(stored.id, again.unit.id)
+        assertEquals(reference.sha256, again.unit.structureSha256)
+        assertEquals(1, Files.list(root.resolve("structure")).use { it.count() })
+
+        // Committing text that has no structure drops the reference rather than keeping one for other text.
+        val plain = store.commitExtractedUnit(document, fingerprint, "page-1", 0, draftOf(extracted = "other"), root)
+        assertNull(plain.unit.structureRelativePath)
+        assertNull(plain.unit.structureSha256)
+        assertNull(store.structureOf(plain.unit, root))
+    }
+
+    @Test
+    fun tamperedStructureReadsAsNull() {
+        val document = newDocument()
+        val root = artifactRoot(document)
+        val derived = derivedPage("Heading\nA paragraph of text.")
+        val reference = PageStructureStore.write(root, 0, derived.structure)
+        val unit = store.commitExtractedUnit(
+            document, fingerprint, "page-1", 0,
+            draftOf(extracted = derived.extractedText, search = derived.searchText)
+                .copy(structureReference = reference),
+            root,
+        ).unit
+        assertNotNull(store.structureOf(unit, root))
+
+        Files.write(root.resolve(reference.relativePath), byteArrayOf(1, 2, 3))
+
+        assertNull(store.structureOf(unit, root), "a structure whose bytes changed was still trusted")
+        assertEquals(derived.extractedText, store.readUnit(unit.id)?.extractedText, "the text must stay readable")
+    }
+
+    @Test
+    fun `the startup sweep removes only structure artifacts no row names and is safe to repeat`() {
+        val document = newDocument()
+        val root = artifactRoot(document)
+        val kept = derivedPage("Heading\nKept paragraph.")
+        val orphan = derivedPage("Heading\nAn earlier reading nobody committed.")
+        val keptReference = PageStructureStore.write(root, 0, kept.structure)
+        val orphanReference = PageStructureStore.write(root, 0, orphan.structure)
+        store.commitExtractedUnit(
+            document, fingerprint, "page-1", 0,
+            draftOf(extracted = kept.extractedText, search = kept.searchText).copy(structureReference = keptReference),
+            root,
+        )
+        val sweep = infoscry.ocr.OrphanedStructureSweep(database, infoscry.config.AppPaths.of(dataDir))
+
+        assertEquals(1, sweep.run())
+        assertTrue(Files.exists(root.resolve(keptReference.relativePath)), "a referenced structure was removed")
+        assertFalse(Files.exists(root.resolve(orphanReference.relativePath)), "an orphaned structure was kept")
+        assertEquals(0, sweep.run(), "a second sweep found something more to remove")
+        assertTrue(Files.exists(root.resolve(keptReference.relativePath)))
+    }
+
+    @Test
+    fun `a structure that does not verify at commit is dropped and never fails the unit`() {
+        val document = newDocument()
+        val root = artifactRoot(document)
+        val derived = derivedPage("Heading\nA paragraph of text.")
+        val reference = PageStructureStore.write(root, 0, derived.structure)
+
+        val mismatched = store.commitExtractedUnit(
+            document, fingerprint, "page-1", 0,
+            draftOf(extracted = "completely other text").copy(structureReference = reference),
+            root,
+        )
+        assertNull(mismatched.unit.structureRelativePath)
+        assertNull(mismatched.artifactIssue)
+
+        val missing = store.commitExtractedUnit(
+            document, fingerprint, "page-2", 1,
+            draftOf(extracted = derived.extractedText, search = derived.searchText).copy(
+                structureReference = StructureReference(
+                    "structure/page-000001.${"0".repeat(64)}.structure.json.gz",
+                    "0".repeat(64),
+                ),
+            ),
+            root,
+        )
+        assertNull(missing.unit.structureRelativePath)
+        assertNull(missing.artifactIssue)
     }
 
     @Test
@@ -558,6 +673,20 @@ class ContentStoreTest {
         extracted: String = "still readable",
         search: String = extracted,
     ): ContentUnitDraft = ContentUnitDraft(locator = locator, extractedText = extracted, searchText = search, method = ExtractionMethod.DIRECT_TEXT)
+
+    private fun derivedPage(text: String): DerivedPage = StructureDerivation.derive(
+        PageStructureDraft(
+            parser = "markdown/1",
+            blocks = text.split("\n").mapIndexed { index, line ->
+                BlockDraft(
+                    if (index == 0) BlockKind.HEADING else BlockKind.PARAGRAPH,
+                    line,
+                    level = if (index == 0) 1 else null,
+                )
+            },
+        ),
+        imageSha256 = "a".repeat(64),
+    )
 
     private fun artifactRoot(document: DocumentId): Path =
         dataDir.resolve("library").resolve(collectionId.value).resolve(document.value).resolve("artifacts")

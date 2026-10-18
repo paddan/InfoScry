@@ -66,7 +66,7 @@ describe('Investigate panel', () => {
         { type: 'delta', text: 'First answer [S1]' },
         { type: 'usage', inputTokens: 10, outputTokens: 4 },
         { type: 'citation', id: 'S1', valid: true },
-        { type: 'done', text: 'First answer [S1]', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4' }] },
+        { type: 'done', text: 'First answer [S1]', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4', documentTitle: 'Treaty.pdf' }] },
       )())
       .mockReturnValueOnce(events(
         { type: 'started', id: 'conversation-1' },
@@ -82,7 +82,7 @@ describe('Investigate panel', () => {
     await fireEvent.input(await screen.findByLabelText('Investigate question'), { target: { value: 'What happened?' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Investigate' }));
 
-    expect(await screen.findByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' })).toBeTruthy();
     expect(api.startInvestigation).toHaveBeenCalledTimes(1);
     expect(api.startInvestigation).toHaveBeenCalledWith('collection-1', 'What happened?', 'local-cheap', expect.any(AbortSignal), { effortLevel: 'MEDIUM' }, undefined);
     expect(onConversationStarted).toHaveBeenCalledWith('conversation-1');
@@ -129,7 +129,7 @@ describe('Investigate panel', () => {
       await gate;
       yield { type: 'delta', text: 'Final synthesized answer [S1]' };
       yield { type: 'citation', id: 'S1', valid: true };
-      yield { type: 'done', text: 'Final synthesized answer [S1]', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4' }] };
+      yield { type: 'done', text: 'Final synthesized answer [S1]', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4', documentTitle: 'Treaty.pdf' }] };
     })());
     const onWorkingChanged = vi.fn();
     const onConversationFinished = vi.fn();
@@ -152,7 +152,7 @@ describe('Investigate panel', () => {
     expect(screen.getByText(/Tool round limit reached/)).toBeTruthy();
     expect(screen.queryByText(/Provisional half-sentence/)).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' })).toBeTruthy();
     expect(onWorkingChanged).toHaveBeenCalledWith(false);
     await waitFor(() => expect(onConversationFinished).toHaveBeenCalledTimes(1));
   });
@@ -186,7 +186,7 @@ describe('Investigate panel', () => {
         { role: 'user', text: 'Who signed it?' },
         { role: 'assistant', text: 'Mira signed it [S2]' },
       ],
-      evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8' }],
+      evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8', documentTitle: 'Notes.pdf' }],
       inputTokens: 20,
       outputTokens: 9,
       costUsd: 0.0001,
@@ -198,7 +198,7 @@ describe('Investigate panel', () => {
 
     expect(await screen.findByText('Who signed it?')).toBeTruthy();
     expect(api.getInvestigation).toHaveBeenCalledWith('collection-1', 'saved-1');
-    const citation = screen.getByRole('button', { name: /\[S2\] Page 8/ });
+    const citation = screen.getByRole('button', { name: /\[S2\] Notes\.pdf, Page 8/ });
     await fireEvent.click(citation);
     expect(onOpenSource).toHaveBeenCalledWith(expect.objectContaining({ id: 'S2', unitId: 'unit-2' }));
     expect(screen.getByText(/1 tool call/)).toBeTruthy();

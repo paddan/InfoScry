@@ -196,6 +196,13 @@ interface; the `infoscry search` CLI also accepts ISO instants. Open a result to
 read its source. Semantic and hybrid
 retrieval require the local embedding model and supported GPU runtime.
 
+A scanned page read with Surya or the LLM reader shows its layout in the source
+viewer: headings, lists, tables with their header cells, and formulas as their
+LaTeX source. Page headers and footers are shown muted and labelled. A page whose
+layout could not be fully recognised is shown as paragraphs, and page review says
+so. Pages read before this layout support was added keep their plain text until
+they are read again with **Scan this page again**.
+
 If an archive was indexed before chunker version 3, run `infoscry reindex --wait`
 to add short text such as single letters, digits and formulas that the earlier
 chunking rule omitted. Existing extraction checkpoints and source files are

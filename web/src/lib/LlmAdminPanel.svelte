@@ -382,7 +382,6 @@
           </div>
         </div>
       </fieldset>
-      <EffortProfileFields bind:overrides={draft.effortOverrides} provider={draft.provider} maxOutputTokens={draft.maxOutputTokens} />
       {#if !creating && selectedProfile !== null}
         <fieldset class="profile-checks">
           <legend>Profile checks</legend>
@@ -410,6 +409,10 @@
           </div>
         </fieldset>
       {/if}
+
+      <div class="effort">
+        <EffortProfileFields bind:overrides={draft.effortOverrides} provider={draft.provider} maxOutputTokens={draft.maxOutputTokens} />
+      </div>
 
       <div class="actions">
         <button type="submit" class="primary" disabled={saving}>
@@ -488,6 +491,7 @@
     border-color: #515757;
   }
   .hint { margin: 0; color: #929997; font-size: 0.78rem; }
+  .effort { grid-column: 1 / -1; min-width: 0; }
   .actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0.55rem; margin-top: 0.2rem; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
   button.primary:hover:not(:disabled) { background: #d4ba94; }

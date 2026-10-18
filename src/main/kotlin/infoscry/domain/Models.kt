@@ -361,6 +361,14 @@ data class ContentUnit(
     val artifactSha256: String? = null,
     val meanConfidence: Double? = null,
     /**
+     * The page's structure artifact (blocks, tables and their ranges in the two texts), relative to the document's
+     * artifact root, with the hash of its stored bytes. Both are present or both are absent; absent is the honest
+     * answer for text a parser read, for a page read before structures existed, and for one whose artifact
+     * did not verify. Read it through `ContentStore.structureOf`, which answers `null` for any damage.
+     */
+    val structureRelativePath: String? = null,
+    val structureSha256: String? = null,
+    /**
      * How this unit's text was read, or `null` for a unit committed before the pipeline recorded it.
      *
      * Absent is not "direct text": a legacy unit's method is unknown, and a count that showed it as zero
@@ -372,6 +380,9 @@ data class ContentUnit(
         require(ordinal >= 0) { "ContentUnit.ordinal must not be negative, was $ordinal" }
         require((artifactRelativePath == null) == (artifactSha256 == null)) {
             "a unit's artifact reference is either complete or absent"
+        }
+        require((structureRelativePath == null) == (structureSha256 == null)) {
+            "a unit's structure reference is either complete or absent"
         }
     }
 }

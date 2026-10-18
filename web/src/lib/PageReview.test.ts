@@ -16,7 +16,25 @@ const metadata = (ordinal: number, over: Partial<PageReviewResponse> = {}): Page
   documentPages: 3, previousOrdinal: ordinal > 0 ? ordinal - 1 : null,
   nextOrdinal: ordinal < 2 ? ordinal + 1 : null, text: `Text for page ${ordinal + 1}`,
   offset: 0, totalChars: 20, truncated: false, qualityScore: 80,
-  readingMethod: 'Surya', imageKind: 'ocr', ...over,
+  readingMethod: 'Surya', imageKind: 'ocr', structureDegraded: false, ...over,
+});
+
+/** The heading of "Quarterly report\nName\tScore\nAda\t10", with its ranges measured from a window at `base`. */
+const heading = (base: number) => ({ kind: 'HEADING' as const, level: 1, order: 0, start: 0 - base, end: 16 - base });
+
+/** The 2x2 table of that text, with its ranges measured from a window that starts at `base`. */
+const table = (base: number) => ({
+  kind: 'TABLE' as const, order: 1, start: 17 - base, end: 34 - base,
+  rows: [
+    { cells: [
+      { header: true, rowSpan: 1, colSpan: 1, start: 17 - base, end: 21 - base },
+      { header: true, rowSpan: 1, colSpan: 1, start: 22 - base, end: 27 - base },
+    ] },
+    { cells: [
+      { header: false, rowSpan: 1, colSpan: 1, start: 28 - base, end: 31 - base },
+      { header: false, rowSpan: 1, colSpan: 1, start: 32 - base, end: 34 - base },
+    ] },
+  ],
 });
 
 beforeEach(() => {
@@ -46,6 +64,63 @@ describe('PageReview', () => {
     expect(screen.getByText('No extracted text for this page.')).toBeTruthy();
     expect(screen.getByRole('img', { name: 'Original page image, page 2' }).getAttribute('src')).toContain('ordinal=1&revision=revision-a&kind=original');
     expect(mocks.getPage).toHaveBeenLastCalledWith('collection-1', 'doc-1', expect.objectContaining({ ordinal: 1, revision: 'revision-a' }));
+  });
+
+  it('notes a degraded structure on the one page it affects', async () => {
+    const notice = 'Layout could not be fully recognised on this page; text is shown as paragraphs.';
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number }) =>
+      metadata(options.ordinal, { structureDegraded: options.ordinal === 0 }));
+    render(PageReview, { props: { collectionId: 'collection-1', documentId: 'doc-1', initialOrdinal: 0, onBack: vi.fn() } });
+
+    expect(await screen.findByText(notice)).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText('Text for page 2');
+    expect(screen.queryByText(notice)).toBeNull();
+  });
+
+  it('draws a structured page with its heading and table, and keeps the plain pane without structure', async () => {
+    const text = 'Quarterly report\nName\tScore\nAda\t10';
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number }) =>
+      options.ordinal === 0
+        ? metadata(0, { text, totalChars: text.length, structure: { blocks: [heading(0), table(0)] } })
+        : metadata(1, { text: 'Plain page' }));
+    render(PageReview, { props: { collectionId: 'collection-1', documentId: 'doc-1', initialOrdinal: 0, onBack: vi.fn() } });
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Quarterly report' })).toBeTruthy();
+    expect(screen.getByRole('columnheader', { name: 'Name' }).getAttribute('scope')).toBe('col');
+    expect(screen.getByRole('columnheader', { name: 'Score' }).getAttribute('scope')).toBe('col');
+    expect(screen.getByRole('cell', { name: '10' })).toBeTruthy();
+    expect(document.querySelector('.text-pane pre.review-text')).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText('Plain page');
+    expect(document.querySelector('.text-pane pre.review-text')?.textContent).toBe('Plain page');
+    expect(document.querySelector('.text-pane table')).toBeNull();
+  });
+
+  it('appends the structure of each further window when load more is used', async () => {
+    const first = 'Quarterly report';
+    const second = '\nName\tScore\nAda\t10';
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number; offset?: number }) => {
+      if (options.offset === undefined) {
+        return metadata(0, {
+          text: first, totalChars: first.length + second.length, truncated: true,
+          structure: { blocks: [heading(0)] },
+        });
+      }
+      // The second window starts at the newline, so its table ranges are measured from that window.
+      return metadata(0, {
+        text: second, offset: first.length, totalChars: first.length + second.length, truncated: false,
+        structure: { blocks: [table(first.length)] },
+      });
+    });
+    render(PageReview, { props: { collectionId: 'collection-1', documentId: 'doc-1', initialOrdinal: 0, onBack: vi.fn() } });
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Quarterly report' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    expect(await screen.findByRole('columnheader', { name: 'Score' })).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 2, name: 'Quarterly report' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
   });
 
   it('ignores stale page responses and lets long Unicode text load more', async () => {

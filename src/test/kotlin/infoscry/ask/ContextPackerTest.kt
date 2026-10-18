@@ -70,4 +70,32 @@ class ContextPackerTest {
         assertEquals(2, packed.evidences.size)
         assertEquals(listOf("d1", "d1"), packed.evidences.map { it.documentId })
     }
+
+    @Test
+    fun structuredUnitEvidenceIsMarkdown() {
+        val markdown = "| Name | Qty |\n| --- | --- |\n| apple | 3 |"
+        val packed = ContextPacker().pack(
+            "question", "core",
+            listOf(hit("d1", "Name Qty apple 3", "u1")),
+            RequestBudget(10_000), 10,
+            evidenceText = { markdown },
+        )
+
+        assertEquals(listOf(markdown), packed.evidences.map { it.text })
+        assertTrue(packed.request.messages[1].content.contains(markdown))
+    }
+
+    @Test
+    fun budgetCountsRenderedText() {
+        val raw = "short"
+        val rendered = "x".repeat(1_000)
+        val packed = ContextPacker().pack(
+            "question", "core",
+            listOf(hit("d1", raw, "u1")),
+            RequestBudget(1_500, safetyMargin = 1_024), 10,
+            evidenceText = { rendered },
+        )
+
+        assertTrue(packed.evidences.isEmpty(), "a rendered text that exceeds the budget was packed")
+    }
 }

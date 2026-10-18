@@ -1,6 +1,7 @@
 package infoscry.document
 
 import infoscry.AppContext
+import infoscry.domain.ContentUnitId
 import infoscry.domain.ExtractionMethod
 import infoscry.extract.PdfPageRenderer
 import infoscry.extract.PngPageRenderer
@@ -62,6 +63,52 @@ class PageReviewServiceTest {
         val repaired = service.image(document.collectionId, document.id, 0, null, "original")
         assertEquals(2, renders, "a header-only cached PNG must be regenerated")
         assertNotNull(ImageIO.read(repaired.path.toFile()))
+    }
+
+    private fun structured(ordinal: Int, text: String, degraded: Boolean, document: infoscry.domain.Document):
+        infoscry.storage.RevisionPageDraft {
+        val derived = infoscry.ocr.StructureDerivation.derive(
+            infoscry.ocr.PageStructureDraft("markdown/1", listOf(infoscry.ocr.BlockDraft(infoscry.ocr.BlockKind.PARAGRAPH, text)), degraded),
+            "a".repeat(64),
+        )
+        val reference = infoscry.ocr.PageStructureStore.write(
+            context.paths.artifactsDir(document.collectionId, document.id), ordinal, derived.structure,
+        )
+        return fixture.page(ordinal, derived.extractedText).copy(structureReference = reference)
+    }
+
+    @Test fun `page review reports a degraded structure and nothing for a page without one`() {
+        val document = fixture.pdf()
+        fixture.publish(
+            document,
+            listOf(
+                structured(0, "degraded page", true, document),
+                structured(1, "intact page", false, document),
+                fixture.page(2, "legacy page"),
+            ),
+        )
+        val service = service()
+        assertTrue(service.review(document.collectionId, document.id, 0).structureDegraded)
+        assertFalse(service.review(document.collectionId, document.id, 1).structureDegraded)
+        assertFalse(service.review(document.collectionId, document.id, 2).structureDegraded)
+    }
+
+    @Test fun `the sweep keeps a structure named only by a candidate or a superseded revision`() {
+        val document = fixture.pdf()
+        val first = structured(0, "superseded only", false, document)
+        fixture.publish(document, listOf(first))
+        fixture.publish(document, listOf(fixture.page(0, "current text")))
+        val candidatePage = structured(0, "candidate only", false, document)
+        val candidate = context.revisions.openCandidate(document.id, context.revisions.activeRevisionId(document.id), "test")
+        context.revisions.appendPage(candidate, candidatePage.copy(unitId = ContentUnitId("${document.id.value}-0"), producerRevisionId = candidate))
+        val orphan = structured(0, "orphan", false, document).structureReference!!
+        val root = context.paths.artifactsDir(document.collectionId, document.id)
+
+        assertEquals(1, infoscry.ocr.OrphanedStructureSweep(context.database, context.paths).run())
+
+        assertTrue(Files.exists(root.resolve(first.structureReference!!.relativePath)), "a superseded revision's structure was removed")
+        assertTrue(Files.exists(root.resolve(candidatePage.structureReference!!.relativePath)), "a candidate's structure was removed")
+        assertFalse(Files.exists(root.resolve(orphan.relativePath)))
     }
 
     @Test fun `OCR text with unknown provenance does not claim an image or configured method`() {

@@ -1,6 +1,10 @@
 package infoscry.extract
 
 import infoscry.domain.DocumentId
+import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
+import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.PageImage
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.nio.file.Files
@@ -16,6 +20,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -376,6 +381,41 @@ class TesseractOcrTest {
 
         assertEquals(Duration.ofMillis(700), failure.timeout)
         assertTrue(elapsedMillis < 30_000, "the tool was waited for rather than stopped")
+    }
+
+    // ---- The reading's structure --------------------------------------------------------------------
+
+    @Test
+    fun `the reading's text is the text its paragraph structure was derived into`() = runBlocking {
+        val tool = tesseractEmitting(TSV_TWO_LINES)
+        val page = pageFor()
+        val image = PageImage.ofFile(
+            documentId = DocumentId("doc-1"),
+            unitId = "page:1",
+            ordinal = 0,
+            imageRoot = directory,
+            imageReference = imagePath.fileName.toString(),
+            artifactRoot = artifactRoot,
+            renderDpi = 300,
+            rotationDegrees = 0,
+        )
+        val settings = OcrSettingsSnapshot(
+            engine = OcrEngine.TESSERACT,
+            mode = OcrImportMode.FILL_MISSING,
+            language = page.ocrLanguages,
+            extractorVersion = "test",
+        )
+
+        val result = TesseractOcr(executable = tool.toString()).transcribe(image, settings)
+
+        val structure = assertNotNull(result.structure, "a Tesseract reading carries its paragraph structure")
+        assertEquals("tesseract-tsv/1", structure.parser)
+        assertEquals("första raden här\nandra raden\nnytt stycke", result.text)
+        assertEquals(
+            listOf("första raden här\nandra raden", "nytt stycke"),
+            structure.blocks.map { block -> result.text.substring(block.extracted.start, block.extracted.endExclusive) },
+        )
+        assertEquals(emptyList(), result.warnings)
     }
 
     // ---- Helpers ------------------------------------------------------------------------------------

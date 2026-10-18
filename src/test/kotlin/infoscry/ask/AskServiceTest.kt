@@ -168,6 +168,26 @@ class AskServiceTest {
         assertEquals("CONTEXT_BUDGET_EXCEEDED", assertIs<AskEvent.Error>(events.last()).code)
     }
 
+    @Test
+    fun `the evidence text the session renders is what the model is sent and what is saved`() = runBlocking {
+        val provider = ScriptedProvider(
+            streamed = listOf(LlmEvent.TextDelta("answer [S1]"), LlmEvent.Usage(TokenUsage(1, 1))),
+            completion = LlmCompletion("unused"),
+        )
+        val service = AskService(
+            CapturedSearch(listOf(hit())), PromptService(), client = { provider },
+            persistence = { _, _, _, _, _, _, _ -> "conversation-id" },
+            evidenceSession = { _ -> { _ -> "| rendered | table |" } },
+        )
+
+        val events = service.ask(request()).toList()
+
+        val sent = provider.streamRequests.single().messages.last().content
+        assertTrue(sent.contains("| rendered | table |"), "the request carries the rendered text")
+        assertTrue(!sent.contains("\nevidence\n"), "the raw hit text is not sent")
+        assertEquals("| rendered | table |", assertIs<AskEvent.Done>(events.last()).evidence.single().text)
+    }
+
     private fun service(search: AskSearch, provider: AskProvider, persistence: AskPersistence): AskService =
         AskService(search, PromptService(), client = { provider }, persistence = persistence)
 

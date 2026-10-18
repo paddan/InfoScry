@@ -1,6 +1,10 @@
 package infoscry.investigate
 
+import infoscry.ask.StructuredEvidenceSource
+import infoscry.chunk.ChunkDraft
+import infoscry.config.AppPaths
 import infoscry.domain.CollectionId
+import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
@@ -10,6 +14,13 @@ import infoscry.domain.SourceLocation
 import infoscry.extract.ContentUnitDraft
 import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
+import infoscry.ocr.BlockDraft
+import infoscry.ocr.BlockKind
+import infoscry.ocr.CellDraft
+import infoscry.ocr.DerivedPage
+import infoscry.ocr.PageStructureDraft
+import infoscry.ocr.PageStructureStore
+import infoscry.ocr.StructureDerivation
 import infoscry.search.SearchFilters
 import infoscry.search.SearchHit
 import infoscry.search.SearchMode
@@ -368,13 +379,128 @@ class InvestigationToolsTest {
         assertEquals("COMPLETE", payload["status"]!!.jsonPrimitive.content)
     }
 
+    @Test
+    fun `search returns a structured unit's chunk as Markdown`() {
+        val docA = document(collectionA)
+        val unit = addStructuredUnit(collectionA, docA, 0, reportPage())
+        val search = FakeSearch()
+        search.hits = listOf(structuredHit(collectionA, docA, unit))
+        val tools = tools(collectionA, search, structured = structuredSource())
+
+        val success = assertIs<ToolResult.Success>(tools.execute("search_collection", """{"query":"q"}"""))
+
+        assertEquals(listOf(REPORT_MARKDOWN), success.evidence.map { it.text })
+        assertEquals(listOf(REPORT_MARKDOWN), Json.parseToJsonElement(success.payloadJson).jsonArray.map { it.jsonObject["text"]!!.jsonPrimitive.content })
+    }
+
+    @Test
+    fun `reading a structured unit returns its whole-unit Markdown`() {
+        val docA = document(collectionA)
+        val unit = addStructuredUnit(collectionA, docA, 0, reportPage())
+        val tools = tools(collectionA, FakeSearch(), structured = structuredSource())
+
+        val success = assertIs<ToolResult.Success>(
+            tools.execute("read_content_unit", """{"contentUnitId":"${unit.id.value}"}"""),
+        )
+
+        assertEquals(listOf(REPORT_MARKDOWN), success.evidence.map { it.text })
+    }
+
+    @Test
+    fun `adjacent reads mix structured Markdown with plain text`() {
+        val docA = document(collectionA)
+        val plain = addUnit(docA, 0, "plain neighbour text")
+        addStructuredUnit(collectionA, docA, 1, reportPage())
+        val tools = tools(collectionA, FakeSearch(), structured = structuredSource())
+
+        val success = assertIs<ToolResult.Success>(
+            tools.execute("read_adjacent_units", """{"contentUnitId":"${plain.value}","after":1}"""),
+        )
+
+        assertEquals(listOf("plain neighbour text", REPORT_MARKDOWN), success.evidence.map { it.text })
+    }
+
+    @Test
+    fun `a structured result is bounded on its rendered text`() {
+        val docA = document(collectionA)
+        val rows = (1..150).map { "item-%03d".format(it) to "value-%03d-padding-padding".format(it) }
+        val unit = addStructuredUnit(collectionA, docA, 0, reportPage(rows))
+        val tools = tools(collectionA, FakeSearch(), structured = structuredSource())
+
+        val success = assertIs<ToolResult.Success>(
+            tools.execute("read_content_unit", """{"contentUnitId":"${unit.id.value}"}"""),
+        )
+
+        val evidence = success.evidence.single()
+        assertTrue(evidence.truncated, "a rendered text over the cap is shortened")
+        assertTrue(evidence.text.startsWith("# Report\n\n| Name | Qty |"), evidence.text.take(80))
+        assertTrue(success.payloadJson.toByteArray(StandardCharsets.UTF_8).size + evidence.text.toByteArray(StandardCharsets.UTF_8).size <= 2_048)
+    }
+
     private fun tools(
         collection: CollectionId,
         search: InvestigationSearch,
         maxResultBytes: Int = 2_048,
         activeRevisionId: (DocumentId) -> String? = { null },
+        structured: StructuredEvidenceSource? = null,
     ): InvestigationTools =
-        InvestigationTools(collection, search, content, documents, maxResultBytes, activeRevisionId)
+        InvestigationTools(collection, search, content, documents, maxResultBytes, activeRevisionId, structured)
+
+    private fun structuredSource() = StructuredEvidenceSource(content, AppPaths.of(dataDir))
+
+    /** A page with a heading and a table; the rows default to one apple row. */
+    private fun reportPage(rows: List<Pair<String, String>> = listOf("apple" to "3")): DerivedPage = StructureDerivation.derive(
+        PageStructureDraft(
+            "test/1",
+            listOf(
+                BlockDraft(BlockKind.HEADING, "Report", level = 1),
+                BlockDraft(
+                    BlockKind.TABLE, "",
+                    rows = listOf(listOf(CellDraft("Name", true), CellDraft("Qty", true))) +
+                        rows.map { (name, qty) -> listOf(CellDraft(name, false), CellDraft(qty, false)) },
+                ),
+            ),
+        ),
+        imageSha256 = "a".repeat(64),
+    )
+
+    /** Commits [page] as a unit with its structure and one chunk covering the whole text, as ingest stores it. */
+    private fun addStructuredUnit(collection: CollectionId, documentId: DocumentId, ordinal: Int, page: DerivedPage): ContentUnit {
+        val root = AppPaths.of(dataDir).artifactsDir(collection, documentId)
+        val reference = PageStructureStore.write(root, ordinal, page.structure)
+        val unit = content.commitExtractedUnit(
+            documentId = documentId,
+            fingerprint = fingerprint,
+            key = "unit-$ordinal",
+            ordinal = ordinal,
+            draft = ContentUnitDraft(
+                locator = SourceLocation.TextLines(start = ordinal * 2 + 1, end = ordinal * 2 + 2),
+                extractedText = page.extractedText,
+                searchText = page.searchText,
+                method = ExtractionMethod.DIRECT_TEXT,
+                structureReference = reference,
+            ),
+            artifactRoot = root,
+        ).unit
+        content.replaceUnitChunks(
+            unit.id,
+            listOf(ChunkDraft(0, page.searchText, 0, page.searchText.length, tokenCount = 4, tokenStart = 0, tokenEnd = 3)),
+            "test", "test", 512, 0,
+        )
+        return unit
+    }
+
+    private fun structuredHit(collection: CollectionId, documentId: DocumentId, unit: ContentUnit): SearchHit = SearchHit(
+        collectionId = collection,
+        documentId = documentId,
+        unitId = unit.id,
+        chunkOrdinal = 0,
+        text = content.chunksOf(unit.id).single().text,
+        highlighted = null,
+        locator = SourceLocation.TextLines(start = 1, end = 1),
+        locatorLabel = "line 1",
+        matchedBy = setOf(SearchMode.KEYWORD),
+    )
 
     @Test
     fun `evidence carries the revision its text was read from without sending it to the model`() {
@@ -508,3 +634,5 @@ class InvestigationToolsTest {
         val parametersJson: String?,
     )
 }
+
+private const val REPORT_MARKDOWN = "# Report\n\n| Name | Qty |\n| --- | --- |\n| apple | 3 |"

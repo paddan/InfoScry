@@ -1927,7 +1927,7 @@ describe('app shell', () => {
         { type: 'delta', text: 'Answer [S1], invalid [S9].' },
         { type: 'usage', inputTokens: 1000, outputTokens: 500 },
         { type: 'citation', id: 'S1', valid: true },
-        { type: 'done', text: 'Answer [S1], invalid [S9].', evidence: [{ id: 'S1', unitId: 'unit-ask', locatorLabel: 'Page 4', locator: { type: 'PdfPage', page: 4 } }] },
+        { type: 'done', text: 'Answer [S1], invalid [S9].', evidence: [{ id: 'S1', unitId: 'unit-ask', locatorLabel: 'Page 4', documentTitle: 'Treaty.pdf', locator: { type: 'PdfPage', page: 4 } }] },
       ]),
       source: () => jsonResponse(sourcePage('Ask source body', 0, 15)),
     });
@@ -1938,7 +1938,7 @@ describe('app shell', () => {
     await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'What happened?' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
 
-    const citation = await screen.findByRole('button', { name: 'Open source S1, Page 4' });
+    const citation = await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' });
     expect(screen.getByLabelText('Answer').textContent).toContain('Answer ');
     expect(screen.getByLabelText('Answer').textContent).toContain('[S9]');
     expect(screen.queryByRole('button', { name: /Open source S9/ })).toBeNull();
@@ -2096,13 +2096,13 @@ describe('app shell', () => {
 
     expect(await screen.findByText('Who signed it?')).toBeTruthy();
     expect(document.querySelector('.answer')?.textContent).toContain('Mira signed it [S2]');
-    expect(screen.getByRole('button', { name: 'Open source S2, Page 8' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open source S2, Notes.pdf, Page 8' })).toBeTruthy();
     expect(screen.getByText(/1 tool call/)).toBeTruthy();
     expect(screen.getByText(/20 input tokens/)).toBeTruthy();
     expect(screen.getByText(/Estimated cost/).textContent).toContain('$0.0001');
     expect(calls.some((call) => call.url === '/api/collections/default/investigations/conv-1')).toBe(true);
     expect(screen.getByRole('button', { name: 'The treaty', current: true })).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Open source S2, Page 8' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Open source S2, Notes.pdf, Page 8' }));
     expect(await screen.findByText('Investigate source body')).toBeTruthy();
     expect(document.querySelector('.app-shell')?.classList.contains('source-open')).toBe(true);
   });
@@ -2254,7 +2254,7 @@ describe('app shell', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
 
     expect((await screen.findByLabelText('Stored question')).textContent).toBe('Who signed it?');
-    expect(screen.getByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' })).toBeTruthy();
     expect(screen.getByText(/20 input tokens/)).toBeTruthy();
     expect(screen.getByText(/Estimated cost/).textContent).toContain('$0.0001');
     expect(screen.getByRole('button', { name: 'The signer', current: true })).toBeTruthy();
@@ -2272,7 +2272,7 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    const citation = await screen.findByRole('button', { name: 'Open source S1, Page 4' });
+    const citation = await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' });
     citation.focus();
     await fireEvent.click(citation);
 
@@ -2298,7 +2298,7 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' }));
 
     expect(await screen.findByText('Saved excerpt as it was')).toBeTruthy();
     expect(screen.getByText(/Revision unknown/)).toBeTruthy();
@@ -2322,7 +2322,7 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' }));
 
     expect(await screen.findByText('Body of revision eight')).toBeTruthy();
     expect(calls.some((call) => call.url === '/api/collections/default/documents/doc-1/page-review?ordinal=3&revision=revision-8&limit=16384')).toBe(true);
@@ -2338,8 +2338,8 @@ describe('app shell', () => {
         { type: 'citation', id: 'S1', valid: true },
         { type: 'citation', id: 'S2', valid: true },
         { type: 'done', text: 'Compare [S1] with [S2].', evidence: [
-          { id: 'S1', documentId: 'document-one', unitId: 'unit-one', locator: { type: 'pdf_page', page: 2 }, locatorLabel: 'Page 2', revisionId: 'revision-a', excerpt: 'First excerpt' },
-          { id: 'S2', documentId: 'document-two', unitId: 'unit-two', locator: { type: 'pdf_page', page: 7 }, locatorLabel: 'Page 7', revisionId: 'revision-b', excerpt: 'Second excerpt' },
+          { id: 'S1', documentId: 'document-one', unitId: 'unit-one', locator: { type: 'pdf_page', page: 2 }, locatorLabel: 'Page 2', documentTitle: 'One.pdf', revisionId: 'revision-a', excerpt: 'First excerpt' },
+          { id: 'S2', documentId: 'document-two', unitId: 'unit-two', locator: { type: 'pdf_page', page: 7 }, locatorLabel: 'Page 7', documentTitle: 'Two.pdf', revisionId: 'revision-b', excerpt: 'Second excerpt' },
         ] },
       ]),
       pageReview: (url) => {
@@ -2359,12 +2359,12 @@ describe('app shell', () => {
     await fireEvent.input(screen.getByLabelText('Question', { selector: '#question' }), { target: { value: 'Compare these pages' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 2' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, One.pdf, Page 2' }));
     expect(await screen.findByText('Review document-one revision-a ordinal 1')).toBeTruthy();
     expect(screen.getByRole('img', { name: 'Original page image, page 2' }).getAttribute('src'))
       .toBe('/api/collections/default/documents/document-one/page-review/image?ordinal=1&kind=original&revision=revision-a');
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S2, Page 7' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S2, Two.pdf, Page 7' }));
     expect(await screen.findByText('Review document-two revision-b ordinal 6')).toBeTruthy();
     expect(calls.some((call) => call.url === '/api/collections/default/documents/document-one/page-review?ordinal=1&revision=revision-a&limit=16384')).toBe(true);
     expect(calls.some((call) => call.url === '/api/collections/default/documents/document-two/page-review?ordinal=6&revision=revision-b&limit=16384')).toBe(true);
@@ -2387,7 +2387,7 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' }));
 
     expect(await screen.findByText('Body of the named section')).toBeTruthy();
     expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-1?offset=0&limit=16384&revision=revision-8')).toBe(true);
@@ -2404,7 +2404,7 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Ask' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'The signer' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Page 4' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' }));
 
     // A citation that was just streamed carries no excerpt: nothing was saved, and the live unit is what it read.
     expect(await screen.findByText('Live unit text')).toBeTruthy();
@@ -2425,7 +2425,7 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
-    await fireEvent.click(await screen.findByRole('button', { name: /\[S2\] Page 8/ }));
+    await fireEvent.click(await screen.findByRole('button', { name: /\[S2\] Notes\.pdf, Page 8/ }));
 
     expect(await screen.findByText('Saved ledger excerpt')).toBeTruthy();
     expect(screen.getByText(/Revision unknown/)).toBeTruthy();
@@ -2446,7 +2446,7 @@ describe('app shell', () => {
     await screen.findByText('Default');
     await fireEvent.click(screen.getByRole('tab', { name: 'Investigate' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'The treaty' }));
-    await fireEvent.click(await screen.findByRole('button', { name: /\[S2\] Page 8/ }));
+    await fireEvent.click(await screen.findByRole('button', { name: /\[S2\] Notes\.pdf, Page 8/ }));
 
     expect(await screen.findByText('Body of revision three')).toBeTruthy();
     expect(calls.some((call) => call.url === '/api/collections/default/sources/unit-2?offset=0&limit=16384&revision=revision-3')).toBe(true);
@@ -2487,7 +2487,7 @@ describe('app shell', () => {
         { type: 'delta', text: 'Mira signed it [S1].' },
         { type: 'usage', inputTokens: 20, outputTokens: 9 },
         { type: 'citation', id: 'S1', valid: true },
-        { type: 'done', text: 'Mira signed it [S1].', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4' }], conversationId: 'ask-9' },
+        { type: 'done', text: 'Mira signed it [S1].', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4', documentTitle: 'Treaty.pdf' }], conversationId: 'ask-9' },
       ]),
     });
 
@@ -2499,7 +2499,7 @@ describe('app shell', () => {
 
     const column = await screen.findByRole('navigation', { name: 'Ask history' });
     expect(await within(column).findByRole('button', { name: 'The signer', current: true })).toBeTruthy();
-    expect(await screen.findByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' })).toBeTruthy();
     expect((await screen.findByLabelText('Stored question')).textContent).toBe('Who signed it?');
     expect(window.localStorage.getItem('infoscry-history:ask:default')).toBe('ask-9');
   });
@@ -2875,6 +2875,7 @@ function askHistoryEntry(
       unitId: 'unit-1',
       locator,
       locatorLabel: 'Page 4',
+      documentTitle: 'Treaty.pdf',
       ...(revisionId === undefined ? {} : { revisionId }),
       ...(excerpt === undefined ? {} : { excerpt }),
     }],
@@ -2896,7 +2897,7 @@ function investigationHistory(
       { role: 'user', text: question },
       { role: 'assistant', text: answer },
     ],
-    evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8', ...evidenceExtras }],
+    evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8', documentTitle: 'Notes.pdf', ...evidenceExtras }],
     inputTokens: 20,
     outputTokens: 9,
     costUsd: 0.0001,

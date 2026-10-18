@@ -39,14 +39,19 @@ class ContextPacker(private val maxEvidence: Int = DEFAULT_MAX_EVIDENCE) {
         budget: RequestBudget,
         maxOutputTokens: Int,
         profile: LlmProfile? = null,
+        evidenceText: (SearchHit) -> String = SearchHit::text,
     ): PackedContext {
         val unique = ArrayList<SearchHit>()
         for (hit in hits) {
             if (hit.text.isBlank()) continue
             if (unique.none { isNearDuplicate(it.text, hit.text) }) unique += hit
         }
+        // What the model is sent is the evidence text, so the budget measures it and not the raw hit. Each hit is
+        // rendered once, on first use, because a hit that never reaches a request is never sent.
+        val sent = HashMap<SearchHit, String>()
+        fun textOf(hit: SearchHit): String = sent.getOrPut(hit) { evidenceText(hit) }
         fun fits(candidate: List<SearchHit>): Boolean {
-            val request = request(question, systemPrompt, candidate, maxOutputTokens)
+            val request = request(question, systemPrompt, candidate, ::textOf, maxOutputTokens)
             return if (profile == null) budget.fit(request) else budget.measure(profile, request).fits
         }
 
@@ -76,16 +81,22 @@ class ContextPacker(private val maxEvidence: Int = DEFAULT_MAX_EVIDENCE) {
                 hit.unitId.value,
                 hit.locator,
                 hit.locatorLabel,
-                hit.text,
+                textOf(hit),
                 hit.revisionId,
             )
         }
-        val finalRequest = request(question, systemPrompt, selected, maxOutputTokens)
+        val finalRequest = request(question, systemPrompt, selected, ::textOf, maxOutputTokens)
         if (profile == null) budget.requireFits(finalRequest) else if (!budget.measure(profile, finalRequest).fits) throw ContextBudgetExceeded()
         return PackedContext(evidences, finalRequest)
     }
 
-    private fun request(question: String, systemPrompt: String, hits: List<SearchHit>, maxOutputTokens: Int): LlmRequest =
+    private fun request(
+        question: String,
+        systemPrompt: String,
+        hits: List<SearchHit>,
+        text: (SearchHit) -> String,
+        maxOutputTokens: Int,
+    ): LlmRequest =
         LlmRequest(
             messages = listOf(
                 LlmMessage("system", systemPrompt),
@@ -97,7 +108,7 @@ class ContextPacker(private val maxEvidence: Int = DEFAULT_MAX_EVIDENCE) {
                         append("<evidence id=\"S${index + 1}\" locator=\"")
                         append(escapeAttribute(hit.locatorLabel))
                         appendLine("\">")
-                        appendLine(escapeEvidence(hit.text))
+                        appendLine(escapeEvidence(text(hit)))
                         appendLine("</evidence>")
                     }
                 }),

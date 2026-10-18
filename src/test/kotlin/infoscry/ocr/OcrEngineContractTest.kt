@@ -23,6 +23,7 @@ import infoscry.extract.PdfPageRenderer
 import infoscry.extract.PermitProbeBoundary
 import infoscry.ocr.PageImageRenderer
 import infoscry.extract.PngPageRenderer
+import infoscry.pdf.PdfModelRules
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
 import infoscry.storage.Database
@@ -287,6 +288,36 @@ class OcrEngineContractTest {
 
         assertFailsWith<IllegalStateException> {
             runBlocking { engines.transcribe(OcrEngine.TESSERACT, image, attemptSettings().pageOcrSettings(300)) }
+        }
+    }
+
+    @Test
+    fun structureTextMatchesResultText() {
+        // A reading's text is the text its structure was derived into: the structure's hash is the text's own,
+        // and a reading whose text is anything else is refused rather than kept with ranges that point at the
+        // wrong characters.
+        val hash = "a".repeat(64)
+        val derived = StructureDerivation.derive(
+            SuryaStructureParser.parse(
+                listOf(
+                    SuryaBlockInput("<h2>Invoice</h2>", "SectionHeader", 0, PixelBox(1, 2, 30, 20)),
+                    SuryaBlockInput("<table><tr><td>a</td><td>b</td></tr></table>", "Table", 1, PixelBox(1, 30, 30, 60)),
+                ),
+            ),
+            hash,
+        )
+
+        val reading = OcrPageResult(
+            text = derived.extractedText,
+            engine = OcrEngine.SURYA,
+            imageSha256 = hash,
+            structure = derived.structure,
+        )
+
+        assertEquals(derived.extractedText, reading.text)
+        assertEquals(PdfModelRules.sha256Of(reading.text), reading.structure?.textSha256)
+        assertFailsWith<IllegalArgumentException>("a reading kept a text its structure does not describe") {
+            reading.copy(text = "another text")
         }
     }
 

@@ -15,6 +15,7 @@
     type InvestigateMessage,
     type LlmProfilePrice,
   } from './api';
+  import { evidenceSourceLabel } from './evidenceLabel';
   import { DEFAULT_EFFORT_LEVEL, isEffortLevel } from './investigationLimits';
   import type { EffortLevel, ResolvedInvestigationLimits } from './api';
 
@@ -318,7 +319,7 @@
       <li class:assistant={message.role === 'assistant'}>
         <strong>{message.role === 'user' ? 'You' : 'InfoScry'}</strong>
         {#if message.role === 'assistant'}
-          <div class="answer">{#each answerParts(message.text) as part, partIndex (`${partIndex}-${part.text}`)}{#if part.evidence !== null}<button class="citation" type="button" aria-label={`Open source ${part.text.slice(1, -1)}, ${part.evidence.locatorLabel}`} onclick={() => onOpenSource(part.evidence!)}>{part.text}</button>{:else}{part.text}{/if}{/each}</div>
+          <div class="answer">{#each answerParts(message.text) as part, partIndex (`${partIndex}-${part.text}`)}{#if part.evidence !== null}<button class="citation" type="button" title={evidenceSourceLabel(part.evidence)} aria-label={`Open source ${part.text.slice(1, -1)}, ${evidenceSourceLabel(part.evidence)}`} onclick={() => onOpenSource(part.evidence!)}>{part.text}</button>{:else}{part.text}{/if}{/each}</div>
         {:else}<p>{message.text}</p>{/if}
       </li>
     {/each}
@@ -333,7 +334,7 @@
   {#if evidence.length > 0}
     <details>
       <summary>Sources in this conversation ({evidence.length})</summary>
-      <ul>{#each evidence as item (item.id)}<li><button class="citation" type="button" onclick={() => onOpenSource(item)}> [{item.id}] {item.locatorLabel}</button></li>{/each}</ul>
+      <ul>{#each evidence as item (item.id)}<li><button class="citation" type="button" onclick={() => onOpenSource(item)}> [{item.id}] {evidenceSourceLabel(item)}</button></li>{/each}</ul>
     </details>
   {/if}
   {#if inputTokens + outputTokens > 0}

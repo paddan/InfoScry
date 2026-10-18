@@ -235,6 +235,30 @@ class OcrSettingsTest {
     }
 
     @Test
+    fun `structureVersionChangesFingerprint`() {
+        // A page read into another structure format, or by another parser, is another reading: it has to be
+        // read again on rescan instead of reusing a checkpoint whose structure has a different shape.
+        val current = attemptIdentity()
+        val newer = current.copy(structureVersion = current.structureVersion + 1)
+
+        assertEquals(STRUCTURE_VERSION, current.structureVersion)
+        assertNotEquals(
+            ExtractionFingerprint.of("f".repeat(64), ExtractionSettings("eng", ocrAttempt = current)),
+            ExtractionFingerprint.of("f".repeat(64), ExtractionSettings("eng", ocrAttempt = newer)),
+            "a page with another structure format reused this attempt's committed pages",
+        )
+        assertNotEquals(
+            OcrTranscriptionFingerprint.of("doc-1", "unit-1", 0, current),
+            OcrTranscriptionFingerprint.of("doc-1", "unit-1", 0, newer),
+            "a page read into another structure format was treated as the same reading",
+        )
+        assertEquals("surya-html/1", current.copy(engine = OcrEngine.SURYA).structureParser)
+        assertEquals("tesseract-tsv/1", current.copy(engine = OcrEngine.TESSERACT).structureParser)
+        assertEquals("markdown/1", current.copy(engine = OcrEngine.LLM, profileRevisionId = "rev-1").structureParser)
+        assertFailsWith<IllegalArgumentException> { current.copy(structureVersion = 0) }
+    }
+
+    @Test
     fun `a picture read under another decoding policy is not the reading this attempt may reuse`() {
         // A picture is read from the managed copy or from a bounded copy of it depending on the rule that
         // decides what fits the bound a tool is handed, and the two are different pixels. The document-level

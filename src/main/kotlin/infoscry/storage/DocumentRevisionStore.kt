@@ -9,6 +9,7 @@ import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.StructureReference
 import infoscry.pdf.LayoutReference
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -120,6 +121,13 @@ data class RevisionPageText(
      * affects only a later selectable-PDF export and is never read for publication, search or citation.
      */
     val layoutReference: LayoutReference? = null,
+    /**
+     * This page's structure artifact (blocks, tables and their ranges in [extractedText] and [searchText]), or
+     * `null` for a page that has none: text a parser read, a page read before structures existed, or one whose
+     * engine read no structure. Read it with [infoscry.ocr.PageStructureStore] against the document's artifact
+     * root; it answers `null` for any damage. Never inferred from equal bytes.
+     */
+    val structureReference: StructureReference? = null,
 )
 
 /**
@@ -149,6 +157,8 @@ data class RevisionPageDraft(
     val producerRevisionId: String? = null,
     /** See [RevisionPageText.layoutReference]; preserved and restored pages inherit it exactly, including absence. */
     val layoutReference: LayoutReference? = null,
+    /** See [RevisionPageText.structureReference]; preserved and restored pages inherit it exactly, including absence. */
+    val structureReference: StructureReference? = null,
 ) {
     init {
         require(ordinal >= 0) { "RevisionPageDraft.ordinal must not be negative, was $ordinal" }
@@ -497,7 +507,8 @@ class DocumentRevisionStore(private val database: Database, private val content:
                     require(source != null && source.approval == PageApproval.APPROVED && source.unitId == page.unitId &&
                         source.extractedText == page.extractedText && source.sourceImage == page.sourceImage &&
                         source.extractionMethod == page.extractionMethod &&
-                        source.layoutReference == page.layoutReference) { "a preserved page must match its recorded producer" }
+                        source.layoutReference == page.layoutReference &&
+                        source.structureReference == page.structureReference) { "a preserved page must match its recorded producer" }
                 }
             }
             connection.deletePageChunks(revisionId, page.ordinal)
@@ -1084,12 +1095,15 @@ class DocumentRevisionStore(private val database: Database, private val content:
         // all — the same pre-existing gap it has for source-image provenance — so a document's very first
         // published revision names no layout for any page here, literally rather than by omission: there is
         // nothing to select. Only a later rescan's candidate (page_text_revisions, written directly) can.
+        // The structure reference is different: `content_units` carries it, so it is copied as it stands.
         prepareStatement(
             "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, extracted_text, " +
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
-                "artifact_sha256, approval, created_at, producer_revision_id, layout_relative_path, layout_sha256) " +
+                "artifact_sha256, approval, created_at, producer_revision_id, layout_relative_path, layout_sha256, " +
+                "structure_relative_path, structure_sha256) " +
                 "SELECT ?, ordinal, id, locator, extracted_text, search_text, NULL, extraction_method, " +
-                "mean_confidence, artifact_relative_path, artifact_sha256, ?, ?, ?, NULL, NULL FROM content_units " +
+                "mean_confidence, artifact_relative_path, artifact_sha256, ?, ?, ?, NULL, NULL, " +
+                "structure_relative_path, structure_sha256 FROM content_units " +
                 "WHERE document_id = ?",
         ).use { statement ->
             statement.setString(1, revisionId)
@@ -1131,13 +1145,14 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
                 "artifact_sha256, source_image_root, source_image_relative_path, source_image_sha256, " +
                 "source_image_width, source_image_height, source_image_render_version, approval, created_at, " +
-                "producer_revision_id, layout_relative_path, layout_sha256) " +
+                "producer_revision_id, layout_relative_path, layout_sha256, " +
+                "structure_relative_path, structure_sha256) " +
                 "SELECT ?, ordinal, unit_id, locator, extracted_text, search_text, text_sha256, " +
                 "extraction_method, mean_confidence, artifact_relative_path, artifact_sha256, " +
                 "source_image_root, source_image_relative_path, source_image_sha256, source_image_width, " +
                 "source_image_height, source_image_render_version, ?, ?, producer_revision_id, " +
-                "layout_relative_path, layout_sha256 FROM page_text_revisions " +
-                "WHERE revision_id = ? AND approval = ?",
+                "layout_relative_path, layout_sha256, structure_relative_path, structure_sha256 " +
+                "FROM page_text_revisions WHERE revision_id = ? AND approval = ?",
         ).use { statement ->
             statement.setString(1, revisionId)
             statement.setString(2, PageApproval.APPROVED.name)
@@ -1209,8 +1224,9 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
                 "artifact_sha256, source_image_root, source_image_relative_path, source_image_sha256, " +
                 "source_image_width, source_image_height, source_image_render_version, approval, " +
-                "created_at, unit_key, producer_revision_id, layout_relative_path, layout_sha256) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "created_at, unit_key, producer_revision_id, layout_relative_path, layout_sha256, " +
+                "structure_relative_path, structure_sha256) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (revision_id, ordinal) DO UPDATE SET unit_id = excluded.unit_id, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, text_sha256 = excluded.text_sha256, " +
@@ -1225,7 +1241,9 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "source_image_height = excluded.source_image_height, " +
                 "source_image_render_version = excluded.source_image_render_version, " +
                 "approval = excluded.approval, unit_key = excluded.unit_key, producer_revision_id = excluded.producer_revision_id, " +
-                "layout_relative_path = excluded.layout_relative_path, layout_sha256 = excluded.layout_sha256",
+                "layout_relative_path = excluded.layout_relative_path, layout_sha256 = excluded.layout_sha256, " +
+                "structure_relative_path = excluded.structure_relative_path, " +
+                "structure_sha256 = excluded.structure_sha256",
         ).use { statement ->
             statement.setString(1, revisionId)
             statement.setInt(2, page.ordinal)
@@ -1267,6 +1285,8 @@ class DocumentRevisionStore(private val database: Database, private val content:
             statement.setString(21, page.producerRevisionId)
             statement.setString(22, page.layoutReference?.relativePath)
             statement.setString(23, page.layoutReference?.sha256)
+            statement.setString(24, page.structureReference?.relativePath)
+            statement.setString(25, page.structureReference?.sha256)
             statement.executeUpdate()
         }
     }
@@ -1336,7 +1356,20 @@ class DocumentRevisionStore(private val database: Database, private val content:
         sourceImage = toSourceImage(),
         producerRevisionId = getString("producer_revision_id"),
         layoutReference = toLayoutReference(),
+        structureReference = toStructureReference(),
     )
+
+    /** The structure reference the row names, or `null`; one column without the other is corrupt provenance. */
+    private fun ResultSet.toStructureReference(): StructureReference? {
+        val relativePath = getString("structure_relative_path")
+        val sha256 = getString("structure_sha256")
+        if (relativePath == null && sha256 == null) return null
+        val where = "revision ${getString("revision_id")} page ${getInt("ordinal")}"
+        check(relativePath != null && sha256 != null) {
+            "$where carries only part of a structure reference, so it names no structure it can be trusted to"
+        }
+        return StructureReference(relativePath, sha256)
+    }
 
     /**
      * The layout reference the row names, or `null` when it names none — a row written before this column
@@ -1443,7 +1476,8 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "extraction_method, mean_confidence, artifact_relative_path, artifact_sha256, approval, " +
                 "source_image_root, source_image_relative_path, source_image_sha256, source_image_width, " +
                 "source_image_height, source_image_render_version, producer_revision_id, " +
-                "layout_relative_path, layout_sha256 FROM page_text_revisions"
+                "layout_relative_path, layout_sha256, structure_relative_path, structure_sha256 " +
+                "FROM page_text_revisions"
 
         const val SELECT_CHUNKS =
             "SELECT unit_ordinal, ordinal, text, start_offset, end_offset, token_count, token_start, " +

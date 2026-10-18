@@ -396,7 +396,13 @@ class RescanJobHandler internal constructor(
             operations.advance(operation.operationId, OcrOperationStage.CHUNKING)
             updateDocumentStatus(operation, DocumentStatus.CHUNKING)
         }
-        phases.chunkCandidate(operation.operationId, candidate, document, stage)
+        phases.chunkCandidate(
+            operation.operationId,
+            candidate,
+            document,
+            stage,
+            artifactRoot = paths.artifactsDir(document.collectionId, document.id),
+        )
 
         // ---- phase 3: embed the passages that have no vector ----
         stage.run(STAGE_EMBED) {
@@ -464,6 +470,7 @@ class RescanJobHandler internal constructor(
                     artifactRelativePath = baselinePage.artifactRelativePath,
                     artifactSha256 = baselinePage.artifactSha256,
                     layoutReference = baselinePage.layoutReference,
+                    structureReference = baselinePage.structureReference,
                 ),
                 documentArtifactRoot = documentArtifactRoot,
                 producerRevisionId = baselinePage.producerRevisionId,

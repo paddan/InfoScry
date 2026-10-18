@@ -155,7 +155,7 @@ private suspend fun ApplicationCall.runSearch(
             SearchHitResponse(
                 collectionId = hit.collectionId.value,
                 documentId = hit.documentId.value,
-                title = document?.title?.takeIf(String::isNotBlank) ?: document?.originalFilename ?: hit.documentId.value,
+                title = documentDisplayTitle(document?.title, document?.originalFilename, hit.documentId.value),
                 unitId = hit.unitId.value,
                 chunkOrdinal = hit.chunkOrdinal,
                 text = hit.text,

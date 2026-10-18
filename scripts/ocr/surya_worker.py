@@ -23,8 +23,9 @@ writes one page per line on stdin and reads one answer per line on stdout — an
   and would leave the server (and a gigabyte of weights) behind.
 
 The protocol is versioned JSON, and it is the parent's `infoscry.ocr.SuryaOcr` that defines it: a request is
-`{"protocol": 1, "type": "page", "unitId": ..., "ordinal": ..., "page": ..., "imagePath": ...}` and a result
-is either a reading (`status` `read` or `empty`, with `text`, `blocks` and the `model` identity) or an error
+`{"protocol": 2, "type": "page", "unitId": ..., "ordinal": ..., "page": ..., "imagePath": ...}` and a result
+is either a reading (`status` `read` or `empty`, with `text`, `blocks` and the `model` identity; each block carries
+its `text`, its raw `html`, its `bbox`, `label`, `readingOrder` and `confidence`) or an error
 (`status` `error` with a `code`: `NEEDS_LLAMA_CPP`, `NEEDS_SURYA_MODEL`, `NEEDS_SURYA`,
 `SURYA_START_FAILED`, `UNREADABLE_IMAGE`, `PAGE_TOO_LARGE`, `MALFORMED_REQUEST`, `INFERENCE_FAILED`).
 
@@ -46,7 +47,7 @@ import subprocess
 import sys
 from html import unescape
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 PAGE_TYPE = "page"
 IDENTITY_TYPE = "identity"
 
@@ -77,7 +78,8 @@ INFERENCE_FAILED = "INFERENCE_FAILED"
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 4 * 1024 * 1024
 
-# What one page's reading may hold. Crossing either bound is reported rather than trimmed.
+# What one page's reading may hold, counted as its text and its HTML together. Crossing the bound is reported
+# rather than trimmed.
 MAX_PAGE_TEXT_CHARS = 200_000
 MAX_BLOCKS = 2_000
 
@@ -369,19 +371,22 @@ def collect_blocks(page, engine):
     exists to prevent, and asking how long the reading was after building it bounds nothing. A block with
     no text a match could be shown at is dropped before it counts, because it is not part of the reading.
 
-    Raises `ResultTooLarge` when the page's text or its block count crosses its bound.
+    A block is held by its HTML as well as its text: the HTML is what the parent reads the structure from, and
+    it is far longer than the text it says, so a bound on the text alone would not bound what is held.
+
+    Raises `ResultTooLarge` when the page's characters or its block count crosses its bound.
     """
     blocks = []
-    text_chars = 0
+    page_chars = 0
     for item in page.blocks:
         block = block_result(item, engine)
         if block is None:
             continue
         # The page's text is these blocks joined by newlines, so the separator the join adds counts as well.
-        text_chars += len(block["text"]) + (1 if blocks else 0)
-        if len(blocks) >= MAX_BLOCKS or text_chars > MAX_PAGE_TEXT_CHARS:
+        page_chars += len(block["text"]) + len(block["html"]) + (1 if blocks else 0)
+        if len(blocks) >= MAX_BLOCKS or page_chars > MAX_PAGE_TEXT_CHARS:
             raise ResultTooLarge(
-                f"more than {MAX_BLOCKS} blocks or {MAX_PAGE_TEXT_CHARS} characters of text"
+                f"more than {MAX_BLOCKS} blocks or {MAX_PAGE_TEXT_CHARS} characters of text and markup"
             )
         blocks.append(block)
     return blocks
@@ -406,19 +411,24 @@ def open_image(path: str):
 
 
 def block_result(block, engine: Engine):
-    """One of the model's blocks as a box, or `None` when it carries no text a match could be shown at.
+    """One of the model's blocks as a box, or `None` when it has neither text nor markup to say.
 
     Surya answers a page as blocks, not as words: one box per block, and one confidence for the page's
     single call — the mean token probability of that call's answer, which the library reports on each of
     its blocks. It is the *model's* confidence and not this project's.
+
+    The raw HTML travels with the text: the parent reads a table, a heading or a formula from it. A block
+    with markup and no text of its own (a figure, say) is kept so the parent can read it; a block with
+    neither is not part of the reading.
     """
     text = html_to_text(block.html)
-    if not text.strip():
+    if not text.strip() and not block.html.strip():
         return None
     xs = [point[0] for point in block.polygon]
     ys = [point[1] for point in block.polygon]
     return {
         "text": text,
+        "html": block.html,
         "bbox": [
             int(round(min(xs))),
             int(round(min(ys))),

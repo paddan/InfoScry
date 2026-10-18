@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { documentPageReviewImageUrl, getDocumentPageReview, SOURCE_PAGE_CHARS, type PageReviewResponse } from './api';
+  import { documentPageReviewImageUrl, getDocumentPageReview, SOURCE_PAGE_CHARS, type PageReviewResponse, type StructureView } from './api';
   import SelectablePdfActions from './SelectablePdfActions.svelte';
+  import StructuredPage from './StructuredPage.svelte';
 
   export let collectionId: string;
   export let documentId: string;
@@ -23,6 +24,8 @@
   let ordinal = initialOrdinal;
   let page: PageReviewResponse | null = null;
   let text = '';
+  /** The fetched windows of the page text, in order; a window with structure is drawn by StructuredPage. */
+  let windows: { text: string; structure: StructureView | null }[] = [];
   let loadingText = false;
   let textError: string | null = null;
   let imageError: string | null = null;
@@ -79,6 +82,7 @@
     ordinal = nextOrdinal;
     page = null;
     text = '';
+    windows = [];
     textError = null;
     imageError = null;
     imageLoading = false;
@@ -92,6 +96,7 @@
       if (generation !== requestGeneration) return;
       page = result;
       text = result.text;
+      windows = [windowOf(result)];
       pdfRevision = result.revisionId;
       // The first live response selects one immutable revision for every later page in this review.
       if (exactRevision === undefined && result.revisionId !== null) pinnedRevision = result.revisionId;
@@ -119,6 +124,7 @@
       if (generation !== requestGeneration) return;
       page = result;
       text += result.text;
+      windows = [...windows, windowOf(result)];
     } catch (failure) {
       if (generation === requestGeneration) textError = messageOf(failure);
     } finally {
@@ -140,6 +146,7 @@
       if (generation !== requestGeneration) return;
       page = result;
       text = result.text;
+      windows = [windowOf(result)];
     } catch (failure) {
       if (generation === requestGeneration) textError = messageOf(failure);
     } finally {
@@ -218,6 +225,10 @@
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', finish, { once: true });
     window.addEventListener('pointercancel', finish, { once: true });
+  }
+
+  function windowOf(result: PageReviewResponse): { text: string; structure: StructureView | null } {
+    return { text: result.text, structure: result.structure ?? null };
   }
 
   function messageOf(failure: unknown): string {
@@ -329,7 +340,15 @@
           <p role="alert">{textError}</p><button type="button" disabled={loadingText} onclick={retryText}>Retry text</button>
         {:else if page !== null}
           {#if page.qualityScore !== null}<p class="quality">Text quality: {Math.round(page.qualityScore)}%</p>{/if}
+          {#if page.structureDegraded}<p class="notice">Layout could not be fully recognised on this page; text is shown as paragraphs.</p>{/if}
           {#if text.length === 0}<p class="empty">No extracted text for this page.</p>
+          {:else if windows.some((window) => window.structure !== null)}
+            <div class="review-structure">
+              {#each windows as window}
+                {#if window.structure !== null}<StructuredPage text={window.text} structure={window.structure} />
+                {:else}<pre class="review-text">{window.text}</pre>{/if}
+              {/each}
+            </div>
           {:else}<pre class="review-text" style="min-height: 0; max-height: none; overflow-y: auto;">{text}</pre>{/if}
           {#if textError !== null}<p role="alert">{textError}</p>{/if}
           {#if page.truncated}<button type="button" onclick={loadMore} disabled={loadingText}>{loadingText ? 'Loading…' : 'Load more'}</button>{/if}
@@ -360,6 +379,7 @@
   .image-loading { position: absolute; inset: .5rem auto auto .75rem; z-index: 1; }
   .review-text, .excerpt { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 0; padding: .85rem; overflow: auto; }
   .review-text { flex: 1 1 0; min-height: 0; }
+  .review-structure { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: .85rem; }
   .empty { padding: .85rem; color: #9da4a1; }
   .divider { cursor: col-resize; touch-action: none; background: #303535; }
   .divider:hover, .divider:focus { background: #c4a77d; }

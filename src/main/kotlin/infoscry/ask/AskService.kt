@@ -13,6 +13,7 @@ import infoscry.llm.PromptService
 import infoscry.llm.ResolvedPrompt
 import infoscry.llm.RequestBudget
 import infoscry.search.SearchFilters
+import infoscry.search.SearchHit
 import infoscry.search.SearchMode
 import infoscry.search.SearchOutcome
 import infoscry.search.SearchService
@@ -64,13 +65,19 @@ class AskService(
     private val prompt: PromptService,
     private val client: (LlmProfile) -> LlmStreamingClient,
     private val persistence: AskPersistence,
+    /**
+     * The evidence text renderer for one ask, given its collection. A structured page's hit is rendered as
+     * Markdown here; the default sends each hit's own text.
+     */
+    private val evidenceSession: (CollectionId) -> (SearchHit) -> String = { _ -> SearchHit::text },
 ) {
     constructor(
         search: SearchService,
         prompt: PromptService,
         client: (LlmProfile) -> LlmStreamingClient,
         persistence: AskPersistence,
-    ) : this(AskSearch(search::search), prompt, client, persistence)
+        evidenceSession: (CollectionId) -> (SearchHit) -> String = { _ -> SearchHit::text },
+    ) : this(AskSearch(search::search), prompt, client, persistence, evidenceSession)
 
     fun ask(request: AskRequest): Flow<AskEvent> = flow {
         if (request.question.isBlank()) {
@@ -92,6 +99,7 @@ class AskService(
                 budget,
                 request.profile.maxOutputTokens,
                 request.profile,
+                evidenceText = evidenceSession(request.collectionId),
             )
             // requireFits is deliberately immediately before stream: an irreducible failure makes zero calls.
             if (!budget.measure(request.profile, packed.request).fits) throw ContextBudgetExceeded()

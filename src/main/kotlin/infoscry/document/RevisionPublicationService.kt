@@ -583,6 +583,8 @@ class RevisionPublicationService(
                 meanConfidence = page.meanConfidence,
                 artifactRelativePath = page.artifactRelativePath,
                 artifactSha256 = page.artifactSha256,
+                structureRelativePath = page.structureReference?.relativePath,
+                structureSha256 = page.structureReference?.sha256,
                 chunks = byOrdinal[page.ordinal].orEmpty().map { chunk ->
                     infoscry.chunk.ChunkDraft(
                         ordinal = chunk.ordinal,

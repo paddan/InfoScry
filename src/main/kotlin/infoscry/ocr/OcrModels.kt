@@ -1,5 +1,6 @@
 package infoscry.ocr
 
+import infoscry.extract.TesseractTsv
 import infoscry.llm.LlmProvider
 import infoscry.llm.ValidEnvironmentVariableName
 import infoscry.llm.endpointCarriesUserInfo
@@ -66,7 +67,7 @@ enum class OcrProfileRole {
  * shipped bodies themselves arrive with the image-model client; what is fixed here is the numbering, so a
  * later prompt edit is a new version rather than a silent change to what an old snapshot meant.
  */
-const val OCR_TRANSCRIPTION_PROMPT_VERSION = 1
+const val OCR_TRANSCRIPTION_PROMPT_VERSION = 2
 
 /**
  * The version of the shipped review prompt body, for the same reason as the transcription version.
@@ -293,8 +294,15 @@ data class OcrAttemptIdentity(
     val renderDpi: Int? = null,
     val pictureDecodingPolicyVersion: Int = PageImage.PICTURE_DECODING_POLICY_VERSION,
     val runtimeIdentity: String? = null,
+    /**
+     * The page structure format the reading was made into ([STRUCTURE_VERSION] of the running build). Like
+     * [pictureDecodingPolicyVersion] it is here because checkpoints are keyed by the fingerprint alone: a
+     * page read into another format must be read again, with the earlier reading kept in history.
+     */
+    val structureVersion: Int = STRUCTURE_VERSION,
 ) {
     init {
+        require(structureVersion > 0) { "OcrAttemptIdentity.structureVersion must be positive, was $structureVersion" }
         require(pictureDecodingPolicyVersion > 0) {
             "OcrAttemptIdentity.pictureDecodingPolicyVersion must be positive, was " +
                 pictureDecodingPolicyVersion
@@ -310,6 +318,18 @@ data class OcrAttemptIdentity(
             "engine LLM reads through a profile revision, and a local engine must not name one"
         }
     }
+
+    /**
+     * The parser that turns this engine's output into a page structure, as a fixed function of the engine
+     * (never read from a result): Surya's block HTML, an image model's Markdown, Tesseract's TSV. A parser
+     * change is a new reading of the page, so its version is part of the identity.
+     */
+    val structureParser: String
+        get() = when (engine) {
+            OcrEngine.SURYA -> SuryaStructureParser.PARSER
+            OcrEngine.LLM -> MarkdownStructureParser.PARSER
+            OcrEngine.TESSERACT -> TesseractTsv.PARSER
+        }
 }
 
 /**
@@ -467,6 +487,10 @@ value class OcrTranscriptionFingerprint(val value: String) {
                 // rather than spelled, so a runtime that reports the literal word one of them might have used
                 // cannot compose the other's line.
                 "runtime=${fingerprintPresence(attempt.runtimeIdentity)}",
+                // The shape of the structure the page was read into: a different format or parser is a
+                // different reading, so the page is read again and the earlier one stays in history.
+                "structure_version=${attempt.structureVersion}",
+                "structure_parser=${attempt.structureParser}",
             ).let(::fingerprintFields)
             return OcrTranscriptionFingerprint(sha256Of(canonical))
         }

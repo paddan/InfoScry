@@ -11,6 +11,8 @@ data class CleanupReport(
     val jobsCancelled: Int,
     val operationsFailed: Int,
     val candidatesWithdrawn: Int,
+    /** Page structure artifacts that no row named any more, removed by [OrphanedStructureSweep]. */
+    val structureArtifactsRemoved: Int = 0,
 )
 
 /**
@@ -24,6 +26,8 @@ class StaleOcrStateCleanup(
     private val documents: DocumentStore,
     /** The startup composition root supplies false because no worker is attached until open completes. */
     private val hasLiveAttempt: (String) -> Boolean = { false },
+    /** Removes structure artifacts a crash left unnamed; absent where the caller has no data directory. */
+    private val structureSweep: OrphanedStructureSweep? = null,
 ) {
     fun run(): CleanupReport {
         var jobsCancelled = 0
@@ -78,7 +82,9 @@ class StaleOcrStateCleanup(
             }
         }
 
-        return CleanupReport(jobsCancelled, operationsFailed, candidatesWithdrawn)
+        val structureArtifactsRemoved = structureSweep?.run() ?: 0
+
+        return CleanupReport(jobsCancelled, operationsFailed, candidatesWithdrawn, structureArtifactsRemoved)
     }
 
     private fun candidateIsAuthoritative(operation: OcrOperation): Boolean =

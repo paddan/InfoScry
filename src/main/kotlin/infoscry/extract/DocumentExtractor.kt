@@ -10,6 +10,7 @@ import infoscry.ocr.OcrAttemptIdentity
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.StructureReference
 import infoscry.ocr.fingerprintPresence
 import infoscry.pdf.LayoutReference
 import java.io.IOException
@@ -187,6 +188,10 @@ const val PAGE_IMAGES_UNSUPPORTED_CODE: String = "PAGE_IMAGES_UNSUPPORTED"
  * nothing to position against, and a reading engine or page geometry this build cannot locally position is
  * an absence here, never a failure of the unit itself. It affects only a later selectable-PDF export; a unit
  * with no layout reference is read, searched and cited exactly like one that was never meant to carry one.
+ *
+ * [structureReference] names the page's structure artifact (blocks, tables and their ranges in [extractedText]
+ * and [searchText]), written under the artifact root before this draft is returned. It is absent for text a
+ * parser read and for an engine that read no structure; an absent or damaged structure never fails the unit.
  */
 data class ContentUnitDraft(
     val locator: SourceLocation,
@@ -199,6 +204,7 @@ data class ContentUnitDraft(
     val sourceImage: SourceImageProvenance? = null,
     val directText: String? = null,
     val layoutReference: LayoutReference? = null,
+    val structureReference: StructureReference? = null,
 )
 
 /**
@@ -386,6 +392,9 @@ value class ExtractionFingerprint(val value: String) {
                     // and the document-level fingerprint is the only key an attempt's checkpoints answer to,
                     // so a policy this line does not cover would be one whose pages could be reused wrong.
                     add("ocr_picture_decoding_policy=${attempt.pictureDecodingPolicyVersion}")
+                    // The structure format and the engine's parser: either changing reads the page again.
+                    add("ocr_structure_version=${attempt.structureVersion}")
+                    add("ocr_structure_parser=${attempt.structureParser}")
                     // The mode belongs inside this block for the same reason the attempt does: an attempt
                     // that trusted a text layer committed a different page than one that read its image, so
                     // the two may not satisfy each other's checkpoints.

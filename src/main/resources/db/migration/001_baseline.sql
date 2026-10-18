@@ -251,10 +251,25 @@ CREATE TABLE content_units (
     updated_at TEXT NOT NULL,
     extraction_method TEXT CHECK (extraction_method IS NULL OR extraction_method IN ('DIRECT_TEXT', 'OCR')),
     page_approval TEXT CHECK (page_approval IS NULL OR page_approval IN ('APPROVED', 'PENDING')),
+    -- The page's structure artifact (blocks, tables and their ranges in this unit's two texts), relative to the
+    -- document's artifact root. It is an optional extra on top of the text: absent for text a parser read, for
+    -- a page read before structures existed, and for a page whose artifact did not verify.
+    structure_relative_path  TEXT    CHECK (
+        structure_relative_path IS NULL OR (
+            length(trim(structure_relative_path)) > 0
+            AND substr(structure_relative_path, 1, 1) NOT IN ('/', '\')
+            AND structure_relative_path NOT GLOB '[A-Za-z]:*'
+            AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%/../%'
+            AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%/./%'
+            AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%//%'
+        )
+    ),
+    structure_sha256         TEXT    CHECK (structure_sha256 IS NULL OR length(structure_sha256) = 64),
     UNIQUE (document_id, ordinal),
     -- An artifact reference is complete or absent: a path without a checksum could not be verified,
     -- and a checksum without a path names nothing to check.
-    CHECK ((artifact_relative_path IS NULL) = (artifact_sha256 IS NULL))
+    CHECK ((artifact_relative_path IS NULL) = (artifact_sha256 IS NULL)),
+    CHECK ((structure_relative_path IS NULL) = (structure_sha256 IS NULL))
 );
 
 -- One embeddable passage of a unit. The span is what the chunk covers of the unit's search text; the
@@ -741,9 +756,24 @@ CREATE TABLE page_text_revisions (
         )
     ),
     layout_sha256                TEXT    CHECK (layout_sha256 IS NULL OR length(layout_sha256) = 64),
+    -- `structure_relative_path` and `structure_sha256` name the page's structure artifact, resolved against the
+    -- document's artifact root like the layout above and present together or absent together. A preserved or
+    -- restored page inherits both exactly, including their absence.
+    structure_relative_path  TEXT    CHECK (
+        structure_relative_path IS NULL OR (
+            length(trim(structure_relative_path)) > 0
+            AND substr(structure_relative_path, 1, 1) NOT IN ('/', '\')
+            AND structure_relative_path NOT GLOB '[A-Za-z]:*'
+            AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%/../%'
+            AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%/./%'
+            AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%//%'
+        )
+    ),
+    structure_sha256         TEXT    CHECK (structure_sha256 IS NULL OR length(structure_sha256) = 64),
     PRIMARY KEY (revision_id, ordinal),
     CHECK ((artifact_relative_path IS NULL) = (artifact_sha256 IS NULL)),
     CHECK ((layout_relative_path IS NULL) = (layout_sha256 IS NULL)),
+    CHECK ((structure_relative_path IS NULL) = (structure_sha256 IS NULL)),
     CHECK (
         (
             source_image_root IS NULL

@@ -4,6 +4,13 @@ import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
+import infoscry.ocr.BlockKind
+import infoscry.ocr.PageStructure
+import infoscry.ocr.STRUCTURE_VERSION
+import infoscry.ocr.StructureBlock
+import infoscry.ocr.TableCell
+import infoscry.ocr.TableRow
+import infoscry.ocr.TextRange
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -305,6 +312,139 @@ class ChunkerTest {
         )
     }
 
+    @Test
+    fun `no structure is unchanged`() {
+        val lines = (1..40).joinToString("\n") { row -> "row$row " + (1..7).joinToString(" ") { "v$row$it" } }
+        val sheet = unitOf("name a b c d e f g\n" + lines, SourceLocation.SpreadsheetRange("Sheet1", "A1", "H41"))
+        val prose = unitOf(words(300) + "\n" + words(120))
+
+        // The spans below were recorded from the chunker before structure existed (version 3).
+        assertEquals(
+            listOf(
+                Triple(0, 183, 59), Triple(143, 315, 53), Triple(275, 479, 53), Triple(429, 643, 53),
+                Triple(593, 807, 53), Triple(757, 971, 53), Triple(921, 1135, 53), Triple(1085, 1299, 53),
+                Triple(1249, 1463, 53), Triple(1413, 1545, 37), Triple(1495, 1586, 29),
+            ),
+            spans(chunker().chunk(sheet, 60, 10)),
+        )
+        assertEquals(
+            listOf(
+                Triple(0, 390, 60), Triple(320, 724, 60), Triple(649, 1100, 60), Triple(1020, 1476, 60),
+                Triple(1396, 1852, 60), Triple(1772, 2228, 60), Triple(2148, 2556, 60), Triple(2486, 2885, 60),
+                Triple(2815, 3143, 47),
+            ),
+            spans(chunker().chunk(prose, 60, 10)),
+        )
+        assertEquals(chunker().chunk(prose, 60, 10), chunker().chunk(prose, 60, 10, structure = null))
+    }
+
+    @Test
+    fun `page header and footer are not chunked`() {
+        val body = words(20)
+        val text = "Running Header\n\n$body\n\nPage 3 footer"
+        val unit = unitOf(text)
+        val structure = structureOf(text, "Running Header" to BlockKind.PAGE_HEADER, body to BlockKind.PARAGRAPH, "Page 3 footer" to BlockKind.PAGE_FOOTER)
+
+        val plan = chunker().chunk(unit, 100, 10, structure)
+
+        assertEquals(1, plan.drafts.size)
+        assertEquals(body, plan.drafts.single().text)
+        assertEquals(text.indexOf(body), plan.drafts.single().startOffset)
+        assertEquals(text.indexOf(body) + body.length, plan.drafts.single().endOffset)
+    }
+
+    @Test
+    fun `no chunk crosses a segment between two excluded blocks`() {
+        val first = words(15)
+        val second = (1..15).joinToString(" ") { "other$it" }
+        val text = "$first\n\nRunning title\n\n$second"
+        val structure = structureOf(text, first to BlockKind.PARAGRAPH, "Running title" to BlockKind.PAGE_HEADER, second to BlockKind.PARAGRAPH)
+
+        val plan = chunker().chunk(unitOf(text), 200, 10, structure)
+
+        assertEquals(listOf(first, second), plan.drafts.map { it.text })
+    }
+
+    @Test
+    fun `a page with only a header has no chunks`() {
+        val text = "Running Header"
+        val plan = chunker().chunk(unitOf(text), 100, 10, structureOf(text, text to BlockKind.PAGE_HEADER))
+
+        assertTrue(plan.drafts.isEmpty())
+        assertFalse(plan.headerDropped)
+    }
+
+    @Test
+    fun `never splits inside a table row`() {
+        val rows = (0..40).map { row -> (1..4).map { "r${row}c$it" } }
+        val (text, structure) = tableOf(rows)
+
+        val plan = chunker().chunk(unitOf(text), 40, 3, structure)
+
+        assertTrue(plan.drafts.size > 2)
+        plan.drafts.forEach { draft ->
+            assertTrue(draft.tokenCount <= 40, "chunk ${draft.ordinal} needs ${draft.tokenCount} tokens")
+            val atRowEnd = draft.endOffset == text.length || text[draft.endOffset] == '\n'
+            assertTrue(atRowEnd, "chunk ${draft.ordinal} ends inside a row")
+        }
+        assertEquals(text, covered(unitOf(text), plan))
+    }
+
+    @Test
+    fun `a table continuation repeats the header row`() {
+        val rows = listOf(listOf("Name", "Qty", "Unit", "Note")) + (1..40).map { row -> (1..4).map { "r${row}c$it" } }
+        val (text, structure) = tableOf(rows, headerRows = 1)
+        val header = "Name Qty Unit Note\n"
+
+        val plan = chunker().chunk(unitOf(text), 40, 3, structure)
+
+        assertTrue(plan.drafts.size > 2)
+        assertFalse(plan.headerDropped)
+        assertTrue(plan.drafts.first().text.startsWith(header))
+        plan.drafts.drop(1).forEach { draft ->
+            assertTrue(draft.text.startsWith(header), "chunk ${draft.ordinal} lacks the header row")
+            assertEquals(text.substring(draft.startOffset, draft.endOffset), draft.text.removePrefix(header))
+            assertTrue(draft.tokenCount <= 40)
+        }
+        assertEquals(text, covered(unitOf(text), plan))
+    }
+
+    @Test
+    fun `an overlapping continuation inside a table starts at a row start`() {
+        val rows = listOf(listOf("Name", "Qty", "Unit", "Note")) + (1..60).map { row -> (1..4).map { "r${row}c$it" } }
+        val (text, structure) = tableOf(rows, headerRows = 1)
+        val header = "Name Qty Unit Note\n"
+
+        val plan = chunker().chunk(unitOf(text), 40, 8, structure)
+
+        assertTrue(plan.drafts.size > 2)
+        plan.drafts.drop(1).forEach { draft ->
+            assertTrue(
+                draft.startOffset == 0 || text[draft.startOffset - 1] == '\n',
+                "chunk ${draft.ordinal} starts inside a row",
+            )
+            assertEquals(text.substring(draft.startOffset, draft.endOffset), draft.text.removePrefix(header))
+            assertTrue(draft.tokenCount <= 40)
+        }
+        assertEquals(text, covered(unitOf(text), plan))
+    }
+
+    @Test
+    fun `an oversized table header is not repeated`() {
+        val headerRow = (1..40).map { "head$it" }
+        val rows = listOf(headerRow) + (1..30).map { row -> listOf("r${row}a", "r${row}b") }
+        val (text, structure) = tableOf(rows, headerRows = 1)
+
+        val plan = chunker().chunk(unitOf(text), 30, 3, structure)
+
+        assertTrue(plan.headerDropped)
+        plan.drafts.forEach { draft ->
+            assertTrue(draft.tokenCount <= 30, "chunk ${draft.ordinal} needs ${draft.tokenCount} tokens")
+            assertEquals(text.substring(draft.startOffset, draft.endOffset), draft.text)
+        }
+        assertEquals(text, covered(unitOf(text), plan))
+    }
+
     /** The characters the chunks of [unit] cover, in order, with the overlap counted once. */
     private fun covered(unit: ContentUnit, plan: ChunkPlan): String {
         val text = unit.searchText
@@ -319,6 +459,50 @@ class ChunkerTest {
         assertEquals(text.length, cursor, "the chunks do not reach the end of the unit")
         return builder.toString()
     }
+
+    private fun spans(plan: ChunkPlan) = plan.drafts.map { Triple(it.startOffset, it.endOffset, it.tokenCount) }
+
+    private fun range(text: String, snippet: String, from: Int = 0): TextRange {
+        val start = text.indexOf(snippet, from)
+        require(start >= 0) { "the fixture text lacks $snippet" }
+        return TextRange(start, start + snippet.length)
+    }
+
+    private fun structureOf(text: String, vararg parts: Pair<String, BlockKind>): PageStructure {
+        var from = 0
+        val blocks = parts.mapIndexed { order, (snippet, kind) ->
+            val at = range(text, snippet, from)
+            from = at.endExclusive
+            StructureBlock(kind = kind, order = order, extracted = at, search = at)
+        }
+        return pageStructure(blocks)
+    }
+
+    /** One table as the whole page: a row per line, a cell per word. The first [headerRows] rows are header cells. */
+    private fun tableOf(rows: List<List<String>>, headerRows: Int = 0): Pair<String, PageStructure> {
+        val text = rows.joinToString("\n") { it.joinToString(" ") }
+        var from = 0
+        val tableRows = rows.mapIndexed { index, cells ->
+            TableRow(
+                cells.map { cell ->
+                    val at = range(text, cell, from)
+                    from = at.endExclusive
+                    TableCell(header = index < headerRows, extracted = at, search = at)
+                },
+            )
+        }
+        val whole = TextRange(0, text.length)
+        val table = StructureBlock(kind = BlockKind.TABLE, order = 0, extracted = whole, search = whole, rows = tableRows)
+        return text to pageStructure(listOf(table))
+    }
+
+    private fun pageStructure(blocks: List<StructureBlock>) = PageStructure(
+        version = STRUCTURE_VERSION,
+        textSha256 = "0".repeat(64),
+        imageSha256 = "1".repeat(64),
+        parser = "test",
+        blocks = blocks,
+    )
 
     private fun chunker(): Chunker = Chunker(counter())
 

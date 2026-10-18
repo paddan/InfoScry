@@ -54,6 +54,15 @@ rescanning and historical Ask citations have browser coverage; the format-specif
 source-viewer finish line remains open. See [implementation status](docs/implementation-status.md)
 for recorded checks.
 
+Structured page reading is implemented: Surya and LLM OCR pages keep their headings,
+lists, tables and formulas for the reader, Ask and chunking. The selectable-PDF text
+layer follows the structure's reading order; it has no cell positions yet, as exact
+geometry is sub-project 2. The [design](docs/specs/2026-10-18-structured-page-reading-design.md) and
+[OCR workflow](docs/ocr-workflow.md#structured-page-reading-2026-10-18) describe the
+contract. The real Surya table gate passed on a rendered table page on this Mac;
+the browser scenario runs against fake engines. Existing readings gain structure on
+their next rescan.
+
 The workspace and page review are implemented: common views use the available
 width, and the compact document list has live filename search, inline details and session view memory.
 The adaptive source view preserves context and supports narrow-screen Back.

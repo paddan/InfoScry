@@ -3,15 +3,11 @@ package infoscry.pdf
 import infoscry.config.AppPaths
 import infoscry.domain.CollectionId
 import infoscry.domain.DocumentId
+import infoscry.storage.ContentAddressedFile
 import java.io.IOException
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
-import java.util.HexFormat
-import java.util.UUID
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
@@ -76,16 +72,7 @@ object PageTextLayoutStore {
         val normalizedRoot = root.toAbsolutePath().normalize()
         val relativePath = "$LAYOUT_DIRECTORY/$sha256.json"
         val target = normalizedRoot.resolve(relativePath)
-        if (!alreadyWritten(target, sha256)) {
-            Files.createDirectories(checkNotNull(target.parent))
-            val temporary = target.resolveSibling("${target.fileName}.${UUID.randomUUID()}.tmp")
-            try {
-                Files.write(temporary, bytes)
-                moveIntoPlace(temporary, target)
-            } finally {
-                Files.deleteIfExists(temporary)
-            }
-        }
+        ContentAddressedFile.writeOnce(target, bytes, sha256)
         return LayoutReference(relativePath, sha256)
     }
 
@@ -150,23 +137,6 @@ object PageTextLayoutStore {
         return layout
     }
 
-    private fun alreadyWritten(target: Path, expectedSha256: String): Boolean {
-        if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) return false
-        return try {
-            sha256Of(Files.readAllBytes(target)) == expectedSha256
-        } catch (unreadable: IOException) {
-            false
-        }
-    }
-
-    private fun moveIntoPlace(temporary: Path, target: Path) {
-        try {
-            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-        } catch (unsupported: AtomicMoveNotSupportedException) {
-            Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING)
-        }
-    }
-
     /**
      * The path [relativePath] names under [root], refused unless it both lexically and, where the file
      * already exists, really (through its canonical filesystem path) stays inside [root].
@@ -192,6 +162,5 @@ object PageTextLayoutStore {
         return resolved
     }
 
-    private fun sha256Of(bytes: ByteArray): String =
-        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))
+    private fun sha256Of(bytes: ByteArray): String = ContentAddressedFile.sha256Of(bytes)
 }

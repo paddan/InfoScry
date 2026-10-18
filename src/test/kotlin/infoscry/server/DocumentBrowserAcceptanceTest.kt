@@ -18,6 +18,9 @@ import infoscry.extract.ContentUnitDraft
 import infoscry.extract.DocumentExtractor
 import infoscry.extract.ExtractionEvent
 import infoscry.extract.ExtractionInput
+import infoscry.extract.ExtractionSettings
+import infoscry.extract.EXTRACTOR_SCHEMA_VERSION
+import infoscry.extract.PdfExtractor
 import infoscry.extract.PdfPageSelector
 import infoscry.extract.PlainTextExtractor
 import infoscry.jobs.DispatchingJobHandler
@@ -31,15 +34,23 @@ import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.LlmProvider
 import infoscry.ocr.CollectionOcrSettings
+import infoscry.ocr.OCR_TRANSCRIPTION_PROMPT_VERSION
+import infoscry.ocr.OcrAttemptIdentity
 import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrOperationStage
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrProfileRevisionDraft
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageOcrEngine
+import infoscry.ocr.PageOcrEngines
+import infoscry.ocr.PixelBox
 import infoscry.ocr.ReadingMethod
 import infoscry.ocr.RescanSelection
+import infoscry.ocr.StructureDerivation
+import infoscry.ocr.SuryaBlockInput
+import infoscry.ocr.SuryaStructureParser
 import infoscry.storage.Instants
 import io.ktor.client.statement.bodyAsText
 import java.awt.image.BufferedImage
@@ -272,6 +283,25 @@ class DocumentBrowserAcceptanceTest {
     }
 
     @Test
+    fun `scanned table is read as a table, shown as one in the source and sent to Ask as Markdown`() {
+        seeded = seedScannedTableDocument()
+        // Opening the Ask panel reads the provider's model catalog first, so that answer is the fake's first response.
+        FakeOpenAiServer(listOf(catalogResponse(), answerStream("The archive scanning payment was approved [S1]."), titleCompletion("Table reading"))).use { fake ->
+            startServer()
+            createAskProfile(fake.url)
+            runScenario("scanned-table")
+            assertTrue(fake.handledRequests >= 2, "the local provider answered and titled the Ask")
+            val answerRequest = fake.requests.first { it.path.endsWith("/chat/completions") }.body
+            val evidence = LlmJson.parseToJsonElement(answerRequest).jsonObject.getValue("messages").jsonArray
+                .joinToString("\n") { message -> message.jsonObject.getValue("content").jsonPrimitive.content }
+            assertTrue(
+                evidence.contains("| Item | Amount |") && evidence.contains("| --- | --- |"),
+                "the evidence the provider received carries the scanned table as a pipe table with its header row: $evidence",
+            )
+        }
+    }
+
+    @Test
     fun `page resources stay paired across delayed and missing images and unsupported text stays readable`() {
         val textDocumentId = seedResourceTextDocument()
         startServer()
@@ -339,6 +369,54 @@ class DocumentBrowserAcceptanceTest {
         for (x in 0 until image.width) for (y in 0 until image.height) image.setRGB(x, y, 0xFFFFFF)
         ImageIO.write(image, "png", source.toFile())
         val imported = Harness(imageWorkspace).use { it.importDurably(listOf(source), SingleImageUnit()) }
+        val documentId = imported.items.single().documentId!!
+        val revisionId = AppContext.open(serverDataDir).use { archive ->
+            archive.revisions.activeRevisionId(documentId)!!
+        }
+        return Seeded(documentId, revisionId)
+    }
+
+    /**
+     * A one-page scan imported through the real PDF extractor, read by a fake Surya engine whose block HTML goes
+     * through the real Surya parser. The page has no text layer, so every word the reader and Ask see comes from
+     * the reading's structure.
+     */
+    private fun seedScannedTableDocument(): Seeded {
+        val workspace = tempDir.resolve("table-fixture")
+        serverDataDir = workspace.resolve("data")
+        val source = workspace.resolve("sources/table-scan.pdf")
+        Files.createDirectories(source.parent)
+        val scan = BufferedImage(400, 500, BufferedImage.TYPE_INT_RGB)
+        for (x in 0 until scan.width) for (y in 0 until scan.height) scan.setRGB(x, y, 0xFFFFFF)
+        PDDocument().use { pdf ->
+            val page = PDPage()
+            pdf.addPage(page)
+            PDPageContentStream(pdf, page).use { content ->
+                content.drawImage(LosslessFactory.createFromImage(pdf, scan), 80f, 120f, 450f, 600f)
+            }
+            pdf.save(source.toFile())
+        }
+        val imported = Harness(workspace).use { importer ->
+            importer.importDurably(
+                listOf(source),
+                PdfExtractor(PageOcrEngines(listOf(ScannedTableEngine()))),
+                settings = ExtractionSettings(
+                    ocrLanguages = "eng",
+                    ocrTool = "surya-ocr 0.22.1",
+                    renderDpi = 300,
+                    ocrMode = OcrImportMode.FILL_MISSING,
+                    ocrAttempt = OcrAttemptIdentity(
+                        engine = OcrEngine.SURYA,
+                        mode = OcrImportMode.FILL_MISSING,
+                        language = "eng",
+                        transcriptionPromptVersion = OCR_TRANSCRIPTION_PROMPT_VERSION,
+                        extractorSchemaVersion = EXTRACTOR_SCHEMA_VERSION,
+                        toolVersion = "surya-ocr 0.22.1",
+                        renderDpi = 300,
+                    ),
+                ),
+            )
+        }
         val documentId = imported.items.single().documentId!!
         val revisionId = AppContext.open(serverDataDir).use { archive ->
             archive.revisions.activeRevisionId(documentId)!!
@@ -541,6 +619,37 @@ class DocumentBrowserAcceptanceTest {
                 ))
             }
             input.boundary.unit { emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = 1)) }
+        }
+    }
+
+    /** A fake Surya page whose blocks are a heading, a table with a header row, and a paragraph. */
+    private class ScannedTableEngine : PageOcrEngine {
+        override val engine = OcrEngine.SURYA
+        override suspend fun transcribe(page: PageImage, settings: OcrSettingsSnapshot): OcrPageResult {
+            val derived = StructureDerivation.derive(
+                SuryaStructureParser.parse(
+                    listOf(
+                        SuryaBlockInput("<h2>Approved payments</h2>", "SectionHeader", 0, PixelBox(40, 40, 360, 80)),
+                        SuryaBlockInput(
+                            "<table><thead><tr><th>Item</th><th>Amount</th></tr></thead>" +
+                                "<tbody><tr><td>Archive scanning</td><td>1480 SEK</td></tr></tbody></table>",
+                            "Table",
+                            1,
+                            PixelBox(40, 100, 360, 260),
+                        ),
+                        SuryaBlockInput("<p>The committee approved every line above.</p>", "Text", 2, PixelBox(40, 280, 360, 320)),
+                    ),
+                ),
+                page.sha256,
+            )
+            return OcrPageResult(
+                text = derived.extractedText,
+                engine = engine,
+                imageSha256 = page.sha256,
+                meanConfidence = 0.9,
+                modelVersion = "fake-surya-table-1",
+                structure = derived.structure,
+            )
         }
     }
 

@@ -4,6 +4,9 @@ import infoscry.llm.RetryPolicy
 import io.ktor.client.engine.HttpClientEngine
 import kotlin.time.Duration
 
+/** The marker the transcription prompt writes in place of text that cannot be read. */
+private const val UNREADABLE_MARKER: String = "[unreadable]"
+
 /**
  * Reads one page with an image-capable model, through the profile revision one attempt was admitted with.
  *
@@ -89,19 +92,43 @@ class LlmOcr(
         // One client per page: the endpoint, model and limits are the revision's, the transport is this
         // call's own, and nothing outlives the reading it was built for.
         val reading = client.use { it.transcribe(page) }
-        // Whitespace is not a page's text: an empty reading is what the caller's blankness question is asked
-        // about, and it is delivered under the seam's own code rather than as a success. Text that says
-        // something is delivered exactly as the model wrote it — names, numbers and line structure are the
-        // page's, not this engine's to normalise.
-        val text = if (reading.text.isBlank()) "" else reading.text
+        // The reading is Markdown (prompt version 2). Its structure is parsed and derived into the page's text, and
+        // that derived text is the reading's text, so the structure's ranges point into what the reading carries.
+        // Whitespace is not a page's text: a blank reading derives to nothing and is reported as an empty reading
+        // rather than as a success. Text that says something keeps the words the model wrote.
+        val derived = StructureDerivation.derive(MarkdownStructureParser.parse(reading.text), page.sha256)
+        val text = derived.extractedText
+        // The model's own offsets name its raw text, not the derived text, so only the count of unreadable markers is
+        // compared with what the model reported. A model that reported no spans is not a mismatch: the markers' own
+        // positions are the spans. A non-zero report that differs in count cannot say which marker it meant, so the
+        // spans are dropped and the page says so.
+        val markers = unreadableSpansOf(text)
+        val spansAgree = reading.unreadable.isEmpty() || markers.size == reading.unreadable.size
+        // The page's warning and the structure's flag are one fact, so the structure is marked degraded too. The text
+        // is the same either way; only the flag changes what page review shows.
+        val degraded = derived.degraded || !spansAgree
         return OcrPageResult(
             text = text,
             engine = engine,
             imageSha256 = page.sha256,
-            unreadableSpans = reading.unreadable,
+            unreadableSpans = if (spansAgree) markers else emptyList(),
             modelVersion = reading.modelVersion,
             errorCode = if (text.isEmpty()) OcrPageResult.EMPTY_READING_CODE else null,
+            structure = if (degraded) derived.structure.copy(degraded = true) else derived.structure,
+            warnings = if (degraded) listOf(STRUCTURE_DEGRADED) else emptyList(),
         )
+    }
+
+    /** Every [UNREADABLE_MARKER] in [text], as the span it occupies. */
+    private fun unreadableSpansOf(text: String): List<UnreadableSpan> {
+        val spans = ArrayList<UnreadableSpan>()
+        var from = 0
+        while (true) {
+            val at = text.indexOf(UNREADABLE_MARKER, from)
+            if (at < 0) return spans
+            spans += UnreadableSpan(at, at + UNREADABLE_MARKER.length)
+            from = at + UNREADABLE_MARKER.length
+        }
     }
 
     /**

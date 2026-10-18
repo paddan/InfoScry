@@ -4,6 +4,7 @@ import infoscry.AppContext
 import infoscry.ask.AskEvent
 import infoscry.ask.AskRequest
 import infoscry.ask.AskService
+import infoscry.ask.StructuredEvidenceSource
 import infoscry.domain.CollectionId
 import infoscry.domain.SourceLocation
 import infoscry.llm.AnthropicClient
@@ -60,12 +61,13 @@ fun Routing.configureAskRoutes(context: AppContext) {
                     context.conversations.persistAsk(ask.collectionId, ask.profile, ask.prompt, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
                         .also { conversationId = it }
                 },
+                evidenceSession = StructuredEvidenceSource(context.content, context.paths).let { source -> { id -> source.session(id)::textOf } },
             )
             call.respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {
                 service.ask(AskRequest(collectionId, body.question, profile, prompt)).collect { event ->
                     // [conversationId] is only ever set by the persistence seam above, and persistence
                     // runs before the done event, so the reader can mark the row it just streamed.
-                    write("data: ${ApiJson.encodeToString(event.toWire(conversationId))}\n\n".toByteArray(StandardCharsets.UTF_8)); flush()
+                    write("data: ${ApiJson.encodeToString(event.toWire(conversationId, context::documentTitleOf))}\n\n".toByteArray(StandardCharsets.UTF_8)); flush()
                 }
                 // The answer's events are already flushed, so the reader never waits on the title;
                 // the stream stays open until the title exists, which is what makes the title appear
@@ -190,7 +192,7 @@ private fun loadAskEvidence(
     val placeholders = conversationIds.joinToString(",") { "?" }
     return connection.prepareStatement(
         "SELECT c.conversation_id, c.evidence_id, c.source_unit_id, c.locator_json, c.snippet, " +
-            "r.id AS placed_revision_id, d.id AS document_id " +
+            "r.id AS placed_revision_id, d.id AS document_id, d.title AS document_title, d.original_filename " +
             "FROM citations c " +
             // A stored answer's evidence is read back from its own citation row, because the unit it names may
             // be gone: a replacement can remove the page a saved excerpt came from, and resolving the excerpt
@@ -224,6 +226,11 @@ private fun loadAskEvidence(
                             locatorLabel = locator.describe(),
                             revisionId = rows.getString("placed_revision_id"),
                             excerpt = rows.getString("snippet"),
+                            documentTitle = documentDisplayTitle(
+                                rows.getString("document_title"),
+                                rows.getString("original_filename"),
+                                rows.getString("document_id"),
+                            ),
                         ),
                     )
                 }
@@ -271,7 +278,10 @@ internal data class AskWire(
     val evidence: List<EvidenceWire> = emptyList(),
 )
 
-internal fun AskEvent.toWire(conversationId: String? = null) = when (this) {
+internal fun AskEvent.toWire(
+    conversationId: String? = null,
+    documentTitle: (documentId: String) -> String = { it },
+) = when (this) {
     is AskEvent.Delta -> AskWire("delta", text = text)
     is AskEvent.Usage -> AskWire("usage", inputTokens = inputTokens, outputTokens = outputTokens)
     is AskEvent.Citation -> AskWire("citation", id = evidenceId, valid = valid)
@@ -283,6 +293,7 @@ internal fun AskEvent.toWire(conversationId: String? = null) = when (this) {
             locator = it.locator,
             locatorLabel = it.locatorLabel,
             revisionId = it.revisionId,
+            documentTitle = documentTitle(it.documentId),
         )
     })
     is AskEvent.Error -> AskWire("error", code = code, message = message)

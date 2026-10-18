@@ -41,7 +41,10 @@ const stored: AskHistoryEntry = {
   title: 'The signer',
   promptName: 'Default',
   answer: 'Mira signed it [S2].',
-  evidence: [{ id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8' }],
+  evidence: [
+    { id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 3', documentTitle: 'Uncited.pdf' },
+    { id: 'S2', documentId: 'doc-2', unitId: 'unit-2', locator: {}, locatorLabel: 'Page 8', documentTitle: 'Notes.pdf' },
+  ],
   inputTokens: 20,
   outputTokens: 9,
   costUsd: 0.0001,
@@ -65,7 +68,11 @@ describe('Ask panel', () => {
 
     expect(await screen.findByText(/Mira signed it/)).toBeTruthy();
     expect(screen.getByLabelText('Stored question').textContent).toBe('Who signed it?');
-    const citation = screen.getByRole('button', { name: 'Open source S2, Page 8' });
+    const citation = screen.getByRole('button', { name: 'Open source S2, Notes.pdf, Page 8' });
+    expect(citation.getAttribute('title')).toBe('Notes.pdf, Page 8');
+    const sources = screen.getByRole('list', { name: 'Sources' });
+    expect(sources.textContent).toContain('[S2] Notes.pdf, Page 8');
+    expect(sources.textContent).not.toContain('Uncited.pdf');
     await fireEvent.click(citation);
     expect(onOpenSource).toHaveBeenCalledWith(expect.objectContaining({ id: 'S2', unitId: 'unit-2' }));
     expect(screen.getByText(/20 input tokens/)).toBeTruthy();
@@ -91,7 +98,7 @@ describe('Ask panel', () => {
       { type: 'delta', text: 'Mira signed it [S1].' },
       { type: 'usage', inputTokens: 7, outputTokens: 3 },
       { type: 'citation', id: 'S1', valid: true },
-      { type: 'done', text: 'Mira signed it [S1].', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4' }], conversationId: 'ask-2' },
+      { type: 'done', text: 'Mira signed it [S1].', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4', documentTitle: 'Treaty.pdf' }], conversationId: 'ask-2' },
     )());
     const onAnswerStored = vi.fn();
     const onAnswerFinished = vi.fn();
@@ -102,7 +109,7 @@ describe('Ask panel', () => {
     await fireEvent.input(await screen.findByLabelText('Question'), { target: { value: 'Who signed it?' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
 
-    expect(await screen.findByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' })).toBeTruthy();
     expect(onAnswerStored).toHaveBeenCalledWith('ask-2');
     expect(onAnswerFinished).toHaveBeenCalledTimes(1);
 
@@ -110,12 +117,12 @@ describe('Ask panel', () => {
     // the stored row and marks it, the stored answer replaces the live one.
     await rerender({
       conversationId: 'ask-2',
-      entries: [{ ...stored, id: 'ask-2', question: 'Who signed it?', title: 'The signer', answer: 'Mira signed it [S1].', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4' }] }],
+      entries: [{ ...stored, id: 'ask-2', question: 'Who signed it?', title: 'The signer', answer: 'Mira signed it [S1].', evidence: [{ id: 'S1', documentId: 'doc-1', unitId: 'unit-1', locator: {}, locatorLabel: 'Page 4', documentTitle: 'Treaty.pdf' }] }],
     });
 
     expect(await screen.findByLabelText('Stored question')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Open source S1, Page 4' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Open source S2, Page 8' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open source S1, Treaty.pdf, Page 4' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Open source S2, Notes.pdf, Page 8' })).toBeNull();
   });
 
   it('keeps a streamed partial answer visible when the stream ends with an error', async () => {

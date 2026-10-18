@@ -12,6 +12,7 @@ import infoscry.pdf.LayoutReference
 import infoscry.pdf.OcrGeometryAligner
 import infoscry.pdf.PageTextLayout
 import infoscry.pdf.PageTextLayoutStore
+import infoscry.pdf.PdfModelRules
 import infoscry.pdf.PdfPageGeometry
 import java.io.IOException
 import java.nio.file.Files
@@ -510,7 +511,23 @@ data class OcrPageResult(
     /** The model or tool version the engine reported, when it reports one. */
     val modelVersion: String? = null,
     val errorCode: String? = null,
+    /**
+     * The structure the reading's text was derived into, when the engine reads one.
+     *
+     * Its text is this reading's text, so the ranges in it point into the text the reading carries. That is
+     * checked here, where a reading is made: a structure that describes other text would put a citation on
+     * the wrong words, and no caller would see it happen.
+     */
+    val structure: PageStructure? = null,
+    /** Reasons the reading is less than the engine can give, such as a structure that fell back to paragraphs. */
+    val warnings: List<String> = emptyList(),
 ) {
+    init {
+        require(structure == null || structure.textSha256 == PdfModelRules.sha256Of(text)) {
+            "a reading's structure describes other text than the reading carries"
+        }
+    }
+
     companion object {
 
         /**
@@ -817,4 +834,31 @@ suspend fun writtenLayoutReferenceFor(
     PageTextLayoutStore.write(artifactRoot, layout)
 } catch (failure: IOException) {
     null
+}
+
+/**
+ * The structure [reading] carries, durably written under [artifactRoot] and returned as a reference, or `null`
+ * when the reading has none, when it does not describe [canonicalText], or when the write failed.
+ *
+ * [canonicalText] is the unit's *final, normalized* text. The structure is checked against it here, where it
+ * is about to be committed with the unit, because a structure that points into other text would put a
+ * citation on the wrong words. The structure is an optional extra on top of the text, so a reading that has
+ * none, a mismatch and a failed write are all an absence rather than a failed page. The artifact is written
+ * before the unit's checkpoint commits and is content-addressed, so a repeat after a crash writes the same
+ * bytes to the same name and a page that is read again converges on one file.
+ */
+fun writtenStructureReferenceFor(
+    reading: OcrPageResult,
+    canonicalText: String,
+    ordinal: Int,
+    artifactRoot: Path,
+): StructureReference? {
+    val structure = reading.structure ?: return null
+    return try {
+        PageStructureStore.write(artifactRoot, ordinal, structure.verifiedAgainst(canonicalText))
+    } catch (mismatch: IllegalArgumentException) {
+        null
+    } catch (failure: IOException) {
+        null
+    }
 }

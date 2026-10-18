@@ -13,6 +13,7 @@ import infoscry.ocr.PageImageRenderer
 import infoscry.ocr.PageOcrEngine
 import infoscry.ocr.PageOcrEngines
 import infoscry.ocr.writtenLayoutReferenceFor
+import infoscry.ocr.writtenStructureReferenceFor
 import infoscry.pdf.LayoutReference
 import java.io.IOException
 import java.nio.file.Files
@@ -573,6 +574,11 @@ class PdfExtractor(
             artifactRoot = artifactRoot,
             canonicalText = normalised.extracted,
         )
+        val structureReference = if (reading != null && artifactRoot != null) {
+            writtenStructureReferenceFor(reading, normalised.extracted, page - 1, artifactRoot)
+        } else {
+            null
+        }
         emit(
             ExtractionEvent.UnitReady(
                 key = key,
@@ -594,6 +600,7 @@ class PdfExtractor(
                         ?.extracted
                         ?.takeIf(String::isNotBlank),
                     layoutReference = layoutReference,
+                    structureReference = structureReference,
                 ),
             ),
         )

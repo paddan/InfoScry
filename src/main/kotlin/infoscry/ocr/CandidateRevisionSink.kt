@@ -170,6 +170,7 @@ class CandidateRevisionSink(
             approval = approval,
             unitKey = event.key,
             layoutReference = draft.layoutReference,
+            structureReference = draft.structureReference,
         )
     }
 }

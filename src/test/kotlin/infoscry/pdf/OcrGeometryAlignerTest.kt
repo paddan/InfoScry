@@ -1,8 +1,13 @@
 package infoscry.pdf
 
 import infoscry.domain.DocumentId
+import infoscry.ocr.BlockDraft
+import infoscry.ocr.BlockKind
+import infoscry.ocr.CellDraft
 import infoscry.ocr.OcrWordBox
 import infoscry.ocr.PageImage
+import infoscry.ocr.PageStructureDraft
+import infoscry.ocr.StructureDerivation
 import java.nio.file.Path
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -585,6 +590,106 @@ class OcrGeometryAlignerTest {
         assertTrue(layout.complete)
         assertTrue(layout.verifiedBlank)
         assertEquals(sha(text), layout.textSha256)
+    }
+
+    // Structure order: the canonical text is the structure's derived text, so spans follow cell order.
+
+    @Test
+    fun `table page spans follow cell order row by row and the layout is complete`() {
+        val derived = StructureDerivation.derive(
+            PageStructureDraft(
+                parser = "test",
+                blocks = listOf(
+                    BlockDraft(BlockKind.PARAGRAPH, "Redovisning"),
+                    BlockDraft(
+                        BlockKind.TABLE,
+                        "",
+                        rows = listOf(
+                            listOf(CellDraft("Namn", header = true), CellDraft("Belopp", header = true)),
+                            listOf(CellDraft("Åsa", header = false), CellDraft("120", header = false)),
+                            listOf(CellDraft("Bo", header = false), CellDraft("95", header = false)),
+                        ),
+                    ),
+                ),
+            ),
+            ALIGN_IMAGE_SHA,
+        )
+        val text = derived.extractedText
+        assertEquals("Redovisning\nNamn\tBelopp\nÅsa\t120\nBo\t95", text)
+
+        // Word boxes as a local positioning pass reads them: visual order, which here is row by row.
+        val layout = OcrGeometryAligner.align(
+            input(
+                text,
+                drawn("Redovisning", 10, 10, 200, 20),
+                drawn("Namn", 10, 40, 60, 20),
+                drawn("Belopp", 120, 40, 80, 20),
+                drawn("Åsa", 10, 70, 50, 20),
+                drawn("120", 120, 70, 40, 20),
+                drawn("Bo", 10, 100, 40, 20),
+                drawn("95", 120, 100, 30, 20),
+            ),
+        )
+        assertTrue(layout.complete, "every table word is placed: ${layout.reasonCode}")
+        assertEquals(sha(text), layout.textSha256)
+
+        val cellWords = listOf("Redovisning", "Namn", "Belopp", "Åsa", "120", "Bo", "95")
+        assertEquals(cellWords, layout.spans.map { text.substring(it.start, it.endExclusive) })
+        assertEquals((0 until cellWords.size).toList(), layout.spans.map { it.order }, "order follows the reading")
+        assertEquals(layout.spans.map { it.start }.sorted(), layout.spans.map { it.start }, "starts run in reading order")
+
+        // Every table cell's words are the spans whose start lies inside that cell's extracted range.
+        val cells = derived.structure.blocks.single { it.kind == BlockKind.TABLE }.rows!!.flatMap { it.cells }
+        val cellOfSpan = layout.spans.map { span -> cells.indexOfFirst { span.start in it.extracted.start until it.extracted.endExclusive } }
+        assertEquals(-1, cellOfSpan.first(), "the heading paragraph is not a cell")
+        assertEquals(listOf(0, 1, 2, 3, 4, 5), cellOfSpan.drop(1), "each table word lies in its cell, in cell order")
+    }
+
+    @Test
+    fun `surya table separators do not change token placement or completeness`() {
+        // A Surya table block is flattened with tabs between cells and newlines between rows; the aligner
+        // tokenizes on any whitespace, so a space-separated reading of the same words must place identically.
+        val tabbed = "Namn\tBelopp\nÅsa\t120"
+        val spaced = "Namn Belopp Åsa 120"
+        val anchors = arrayOf(
+            drawn("Namn", 10, 40, 60, 20),
+            drawn("Belopp", 120, 40, 80, 20),
+            drawn("Åsa", 10, 70, 50, 20),
+            drawn("120", 120, 70, 40, 20),
+        )
+        val fromTabs = OcrGeometryAligner.align(input(tabbed, *anchors))
+        val fromSpaces = OcrGeometryAligner.align(input(spaced, *anchors))
+        assertTrue(fromTabs.complete, "tab and newline separated table is complete: ${fromTabs.reasonCode}")
+        assertTrue(fromSpaces.complete, "space separated words are complete: ${fromSpaces.reasonCode}")
+        assertEquals(fromSpaces.spans.map { it.rectangle }, fromTabs.spans.map { it.rectangle })
+        assertEquals(listOf("Namn", "Belopp", "Åsa", "120"), fromTabs.spans.map { tabbed.substring(it.start, it.endExclusive) })
+    }
+
+    @Test
+    fun `a page without structure keeps the layout it had before structure order`() {
+        // Pinned literal output for a plain reading (no structure input exists on the aligner): the same
+        // rectangles, orders and offsets as before tables had cell order.
+        val text = "Åsa betalade\nLindqvist 95"
+        val layout = OcrGeometryAligner.align(
+            input(
+                text,
+                drawn("Åsa", 10, 10, 40, 20),
+                drawn("betalade", 60, 10, 80, 20),
+                drawn("Lindqvist", 10, 40, 90, 20),
+                drawn("95", 110, 40, 30, 20),
+            ),
+        )
+        assertTrue(layout.complete)
+        assertNull(layout.reasonCode)
+        assertEquals(
+            listOf(
+                span(0, 3, 0, rect(10.0, 10.0, 40.0, 20.0)),
+                span(4, 12, 1, rect(60.0, 10.0, 80.0, 20.0)),
+                span(13, 22, 2, rect(10.0, 40.0, 90.0, 20.0)),
+                span(23, 25, 3, rect(110.0, 40.0, 30.0, 20.0)),
+            ),
+            layout.spans,
+        )
     }
 
     // Fixtures and helpers.

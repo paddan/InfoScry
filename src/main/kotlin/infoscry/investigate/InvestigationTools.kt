@@ -1,6 +1,7 @@
 package infoscry.investigate
 
 import infoscry.ask.ContextPacker
+import infoscry.ask.StructuredEvidenceSource
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
@@ -76,6 +77,10 @@ class InvestigationTools(
      * revision its text belongs to; null for a document with no published revision.
      */
     private val activeRevisionId: (DocumentId) -> String? = { null },
+    /**
+     * Renders units whose page has a structure as Markdown; null sends every unit's own text, as before.
+     */
+    private val structured: StructuredEvidenceSource? = null,
 ) {
     constructor(
         collectionId: CollectionId,
@@ -84,7 +89,8 @@ class InvestigationTools(
         documents: DocumentStore,
         maxResultBytes: Int = DEFAULT_MAX_RESULT_BYTES,
         activeRevisionId: (DocumentId) -> String? = { null },
-    ) : this(collectionId, InvestigationSearch(search::search), content, documents, maxResultBytes, activeRevisionId)
+        structured: StructuredEvidenceSource? = null,
+    ) : this(collectionId, InvestigationSearch(search::search), content, documents, maxResultBytes, activeRevisionId, structured)
 
     init {
         require(maxResultBytes > 0) { "maxResultBytes must be positive, was $maxResultBytes" }
@@ -114,6 +120,7 @@ class InvestigationTools(
     }
 
     private fun searchCollection(argumentsJson: String, nextEvidenceId: () -> String): ToolResult = parse<SearchArgs>(argumentsJson) { args ->
+        val session = structured?.session(collectionId)
         val outcome = try {
             search.search(args.query, modeOf(args.searchMode), filtersOf(args.filters))
         } catch (unavailable: SearchUnavailableException) {
@@ -128,7 +135,7 @@ class InvestigationTools(
                     hit.unitId.value,
                     hit.locator,
                     hit.locatorLabel,
-                    escape(hit.text),
+                    escape(session?.textOf(hit) ?: hit.text),
                     revisionId = hit.revisionId,
                     documentId = hit.documentId.value,
                 )
@@ -185,7 +192,8 @@ class InvestigationTools(
         val unit = scopedUnit(ContentUnitId(args.contentUnitId))
             ?: return ToolResult.Failure(CODE_NOT_FOUND, "the requested content unit is not readable here")
         val revisionId = provableRevision(unit.documentId, listOf(unit))
-        bounded(mutableListOf(itemOf(unit, revisionId)), { 0 }, nextEvidenceId)
+        val session = structured?.session(collectionId)
+        bounded(mutableListOf(itemOf(unit, revisionId, session)), { 0 }, nextEvidenceId)
     }
 
     private fun readAdjacent(argumentsJson: String, nextEvidenceId: () -> String): ToolResult = parse<AdjacentArgs>(argumentsJson) { args ->
@@ -199,10 +207,11 @@ class InvestigationTools(
         val afterUnits = if (after == 0) emptyList() else content.listUnits(unit.documentId, afterOrdinal = unit.ordinal, limit = after)
 
         val revisionId = provableRevision(unit.documentId, beforeUnits + unit + afterUnits)
+        val session = structured?.session(collectionId)
         val items = ArrayList<EvidenceItem>(before + 1 + after)
-        beforeUnits.forEach { items += itemOf(it, revisionId) }
-        items += itemOf(unit, revisionId)
-        afterUnits.forEach { items += itemOf(it, revisionId) }
+        beforeUnits.forEach { items += itemOf(it, revisionId, session) }
+        items += itemOf(unit, revisionId, session)
+        afterUnits.forEach { items += itemOf(it, revisionId, session) }
         val sides = FarthestNeighbour(beforeRemaining = items.size - 1 - afterUnits.size)
         bounded(items, { size -> sides.dropIndex(size) }, nextEvidenceId)
     }
@@ -216,12 +225,12 @@ class InvestigationTools(
         return if (document.collectionId == collectionId) unit else null
     }
 
-    private fun itemOf(unit: ContentUnit, revisionId: String?): EvidenceItem =
+    private fun itemOf(unit: ContentUnit, revisionId: String?, session: StructuredEvidenceSource.Session?): EvidenceItem =
         EvidenceItem(
             unit.id.value,
             unit.locator,
             unit.locator.describe(),
-            escape(unit.extractedText),
+            escape(session?.unitText(unit) ?: unit.extractedText),
             revisionId = revisionId,
             documentId = unit.documentId.value,
         )

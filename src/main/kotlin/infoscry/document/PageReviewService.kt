@@ -22,6 +22,9 @@ import infoscry.storage.DocumentStore
 import infoscry.storage.OcrOperationStore
 import infoscry.storage.PageApproval
 import infoscry.storage.RevisionPageText
+import infoscry.ocr.PageStructureStore
+import infoscry.ocr.StructureView
+import infoscry.ocr.windowStructure
 import infoscry.storage.RevisionState
 import java.io.IOException
 import java.nio.file.Files
@@ -33,6 +36,7 @@ import java.nio.file.attribute.FileTime
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import javax.imageio.ImageIO
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.io.IOUtils
@@ -53,6 +57,14 @@ data class PageReviewResponse(
     val qualityScore: Double?,
     val readingMethod: String?,
     val imageKind: String,
+    /** True when the page's structure fell back to paragraphs (`STRUCTURE_DEGRADED`); false when it has none. */
+    val structureDegraded: Boolean = false,
+    /**
+     * The page's structure over the served slice, absent when the page has none or its structure does not verify
+     * against the stored text. It is shaped and ranged exactly as a source read's structure is.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val structure: StructureView? = null,
 )
 
 data class PageReviewImage(val path: Path, val mediaType: String)
@@ -95,6 +107,12 @@ class PageReviewService(
         val end = if (splitsPair(text, requestedEnd)) {
             if (requestedEnd - start <= 1) requestedEnd + 1 else requestedEnd - 1
         } else requestedEnd
+        // Read once: the degraded flag and the served structure come from the same verified structure.
+        val structure = resolved.page?.let { page ->
+            page.structureReference?.let { reference ->
+                PageStructureStore.read(paths.artifactsDir(collectionId, documentId), reference, page.extractedText)
+            }
+        }
         return PageReviewResponse(
             documentId = documentId.value,
             unitId = resolved.page?.unitId?.value,
@@ -116,6 +134,8 @@ class PageReviewService(
                 resolved.page == null || resolved.page.extractionMethod == ExtractionMethod.DIRECT_TEXT -> "original"
                 else -> "none"
             },
+            structureDegraded = structure?.degraded == true,
+            structure = structure?.let { windowStructure(it, start, end) },
         )
     }
 

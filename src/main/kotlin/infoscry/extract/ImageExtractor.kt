@@ -8,6 +8,7 @@ import infoscry.ocr.OcrPageResult
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageImageRenderer
 import infoscry.ocr.PageOcrEngines
+import infoscry.ocr.writtenStructureReferenceFor
 import java.awt.image.BufferedImage
 import java.io.IOException
 import java.nio.file.Files
@@ -164,6 +165,7 @@ class ImageExtractor(
             }
             confidence = verified.meanConfidence
             val normalised = TextNormalizer.normalize(verified.text)
+            val structureReference = writtenStructureReferenceFor(verified, normalised.extracted, ORDINAL, input.artifactRoot)
             emit(
                 ExtractionEvent.UnitReady(
                     key = UNIT_KEY,
@@ -185,6 +187,7 @@ class ImageExtractor(
                         // attempt wrote for it. The two are different images, and a reading of one may never
                         // be attributed to the other.
                         sourceImage = provenance(image, input),
+                        structureReference = structureReference,
                     ),
                 ),
             )

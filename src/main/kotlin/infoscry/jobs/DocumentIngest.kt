@@ -322,7 +322,13 @@ internal class DocumentIngest(
             stage.run(STAGE_CHUNK) { documents.updateStatus(document.id, DocumentStatus.CHUNKING) }
             // No operation row: what this reading owes a reader is read from its document's status, which is
             // written below from the publication attempt itself.
-            phases.chunkCandidate(operationId = null, candidate = candidate, document = document, stage = stage)
+            phases.chunkCandidate(
+                operationId = null,
+                candidate = candidate,
+                document = document,
+                stage = stage,
+                artifactRoot = paths.artifactsDir(document.collectionId, document.id),
+            )
             stage.run(STAGE_EMBED) { documents.updateStatus(document.id, DocumentStatus.EMBEDDING) }
             phases.embedCandidate(candidate = candidate, embedder = embedder, stage = stage)
             stage.run(STAGE_INDEX) { documents.updateStatus(document.id, DocumentStatus.INDEXING) }
@@ -510,6 +516,7 @@ internal class DocumentIngest(
         val tokenizerId = chunker.counterId
         val maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS
         val overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS
+        val artifactRoot = paths.artifactsDir(document.collectionId, document.id)
         if (!content.needsChunking(document.id, version, tokenizerId, maxSequenceTokens, overlapTokens)) return
 
         stage.run(STAGE_CHUNK) { documents.updateStatus(document.id, DocumentStatus.CHUNKING) }
@@ -519,7 +526,7 @@ internal class DocumentIngest(
             val batch = content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
             if (batch.isEmpty()) break
             batch.forEach { unit ->
-                val plan = chunker.chunk(unit, maxSequenceTokens, overlapTokens)
+                val plan = chunker.chunk(unit, maxSequenceTokens, overlapTokens, content.structureOf(unit, artifactRoot))
                 stage.run(STAGE_CHUNK) {
                     content.replaceUnitChunks(
                         unitId = unit.id,

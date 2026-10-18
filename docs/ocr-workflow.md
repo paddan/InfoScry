@@ -132,6 +132,37 @@ the provider may already have generated and billed an answer. Previously
 committed pages remain resumable; existing published text stays unchanged on
 failure. HTTP request timeouts are distinguished from other transport failures.
 
+## Structured page reading (2026-10-18)
+
+An OCR page keeps the layout its engine recognised (headings, lists, tables,
+formulas, captions, footnotes, page headers and footers) as a structure stored
+beside its text. The [design](specs/2026-10-18-structured-page-reading-design.md)
+is implemented; the technical contracts are in
+[technical reference](technical-reference.md#page-structure).
+
+- **Which readings have structure.** Surya and the LLM reader (Markdown,
+  transcription prompt version 2) carry structure. Tesseract gives paragraphs
+  grouped by its own blocks, and recognises no tables or headings. Embedded-image
+  units of e-book and Office documents get no structure in this project.
+- **Degraded structure.** Only a block the engine labelled `Table` falls back to
+  a paragraph when its markup does not parse as a table; `Form` and
+  `TableOfContents` blocks fall back to a paragraph without the flag. A page
+  whose structure could not be kept is marked degraded (`STRUCTURE_DEGRADED`),
+  and page review says so. Its text and citations are unaffected.
+- **Existing readings are not upgraded.** A page gets structure on its next
+  import or rescan with an OCR engine. A rescan whose text is unchanged adopts
+  the new reading's structure.
+- **Reader.** The source viewer draws headings, lists, real tables with header
+  cells, formulas as their LaTeX source, and page headers and footers muted.
+- **Ask and Investigate.** A chunk's tables and headings reach the model as
+  Markdown (pipe tables with their header row); citations still name the chunk.
+- **Chunking.** Chunks split at block boundaries and never inside a table row. A
+  table that spans chunks repeats its header row. Page headers and footers stay
+  out of the search index and embeddings.
+- **Selectable PDF.** The text layer follows reading order, and a table cell by
+  cell, row by row. Cell rectangles are not estimated: exact cell geometry waits
+  for Surya line detection, a later sub-project.
+
 ## Always restartable
 
 The rule: **starting a run never depends on the state a previous run left

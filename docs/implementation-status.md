@@ -270,6 +270,44 @@ suite; Svelte checking reported no errors or warnings. Documentation and diff ch
 passed. This establishes automated behavior, not real-provider model compatibility.
 No user archive was reset or migrated, and nothing was committed or pushed.
 
+## Structured page reading (2026-10-18)
+
+The [design](specs/2026-10-18-structured-page-reading-design.md) is implemented:
+Surya and LLM OCR readings keep headings, lists, tables and formulas as a page
+structure; the reader, Ask and Investigate, chunking and the selectable-PDF text
+layer use it. Contracts are in the [OCR workflow](ocr-workflow.md#structured-page-reading-2026-10-18)
+and [technical reference](technical-reference.md#page-structure).
+
+Recorded on 2026-10-18 on the development Mac:
+
+- **Browser acceptance:** `DocumentBrowserAcceptanceTest` scenario "scanned table
+  is read as a table, shown as one in the source and sent to Ask as Markdown"
+  passed under `./gradlew externalTest --tests infoscry.server.DocumentBrowserAcceptanceTest`
+  (all 10 class tests passed). A one-page scan is imported through the real
+  `PdfExtractor`; a fake Surya engine returns Surya block HTML that goes through
+  the real parser. Chromium searches for a table cell, and the source viewer shows
+  the table with column headers `th[scope="col"]`, the cell values and the heading.
+  Ask then sends the table to the fake provider as a pipe table with its header row.
+  This uses fake engines and a fake provider, not the real model.
+- **Real Surya gate:** `SuryaRealToolTest` passed under
+  `INFOSCRY_SURYA_PYTHON=/Users/patrik/.local/share/infoscry/surya-venv/bin/python ./gradlew externalTest --tests infoscry.ocr.SuryaRealToolTest`
+  (2 tests, 0 failures). Runtime: Python 3.12.14, `surya-ocr` 0.22.1, torch 2.14.1,
+  transformers 5.18.0, `llama-server` 0.7.0 (build 11669). The new table test
+  renders a 1200x800 page with a bold header row (Item, Quantity, Amount) and two
+  data rows, and the real runtime recognised a `TABLE` block whose header cells
+  were `Item`, `Quantity` and `Amount`. The page is synthetic, so this is one
+  rendered table, not a measurement of real scanned tables, handwriting or
+  multi-page layouts.
+- **Full gate:** `./gradlew check` passed: 2,015 JVM tests with no failures and 513
+  Vitest tests.
+- `SuryaRealToolTest` is tagged `external`, so the `test` task does not run it.
+  Run it under `externalTest`.
+
+Open for this feature: table and heading quality on the owner's real scanned pages
+has not been measured. That is the pilot check for the Surya HTML path, not part of
+the automated gate. Exact cell geometry for the selectable PDF is sub-project 2
+(Surya line detection); the text layer follows reading order until then.
+
 ## Recorded verification
 
 The previous README recorded a local 2026-09-24 run of `check`, `externalTest`

@@ -5,8 +5,11 @@ Rules:
 
 1. Transcribe exactly what is on the page: every character, word, name, number, date and mark, in the
    language and spelling it uses. Never correct, translate, modernise, summarise or explain.
-2. Keep the page's line structure: one transcribed line for each line of the page, in the same order,
-   with the same paragraph breaks.
+2. Write the page as GitHub-flavored Markdown that keeps its layout: `#` to `######` for headings,
+   `-` or `1.` for list items, pipe tables with a header row and a `---` separator row, `$…$` or
+   `$$…$$` for formulas, fenced code blocks for code. Wrap the page's running header in
+   `<!-- page-header -->` … `<!-- /page-header -->` and its footer in `<!-- page-footer -->` …
+   `<!-- /page-footer -->`. Keep paragraph breaks as blank lines.
 3. Write nothing for a part you cannot read. Mark its place in the text with the marker `[unreadable]`
    and list the span of that marker in "unreadable", using character offsets into the "text" you return.
 4. Never fill in, guess or complete anything that is obscured, smudged, cut off, blacked out or

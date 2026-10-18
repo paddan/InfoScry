@@ -37,39 +37,76 @@
 
 <fieldset class="effort-levels">
   <legend>Investigate effort levels</legend>
-  <p>Inherited limits apply until a row is edited. Native reasoning is optional; enable it only for a model that supports it.</p>
-  {#each levels as level}
-    <fieldset class="effort-row">
-      <legend>{level} — {overrides?.[level] ? 'Override' : 'Inherited'}</legend>
-      <label>{level} tool rounds
-        <input type="number" min="1" max="50" step="1" required value={(overrides?.[level]?.limits ?? defaults[level]).maxToolRounds} oninput={(event) => limit(level, 'maxToolRounds', event)} />
-      </label>
-      <label>{level} tool calls
-        <input type="number" min="1" max="100" step="1" required value={(overrides?.[level]?.limits ?? defaults[level]).maxToolCalls} oninput={(event) => limit(level, 'maxToolCalls', event)} />
-      </label>
-      <label>{level} turn seconds
-        <input type="number" min="10" max="1800" step="1" required value={(overrides?.[level]?.limits ?? defaults[level]).maxTurnSeconds} oninput={(event) => limit(level, 'maxTurnSeconds', event)} />
-      </label>
-      <label>{level} native reasoning
-        {#if provider === 'ANTHROPIC'}
-          <input type="number" min="1024" max={maxOutputTokens - 1} step="1" placeholder="None" value={nativeValue(level, overrides)} oninput={(event) => reasoning(level, event)} />
-        {:else}
-          <select value={nativeValue(level, overrides)} onchange={(event) => reasoning(level, event)}>
-            <option value="">None</option>
-            <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
-          </select>
-        {/if}
-      </label>
-      <button type="button" aria-label={`Clear ${level} override`} onclick={() => clear(level)} disabled={!overrides?.[level]}>Clear</button>
-    </fieldset>
-  {/each}
+  <p class="hint">Inherited limits apply until a row is edited. Native reasoning is optional; enable it only for a model that supports it.</p>
+  <div class="effort-table">
+    <div class="effort-head" aria-hidden="true">
+      <span>Level</span><span>Tool rounds</span><span>Tool calls</span><span>Turn seconds</span><span>Native reasoning</span><span></span>
+    </div>
+    {#each levels as level}
+      <div class="effort-row" role="group" aria-labelledby={`effort-${level}`}>
+        <div class="level" id={`effort-${level}`}>
+          <span class="name">{level}</span>
+          <span class="state" class:override={!!overrides?.[level]}>{overrides?.[level] ? 'Override' : 'Inherited'}</span>
+        </div>
+        <label><span class="cell-label">Tool rounds</span>
+          <input type="number" aria-label={`${level} tool rounds`} min="1" max="50" step="1" required value={(overrides?.[level]?.limits ?? defaults[level]).maxToolRounds} oninput={(event) => limit(level, 'maxToolRounds', event)} />
+        </label>
+        <label><span class="cell-label">Tool calls</span>
+          <input type="number" aria-label={`${level} tool calls`} min="1" max="100" step="1" required value={(overrides?.[level]?.limits ?? defaults[level]).maxToolCalls} oninput={(event) => limit(level, 'maxToolCalls', event)} />
+        </label>
+        <label><span class="cell-label">Turn seconds</span>
+          <input type="number" aria-label={`${level} turn seconds`} min="10" max="1800" step="1" required value={(overrides?.[level]?.limits ?? defaults[level]).maxTurnSeconds} oninput={(event) => limit(level, 'maxTurnSeconds', event)} />
+        </label>
+        <label><span class="cell-label">Native reasoning</span>
+          {#if provider === 'ANTHROPIC'}
+            <input type="number" aria-label={`${level} native reasoning`} min="1024" max={maxOutputTokens - 1} step="1" placeholder="None" value={nativeValue(level, overrides)} oninput={(event) => reasoning(level, event)} />
+          {:else}
+            <select aria-label={`${level} native reasoning`} value={nativeValue(level, overrides)} onchange={(event) => reasoning(level, event)}>
+              <option value="">None</option>
+              <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
+            </select>
+          {/if}
+        </label>
+        <button type="button" aria-label={`Clear ${level} override`} onclick={() => clear(level)} disabled={!overrides?.[level]}>Clear</button>
+      </div>
+    {/each}
+  </div>
 </fieldset>
 
 <style>
-  .effort-levels { min-width: 0; }
-  p { font-size: .85rem; }
-  .effort-row { display: flex; flex-wrap: wrap; gap: .65rem; margin-block: .65rem; min-width: 0; }
-  label { display: grid; gap: .25rem; font-size: .8rem; flex: 1 1 8rem; min-width: 0; }
-  input, select { width: 100%; min-width: 0; }
-  button { align-self: end; }
+  .effort-levels { min-width: 0; margin: 0; border: 1px solid #303535; border-radius: 0.55rem; padding: 1rem; container: effort / inline-size; }
+  legend { padding: 0 0.35rem; color: #b8bcbb; font-size: 0.85rem; }
+  .hint { margin: 0 0 0.9rem; color: #929997; font-size: 0.78rem; }
+  .effort-table { display: grid; gap: 0.55rem; }
+  .effort-head, .effort-row {
+    display: grid;
+    grid-template-columns: 7rem repeat(3, minmax(0, 9rem)) minmax(0, 12rem) minmax(0, 1fr);
+    gap: 0.75rem;
+    align-items: center;
+  }
+  .effort-head { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+  .effort-row { padding-top: 0.55rem; border-top: 1px solid #2d3131; }
+  .level { display: grid; gap: 0.2rem; }
+  .name { color: #e8e9e7; font-size: 0.85rem; font-weight: 650; }
+  .state { color: #929997; font-size: 0.72rem; }
+  .state.override { color: #c4a77d; }
+  button { justify-self: start; }
+  label { display: grid; gap: 0.35rem; min-width: 0; color: #b8bcbb; font-size: 0.82rem; }
+  .cell-label { display: none; }
+  select, input {
+    width: 100%;
+    min-width: 0;
+    border: 1px solid #383d3e;
+    border-radius: 0.48rem;
+    background: #202324;
+    padding: 0.62rem 0.72rem;
+    color: #e8e9e7;
+  }
+  select:hover, input:hover { border-color: #515757; }
+  @container effort (max-width: 46rem) {
+    .effort-head { display: none; }
+    .effort-row { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; }
+    .level { grid-column: 1 / -1; grid-auto-flow: column; justify-content: start; align-items: baseline; gap: 0.6rem; }
+    .cell-label { display: block; }
+  }
 </style>

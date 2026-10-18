@@ -144,7 +144,7 @@ class SuryaOcrTest {
         val surya = engineWith(
             "no-llamacpp",
             mirrorIdentity() + "exit 0\n",
-            firstLine = "printf '%s\\n' '{\"protocol\":1,\"type\":\"page\",\"status\":\"error\"," +
+            firstLine = "printf '%s\\n' '{\"protocol\":$PROTOCOL,\"type\":\"page\",\"status\":\"error\"," +
                 "\"code\":\"NEEDS_LLAMA_CPP\",\"message\":\"llama-server binary not found\"}'\n",
         )
         val engines = PageOcrEngines(listOf(RecordingTesseract(), surya))
@@ -163,7 +163,7 @@ class SuryaOcrTest {
         val surya = engineWith(
             "no-model",
             mirrorIdentity() + "exit 0\n",
-            firstLine = "printf '%s\\n' '{\"protocol\":1,\"type\":\"page\",\"status\":\"error\"," +
+            firstLine = "printf '%s\\n' '{\"protocol\":$PROTOCOL,\"type\":\"page\",\"status\":\"error\"," +
                 "\"code\":\"NEEDS_SURYA_MODEL\",\"message\":\"download failed\"}'\n",
         )
 
@@ -241,9 +241,9 @@ class SuryaOcrTest {
         // before its origin, is not a region of this page: a citation drawn from it would point somewhere
         // this reading has no evidence for, and the whole reading's boxes are what a citation is made of.
         val outside = listOf(
-            """{"text":"$A_BLOCK_TEXT","bbox":[1,2,301,4],"confidence":0.9}""",
-            """{"text":"$A_BLOCK_TEXT","bbox":[-5,2,3,4]}""",
-            """{"text":"$A_BLOCK_TEXT","bbox":[1,2,3,81]}""",
+            """{"html":"<p>$A_BLOCK_TEXT</p>","text":"$A_BLOCK_TEXT","bbox":[1,2,301,4],"confidence":0.9}""",
+            """{"html":"<p>$A_BLOCK_TEXT</p>","text":"$A_BLOCK_TEXT","bbox":[-5,2,3,4]}""",
+            """{"html":"<p>$A_BLOCK_TEXT</p>","text":"$A_BLOCK_TEXT","bbox":[1,2,3,81]}""",
         )
         outside.forEach { block ->
             val surya = engineWith("out-of-page", mirrorIdentity() + pageResult(blocks = block))
@@ -255,6 +255,63 @@ class SuryaOcrTest {
             assertEquals(SuryaWorkerException.MALFORMED_OUTPUT, failure.code, "for the block $block")
             assertContains(failure.message.orEmpty(), "outside the page", message = "for the block $block")
         }
+    }
+
+    @Test
+    fun readingCarriesStructure() = runBlocking {
+        // A table block is read into its rows, and the page's text is the structure's text, tab-separated
+        // across the cells, so a citation's ranges and the text it points into are the same reading.
+        val table = """{"html":"<table><tr><td>a</td><td>b</td></tr></table>","text":"a b","bbox":[1,2,3,4],""" +
+            """"confidence":0.9,"label":"Table","readingOrder":0}"""
+        val surya = engineWith("table", mirrorIdentity() + pageResult(blocks = table))
+
+        val reading = surya.transcribe(writtenPageImage(), suryaSettings())
+
+        val structure = assertNotNull(reading.structure, "the reading carried no structure")
+        assertEquals(BlockKind.TABLE, structure.blocks[0].kind)
+        assertContains(reading.text, "a\tb", message = "the table's cells were not read into the text")
+        assertEquals(emptyList(), reading.warnings, "a table that parsed was reported as degraded")
+    }
+
+    @Test
+    fun markupOnlyBlockDoesNotFailThePage() = runBlocking {
+        // A figure's block has markup and no words. The worker keeps it, and the reading must not fail on it: it
+        // gets no word box, and the page's text is the caption beside it.
+        val figure = """{"html":"<img>","text":"","bbox":[1,2,3,4],"label":"Picture","readingOrder":0}"""
+        val surya = engineWith("markup-only", mirrorIdentity() + pageResult(blocks = "$figure,${paragraphBlock("Caption text")}"))
+
+        val reading = surya.transcribe(writtenPageImage(), suryaSettings())
+
+        assertEquals("Caption text", reading.text)
+        assertEquals("Caption text", reading.boxes.single().text)
+        assertNull(reading.errorCode, "a page with a caption was reported as an empty reading")
+    }
+
+    @Test
+    fun unparsedTableIsDegradedToParagraphsWithAWarning() = runBlocking {
+        // A table the parser cannot read keeps its words as a paragraph, and the reading says so rather than
+        // presenting paragraphs as the table it was.
+        val table = """{"html":"<p>just words</p>","text":"just words","bbox":[1,2,3,4],"label":"Table","readingOrder":0}"""
+        val surya = engineWith("unparsed-table", mirrorIdentity() + pageResult(blocks = table))
+
+        val reading = surya.transcribe(writtenPageImage(), suryaSettings())
+
+        assertEquals("just words", reading.text)
+        assertEquals(listOf(STRUCTURE_DEGRADED), reading.warnings)
+        assertEquals(BlockKind.PARAGRAPH, assertNotNull(reading.structure).blocks.single().kind)
+    }
+
+    @Test
+    fun protocolOneIsRefused() = runBlocking {
+        // A worker of the previous protocol is refused before any of its fields is read as this protocol's.
+        val surya = engineWith("protocol-one", mirrorIdentity() + pageResult(protocol = 1))
+
+        val failure = assertFailsWith<SuryaWorkerException> {
+            surya.transcribe(writtenPageImage(), suryaSettings())
+        }
+
+        assertEquals(SuryaWorkerException.MALFORMED_OUTPUT, failure.code)
+        assertContains(failure.message.orEmpty(), "protocol 1")
     }
 
     @Test
@@ -813,11 +870,16 @@ class SuryaOcrTest {
     private fun pageResult(
         status: String = "read",
         text: String = READING,
-        blocks: String = """{"text":"$A_BLOCK_TEXT","bbox":[1,2,3,4],"confidence":0.9,"label":"Text","readingOrder":0}""",
+        blocks: String = paragraphBlock(text),
         ordinalExpression: String = "\$ordinal",
-    ): String = "printf '{\"protocol\":$PROTOCOL,\"type\":\"page\",\"unitId\":\"%s\"," +
+        protocol: Int = PROTOCOL,
+    ): String = "printf '{\"protocol\":$protocol,\"type\":\"page\",\"unitId\":\"%s\"," +
         "\"ordinal\":%s,\"page\":%s,\"status\":\"$status\",\"text\":\"$text\"," +
         "\"model\":\"$MODEL\",\"blocks\":[$blocks]}\\n' \"\$unit\" \"$ordinalExpression\" \"\$page\"\n"
+
+    /** One paragraph block, as the worker writes it: its HTML and its text say the same words. */
+    private fun paragraphBlock(text: String): String =
+        """{"html":"<p>$text</p>","text":"$text","bbox":[1,2,3,4],"confidence":0.9,"label":"Text","readingOrder":0}"""
 
     private fun suryaSettings(): OcrSettingsSnapshot = OcrSettingsSnapshot(
         engine = OcrEngine.SURYA,
@@ -888,7 +950,7 @@ class SuryaOcrTest {
     private companion object {
 
         /** The protocol version these fakes speak, spelled out so a change to it is visible here. */
-        const val PROTOCOL: Int = 1
+        const val PROTOCOL: Int = 2
 
         const val PAGE_KEY: String = "page:1"
 
