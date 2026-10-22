@@ -362,6 +362,8 @@ export type SourceContentResponse = {
   unitCount?: number;
   /** The page's structure, absent when the text has none. Ranges are in this response's `text`, shifted by `offset`. */
   structure?: StructureView;
+  /** True when the collection's corrections changed this unit's text; its reading can be shown. */
+  hasReading?: boolean;
 };
 
 /** Kinds the parsers emit, as the server names them (the enum's name). */
@@ -1408,6 +1410,69 @@ export async function deleteCollectionPrompt(collectionId: string, promptId: str
   await mutate(`${promptsPath(collectionId)}/${encodeURIComponent(promptId)}`, 'DELETE');
 }
 
+// ---- collection corrections ----
+
+/** A standing correction of a collection, with how many places it changed in published text. */
+export type CorrectionRule = { id: string; find: string; replace: string; exactCase: boolean; matches: number };
+
+/** A rule as the reader writes it. */
+export type CorrectionRuleInput = { find: string; replace: string; exactCase: boolean };
+
+/** A collection's rules and its correction job (running, or the last one; null when none ever ran). */
+export type CorrectionList = { rules: CorrectionRule[]; job: JobApiView | null };
+
+/** One place a rule matches: the text as it reads now and as it would read. */
+export type CorrectionExample = { documentId: string; sourceId: string; before: string; after: string };
+
+export type CorrectionPreview = { matches: number; documents: number; examples: CorrectionExample[] };
+
+const correctionsPath = (collectionId: string): string => `/api/collections/${encodeURIComponent(collectionId)}/corrections`;
+
+/** The collection's corrections and its correction job. */
+export async function getCorrections(collectionId: string): Promise<CorrectionList> {
+  const body = (await readJson(await fetch(correctionsPath(collectionId)))) as { rules: CorrectionRule[]; job?: JobApiView | null };
+  return { rules: body.rules ?? [], job: body.job ?? null };
+}
+
+/** Stores rule [ruleId] and starts the collection's correction job; repeating it stores nothing new. */
+export async function putCorrection(collectionId: string, ruleId: string, rule: CorrectionRuleInput): Promise<CorrectionRule> {
+  return (await mutate(`${correctionsPath(collectionId)}/${encodeURIComponent(ruleId)}`, 'PUT', rule)) as CorrectionRule;
+}
+
+/** Removes a rule; one already gone is not an error. */
+export async function deleteCorrection(collectionId: string, ruleId: string): Promise<void> {
+  await mutate(`${correctionsPath(collectionId)}/${encodeURIComponent(ruleId)}`, 'DELETE');
+}
+
+/** What [rule] would change (replacing [replacingId] when it edits one); stores nothing. */
+export async function previewCorrection(
+  collectionId: string,
+  rule: CorrectionRuleInput,
+  replacingId?: string | null,
+): Promise<CorrectionPreview> {
+  const body = replacingId ? { ...rule, replacingId } : rule;
+  return (await mutate(`${correctionsPath(collectionId)}/preview`, 'POST', body)) as CorrectionPreview;
+}
+
+/** What removing rule [ruleId] would change: the documents whose text returns to the reading. */
+export async function previewCorrectionRemoval(collectionId: string, ruleId: string): Promise<CorrectionPreview> {
+  return (await mutate(`${correctionsPath(collectionId)}/preview`, 'POST', { removingId: ruleId })) as CorrectionPreview;
+}
+
+/** Starts the collection's correction job again (Retry), or answers with the one already running. */
+export async function applyCorrections(collectionId: string): Promise<JobApiView> {
+  return ((await mutate(`${correctionsPath(collectionId)}/apply`, 'POST')) as { job: JobApiView }).job;
+}
+
+/** A source unit's text as it was read, before corrections; null when the corrections changed nothing. */
+export async function readSourceReading(collectionId: string, sourceId: string, revisionId?: string | null): Promise<string | null> {
+  const revision = revisionId ? `?revision=${encodeURIComponent(revisionId)}` : '';
+  const response = await fetch(
+    `/api/collections/${encodeURIComponent(collectionId)}/sources/${encodeURIComponent(sourceId)}/reading${revision}`,
+  );
+  return ((await readJson(response)) as { reading?: string | null }).reading ?? null;
+}
+
 /** Makes a prompt the collection default for one role and answers with the id now in effect. */
 export async function setCollectionPromptDefault(collectionId: string, role: PromptRole, promptId: string): Promise<string> {
   const body = (await mutate(
@@ -1839,6 +1904,8 @@ export type RevisionView = {
   extractionMethods?: string[];
   pageChanges?: PageChanges;
   noOcrNeeded?: boolean;
+  /** What each correction rule changed in this revision; absent or empty when none did. */
+  corrections?: { find: string; replace: string; matches: number }[];
 };
 
 export type RevisionsResponse = {

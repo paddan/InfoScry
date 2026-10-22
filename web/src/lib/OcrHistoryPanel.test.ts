@@ -187,6 +187,30 @@ describe('text history', () => {
       expect(original.textContent).toContain('Import');
     });
 
+    it('names what corrections changed and says a restore applied them', async () => {
+      api.listDocumentRevisions.mockResolvedValue(history({
+        revisions: [
+          revision('rev-5555555555', {
+            provenance: 'CORRECTIONS',
+            active: true,
+            corrections: [{ find: 'spinners', replace: 'Spinnars', matches: 14 }, { find: 'malmo', replace: 'Malmö', matches: 1 }],
+          }),
+          revision('rev-4444444444', {
+            provenance: 'RESTORE',
+            restoredFromRevisionId: 'rev-1111111111',
+            corrections: [{ find: 'spinners', replace: 'Spinnars', matches: 2 }],
+          }),
+        ],
+        total: 2,
+      }));
+      await renderPanel();
+      await openHistory();
+
+      const [corrected, restored] = versions();
+      expect(corrected.textContent).toContain('Corrections: spinners → Spinnars (14 matches), malmo → Malmö (1 match)');
+      expect(restored.textContent).toContain("Restored from rev-1111, with the collection's corrections");
+    });
+
     it('shows engine, model, mode and language from the recorded reading', async () => {
       await renderPanel();
       await openHistory();

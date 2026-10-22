@@ -9,6 +9,7 @@
   } from './api';
   import CollectionOcrSettings from './CollectionOcrSettings.svelte';
   import CollectionPromptSettings from './CollectionPromptSettings.svelte';
+  import CollectionCorrectionSettings from './CollectionCorrectionSettings.svelte';
 
   export let collection: Collection;
   export let onCollectionsChanged: (selectedId?: string) => Promise<void> | void;
@@ -207,6 +208,7 @@
     <CollectionOcrSettings {collection} onChanged={() => onCollectionsChanged()} {onOpenLlmProfiles} />
 
     <CollectionPromptSettings bind:this={promptSettings} {collection} />
+    <CollectionCorrectionSettings {collection} />
   </section>
 
   <section class="collection-deletion" aria-label={`Delete ${collection.name}`}>

@@ -6,6 +6,7 @@
   import SourceWorkspace from '../lib/SourceWorkspace.svelte';
   import PageReview from '../lib/PageReview.svelte';
   import StructuredPage from '../lib/StructuredPage.svelte';
+  import SourceReading from '../lib/SourceReading.svelte';
   import SelectablePdfActions from '../lib/SelectablePdfActions.svelte';
   import DocumentRescan from '../lib/DocumentRescan.svelte';
   import StartReadingDialog from '../lib/StartReadingDialog.svelte';
@@ -1247,13 +1248,15 @@
       {:else if source !== null}
         {@const quality = qualityLabel(source.qualityScore)}
         {#if quality !== null}<p class="ocr-quality {quality.level}">{quality.text}</p>{/if}
-        {#if sourceWindows.some((chunk) => chunk.structure !== undefined)}
-          {#each sourceWindows as chunk (chunk.offset)}
-            <StructuredPage text={chunk.text} structure={chunk.structure ?? null} />
-          {/each}
-        {:else}
-          <pre class="source-text">{sourceText}</pre>
-        {/if}
+        <SourceReading collectionId={selectedHit.collectionId} sourceId={source.id} revisionId={source.revisionId ?? null} hasReading={source.hasReading === true}>
+          {#if sourceWindows.some((chunk) => chunk.structure !== undefined)}
+            {#each sourceWindows as chunk (chunk.offset)}
+              <StructuredPage text={chunk.text} structure={chunk.structure ?? null} />
+            {/each}
+          {:else}
+            <pre class="source-text">{sourceText}</pre>
+          {/if}
+        </SourceReading>
         {#if sourceError !== null}<p role="alert">{sourceError}</p>{/if}
         {#if source.truncated}
           <button type="button" onclick={loadMoreSource} disabled={loadingSource}>

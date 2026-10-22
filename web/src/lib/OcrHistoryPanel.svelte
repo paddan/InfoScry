@@ -305,13 +305,23 @@
         return 'Import (existing text checked and improved)';
       case 'RESCAN':
         return 'Rescan';
-      case 'RESTORE':
-        return revision.restoredFromRevisionId
+      case 'RESTORE': {
+        const restored = revision.restoredFromRevisionId
           ? `Restored from ${shortId(revision.restoredFromRevisionId)}`
           : 'Restored from an earlier version (which one was not recorded)';
+        return (revision.corrections ?? []).length > 0 ? `${restored}, with the collection's corrections` : restored;
+      }
+      case 'CORRECTIONS':
+        return (revision.corrections ?? []).length > 0
+          ? `Corrections: ${(revision.corrections ?? []).map(correctionLabel).join(', ')}`
+          : 'Corrections';
       default:
         return revision.provenance;
     }
+  }
+
+  function correctionLabel(correction: { find: string; replace: string; matches: number }): string {
+    return `${correction.find} → ${correction.replace} (${correction.matches} ${correction.matches === 1 ? 'match' : 'matches'})`;
   }
 
   function changeSummary(changes: PageChanges | undefined): string {

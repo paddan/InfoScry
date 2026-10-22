@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createCollectionPrompt, deleteCollectionPrompt, getCollectionPrompts, setCollectionPromptDefault, updateCollectionPrompt, fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { applyCorrections, deleteCorrection, getCorrections, previewCorrection, previewCorrectionRemoval, putCorrection, readSourceReading, createCollectionPrompt, deleteCollectionPrompt, getCollectionPrompts, setCollectionPromptDefault, updateCollectionPrompt, fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -531,6 +531,49 @@ describe('collection prompt requests', () => {
       { collection: 'Archive', question: 'question', profile: 'profile-1', prompt: 'Board tone' },
       { collection: 'Archive', question: 'question', profile: 'profile-1' },
       { collection: 'Archive', question: 'question', profile: 'profile-1', prompt: 'Thorough' },
+    ]);
+  });
+});
+
+describe('collection correction requests', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses the correction routes with the fields the server expects', async () => {
+    const calls: { url: string; method: string; body?: unknown }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'token' }), { status: 200 });
+      calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+      if (url.includes('/reading')) return new Response(JSON.stringify({ reading: 'hos spinners' }), { status: 200 });
+      if (url.endsWith('/preview')) return new Response(JSON.stringify({ matches: 2, documents: 1, examples: [] }), { status: 200 });
+      if (url.endsWith('/apply')) return new Response(JSON.stringify({ job: { id: 'j1', type: 'CORRECTIONS', state: 'QUEUED' } }), { status: 200 });
+      if (init?.method === 'PUT') return new Response(JSON.stringify({ id: 'r/1', find: 'spinners', replace: 'Spinnars', exactCase: false, matches: 0 }), { status: 200 });
+      return new Response(JSON.stringify({ rules: [] }), { status: 200 });
+    }));
+
+    const list = await getCorrections('a/b');
+    const rule = await putCorrection('c', 'r/1', { find: 'spinners', replace: 'Spinnars', exactCase: false });
+    const preview = await previewCorrection('c', { find: 'spinners', replace: 'Spinnars', exactCase: false }, 'r/1');
+    await previewCorrectionRemoval('c', 'r/1');
+    await deleteCorrection('c', 'r/1');
+    const job = await applyCorrections('c');
+    const reading = await readSourceReading('c', 'u/1', 'rev-1');
+
+    expect(list.rules).toEqual([]);
+    expect(list.job).toBeNull();
+    expect(rule.replace).toBe('Spinnars');
+    expect(preview.matches).toBe(2);
+    expect(job.type).toBe('CORRECTIONS');
+    expect(reading).toBe('hos spinners');
+    expect(calls).toEqual([
+      { url: '/api/collections/a%2Fb/corrections', method: 'GET', body: undefined },
+      { url: '/api/collections/c/corrections/r%2F1', method: 'PUT', body: { find: 'spinners', replace: 'Spinnars', exactCase: false } },
+      { url: '/api/collections/c/corrections/preview', method: 'POST', body: { find: 'spinners', replace: 'Spinnars', exactCase: false, replacingId: 'r/1' } },
+      { url: '/api/collections/c/corrections/preview', method: 'POST', body: { removingId: 'r/1' } },
+      { url: '/api/collections/c/corrections/r%2F1', method: 'DELETE', body: undefined },
+      { url: '/api/collections/c/corrections/apply', method: 'POST', body: undefined },
+      { url: '/api/collections/c/sources/u%2F1/reading?revision=rev-1', method: 'GET', body: undefined },
     ]);
   });
 });
