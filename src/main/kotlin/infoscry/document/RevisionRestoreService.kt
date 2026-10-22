@@ -371,9 +371,11 @@ class RevisionRestoreService(
      */
     private fun correct(collectionId: CollectionId, documentId: DocumentId, record: RevisionRestoreRecord) {
         val corrector = corrector ?: return
+        // A page that had no passages before (a blank page) needs none now; only the pages the correction rewrote do.
+        val before = unchunkedOrdinals(record.newRevisionId)
         corrector.correct(collectionId, documentId, record.newRevisionId)
-        val chunked = revisions.chunks(record.newRevisionId).mapTo(mutableSetOf()) { it.unitOrdinal }
-        val unchunked = revisions.pages(record.newRevisionId).filter { it.ordinal !in chunked }
+        val rewritten = unchunkedOrdinals(record.newRevisionId) - before
+        val unchunked = revisions.pages(record.newRevisionId).filter { it.ordinal in rewritten }
         if (unchunked.isEmpty()) return
         val tokenizer = chunker() ?: throw RestoreRefusalException(
             RestoreRefusalException.EMBEDDING_UNAVAILABLE,
@@ -385,6 +387,11 @@ class RevisionRestoreService(
         unchunked.forEach { page ->
             revisions.recordPageChunks(record.newRevisionId, page.ordinal, tokenizer.chunkStagedPage(page, documentId, root))
         }
+    }
+
+    private fun unchunkedOrdinals(revisionId: String): Set<Int> {
+        val chunked = revisions.chunks(revisionId).mapTo(mutableSetOf()) { it.unitOrdinal }
+        return revisions.pages(revisionId).map { it.ordinal }.filterTo(mutableSetOf()) { it !in chunked }
     }
 
     private suspend fun embedOrRefuse(record: RevisionRestoreRecord, embedder: DocumentEmbedder) {

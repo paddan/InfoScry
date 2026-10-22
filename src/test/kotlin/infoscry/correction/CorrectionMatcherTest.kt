@@ -142,4 +142,24 @@ class CorrectionMatcherTest {
         assertEquals(emptyList(), result.edits)
         assertEquals(false, result.changed)
     }
+
+    @Test
+    fun `a rule that writes a word back as it was makes no edit`() {
+        val result = CorrectionMatcher(listOf(rule("SPINNERS → spinners"))).apply("hos spinners")
+
+        assertEquals(emptyList(), result.edits)
+        assertEquals(false, result.changed)
+    }
+
+    @Test
+    fun `long runs of punctuation stay fast`() {
+        val rules = (1..20).map { index -> rule("ord$index → Ord$index", "r$index") }
+        val page = (1..40).joinToString("\n") { "Kapitel $it " + ".".repeat(300) + " $it" }
+        val started = System.nanoTime()
+
+        CorrectionMatcher(rules).apply(page)
+
+        val millis = (System.nanoTime() - started) / 1_000_000
+        kotlin.test.assertTrue(millis < 500, "a page of dot leaders took $millis ms")
+    }
 }

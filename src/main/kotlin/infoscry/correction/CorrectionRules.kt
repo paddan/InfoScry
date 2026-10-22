@@ -19,6 +19,13 @@ class CorrectionFindTakenException : ApiFaultException(
     "another correction already finds that word",
 )
 
+/** A rule id that another collection's rule already uses. */
+class CorrectionIdTakenException : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "CORRECTION_ID_TAKEN",
+    "another collection already has a correction with that id",
+)
+
 /** The rules every stored correction obeys, and the identity of a whole list. */
 object CorrectionRules {
 

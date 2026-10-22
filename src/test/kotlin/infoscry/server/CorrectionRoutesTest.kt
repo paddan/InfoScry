@@ -222,4 +222,30 @@ class CorrectionRoutesTest {
         assertEquals("Spinnars", corrections.getValue("replace").jsonPrimitive.content)
         assertEquals(1, corrections.getValue("matches").jsonPrimitive.content.toInt())
     }
+
+    @Test
+    fun `a rule id another collection owns answers 409`() = runBlocking {
+        val first = newCollection()
+        harness.createCollection("Other", Credential.BEARER)
+        val other = harness.collectionIdOf("Other")
+        put(first, "shared-id", "spinners", "Spinnars")
+
+        val refused = put(other, "shared-id", "malmo", "Malmö")
+
+        assertEquals(HttpStatusCode.Conflict, refused.status, refused.bodyAsText())
+        assertEquals("CORRECTION_ID_TAKEN", json(refused).getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `the live reading is refused while the index is sealed`() = runBlocking {
+        val id = newCollection()
+        val fixture = RestoreFixtures.publishGenerations(harness.context, dataDir, CollectionId(id), marketReadings = listOf("hos spinners"))
+        harness.context.revisionSnapshots.seal("test seal")
+
+        val refused = harness.request(
+            HttpMethod.Get, "/api/collections/$id/sources/${fixture.unitIds[1].value}/reading", credential = Credential.BEARER,
+        )
+
+        assertEquals(HttpStatusCode.ServiceUnavailable, refused.status, refused.bodyAsText())
+    }
 }

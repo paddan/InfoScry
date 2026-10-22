@@ -65,12 +65,13 @@ class CandidateCorrector(
     }
 
     /**
-     * Records on a published import revision what the collection's list changed in it. A plain import corrects each
-     * unit as it is committed ([correctDraft]), so the counts are read back from the units' readings here.
+     * Records on a published import revision what the collection's list changed in it, and answers whether the
+     * revision still differs from today's list. A plain import corrects each unit as it is committed ([correctDraft])
+     * with the list it read at the document's first unit, so a rule saved during the import is caught here.
      */
-    fun recordApplied(collectionId: CollectionId, revisionId: String) {
+    fun recordApplied(collectionId: CollectionId, revisionId: String): Boolean {
         val rules = corrections.list(collectionId)
-        if (rules.isEmpty()) return
+        if (rules.isEmpty()) return wouldChange(collectionId, revisionId)
         val matcher = CorrectionMatcher(rules)
         val counts = mutableMapOf<String, Int>()
         revisions.pages(revisionId).forEach { page ->
@@ -79,6 +80,7 @@ class CandidateCorrector(
             }
         }
         revisions.recordCorrections(revisionId, CorrectionRules.fingerprint(rules), appliedOf(rules, counts))
+        return wouldChange(collectionId, revisionId)
     }
 
     /** The directory a document's artifacts, the corrected structures and layouts among them, are written under. */

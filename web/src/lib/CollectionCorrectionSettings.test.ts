@@ -94,4 +94,64 @@ describe('CollectionCorrectionSettings', () => {
       vi.useRealTimers();
     }
   });
+
+  it('stops reading the list once the section is gone', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolve: (value: CorrectionList) => void = () => {};
+      vi.mocked(api.getCorrections).mockImplementationOnce(() => new Promise((r) => { resolve = r; }));
+      vi.mocked(api.getCorrections).mockResolvedValue(list({ job: job('RUNNING', 1, 2) }));
+      const view = render(CollectionCorrectionSettings, { collection });
+      view.unmount();
+      resolve(list({ job: job('RUNNING', 1, 2) }));
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(api.getCorrections).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('puts focus on Add correction after a rule is removed', async () => {
+    render(CollectionCorrectionSettings, { collection });
+    await screen.findByRole('table');
+    vi.mocked(api.getCorrections).mockResolvedValue(list({ rules: [] }));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove spinners' }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('The text returns to the reading in 6 documents.');
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }));
+
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Add correction' })));
+  });
+
+  it('keeps the rules on screen when a refresh fails', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(api.getCorrections)
+        .mockResolvedValueOnce(list({ job: job('RUNNING', 1, 2) }))
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValue(list({ job: job('COMPLETE', 2, 2) }));
+      render(CollectionCorrectionSettings, { collection });
+      await vi.waitFor(() => expect(screen.getByRole('table')).toBeTruthy());
+
+      await vi.advanceTimersByTimeAsync(2500);
+
+      expect(screen.getByRole('table')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Add correction' })).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(2500);
+      await vi.waitFor(() => expect(screen.getByText('All documents follow the list')).toBeTruthy());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not claim a stopped job finished, and offers Retry', async () => {
+    vi.mocked(api.getCorrections).mockResolvedValue(list({ job: job('CANCELLED', 1, 6) }));
+    render(CollectionCorrectionSettings, { collection });
+
+    expect(await screen.findByText('Applying the corrections was stopped before every document was done.')).toBeTruthy();
+    expect(screen.queryByText('All documents follow the list')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+  });
 });

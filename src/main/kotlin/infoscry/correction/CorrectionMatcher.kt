@@ -51,8 +51,10 @@ class CorrectionMatcher(rules: List<CorrectionRule>) {
             val match = bestMatchAt(source, position)
             val start = match?.let { view.originalOffset(position) }
             val end = match?.let { view.originalOffset(it.end) }
-            if (match != null && start != null && end != null) {
-                edits += TextEdit(start, end, replacementFor(match.rule, source.substring(position, match.end)), match.rule.rule.id)
+            val replacement = match?.let { replacementFor(it.rule, source.substring(position, it.end)) }
+            if (match != null && start != null && end != null && replacement != null) {
+                // A rule that writes the matched text back as it was is no edit: it must not mark the page corrected.
+                if (replacement != text.substring(start, end)) edits += TextEdit(start, end, replacement, match.rule.rule.id)
                 position = match.end
             } else {
                 position += Character.charCount(source.codePointAt(position))
@@ -106,7 +108,9 @@ class CorrectionMatcher(rules: List<CorrectionRule>) {
 
     /** Where [rule] ends when it matches at [position], or `null`. */
     private fun matchEnd(rule: Compiled, text: String, position: Int): Int? {
-        if (!rule.substring && !boundaryBefore(text, position)) return null
+        // A whole-word rule starts with a letter, mark or digit, so a position that holds none (a dot leader, a rule
+        // line) is no start; this also keeps long runs of punctuation from being scanned once per position.
+        if (!rule.substring && (!boundaryBefore(text, position) || !isWordCodePoint(text.codePointAt(position)))) return null
         var cursor = position
         rule.tokens.forEachIndexed { index, token ->
             val last = index == rule.tokens.lastIndex
@@ -133,9 +137,13 @@ class CorrectionMatcher(rules: List<CorrectionRule>) {
 
     /** The end of the last token inside the run `[from, runEnd)`, at a word boundary, or `null`. */
     private fun lastTokenEnd(rule: Compiled, index: Int, text: String, from: Int, runEnd: Int): Int? {
+        // Case folding never shortens text, so a prefix with more code points than the token cannot equal it.
+        val limit = rule.tokens[index].length.coerceAtLeast(rule.folded[index].length)
         var end = from
-        while (end < runEnd) {
+        var codePoints = 0
+        while (end < runEnd && codePoints < limit) {
             end += Character.charCount(text.codePointAt(end))
+            codePoints++
             if (boundaryAfter(text, end) && same(rule, index, text.substring(from, end))) return end
         }
         return null

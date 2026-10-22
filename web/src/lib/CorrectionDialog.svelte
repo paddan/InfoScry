@@ -19,6 +19,8 @@
   export let onClose: () => void;
   export let onSaved: (rule: CorrectionRule) => void;
 
+  /** One id per dialog: a Save retried after a lost answer stores the same rule instead of a second one. */
+  const ruleId = rule?.id ?? newId();
   let find = rule?.find ?? initialFind;
   let replace = rule?.replace ?? initialReplace;
   let exactCase = rule?.exactCase ?? false;
@@ -68,7 +70,7 @@
     error = null;
     holdDialogFocus(dialog);
     try {
-      const stored = await putCorrection(collectionId, rule?.id ?? newId(), input);
+      const stored = await putCorrection(collectionId, ruleId, input);
       onSaved(stored);
     } catch (failure) {
       error = failure instanceof ApiError && failure.code === 'CORRECTION_FIND_TAKEN'

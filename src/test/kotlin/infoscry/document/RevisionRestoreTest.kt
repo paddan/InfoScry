@@ -655,4 +655,46 @@ class RevisionRestoreTest {
             assertEquals(0, rows, "$table holds rows of a revision that no longer exists")
         }
     }
+
+    @Test
+    fun `a restore of a revision with a blank page needs no tokenizer when nothing is corrected`() {
+        open().use { context ->
+            val fixture = RestoreFixtures.publishGenerations(context, dataDir, collection)
+            val withBlank = context.revisions.openCandidate(fixture.documentId, fixture.revisionIds.last(), "TEST_REPLACEMENT")
+            context.revisions.appendPage(
+                withBlank,
+                infoscry.storage.RevisionPageDraft(
+                    ordinal = 0, unitId = fixture.unitIds[0], locator = infoscry.domain.SourceLocation.TextLines(1, 1),
+                    extractedText = "   ", searchText = "   ", extractionMethod = infoscry.domain.ExtractionMethod.OCR,
+                    approval = PageApproval.APPROVED,
+                ),
+            )
+            val text = "market blank"
+            context.revisions.appendPage(
+                withBlank,
+                infoscry.storage.RevisionPageDraft(
+                    ordinal = 1, unitId = fixture.unitIds[1], locator = infoscry.domain.SourceLocation.TextLines(2, 2),
+                    extractedText = text, searchText = text, extractionMethod = infoscry.domain.ExtractionMethod.OCR,
+                    approval = PageApproval.APPROVED,
+                    chunks = listOf(
+                        infoscry.storage.RevisionChunkDraft(
+                            0, text, 0, text.length, 5, 0, 4, infoscry.embedding.TestDocumentEmbedder().embedDocuments(listOf(text)).single(),
+                        ),
+                    ),
+                ),
+            )
+            runBlocking { context.revisionPublication.publish(fixture.documentId, fixture.revisionIds.last(), withBlank) }
+            assertEquals(withBlank, context.revisions.activeRevisionId(fixture.documentId), "the blank page was published")
+
+            context.restore(fixture.copy(revisionIds = fixture.revisionIds + withBlank), expected = withBlank, restoring = fixture.revisionIds.first())
+            context.restore(
+                fixture.copy(revisionIds = fixture.revisionIds + withBlank),
+                requestId = "request-2",
+                expected = checkNotNull(context.revisions.activeRevisionId(fixture.documentId)),
+                restoring = withBlank,
+            )
+
+            assertEquals("   ", context.revisions.pages(checkNotNull(context.revisions.activeRevisionId(fixture.documentId)))[0].extractedText)
+        }
+    }
 }

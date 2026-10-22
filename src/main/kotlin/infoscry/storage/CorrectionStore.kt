@@ -1,5 +1,6 @@
 package infoscry.storage
 
+import infoscry.correction.CorrectionIdTakenException
 import infoscry.correction.CorrectionFindTakenException
 import infoscry.correction.CorrectionRule
 import infoscry.correction.CorrectionRuleInput
@@ -38,6 +39,11 @@ class CorrectionStore(private val database: Database) {
         val rule = CorrectionRules.normalize(input)
         val key = CorrectionRules.findKey(rule)
         return database.transaction { connection ->
+            val owner = connection.prepareStatement("SELECT collection_id FROM collection_corrections WHERE id = ?").use { statement ->
+                statement.setString(1, id)
+                statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
+            }
+            if (owner != null && owner != collectionId.value) throw CorrectionIdTakenException()
             val existing = connection.selectRule(collectionId, id)
             val taken = connection.prepareStatement(
                 "SELECT id FROM collection_corrections WHERE collection_id = ? AND find_key = ? AND id <> ?",

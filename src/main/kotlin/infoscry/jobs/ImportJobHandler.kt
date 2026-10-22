@@ -782,6 +782,7 @@ class ImportJobHandler internal constructor(
                 // answer to what an unapproved page costs.
                 publication = context.revisionPublication,
                 corrector = context.candidateCorrector,
+                requestCorrections = { collectionId -> context.followCorrectionsFor(collectionId) },
             )
             val attemptDispatch = AttemptDispatch(
                 operations = context.ocrOperations,

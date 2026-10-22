@@ -411,4 +411,16 @@ class CollectionCommandTest {
 
     private fun args(vararg extra: String): Array<String> =
         (listOf("--data-dir", dataDir.toString()) + extra).toTypedArray()
+
+    @Test
+    fun `the same correction can be added to two collections`() {
+        CliProcess.run(*args("collection", "create", "Default"))
+        CliProcess.run(*args("collection", "create", "Other"))
+
+        val first = CliProcess.run(*args("collection", "corrections", "add", "Default", "spinners", "Spinnars"))
+        val second = CliProcess.run(*args("collection", "corrections", "add", "Other", "spinners", "Spinnars"))
+
+        assertEquals(0, first.exitCode, first.stderr)
+        assertEquals(0, second.exitCode, second.stderr)
+    }
 }

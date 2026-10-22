@@ -190,6 +190,8 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                     val page = context.revisions.pageForUnit(revisionId, unitId) ?: throw missing()
                     revision.documentId to page.reading
                 } else {
+                    // A live read owes the same refusal the source route gives while the index cannot be switched.
+                    context.revisionSnapshots.requireUnsealed()
                     val unit = context.content.readUnit(unitId) ?: throw missing()
                     unit.documentId to unit.reading
                 }

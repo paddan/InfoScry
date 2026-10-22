@@ -2,6 +2,7 @@ package infoscry
 
 import infoscry.correction.CorrectionService
 import infoscry.correction.CandidateCorrector
+import infoscry.domain.CollectionId
 import infoscry.storage.CorrectionStore
 import infoscry.collection.CollectionIndexRemover
 import infoscry.collection.CollectionPromptService
@@ -277,8 +278,30 @@ class AppContext private constructor(
         gate = revisionSnapshots,
         onPublished = RevisionPublishedHook { documentId, collectionId, revisionId ->
             selectablePdfService.queueForPublishedRevision(documentId, collectionId, revisionId)
+            followCorrections(collectionId, revisionId)
         },
     )
+
+    /**
+     * Starts the collection's correction job when a revision was published under an older correction list (a rescan
+     * or restore corrected before a rule changed, an import that straddled a change). It never throws: a publication
+     * is never failed by its follow-up, and a collection being deleted needs no corrections.
+     */
+    internal fun followCorrectionsFor(collectionId: CollectionId) {
+        try {
+            correctionService.apply(collectionId)
+        } catch (gone: NoSuchElementException) {
+            // The collection is being deleted; there is nothing left to correct.
+        }
+    }
+
+    internal fun followCorrections(collectionId: CollectionId, revisionId: String) {
+        try {
+            if (candidateCorrector.wouldChange(collectionId, revisionId)) correctionService.apply(collectionId)
+        } catch (gone: NoSuchElementException) {
+            // The collection is being deleted; there is nothing left to correct.
+        }
+    }
 
     /** Exact revision-bound text and page images, available without OCR or embeddings. */
     val pageReviewService: infoscry.document.PageReviewService = infoscry.document.PageReviewService(
@@ -360,6 +383,12 @@ class AppContext private constructor(
         attachedChunker = chunker
     }
 
+    /** Each collection's standing corrections. */
+    val corrections: CorrectionStore = CorrectionStore(database)
+
+    /** Applies a collection's corrections to text about to be published. */
+    val candidateCorrector: CandidateCorrector = CandidateCorrector(revisions, corrections, paths)
+
     /**
      * Explicit restoration of a historical revision as a new publication.
      *
@@ -367,12 +396,6 @@ class AppContext private constructor(
      * every other writer: a restore is refused while a rescan owns the document or a deletion targets it, and
      * it becomes the document's text only through the same recoverable protocol a rescan publishes through.
      */
-    /** Each collection's standing corrections. */
-    val corrections: CorrectionStore = CorrectionStore(database)
-
-    /** Applies a collection's corrections to text about to be published. */
-    val candidateCorrector: CandidateCorrector = CandidateCorrector(revisions, corrections, paths)
-
     val revisionRestore: RevisionRestoreService = RevisionRestoreService(
         revisions = revisions,
         documents = documents,

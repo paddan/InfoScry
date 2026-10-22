@@ -19,6 +19,9 @@
 
   let list: CorrectionList | null = null;
   let loadError: string | null = null;
+  /** A refresh that failed while the list was already shown; the list stays and the next poll tries again. */
+  let refreshError: string | null = null;
+  let addButton: HTMLButtonElement | null = null;
   let boundId = '';
   /** Answers for a collection the reader has left carry an older generation and are dropped. */
   let generation = 0;
@@ -39,7 +42,11 @@
   $: if (collection.id !== boundId) void load(collection.id);
   $: job = list?.job ?? null;
 
-  onDestroy(() => stopPolling());
+  onDestroy(() => {
+    // An answer still in flight belongs to a section that is gone, so it may neither render nor poll again.
+    generation++;
+    stopPolling();
+  });
 
   async function load(target: string): Promise<void> {
     boundId = target;
@@ -56,9 +63,14 @@
       if (mine !== generation) return;
       list = answer;
       loadError = null;
+      refreshError = null;
     } catch (failure) {
-      if (mine === generation) loadError = describe(failure);
-      return;
+      if (mine !== generation) return;
+      if (list === null) {
+        loadError = describe(failure);
+        return;
+      }
+      refreshError = `The list could not be refreshed: ${describe(failure)}`;
     }
     stopPolling();
     // Read from the answer itself: the reactive `active` is not recomputed until after this function returns.
@@ -87,6 +99,9 @@
     const latest = current.job;
     if (latest !== null && (latest.state === 'QUEUED' || latest.state === 'RUNNING')) {
       return `Applying: ${number(latest.completed ?? 0)} of ${documents(latest.total ?? 0)}`;
+    }
+    if (latest !== null && latest.state === 'CANCELLED') {
+      return 'Applying the corrections was stopped before every document was done.';
     }
     if (latest !== null && latest.state === 'FAILED') {
       return latest.errorCode === 'EMBEDDING_UNAVAILABLE'
@@ -151,8 +166,12 @@
       return;
     }
     removeBusy = false;
+    // The row and its Remove button are gone, so focus moves to Add correction rather than to the page.
+    removeOpener = null;
     closeRemove();
     await reload();
+    await tick();
+    addButton?.focus();
   }
 
   async function retry(): Promise<void> {
@@ -193,7 +212,8 @@
     <p aria-live="polite">Loading corrections…</p>
   {:else}
     <p class="status" aria-live="polite">{statusText(list)}</p>
-    {#if job !== null && job.state === 'FAILED'}
+    {#if refreshError !== null}<p role="alert">{refreshError}</p>{/if}
+    {#if job !== null && (job.state === 'FAILED' || job.state === 'CANCELLED')}
       <div class="actions"><button type="button" onclick={retry}>Retry</button></div>
       {#if retryError !== null}<p role="alert">{retryError}</p>{/if}
     {/if}
@@ -218,7 +238,7 @@
         </tbody>
       </table>
     {/if}
-    <div class="actions"><button type="button" onclick={(event) => openDialog(event, 'new')}>Add correction</button></div>
+    <div class="actions"><button type="button" bind:this={addButton} onclick={(event) => openDialog(event, 'new')}>Add correction</button></div>
   {/if}
 </section>
 

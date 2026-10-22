@@ -147,4 +147,57 @@ class CandidateCorrectorTest {
             assertEquals(ReadingText("hos spinners", "hos spinners"), unit.reading)
         }
     }
+
+    @Test
+    fun `a revision published under an older list starts the correction job`() {
+        AppContext.open(dataDir).use { context ->
+            val documentId = RestoreFixtures.importDocument(context, dataDir, collection, "x")
+            context.corrections.put(collection, "r1", CorrectionRuleInput("spinners", "Spinnars", false))
+            check(context.jobs.activeJob(infoscry.domain.JobType.CORRECTIONS, collection) == null)
+            val candidate = RestoreFixtures.stage(context, documentId, null, listOf("hos spinners"), listOf(ContentUnitId.new()))
+
+            runBlocking { context.revisionPublication.publish(documentId, null, candidate) }
+
+            assertTrue(context.jobs.activeJob(infoscry.domain.JobType.CORRECTIONS, collection) != null)
+        }
+    }
+
+    @Test
+    fun `a revision that follows the list starts no job`() {
+        AppContext.open(dataDir).use { context ->
+            val documentId = RestoreFixtures.importDocument(context, dataDir, collection, "x")
+            context.corrections.put(collection, "r1", CorrectionRuleInput("spinners", "Spinnars", false))
+            val candidate = RestoreFixtures.stage(context, documentId, null, listOf("annat"), listOf(ContentUnitId.new()))
+
+            runBlocking { context.revisionPublication.publish(documentId, null, candidate) }
+
+            assertNull(context.jobs.activeJob(infoscry.domain.JobType.CORRECTIONS, collection))
+        }
+    }
+
+    @Test
+    fun `recordApplied says whether a published import still needs correcting`() {
+        AppContext.open(dataDir).use { context ->
+            val documentId = RestoreFixtures.importDocument(context, dataDir, collection, "x")
+            val revision = RestoreFixtures.stage(context, documentId, null, listOf("hos spinners"), listOf(ContentUnitId.new()))
+            context.corrections.put(collection, "r1", CorrectionRuleInput("spinners", "Spinnars", false))
+
+            assertTrue(context.candidateCorrector.recordApplied(collection, revision))
+            context.candidateCorrector.correct(collection, documentId, revision)
+            assertFalse(context.candidateCorrector.recordApplied(collection, revision))
+        }
+    }
+
+    @Test
+    fun `a rule that writes the text back as it was changes nothing`() {
+        AppContext.open(dataDir).use { context ->
+            val documentId = RestoreFixtures.importDocument(context, dataDir, collection, "x")
+            val candidate = RestoreFixtures.stage(context, documentId, null, listOf("hos spinners"), listOf(ContentUnitId.new()))
+            context.corrections.put(collection, "r1", CorrectionRuleInput("SPINNERS", "spinners", false))
+
+            assertFalse(context.candidateCorrector.wouldChange(collection, candidate))
+            context.candidateCorrector.correct(collection, documentId, candidate)
+            assertNull(context.revisions.pages(candidate).single().reading)
+        }
+    }
 }

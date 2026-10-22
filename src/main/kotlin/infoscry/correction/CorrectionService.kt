@@ -50,7 +50,7 @@ class CorrectionService(
     fun list(collectionId: CollectionId): CorrectionListView {
         collections.requireActive(collectionId)
         val counts = mutableMapOf<String, Int>()
-        activePages(collectionId).keys.forEach { revisionId ->
+        documentIds(collectionId).mapNotNull { revisions.activeRevisionId(it) }.forEach { revisionId ->
             revisions.revision(revisionId)?.correctionsApplied?.forEach { applied ->
                 counts.merge(applied.find, applied.matches, Int::plus)
             }
@@ -153,11 +153,6 @@ class CorrectionService(
         documentIds(collectionId).asSequence().mapNotNull { documentId ->
             revisions.activeRevisionId(documentId)?.let { documentId to revisions.pages(it) }
         }
-
-    /** Each published revision of the collection, with its pages. */
-    private fun activePages(collectionId: CollectionId): Map<String, List<RevisionPageText>> =
-        documentIds(collectionId).mapNotNull { documentId -> revisions.activeRevisionId(documentId) }
-            .associateWith { revisionId -> revisions.pages(revisionId) }
 
     private fun documentIds(collectionId: CollectionId): List<DocumentId> {
         val count = documents.countByCollection(collectionId)

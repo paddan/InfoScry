@@ -94,4 +94,23 @@ describe('CorrectionDialog', () => {
 
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('saves under one id however often Save is tried', async () => {
+    vi.mocked(api.putCorrection)
+      .mockRejectedValueOnce(new Error('the connection dropped'))
+      .mockResolvedValue({ id: 'r1', find: 'spinners', replace: 'Spinnars', exactCase: false, matches: 0 });
+    open();
+    await fireEvent.input(screen.getByLabelText('Wrong'), { target: { value: 'spinners' } });
+    await fireEvent.input(screen.getByLabelText('Correct'), { target: { value: 'Spinnars' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await screen.findByText('14 matches in 6 documents');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText('the connection dropped');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.putCorrection).toHaveBeenCalledTimes(2));
+    const [first, second] = vi.mocked(api.putCorrection).mock.calls;
+    expect(second[1]).toBe(first[1]);
+  });
 });

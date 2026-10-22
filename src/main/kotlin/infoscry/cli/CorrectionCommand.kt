@@ -13,16 +13,18 @@ import infoscry.correction.CorrectionRuleInput
 import infoscry.correction.CorrectionRules
 import infoscry.correction.InvalidCorrectionException
 import infoscry.domain.Job
+import infoscry.domain.JobState
+import infoscry.server.CorrectionListWire
 import infoscry.jobs.ImportJobHandler
 import infoscry.server.ApiJson
 import infoscry.server.CorrectionPreviewWire
-import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.coroutines.runBlocking
 
 /**
  * `infoscry collection corrections …` — a collection's standing corrections.
  *
- * Thin over the same service the HTTP routes use. Saving or removing a rule starts the collection's correction job;
+ * Thin over the same service the HTTP routes use; the command exits non-zero when the job it ran did not apply. Saving or removing a rule starts the collection's correction job;
  * with no running server this command runs that job here and waits for it, as `import` does, because a job must not
  * outlive the process that owns the archive.
  */
@@ -88,14 +90,16 @@ class AddCorrectionCommand : CliktCommand(name = "add") {
     override fun run() {
         val options = resolveOptions(parentOptions, false, dataDirOption)
         val input = CorrectionRuleInput(find, replace, exactCase)
-        val ruleId = id ?: defaultIdOf(input)
         try {
             CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+                val ruleId = id ?: existingIdOf(runBlocking { session.listCorrections(collection) }, input) ?: UUID.randomUUID().toString()
                 echo(describe(runBlocking { session.previewCorrection(collection, input) }))
                 runBlocking { session.putCorrection(collection, ruleId, input) }
                 echo("Saved correction $ruleId.")
-                followJob(session, collection)?.let { job -> echo("Corrections ${job.state.name.lowercase()}.") }
+                followJob(session, collection)?.let(::requireCorrectionsApplied)
             }
+        } catch (failure: CliFailure) {
+            throw failure
         } catch (failure: Exception) {
             throw CliFailure(failure.message ?: "the correction could not be saved", failure)
         }
@@ -127,8 +131,10 @@ class RemoveCorrectionCommand : CliktCommand(name = "remove") {
                 }
                 runBlocking { session.deleteCorrection(collection, match.id) }
                 echo("Removed correction ${match.id}.")
-                followJob(session, collection)?.let { job -> echo("Corrections ${job.state.name.lowercase()}.") }
+                followJob(session, collection)?.let(::requireCorrectionsApplied)
             }
+        } catch (failure: CliFailure) {
+            throw failure
         } catch (failure: Exception) {
             throw CliFailure(failure.message ?: "the correction could not be removed", failure)
         }
@@ -178,15 +184,14 @@ private fun describe(preview: CorrectionPreviewWire): String {
     return "$matches in $documents"
 }
 
-/** A stable id for a rule, so adding the same correction again replaces it instead of failing. */
-private fun defaultIdOf(input: CorrectionRuleInput): String {
+/** The id of the collection's rule that finds the same word, so adding a correction again replaces it. */
+private fun existingIdOf(list: CorrectionListWire, input: CorrectionRuleInput): String? {
     val key = try {
         CorrectionRules.findKey(CorrectionRules.normalize(input))
     } catch (invalid: InvalidCorrectionException) {
         throw CliFailure(invalid.message.orEmpty(), invalid)
     }
-    val digest = MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))
-    return "rule-" + digest.take(8).joinToString("") { "%02x".format(it) }
+    return list.rules.firstOrNull { CorrectionRules.findKey(CorrectionRuleInput(it.find, it.replace, it.exactCase)) == key }?.id
 }
 
 /**
@@ -199,4 +204,11 @@ private fun followJob(session: CliSession, collection: String): Job? {
     val job = context.correctionService.apply(context.collectionService.requireActiveByNameOrId(collection).id)
     ImportJobHandler.attachTo(context, documentEmbedder = productionImportEmbedder(context))
     return runBlocking { awaitTerminalJob(lookup = { session.job(job.id) }, what = "corrections") }
+}
+
+/** Fails the command unless [job] applied the corrections, so a script sees the failure in the exit status. */
+internal fun requireCorrectionsApplied(job: Job) {
+    if (job.state == JobState.COMPLETE) return
+    val reason = job.errorCode?.let { " ($it)" }.orEmpty()
+    throw CliFailure("the corrections were saved but not applied: the job ended ${job.state.name.lowercase()}$reason")
 }

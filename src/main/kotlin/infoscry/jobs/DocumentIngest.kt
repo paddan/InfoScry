@@ -1,5 +1,6 @@
 package infoscry.jobs
 
+import infoscry.domain.CollectionId
 import infoscry.correction.CandidateCorrector
 import infoscry.chunk.Chunker
 import infoscry.config.AppPaths
@@ -106,6 +107,8 @@ internal class DocumentIngest(
     private val publication: RevisionPublicationService,
     /** Applies the collection's corrections to a staged reading and records them on a plain import's revision. */
     private val corrector: CandidateCorrector? = null,
+    /** Starts the collection's correction job, for a published import that does not follow today's list. */
+    private val requestCorrections: (CollectionId) -> Unit = {},
 ) {
 
     /** What a staged reading becomes: its passages, their vectors, and the publication of its pages. */
@@ -489,7 +492,9 @@ internal class DocumentIngest(
                 }
                 index().replaceDocument(rows)
                 revisions.recordPublishedContent(document.id, PROVENANCE_IMPORT, reading)
-                    ?.let { revisionId -> corrector?.recordApplied(collection.id, revisionId) }
+                    ?.let { revisionId ->
+                        if (corrector?.recordApplied(collection.id, revisionId) == true) requestCorrections(collection.id)
+                    }
             }
             stage.run(STAGE_RECORD) {
                 val failedUnits = content.extractionMarker(document.id)?.failedUnits ?: 0
