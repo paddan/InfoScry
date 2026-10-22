@@ -112,13 +112,14 @@
       methods = list.methods.filter((entry) => !isUncheckedImageProfile(entry));
       const preferred = methods.find((entry) => entry.method === list.default && entry.available);
       selectedMethod = preferred?.method ?? methods.find((entry) => entry.available)?.method ?? '';
-      if (selectedMethod) await updatePreview();
-      else if (methods.length === 0) error = 'No reading methods are available.';
+      if (!selectedMethod && methods.length === 0) error = 'No reading methods are available.';
     } catch (failure) {
       error = describe(failure);
     } finally {
       loadingMethods = false;
     }
+    // A summary over many files can take long, so the methods are shown first and stay changeable meanwhile.
+    if (selectedMethod) await updatePreview();
   }
 
   async function chooseMethod(event: Event): Promise<void> {
@@ -213,7 +214,7 @@
     {#if loadingMethods}<p role="status">Loading reading methods…</p>{/if}
     {#if !loadingMethods && methods.length > 0}
       <label for="reading-method">Reading method</label>
-      <select id="reading-method" data-testid="reading-method" value={selectedMethod} onchange={chooseMethod} disabled={submitting || previewing || pendingStart !== null}>
+      <select id="reading-method" data-testid="reading-method" value={selectedMethod} onchange={chooseMethod} disabled={submitting || pendingStart !== null}>
         {#each methods as method (method.method)}
           <option value={method.method} disabled={!method.available}>{methodOptionLabel(method)}</option>
         {/each}

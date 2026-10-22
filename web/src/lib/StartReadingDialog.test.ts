@@ -55,6 +55,24 @@ describe('StartReadingDialog', () => {
     await waitFor(() => expect(api.previewImport).toHaveBeenLastCalledWith(expect.objectContaining({ method: 'tesseract' })));
   });
 
+  it('shows the methods at once and lets the reader change method while a slow summary is prepared', async () => {
+    let finishSlow: (preview: ImportPreview) => void = () => {};
+    vi.mocked(api.previewImport)
+      .mockImplementationOnce(() => new Promise((resolve) => { finishSlow = resolve; }))
+      .mockResolvedValueOnce({ ...importPreview, totalPages: 12, previewHash: 'hash-2' });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data'], recursive: true, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    const select = await screen.findByLabelText('Reading method') as HTMLSelectElement;
+    expect(screen.queryByText('Loading reading methods…')).toBeNull();
+    expect(screen.getByText('Preparing page summary…')).toBeTruthy();
+    expect(select.disabled).toBe(false);
+    await fireEvent.change(select, { target: { value: 'tesseract' } });
+    await screen.findByRole('button', { name: 'Read 12 pages with Tesseract' });
+    // The summary for the method the reader left must not replace the current one.
+    finishSlow(importPreview);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByRole('button', { name: 'Read 12 pages with Tesseract' })).toBeTruthy();
+  });
+
   it('names the confirmed method and page total and submits once with the preview hash', async () => {
     const onstarted = vi.fn();
     render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
