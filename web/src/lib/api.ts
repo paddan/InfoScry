@@ -69,7 +69,7 @@ function decodeCollection(response: CollectionResponse): Collection {
 /** The lifecycle of a job record; stages inside a running job are reported separately. */
 export type JobState = 'QUEUED' | 'RUNNING' | 'COMPLETE' | 'FAILED' | 'CANCELLED';
 
-export type JobType = 'IMPORT' | 'REINDEX' | 'RETRY';
+export type JobType = 'IMPORT' | 'REINDEX' | 'RETRY' | 'RESCAN' | 'SELECTABLE_PDF';
 
 /**
  * One persistent job. Optional fields may be absent from the wire (nulls are omitted), so callers
@@ -1232,6 +1232,12 @@ export async function startImport(
 export async function getJob(id: string): Promise<JobApiView> {
   const body = (await readJson(await fetch(`/api/jobs/${encodeURIComponent(id)}`))) as { job: JobApiView };
   return body.job;
+}
+
+/** The jobs that have not ended, queued or running, oldest first: the one being worked on comes first. */
+export async function listActiveJobs(): Promise<JobApiView[]> {
+  const body = (await readJson(await fetch('/api/jobs?active=true&limit=200'))) as { jobs: JobApiView[] };
+  return body.jobs;
 }
 
 /**

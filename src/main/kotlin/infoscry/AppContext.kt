@@ -325,12 +325,17 @@ class AppContext private constructor(
 
     /** The embedder a restored revision uses: the injected one, the attached one, or the pinned model's. */
     private fun currentDocumentEmbedder(): DocumentEmbedder? =
-        (injectedRestoreEmbedder ?: attachedDocumentEmbedder ?: productionDocumentEmbedder).invoke()
+        (injectedRestoreEmbedder ?: attachedDocumentEmbedder ?: pinnedEmbedder).invoke()
 
-    /** The pinned model's embedder, built on first use and only when nothing else was injected or attached. */
-    private val productionDocumentEmbedder: () -> DocumentEmbedder? by lazy {
-        E5Embedder.productionDocumentEmbedder(paths.modelsDir, paths.embeddingProfileDir)
-    }
+    /**
+     * The pinned model's one embedder for this process, built on first use.
+     *
+     * Search, imports, restores and reindexing all embed with it, so the process holds one accelerator
+     * session for the model: a second one costs another 1.1 GB load and CoreML compilation, and the first
+     * search used to pay for exactly that while an import built its own.
+     */
+    val pinnedEmbedder: () -> E5Embedder? =
+        E5Embedder.productionEmbedder(paths.modelsDir, paths.embeddingProfileDir)
 
     /**
      * Records the embedder this process's worker embeds with, so [revisionRestore] shares it.
@@ -492,7 +497,7 @@ class AppContext private constructor(
             documents = documents,
             index = { index() },
             queryEmbedder = injectedQueryEmbedder
-                ?: E5Embedder.productionQueryEmbedder(paths.modelsDir, paths.embeddingProfileDir),
+                ?: pinnedEmbedder,
             snapshots = revisionSnapshots,
         )
     }

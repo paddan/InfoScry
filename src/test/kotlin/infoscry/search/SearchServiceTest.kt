@@ -194,6 +194,31 @@ class SearchServiceTest {
     }
 
     @Test
+    fun `an ocr noise passage is never a semantic neighbour`() {
+        val collection = collections.create("Default-collection")
+        val noisy = insertDocument(collection.id, "scan.pdf", "application/pdf")
+        val valid = insertDocument(collection.id, "report.txt", "text/plain")
+        openService(embedder = { QueryEmbedder { query -> vectorFor(query) } }).let { (service, index) ->
+            try {
+                // Both read from real scanned pages: a stray digit or letter among punctuation carries no
+                // meaning, and its vector sits close to every query's.
+                runBlocking {
+                    indexChunks(index, collection.id, noisy.id, listOf("?\n1\n. . . . . .", ":\nP\n.\n---"))
+                    indexChunk(index, collection.id, valid.id, "the spin doctors of the campaign")
+                }
+
+                val semantic = service.search("spin", mode = SearchMode.SEMANTIC)
+                assertEquals(listOf(valid.id), semantic.hits.map { it.documentId })
+
+                val anchored = service.search("spin", mode = SearchMode.HYBRID, requireLexicalAnchor = true)
+                assertEquals(listOf(valid.id), anchored.hits.map { it.documentId })
+            } finally {
+                index.close()
+            }
+        }
+    }
+
+    @Test
     fun `keyword search finds, highlights and safely escapes the matched text`() {
         val collection = collections.create("Default-collection")
         val document = insertDocument(collection.id, "report.txt", "text/plain")

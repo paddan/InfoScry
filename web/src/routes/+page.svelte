@@ -12,6 +12,7 @@
   import InvestigatePanel from '../lib/InvestigatePanel.svelte';
   import PromptSelect from '../lib/PromptSelect.svelte';
   import LlmAdminPanel from '../lib/LlmAdminPanel.svelte';
+  import JobsPanel from '../lib/JobsPanel.svelte';
   import type { DocumentListViewState } from '../lib/documentListViewState';
   import CollectionsPanel from '../lib/CollectionsPanel.svelte';
   import {
@@ -73,7 +74,7 @@
   function updateDocumentListView(collectionId: string, state: DocumentListViewState): void {
     documentListViews = new Map(documentListViews).set(collectionId, state);
   }
-  let adminTab: 'COLLECTIONS' | 'LLM' = 'COLLECTIONS';
+  let adminTab: 'COLLECTIONS' | 'JOBS' | 'LLM' = 'COLLECTIONS';
   let mediaType = '';
   let pathContains = '';
   let textContains = '';
@@ -639,7 +640,7 @@
   }
 
   function handleAdminTabKeydown(event: KeyboardEvent): void {
-    const tabs: ('COLLECTIONS' | 'LLM')[] = ['COLLECTIONS', 'LLM'];
+    const tabs: ('COLLECTIONS' | 'JOBS' | 'LLM')[] = ['COLLECTIONS', 'JOBS', 'LLM'];
     const current = tabs.indexOf(adminTab);
     let next = current;
     if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
@@ -993,6 +994,8 @@
           <span class="eyebrow">ADMINISTRATION</span>
           {#if adminTab === 'COLLECTIONS'}
             <p>Create or select a collection and add local files or folders to it. Choosing paths opens a native dialog on this machine.</p>
+          {:else if adminTab === 'JOBS'}
+            <p>Imports, rescans and other work that is queued or running. Stopping a job keeps what it has already saved.</p>
           {:else}
             <p>Configure the LLM profiles Ask, Investigate and OCR can use. A profile that passes the image check can also read scanned pages. API keys stay in environment variables.</p>
           {/if}
@@ -1124,6 +1127,14 @@
             onclick={() => (adminTab = 'COLLECTIONS')}
           >Collections</button>
           <button
+            id="admin-tab-jobs"
+            role="tab"
+            aria-selected={adminTab === 'JOBS'}
+            aria-controls="admin-panel-jobs"
+            tabindex={adminTab === 'JOBS' ? 0 : -1}
+            onclick={() => (adminTab = 'JOBS')}
+          >Jobs</button>
+          <button
             id="admin-tab-llm"
             role="tab"
             aria-selected={adminTab === 'LLM'}
@@ -1164,6 +1175,9 @@
                 onPromptsRevealed={() => (promptsPendingFor = null)}
               />
             {/if}
+          </div>
+          <div id="admin-panel-jobs" role="tabpanel" aria-labelledby="admin-tab-jobs" hidden={adminTab !== 'JOBS'}>
+            <JobsPanel {collections} visible={activeMode === 'ADMIN' && adminTab === 'JOBS'} />
           </div>
           <div id="admin-panel-llm" role="tabpanel" aria-labelledby="admin-tab-llm" hidden={adminTab !== 'LLM'}><LlmAdminPanel /></div>
         </div>

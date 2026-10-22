@@ -28,6 +28,9 @@ internal data class EncodedRow(val ids: LongArray, val mask: LongArray)
 internal fun interface EmbeddingRunner : AutoCloseable {
     fun embed(ids: Array<LongArray>, masks: Array<LongArray>): List<FloatArray>
 
+    /** Prepares whatever the first [embed] would otherwise build, so a later call does not pay for it. */
+    fun warmUp() {}
+
     override fun close() {}
 }
 
@@ -45,7 +48,7 @@ class E5Embedder internal constructor(
     private val tokenizerPath: Path,
     private val runner: EmbeddingRunner,
     private val batchTokenBudget: Int = DEFAULT_BATCH_TOKEN_BUDGET,
-) : TokenCounter, DocumentEmbedder, QueryEmbedder, AutoCloseable {
+) : TokenCounter, DocumentEmbedder, QueryEmbedder, WarmableEmbedder, AutoCloseable {
 
     init {
         require(batchTokenBudget > 0) { "batchTokenBudget must be positive, was $batchTokenBudget" }
@@ -122,6 +125,12 @@ class E5Embedder internal constructor(
     val dimension: Int get() = manifest.dimension
 
     val maxSequenceTokens: Int get() = manifest.maxSequenceTokens
+
+    /** Loads the tokenizer and builds and verifies the accelerator session, embedding nothing. */
+    override fun warmUp() {
+        tokenizer
+        runner.warmUp()
+    }
 
     override fun close() = runner.close()
 
@@ -287,45 +296,19 @@ class E5Embedder internal constructor(
          * digests.
          */
         /**
-         * Builds the query embedder on first use, or reports that the model is not installed.
+         * Builds the pinned model's embedder on first use, or reports that the model is not installed.
          *
-         * This is the search-side twin of [productionDocumentEmbedder]: same laziness, same memoisation,
-         * same `null` when the model is absent, same refusal (never a CPU fallback) when it is not. The
-         * search service only touches it for a semantic or hybrid request, so keyword search and source
-         * reads never wait on the accelerator.
+         * One supplier serves both sides — the query a search embeds and the passages an import embeds — so
+         * a process holds one accelerator session for the model rather than loading and compiling 1.1 GB
+         * twice. It is checked once and memoised, and it returns `null` when the model files are absent —
+         * never a CPU fallback — so the missing model stays a per-document failure or a search remedy rather
+         * than a startup requirement. Keyword search and source reads never ask for it.
          */
-        fun productionQueryEmbedder(
+        fun productionEmbedder(
             modelsDir: Path,
             profileDirectory: Path,
-        ): () -> QueryEmbedder? {
-            val cached: Lazy<QueryEmbedder?> = lazy {
-                val manifest = ModelManifest.load()
-                if (!ModelManager(manifest).isInstalled(modelsDir)) {
-                    null
-                } else {
-                    production(
-                        manifest = manifest,
-                        installation = ModelInstallation(manifest, modelsDir.resolve(manifest.revision)),
-                        profileDirectory = profileDirectory,
-                    )
-                }
-            }
-            return { cached.value }
-        }
-
-        /**
-         * Builds the document embedder on first use, or reports that the model is not installed.
-         *
-         * The returned supplier is the import stage's only source of vectors. It is checked once per
-         * process and memoised, and it returns `null` when the model files are absent — never a CPU
-         * fallback — so the missing model stays a per-document failure with the install remedy rather
-         * than a startup requirement.
-         */
-        fun productionDocumentEmbedder(
-            modelsDir: Path,
-            profileDirectory: Path,
-        ): () -> DocumentEmbedder? {
-            val cached: Lazy<DocumentEmbedder?> = lazy {
+        ): () -> E5Embedder? {
+            val cached: Lazy<E5Embedder?> = lazy {
                 val manifest = ModelManifest.load()
                 if (!ModelManager(manifest).isInstalled(modelsDir)) {
                     null
@@ -459,7 +442,12 @@ internal class CoreMlRunner(
     private val maxSequenceTokens: Int,
 ) : EmbeddingRunner {
 
+    @Volatile
     private var verified: VerifiedSession? = null
+
+    override fun warmUp() {
+        session()
+    }
 
     override fun embed(ids: Array<LongArray>, masks: Array<LongArray>): List<FloatArray> {
         val session = session()

@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
   import {
     ApiError,
+    cancelJob,
     getImportItems,
     getJob,
     pickPaths,
@@ -22,6 +23,8 @@
   export let onImportChanged: (collectionId: string) => void = () => {};
   /** The collection the paths are added to, shown so the destination is explicit before submission. */
   export let collectionName: string;
+  /** An import of this collection that has not finished yet; the panel shows its progress as its own. */
+  export let unfinishedImportId: string | null = null;
 
   let selectedPaths: string[] = [];
   let recursive = false;
@@ -35,6 +38,8 @@
   let error: string | null = null;
   let job: JobApiView | null = null;
   let dialogOpen = false;
+  /** A stop request is on its way to the server; the job itself says once the request is recorded. */
+  let stopping = false;
   /** The finished import's files are read a page at a time: an import can hold tens of thousands. */
   const ITEMS_PAGE_SIZE = 50;
   let items: ImportItemApiView[] = [];
@@ -165,6 +170,7 @@
     itemsOffset = 0;
     finishedJobId = null;
     job = null;
+    stopping = false;
     importing = true;
     try {
       job = initial;
@@ -191,6 +197,50 @@
     } finally {
       if (generation === importGeneration) importing = false;
     }
+  }
+
+  /**
+   * Asks the server to stop the import. It ends at the next file or page boundary, keeping what it saved,
+   * and the polling loop reports it once the job is cancelled. Asking again is harmless.
+   */
+  async function stopImport(): Promise<void> {
+    if (job === null || stopping || isTerminal(job.state)) return;
+    const generation = importGeneration;
+    stopping = true;
+    error = null;
+    try {
+      const updated = await cancelJob(job.id);
+      if (generation === importGeneration && !isTerminal(job.state)) job = updated;
+    } catch (failure) {
+      if (generation === importGeneration) error = describe(failure);
+    } finally {
+      if (generation === importGeneration) stopping = false;
+    }
+  }
+
+  /**
+   * Follows an unfinished import of this collection — one a server restart resumed, or one started before
+   * the page was reloaded — the same way as one started here. The caller finds it in the durable history;
+   * the panel follows each one once, never while it is following another, and moves on to the next queued
+   * import when the one it showed ends.
+   */
+  async function resumeImport(jobId: string): Promise<void> {
+    const generation = importGeneration;
+    try {
+      await waitUntilVisible();
+      if (generation !== importGeneration) return;
+      const current = await getJob(jobId);
+      if (generation !== importGeneration || isTerminal(current.state)) return;
+      await followImport(current);
+    } catch (failure) {
+      if (generation === importGeneration) error = describe(failure);
+    }
+  }
+
+  let resumedImportId: string | null = null;
+  $: if (unfinishedImportId !== null && unfinishedImportId !== resumedImportId && !importing && (job === null || isTerminal(job.state))) {
+    resumedImportId = unfinishedImportId;
+    void resumeImport(unfinishedImportId);
   }
 
   /** Moves the results table one page back or forward; the page is read again, never kept from before. */
@@ -276,6 +326,13 @@
       {/if}
       <p role="status">{status}</p>
       <ImportUnitProgress progress={job.currentProgress} />
+      {#if !isTerminal(job.state)}
+        <div>
+          <button type="button" onclick={stopImport} disabled={stopping || job.cancelRequested}>
+            {stopping || job.cancelRequested ? 'Stopping…' : 'Stop importing'}
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
   {#if !importing && job !== null && isTerminal(job.state)}

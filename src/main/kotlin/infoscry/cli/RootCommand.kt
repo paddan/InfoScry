@@ -8,21 +8,17 @@ import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.path
 import infoscry.embedding.DocumentEmbedder
-import infoscry.embedding.E5Embedder
 import java.nio.file.Path
 
 /**
  * The document embedder production wiring, as one function a composition root can hand to the import path.
  *
- * It answers lazily and per process (the pinned model is 1.1 GB and deliberately not a startup
- * requirement), and it returns `null` when the model is not installed so the import stage reports the
+ * It is the context's one pinned embedder, which search shares. It answers lazily and per process (the
+ * pinned model is 1.1 GB and deliberately not a startup requirement), and it returns `null` when the model is not installed so the import stage reports the
  * install remedy per document. The harness substitutes a deterministic fake at this one seam.
  */
 internal fun productionImportEmbedder(context: infoscry.AppContext): () -> DocumentEmbedder? =
-    E5Embedder.productionDocumentEmbedder(
-        modelsDir = context.paths.modelsDir,
-        profileDirectory = context.paths.embeddingProfileDir,
-    )
+    context.pinnedEmbedder
 
 /** The help text for the two options every command accepts, in one place. */
 internal const val JSON_HELP = "Print stable machine-readable JSON instead of text"

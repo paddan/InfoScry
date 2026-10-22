@@ -1,5 +1,6 @@
 package infoscry.search
 
+import infoscry.chunk.carriesMeaning
 import infoscry.chunk.hasSearchableWord
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
@@ -242,8 +243,10 @@ class SearchService(
             for (hit in candidates) {
                 val key = hit.searchKey()
                 val validation = checked.getOrPut(key) {
-                    // A blank or known artifact passage is not a result and is not stale.
+                    // A blank or known artifact passage is not a result and is not stale. Nor is a meaningless
+                    // passage a semantic neighbour: its vector is near every query's.
                     if (!hasSearchableWord(hit.text)) CandidateValidation()
+                    else if (mode == SearchMode.SEMANTIC && !carriesMeaning(hit.text)) CandidateValidation()
                     else {
                         val published = resolveHit(FusedSearchHit(hit, setOf(mode), 0.0), queryText)
                         CandidateValidation(published, stale = published == null)

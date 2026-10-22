@@ -170,6 +170,16 @@ class ChunkerTest {
     }
 
     @Test
+    fun `ocr noise with a stray digit or letter carries no meaning for a vector`() {
+        listOf("?\n1\n. . . . . .", ":\nP\n.\n---", "(4", "2 N l", "7", "x = 5", "\u00c5", "A\u030a", "").forEach {
+            assertFalse(carriesMeaning(it), "noise must not be a semantic neighbour: $it")
+        }
+        listOf("12", "甲", "かな", "A\u030angstro\u0308m", "Hj", "watergate").forEach {
+            assertTrue(carriesMeaning(it), "a word must remain a semantic neighbour: $it")
+        }
+    }
+
+    @Test
     fun `a spreadsheet unit repeats its header in every chunk and pays for it`() {
         // One long unbroken run of cells below the header, so the boundary is decided by the passage budget
         // rather than by a line break: that is the only way the header's own cost is visible as a shorter

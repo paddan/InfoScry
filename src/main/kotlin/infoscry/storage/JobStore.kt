@@ -185,6 +185,27 @@ open class JobStore(private val database: Database) {
     }
 
     /**
+     * One page of the jobs that have not ended — queued or running — oldest first, so the job being worked
+     * on comes before the ones waiting behind it. Unlike [list], a running job is never pushed off the page
+     * by newer jobs that have already ended.
+     */
+    fun listActive(limit: Int, offset: Int = 0): List<Job> {
+        require(limit > 0) { "limit must be positive, was $limit" }
+        require(offset >= 0) { "offset must not be negative, was $offset" }
+        return database.read { connection ->
+            connection.prepareStatement(
+                "$SELECT_JOBS WHERE state IN (?, ?) ORDER BY created_at ASC, rowid ASC LIMIT ? OFFSET ?",
+            ).use { statement ->
+                statement.setString(1, JobState.QUEUED.name)
+                statement.setString(2, JobState.RUNNING.name)
+                statement.setInt(3, limit)
+                statement.setInt(4, offset)
+                statement.executeQuery().use { rows -> rows.readAll() }
+            }
+        }
+    }
+
+    /**
      * One page of a collection's import jobs, newest first.
      *
      * Import history is a collection-scoped read: another collection's import is never selected, so a page

@@ -33,7 +33,6 @@ import infoscry.extract.WordExtractor
 import infoscry.extract.TextualFallbackExtractor
 import infoscry.extract.emitDocumentRefusal
 import infoscry.embedding.DocumentEmbedder
-import infoscry.embedding.E5Embedder
 import infoscry.embedding.ModelManager
 import infoscry.embedding.TestDocumentEmbedder
 import infoscry.extract.OCR_FAILED_CODE
@@ -1262,10 +1261,7 @@ class ImportJobHandlerTest {
                 ImportJobHandler.attachTo(
                     context,
                     harness.storedPipeline(context, RecordingUnits(units = 1)),
-                    documentEmbedder = E5Embedder.productionDocumentEmbedder(
-                        modelsDir = context.paths.modelsDir,
-                        profileDirectory = context.paths.embeddingProfileDir,
-                    ),
+                    documentEmbedder = context.pinnedEmbedder,
                 )
                 harness.awaitJob(context, job.id)
                 job.id

@@ -717,12 +717,17 @@ describe('collections panel', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('omits the duplicate active import summary and keeps history read failures visible', async () => {
-    api.listCollectionImports.mockResolvedValue(history([importEntry('active', { state: 'RUNNING', filesCompleted: 2, filesTotal: 4, currentProgress: { unitKind: 'PAGE', processedUnits: 3, totalUnits: 20, failedUnits: 0 } })]));
+  it('opens the import panel on a running import, shows its progress once and keeps history read failures visible', async () => {
+    const progress = { unitKind: 'PAGE', processedUnits: 3, totalUnits: 20, failedUnits: 0 } as const;
+    api.listCollectionImports.mockResolvedValue(history([importEntry('active', { state: 'RUNNING', filesCompleted: 2, filesTotal: 4, currentProgress: progress })]));
+    api.getJob.mockResolvedValue({ id: 'active', type: 'IMPORT', state: 'RUNNING', createdAt: '', updatedAt: '', completed: 2, total: 4, cancelRequested: false, currentProgress: progress });
     const view = render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
     await waitFor(() => expect(view.container.querySelector('.imports')?.textContent).toContain('2 of 4 files'));
     expect(screen.queryByRole('region', { name: 'Active imports' })).toBeNull();
-    expect(screen.queryByText('3 of 20 pages processed')).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Stop importing' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add documents' }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('progressbar', { name: 'Import progress' }).getAttribute('value')).toBe('2');
+    expect(screen.getAllByText('3 of 20 pages processed')).toHaveLength(1);
     for (const disclosure of view.container.querySelectorAll('details')) expect(disclosure.open).toBe(false);
     api.listCollectionImports.mockRejectedValueOnce(new Error('history unavailable'));
     await view.rerender({ visible: false });

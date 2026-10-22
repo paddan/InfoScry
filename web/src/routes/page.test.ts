@@ -368,6 +368,25 @@ describe('app shell', () => {
     expect((screen.getByLabelText('Collection') as HTMLSelectElement).value).toBe('default');
   });
 
+  it('shows the running jobs in the Admin Jobs tab', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default', 2), collection('Nightfall', 0)] }),
+      jobs: () => jsonResponse({ jobs: [{ id: 'job-1', type: 'IMPORT', state: 'RUNNING', collectionId: 'nightfall', stage: 'copy',
+        currentItem: 'scan.pdf', completed: 1, total: 4, createdAt: '', updatedAt: '', cancelRequested: false }] }),
+    });
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.click(screen.getByRole('tab', { name: 'Admin' }));
+    expect(calls.some((call) => call.url.startsWith('/api/jobs?'))).toBe(false);
+    await fireEvent.click(screen.getByRole('tab', { name: 'Jobs' }));
+    expect(screen.getByRole('tab', { name: 'Jobs' }).getAttribute('aria-selected')).toBe('true');
+    const panel = screen.getByRole('region', { name: 'Running jobs' });
+    expect(await within(panel).findByText('Copying · scan.pdf')).toBeTruthy();
+    expect(within(panel).getByText('Nightfall')).toBeTruthy();
+    expect(within(panel).getByRole('button', { name: 'Stop' })).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/jobs?active=true&limit=200')).toBe(true);
+  });
+
   it('reports a failed load instead of showing an empty archive', async () => {
     stubFetch({
       list: () => jsonResponse({ error: { code: 'INTERNAL_ERROR', message: 'the archive is unavailable' } }, 500),
@@ -2934,6 +2953,7 @@ function stubFetch(overrides: {
   retry?: (url: string) => Response | Promise<Response>;
   document?: (url: string) => Response | Promise<Response>;
   imports?: (url: string) => Response | Promise<Response>;
+  jobs?: (url: string) => Response | Promise<Response>;
   rename?: (url: string) => Response | Promise<Response>;
   ocrLanguages?: (url: string) => Response | Promise<Response>;
   deleteCollection?: (url: string) => Response | Promise<Response>;
@@ -3013,6 +3033,9 @@ function stubFetch(overrides: {
     }
     if (url.endsWith('/api/deletions')) {
       return (overrides.deletions ?? (() => jsonResponse({ deletions: [] })))(url);
+    }
+    if (url.startsWith('/api/jobs?')) {
+      return (overrides.jobs ?? (() => jsonResponse({ jobs: [] })))(url);
     }
     if (url.includes('/imports')) {
       return (overrides.imports ?? (() => jsonResponse({ imports: [], total: 0 })))(url);

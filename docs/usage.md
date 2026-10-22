@@ -22,6 +22,13 @@ Search.
    updates as each page is saved, including pages with direct text. If the total
    is unknown, the bar is indeterminate and the processed count remains visible.
    Saved page progress survives reloading and resuming an interrupted import.
+7. Press **Stop importing** to cancel a running import. It stops at the next
+   file or page boundary and keeps the files and pages already saved. Importing
+   the same paths again skips the finished files and resumes the rest.
+
+An import continues after a reload or a server restart. When the collection has
+an unfinished import, Admin opens its import panel with the same progress bars
+and **Stop importing** button as when the import was started.
 
 The picker opens on the Mac running the server and requires a graphical session.
 When that is unavailable, enter paths manually. Imports use immutable managed
@@ -358,7 +365,12 @@ is not a strict wall-clock cutoff.
 
 ## Jobs, logs and maintenance
 
-Use the CLI for job inspection, cancellation, logs and reindexing:
+**Admin → Jobs** lists the imports, rescans, retries, reindexing and other jobs
+that are queued or running, oldest first, with their collection, stage, current
+file and progress. The list updates while the tab is open. **Stop** cancels a
+job at its next boundary and keeps what it has already saved.
+
+The CLI also covers job inspection, cancellation, logs and reindexing:
 
 ```bash
 infoscry jobs

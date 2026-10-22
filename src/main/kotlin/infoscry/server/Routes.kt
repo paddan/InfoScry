@@ -475,7 +475,13 @@ fun Application.configureRoutes(
                         parameter.toIntOrNull()?.takeIf { it >= 0 }
                             ?: throw BadRequestException("offset must be a whole number, zero or greater, was '$parameter'")
                     } ?: 0
-                    call.respondJson(HttpStatusCode.OK, JobsResponse(context.jobs.list(limit, offset).map { it.toApiView(context) }))
+                    // `active=true` lists only queued and running jobs, oldest first, for the Admin Jobs tab.
+                    val active = call.request.queryParameters["active"]?.let { parameter ->
+                        parameter.toBooleanStrictOrNull()
+                            ?: throw BadRequestException("active must be true or false, was '$parameter'")
+                    } ?: false
+                    val jobs = if (active) context.jobs.listActive(limit, offset) else context.jobs.list(limit, offset)
+                    call.respondJson(HttpStatusCode.OK, JobsResponse(jobs.map { it.toApiView(context) }))
                 }
             }
 

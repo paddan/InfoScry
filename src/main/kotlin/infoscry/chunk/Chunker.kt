@@ -433,6 +433,40 @@ internal fun hasSearchableWord(text: String): Boolean {
         text.codePoints().anyMatch { Character.isLetterOrDigit(it) }
 }
 
+/**
+ * Whether [text] carries meaning a vector can stand for: a run of at least two letters or digits, or one
+ * character of a script that writes a word in one (Han, kana, Hangul).
+ *
+ * A passage that fails this — OCR noise such as `? 1 . . . . . .` or `: P . ---` — stays a keyword result for
+ * the exact character, but is never a semantic neighbour: its vector says nothing, so it sits close to every
+ * query's.
+ */
+internal fun carriesMeaning(text: String): Boolean {
+    var run = 0
+    for (codePoint in text.codePoints()) {
+        if (Character.isIdeographic(codePoint) || Character.UnicodeScript.of(codePoint) in WORD_SCRIPTS) {
+            return true
+        }
+        // A combining mark belongs to the letter before it: it neither lengthens nor breaks the run.
+        if (isCombiningMark(codePoint)) continue
+        run = if (Character.isLetterOrDigit(codePoint)) run + 1 else 0
+        if (run >= 2) return true
+    }
+    return false
+}
+
+private val WORD_SCRIPTS = setOf(
+    Character.UnicodeScript.HIRAGANA,
+    Character.UnicodeScript.KATAKANA,
+    Character.UnicodeScript.HANGUL,
+)
+
+private fun isCombiningMark(codePoint: Int): Boolean = when (Character.getType(codePoint)) {
+    Character.NON_SPACING_MARK.toInt(), Character.COMBINING_SPACING_MARK.toInt(),
+    Character.ENCLOSING_MARK.toInt() -> true
+    else -> false
+}
+
 /** A header repeated in front of a chunk, with the body tokens it costs. */
 private class RepeatedHeader(val text: String, val tokens: Int)
 

@@ -97,6 +97,24 @@ class JobRoutesTest {
     }
 
     @Test
+    fun `active job list holds only unfinished jobs, oldest first, however many newer jobs ended`() = runBlocking {
+        val jobs = harness.context.jobs
+        val running = jobs.enqueue(JobType.IMPORT, total = 1).also { jobs.claim(it.id) }
+        val queued = jobs.enqueue(JobType.REINDEX)
+        repeat(3) { jobs.complete(jobs.enqueue(JobType.IMPORT, total = 1).also { jobs.claim(it.id) }.id) }
+        jobs.cancel(jobs.enqueue(JobType.IMPORT, total = 1).id)
+
+        fun ids(body: String) = Json.parseToJsonElement(body).jsonObject["jobs"]!!.jsonArray
+            .map { it.jsonObject["id"].toString().trim('"') }
+        assertEquals(listOf(running.id.value, queued.id.value), ids(harness.get("/api/jobs?active=true&limit=1&offset=0").bodyAsText()).let {
+            // A page of one still finds the old running job first; the second page holds the queued one.
+            it + ids(harness.get("/api/jobs?active=true&limit=1&offset=1").bodyAsText())
+        })
+        assertEquals(6, ids(harness.get("/api/jobs").bodyAsText()).size)
+        assertEquals(HttpStatusCode.BadRequest, harness.get("/api/jobs?active=yes").status)
+    }
+
+    @Test
     fun `job list detail and cancel omit worker payload and raw failure details`() = runBlocking {
         val privatePath = "/private/evidence/quarterly-report.pdf"
         val excerpt = "CONFIDENTIAL document excerpt"

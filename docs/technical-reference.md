@@ -94,7 +94,11 @@ Every complete embedding input must fit within 512 tokens using that tokenizer,
 including prefixes, special tokens and repeated headers. Passages are never
 silently truncated. Blank pages and a page consisting only of the known `Â`
 doubled-encoding artifact are not chunked, embedded or indexed. Single letters,
-numbers, formulas and non-Latin text remain searchable. Chunker version 3
+numbers, formulas and non-Latin text remain searchable. A passage without a run
+of two letters or digits (or a Han, kana or Hangul character), such as OCR noise
+like `? 1 . . . . . .`, stays a keyword result for its exact characters but is
+never returned by semantic search: its vector carries no meaning and sits close
+to every query's. Chunker version 3
 rebuilds chunks saved under the earlier two-character rule during reindex; the
 extraction checkpoint and source reading stay unchanged.
 

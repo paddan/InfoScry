@@ -735,10 +735,7 @@ class ImportJobHandler internal constructor(
             ),
             // The document embedder, resolved lazily and per process, and null when the model is not
             // installed. Tests inject a deterministic fake here; production uses the pinned model.
-            documentEmbedder: () -> DocumentEmbedder? = E5Embedder.productionDocumentEmbedder(
-                modelsDir = context.paths.modelsDir,
-                profileDirectory = context.paths.embeddingProfileDir,
-            ),
+            documentEmbedder: () -> DocumentEmbedder? = context.pinnedEmbedder,
             // A document may hold at most this many chunks in a single index transaction's in-memory rows.
             maxChunksPerDocument: Int = MAX_CHUNKS_PER_DOCUMENT,
             reindexService: (AppContext) -> ReindexService = ::productionReindexService,
@@ -927,10 +924,7 @@ class ImportJobHandler internal constructor(
             ),
             paths = context.paths,
             identity = AppContext.identityForCurrentModel(),
-            documentEmbedder = E5Embedder.productionDocumentEmbedder(
-                modelsDir = context.paths.modelsDir,
-                profileDirectory = context.paths.embeddingProfileDir,
-            ),
+            documentEmbedder = context.pinnedEmbedder,
             current = { context.index() },
             publish = { next, previous -> context.publishGeneration(next, previous) },
             revisions = context.revisions,

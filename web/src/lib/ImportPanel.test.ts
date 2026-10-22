@@ -6,6 +6,7 @@ import * as api from './api';
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
   pickPaths: vi.fn(), listReadingMethods: vi.fn(), previewImport: vi.fn(), startImport: vi.fn(), getJob: vi.fn(), getImportItems: vi.fn(),
+  cancelJob: vi.fn(),
 }));
 
 const methods: api.ReadingMethodList = { default: 'surya', methods: [
@@ -79,6 +80,62 @@ describe('ImportPanel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(screen.queryByText(/approval|review/i)).toBeNull();
+  });
+
+  it('stops a running import and lets the next one start', async () => {
+    const running = { ...job, state: 'RUNNING', completed: 0, total: 3 } as api.JobApiView;
+    let cancelled = false;
+    vi.mocked(api.startImport).mockResolvedValue({ job: running });
+    vi.mocked(api.getJob).mockImplementation(async () => (cancelled ? { ...running, state: 'CANCELLED', cancelRequested: true } : running));
+    vi.mocked(api.cancelJob).mockImplementation(async () => {
+      cancelled = true;
+      return { ...running, cancelRequested: true };
+    });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop importing' }));
+    expect(api.cancelJob).toHaveBeenCalledWith('job-1');
+    const stopping = await screen.findByRole('button', { name: 'Stopping…' }) as HTMLButtonElement;
+    expect(stopping.disabled).toBe(true);
+    expect(await screen.findByText('Import cancelled.', {}, { timeout: 2500 })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Stop/ })).toBeNull();
+    expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('shows why a stop failed and keeps the stop button usable', async () => {
+    const running = { ...job, state: 'RUNNING', completed: 0, total: 3 } as api.JobApiView;
+    vi.mocked(api.startImport).mockResolvedValue({ job: running });
+    vi.mocked(api.getJob).mockResolvedValue(running);
+    vi.mocked(api.cancelJob).mockRejectedValue(new Error('Server unavailable.'));
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop importing' }));
+    expect(await screen.findByText('Server unavailable.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Stop importing' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('follows an unfinished import it is handed, as after a server restart', async () => {
+    vi.mocked(api.getJob).mockResolvedValue({ ...job, state: 'RUNNING', completed: 1, total: 3,
+      currentItem: 'a.pdf', currentProgress: { unitKind: 'PAGE', processedUnits: 2, totalUnits: 4, failedUnits: 0 } } as api.JobApiView);
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', unfinishedImportId: 'job-1' });
+    const files = await screen.findByRole('progressbar', { name: 'Import progress' });
+    expect(api.getJob).toHaveBeenCalledWith('job-1');
+    expect(files.getAttribute('value')).toBe('1');
+    expect(files.getAttribute('max')).toBe('3');
+    expect(screen.getByRole('progressbar', { name: 'Page progress' }).getAttribute('value')).toBe('2');
+    expect(screen.getByRole('button', { name: 'Stop importing' })).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Importing…' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('shows no progress when the handed import has already ended', async () => {
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', unfinishedImportId: 'job-1' });
+    await waitFor(() => expect(api.getJob).toHaveBeenCalledWith('job-1'));
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(screen.queryByText(/Import complete/)).toBeNull();
   });
 
   it('reports every file of a large import but shows its results fifty at a time', async () => {

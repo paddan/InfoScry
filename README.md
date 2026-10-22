@@ -14,8 +14,8 @@ reader and a command-line interface.
 - Use **Ask** for answers from one search, or **Investigate** for follow-up
   conversations that search and read sources over several steps, with Low, Medium,
   High or Extra high effort and optional per-profile overrides.
-- Open cited source passages and manage collections and LLM profiles in the
-  English web interface.
+- Open cited source passages and manage collections, running jobs and LLM
+  profiles in the English web interface.
 
 ## Get started
 

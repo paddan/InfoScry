@@ -355,6 +355,16 @@ class E5EmbedderTest {
     }
 
     @Test
+    fun `warming up prepares the accelerator without embedding anything`() {
+        val runner = RecordingRunner()
+
+        embedder(runner).warmUp()
+
+        assertEquals(1, runner.warmUps, "warming up prepares the runner's session once")
+        assertTrue(runner.batchSizes.isEmpty(), "warming up embeds no passage of its own")
+    }
+
+    @Test
     fun `the production counter measures provisionally when the model is not installed`() {
         val modelsDir = Files.createTempDirectory("no-model-installed")
         val profileDirectory = Files.createTempDirectory("profile")
@@ -412,6 +422,11 @@ private fun bugPlanBatches(lengths: List<Int>, batchTokenBudget: Int): List<IntR
 private class RecordingRunner : EmbeddingRunner {
     val batchSizes = mutableListOf<Int>()
     val lengths = mutableListOf<Int>()
+    var warmUps = 0
+
+    override fun warmUp() {
+        warmUps++
+    }
 
     override fun embed(ids: Array<LongArray>, masks: Array<LongArray>): List<FloatArray> {
         batchSizes += ids.size

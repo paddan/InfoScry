@@ -163,6 +163,8 @@
   let newName = '';
   let newDescription = '';
   let addingDocuments = false;
+  /** The selected collection's unfinished import, which the import panel follows when it opens. */
+  let unfinishedImportId: string | null = null;
 
   let expanded = false;
   let disclosureButton: HTMLButtonElement;
@@ -448,6 +450,7 @@
     const restored = restoreDocumentListViewState(cached);
     expanded = restored.expanded;
     addingDocuments = false;
+    unfinishedImportId = null;
     filenameInput = restored.filename;
     filenameQuery = restored.filename.trim();
     statusFilter = restored.status;
@@ -881,6 +884,17 @@
       imports = history.imports;
       importsTotal = history.total;
       importsLoaded = true;
+      // An unfinished import, such as one a server restart resumed, opens the import panel so its progress
+      // shows the same way as when it was started here. Imports run one at a time: the running one, or
+      // else the oldest queued one, which runs next. History is newest first.
+      if (importsOffset === 0) {
+        const unfinished = imports.filter(isWatchedImport);
+        const next = unfinished.find((entry) => entry.state === 'RUNNING') ?? unfinished.at(-1);
+        if (next !== undefined) {
+          unfinishedImportId = next.id;
+          addingDocuments = true;
+        }
+      }
       // The expanded import keeps its file outcomes current while its files are still being worked on.
       if (itemsJobId !== null && imports.some((entry) => entry.id === itemsJobId)) void loadItems(itemsJobId);
       scheduleImportRefresh();
@@ -1366,7 +1380,7 @@
         </div>
         {#if addingDocuments}
           {#key selected.id}
-            <ImportPanel collectionId={selected.id} collectionName={selected.name} onImportChanged={importChanged} {visible} />
+            <ImportPanel collectionId={selected.id} collectionName={selected.name} onImportChanged={importChanged} {unfinishedImportId} {visible} />
           {/key}
         {/if}
 
