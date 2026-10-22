@@ -1,5 +1,6 @@
 package infoscry.document
 
+import infoscry.ocr.OcrQualityScorer
 import infoscry.AppContext
 import infoscry.domain.ContentUnitId
 import infoscry.domain.ExtractionMethod
@@ -75,6 +76,17 @@ class PageReviewServiceTest {
             context.paths.artifactsDir(document.collectionId, document.id), ordinal, derived.structure,
         )
         return fixture.page(ordinal, derived.extractedText).copy(structureReference = reference)
+    }
+
+    @Test fun `the quality score judges the reading, not the corrected text`() {
+        val document = fixture.pdf()
+        val reading = infoscry.domain.ReadingText("x7#q z9@v ||| spinners", "x7#q z9@v ||| spinners")
+        fixture.publish(document, listOf(fixture.page(0, "Brev från Spinnars i dag").copy(reading = reading)))
+        check(OcrQualityScorer.score(reading.extractedText) != OcrQualityScorer.score("Brev från Spinnars i dag"))
+
+        val review = service().review(document.collectionId, document.id, 0)
+
+        assertEquals(OcrQualityScorer.score(reading.extractedText), review.qualityScore)
     }
 
     @Test fun `page review reports a degraded structure and nothing for a page without one`() {

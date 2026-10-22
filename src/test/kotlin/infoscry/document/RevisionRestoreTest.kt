@@ -1,5 +1,9 @@
 package infoscry.document
 
+import infoscry.chunk.WhitespaceTokenCounter
+import infoscry.chunk.Chunker
+import infoscry.domain.AppliedCorrection
+import infoscry.correction.CorrectionRuleInput
 import infoscry.AppContext
 import infoscry.domain.CollectionId
 import infoscry.domain.DocumentId
@@ -64,6 +68,39 @@ class RevisionRestoreTest {
         observe: (RestoreStep) -> Unit = {},
     ) = runBlocking {
         revisionRestore.restore(collection, fixture.documentId, requestId, expected, restoring, observe)
+    }
+
+    // ---- corrections ----
+
+    @Test
+    fun `a restore applies today's corrections to the reading it brings back`() {
+        open().use { context ->
+            context.attachChunker(Chunker(WhitespaceTokenCounter(prefixTokens = 2, specialTokens = 1)))
+            val fixture = RestoreFixtures.publishGenerations(context, dataDir, collection, marketReadings = listOf("hos spinners", "annat"))
+            context.corrections.put(collection, "r1", CorrectionRuleInput("spinners", "Spinnars", false))
+
+            context.restore(fixture)
+
+            val active = assertNotNull(context.revisions.activeRevision(fixture.documentId))
+            val page = context.revisions.pages(active.id)[1]
+            assertEquals("hos Spinnars", page.extractedText)
+            assertEquals("hos spinners", page.reading?.extractedText)
+            assertEquals("RESTORE", active.provenance)
+            assertEquals(listOf(AppliedCorrection("spinners", "Spinnars", 1)), active.correctionsApplied)
+            assertTrue(context.revisions.chunks(active.id).any { it.unitOrdinal == 1 && "Spinnars" in it.text })
+        }
+    }
+
+    @Test
+    fun `a restore that needs new passages is refused without a tokenizer and changes nothing`() {
+        open().use { context ->
+            val fixture = RestoreFixtures.publishGenerations(context, dataDir, collection, marketReadings = listOf("hos spinners", "annat"))
+            context.corrections.put(collection, "r1", CorrectionRuleInput("spinners", "Spinnars", false))
+
+            assertFailsWith<RestoreRefusalException> { context.restore(fixture) }
+
+            assertEquals(fixture.revisionIds.last(), context.revisions.activeRevisionId(fixture.documentId))
+        }
     }
 
     // ---- what a restore adds and what it keeps ----

@@ -81,6 +81,9 @@ class CandidateCorrector(
         revisions.recordCorrections(revisionId, CorrectionRules.fingerprint(rules), appliedOf(rules, counts))
     }
 
+    /** The directory a document's artifacts, the corrected structures and layouts among them, are written under. */
+    fun artifactRoot(collectionId: CollectionId, documentId: DocumentId): Path = paths.artifactsDir(collectionId, documentId)
+
     /** A matcher with the collection's current list, for a sink that corrects units one at a time. */
     fun matcherFor(collectionId: CollectionId): CorrectionMatcher? =
         corrections.list(collectionId).takeIf { it.isNotEmpty() }?.let(::CorrectionMatcher)

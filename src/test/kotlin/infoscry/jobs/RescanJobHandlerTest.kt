@@ -1,5 +1,6 @@
 package infoscry.jobs
 
+import infoscry.correction.CorrectionRuleInput
 import infoscry.AppContext
 import infoscry.chunk.Chunker
 import infoscry.chunk.WhitespaceTokenCounter
@@ -96,6 +97,25 @@ class RescanJobHandlerTest {
             assertEquals(listOf(PageApproval.APPROVED), result.candidateApprovals)
             assertEquals("second reading", result.publishedText)
             assertNotEqualsId(picture.baselineRevisionId, assertNotNull(result.activeRevisionId))
+        }
+    }
+
+    @Test
+    fun `a rescan keeps the collection's corrections`() {
+        withHarness { harness ->
+            val picture = harness.importPicture(text = "first reading")
+            AppContext.open(harness.archiveDir).use { context ->
+                context.corrections.put(CollectionId("default"), "r1", CorrectionRuleInput("spinners", "Spinnars", false))
+            }
+
+            val result = harness.rescan(picture, engine = FakePageEngine(readings = listOf("brev från spinners")))
+
+            assertEquals(OcrOperationStage.COMPLETE, result.operation.stage)
+            assertEquals("brev från Spinnars", result.publishedText)
+            AppContext.open(harness.archiveDir).use { context ->
+                val page = context.revisions.pages(assertNotNull(result.activeRevisionId)).single()
+                assertEquals("brev från spinners", page.reading?.extractedText)
+            }
         }
     }
 
@@ -1388,6 +1408,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
             afterPageStaged = { jobId, ordinal -> afterPageStaged?.invoke(context, ordinal) },
             afterInitialProgressReported = { jobId -> onInitialProgress?.invoke(jobId) },
             beforeCandidatePublication = { jobId -> beforeCandidatePublication?.invoke(context, jobId) },
+            corrector = context.candidateCorrector,
         )
         val failure = runBlocking {
             runCatching {

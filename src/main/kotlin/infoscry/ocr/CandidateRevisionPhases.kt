@@ -1,5 +1,8 @@
 package infoscry.ocr
 
+import infoscry.domain.DocumentId
+import infoscry.storage.RevisionPageText
+import infoscry.chunk.ChunkDraft
 import infoscry.chunk.Chunker
 import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
@@ -249,30 +252,8 @@ internal class CandidateRevisionPhases(
         val chunked = revisions.chunks(candidate).mapTo(mutableSetOf()) { chunk -> chunk.unitOrdinal }
         staged.forEach { page ->
             if (page.ordinal in chunked) return@forEach
-            val plan = chunker.chunk(
-                unit = ContentUnit(
-                    id = page.unitId,
-                    documentId = document.id,
-                    ordinal = page.ordinal,
-                    locator = page.locator,
-                    extractedText = page.extractedText,
-                    searchText = page.searchText,
-                    artifactRelativePath = page.artifactRelativePath,
-                    artifactSha256 = page.artifactSha256,
-                    meanConfidence = page.meanConfidence,
-                    structureRelativePath = page.structureReference?.relativePath,
-                    structureSha256 = page.structureReference?.sha256,
-                    extractionMethod = page.extractionMethod,
-                ),
-                maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
-                overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
-                // The structure ContentStore.structureOf reads once the unit is committed, so a page chunks
-                // the same way here as when it is re-chunked later.
-                structure = page.structureReference?.let { reference ->
-                    PageStructureStore.read(artifactRoot, reference, page.extractedText)
-                },
-            )
-            stage.run(STAGE_CHUNK) { revisions.recordPageChunks(candidate, page.ordinal, plan.drafts) }
+            val drafts = chunker.chunkStagedPage(page, document.id, artifactRoot)
+            stage.run(STAGE_CHUNK) { revisions.recordPageChunks(candidate, page.ordinal, drafts) }
         }
         val pending = revisions.pages(candidate).count { page -> page.approval == PageApproval.PENDING }
         // An attempt with no operation row has nowhere to record it: what an import's reading owes is read
@@ -420,3 +401,30 @@ internal suspend fun failAttempt(
     }
     throw RescanAttemptFailedException(code, message)
 }
+
+/**
+ * The passages of one staged page, chunked the way the page will be chunked once it is committed: with the
+ * structure `ContentStore.structureOf` reads, so a page chunks the same way here as when it is re-chunked later.
+ */
+internal fun Chunker.chunkStagedPage(page: RevisionPageText, documentId: DocumentId, artifactRoot: Path): List<ChunkDraft> =
+    chunk(
+        unit = ContentUnit(
+            id = page.unitId,
+            documentId = documentId,
+            ordinal = page.ordinal,
+            locator = page.locator,
+            extractedText = page.extractedText,
+            searchText = page.searchText,
+            artifactRelativePath = page.artifactRelativePath,
+            artifactSha256 = page.artifactSha256,
+            meanConfidence = page.meanConfidence,
+            structureRelativePath = page.structureReference?.relativePath,
+            structureSha256 = page.structureReference?.sha256,
+            extractionMethod = page.extractionMethod,
+        ),
+        maxSequenceTokens = Chunker.DEFAULT_MAX_SEQUENCE_TOKENS,
+        overlapTokens = Chunker.DEFAULT_OVERLAP_TOKENS,
+        structure = page.structureReference?.let { reference ->
+            PageStructureStore.read(artifactRoot, reference, page.extractedText)
+        },
+    ).drafts

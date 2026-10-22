@@ -366,6 +366,12 @@ class AppContext private constructor(
      * every other writer: a restore is refused while a rescan owns the document or a deletion targets it, and
      * it becomes the document's text only through the same recoverable protocol a rescan publishes through.
      */
+    /** Each collection's standing corrections. */
+    val corrections: CorrectionStore = CorrectionStore(database)
+
+    /** Applies a collection's corrections to text about to be published. */
+    val candidateCorrector: CandidateCorrector = CandidateCorrector(revisions, corrections, paths)
+
     val revisionRestore: RevisionRestoreService = RevisionRestoreService(
         revisions = revisions,
         documents = documents,
@@ -375,6 +381,8 @@ class AppContext private constructor(
         operations = ocrOperations,
         publication = revisionPublication,
         embedder = { currentDocumentEmbedder() },
+        corrector = candidateCorrector,
+        chunker = { attachedChunker },
     )
 
     /** The published text history of a document, as the history view and its restore action read it. */
@@ -398,12 +406,6 @@ class AppContext private constructor(
     )
 
     private val promptService = PromptService()
-
-    /** Each collection's standing corrections. */
-    val corrections: CorrectionStore = CorrectionStore(database)
-
-    /** Applies a collection's corrections to text about to be published. */
-    val candidateCorrector: CandidateCorrector = CandidateCorrector(revisions, corrections, paths)
 
     val collectionPrompts: CollectionPromptService = CollectionPromptService(
         store = CollectionPromptStore(database),

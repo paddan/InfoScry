@@ -342,7 +342,10 @@ internal class DocumentIngest(
         }
 
         val publicationId = try {
-            stage.run(STAGE_CHUNK) { documents.updateStatus(document.id, DocumentStatus.CHUNKING) }
+            stage.run(STAGE_CHUNK) {
+                documents.updateStatus(document.id, DocumentStatus.CHUNKING)
+                corrector?.correct(document.collectionId, document.id, candidate)
+            }
             // No operation row: what this reading owes a reader is read from its document's status, which is
             // written below from the publication attempt itself.
             phases.chunkCandidate(

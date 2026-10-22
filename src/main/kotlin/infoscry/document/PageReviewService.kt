@@ -127,7 +127,8 @@ class PageReviewService(
             offset = start,
             totalChars = text.length,
             truncated = end < text.length,
-            qualityScore = OcrQualityScorer.score(text),
+            // The engine is what the score judges, so a corrected page is scored on what it read.
+            qualityScore = OcrQualityScorer.score(resolved.page?.reading?.extractedText ?: text),
             readingMethod = resolved.page?.let { readingMethod(resolved.document, it) },
             imageKind = when {
                 resolved.page?.sourceImage != null -> "ocr"

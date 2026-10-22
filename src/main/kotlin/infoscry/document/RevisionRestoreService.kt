@@ -1,5 +1,8 @@
 package infoscry.document
 
+import infoscry.ocr.chunkStagedPage
+import infoscry.chunk.Chunker
+import infoscry.correction.CandidateCorrector
 import infoscry.collection.DeletionBlockers
 import infoscry.domain.ApiFaultException
 import infoscry.domain.ApiStatus
@@ -143,6 +146,10 @@ class RevisionRestoreService(
     private val publication: RevisionPublicationService,
     /** The embedder this process has, or null when there is none; resolved on demand and never cached here. */
     private val embedder: () -> DocumentEmbedder?,
+    /** Applies the collection's current corrections to the restored reading, so the text follows the list. */
+    private val corrector: CandidateCorrector? = null,
+    /** The tokenizer a corrected page is chunked with again, or null when this process has none. */
+    private val chunker: () -> Chunker? = { null },
 ) {
 
     /**
@@ -194,6 +201,7 @@ class RevisionRestoreService(
         // Past this point the candidate exists, so every way out resolves the request.
         try {
             observe(RestoreStep.STAGED)
+            mutations.withMutation { correct(collectionId, documentId, record) }
             embedOrRefuse(record, checkNotNull(resolved))
             observe(RestoreStep.EMBEDDED)
             val publicationId = publication.publish(documentId, expectedRevisionId, record.newRevisionId) { step ->
@@ -356,6 +364,29 @@ class RevisionRestoreService(
      * What the embedder threw may carry a provider's text, so it is kept as the cause for the log and never
      * reaches the caller: the refusal's code and its curated sentence are the whole answer.
      */
+    /**
+     * Corrects the restored pages from their readings with today's list, and chunks the pages that changed. A page
+     * the corrections rewrote has no passages, and without a tokenizer it could not get any, so the restore is
+     * refused rather than published with a page nobody can search.
+     */
+    private fun correct(collectionId: CollectionId, documentId: DocumentId, record: RevisionRestoreRecord) {
+        val corrector = corrector ?: return
+        corrector.correct(collectionId, documentId, record.newRevisionId)
+        val chunked = revisions.chunks(record.newRevisionId).mapTo(mutableSetOf()) { it.unitOrdinal }
+        val unchunked = revisions.pages(record.newRevisionId).filter { it.ordinal !in chunked }
+        if (unchunked.isEmpty()) return
+        val tokenizer = chunker() ?: throw RestoreRefusalException(
+            RestoreRefusalException.EMBEDDING_UNAVAILABLE,
+            "this machine has no embedding model available to prepare the corrected text, so nothing was " +
+                "restored and the document still shows its current text",
+            unavailable = true,
+        )
+        val root = corrector.artifactRoot(collectionId, documentId)
+        unchunked.forEach { page ->
+            revisions.recordPageChunks(record.newRevisionId, page.ordinal, tokenizer.chunkStagedPage(page, documentId, root))
+        }
+    }
+
     private suspend fun embedOrRefuse(record: RevisionRestoreRecord, embedder: DocumentEmbedder) {
         try {
             embed(record, embedder)

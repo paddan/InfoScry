@@ -1,5 +1,6 @@
 package infoscry.jobs
 
+import infoscry.correction.CandidateCorrector
 import infoscry.chunk.Chunker
 import infoscry.config.AppPaths
 import infoscry.domain.Collection
@@ -102,6 +103,8 @@ class RescanJobHandler internal constructor(
     private val afterInitialProgressReported: suspend (JobId) -> Unit = {},
     /** A narrow seam immediately before publication changes the document's authoritative revision. */
     private val beforeCandidatePublication: suspend (JobId) -> Unit = {},
+    /** Applies the collection's corrections to the staged reading before it is chunked. */
+    private val corrector: CandidateCorrector? = null,
 ) : JobHandler {
 
     /** What a staged reading becomes: the page it is decided to be, its passages, and the publication. */
@@ -425,6 +428,8 @@ class RescanJobHandler internal constructor(
         stage.run(STAGE_CHUNK) {
             operations.advance(operation.operationId, OcrOperationStage.CHUNKING)
             updateDocumentStatus(operation, DocumentStatus.CHUNKING)
+            // From the reading, so a resumed attempt corrects the same pages to the same text.
+            corrector?.correct(document.collectionId, document.id, candidate)
         }
         phases.chunkCandidate(
             operation.operationId,
