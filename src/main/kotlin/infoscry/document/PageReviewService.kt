@@ -374,6 +374,7 @@ class PageReviewService(
             OcrEngine.TESSERACT -> "Tesseract"
             OcrEngine.SURYA -> "Surya"
             OcrEngine.LLM -> snapshot.transcriptionProfileRevisionId?.let(profileRevisionOf)?.let { "LLM · ${it.model}" }
+            OcrEngine.NONE -> "No OCR"
         }
     }
 

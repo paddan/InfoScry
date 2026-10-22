@@ -94,7 +94,7 @@ class ImportCommand(
         help = "Files or directories to import",
     ).multiple(required = true)
 
-    private val methodOption by option("--method", help = "Reading method: tesseract, surya, or llm:<profileId>")
+    private val methodOption by option("--method", help = "Reading method: none, tesseract, surya, or llm:<profileId>")
     private val yesFlag by option("--yes", help = "Confirm sending the previewed pages to an external endpoint").flag()
 
     private val waitFlag by option(
@@ -265,6 +265,10 @@ class ImportCommand(
     }
 
     private fun confirmPreview(preview: infoscry.jobs.ImportPreview, method: String) {
+        if (method == infoscry.ocr.ReadingMethod.None.id) {
+            echo("No OCR: no page is read; each page keeps the document's own text.", err = true)
+            return
+        }
         val count = (if (preview.atLeast) "at least " else "") + preview.totalPages
         val action = if (preview.external) "Send" else "Read"
         echo("$action $count pages ${if (preview.external) "to" else "on"} ${preview.destination} with $method.", err = true)

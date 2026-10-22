@@ -17,6 +17,7 @@ import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionInput
 import infoscry.extract.ExtractionSettings
 import infoscry.extract.ExtractionSink
+import infoscry.extract.PAGES_WITHOUT_TEXT_METADATA
 import infoscry.extract.PdfExtractor
 import infoscry.extract.UnitBoundary
 import infoscry.extract.UnsupportedMediaTypeException
@@ -222,7 +223,8 @@ internal class DocumentIngest(
             pipeline.registry.extract(input, mediaType.value).collect { event ->                when (event) {
                     is ExtractionEvent.Finished -> {
                         finished = true
-                        keptWithoutReading = event.metadata.containsKey(PdfExtractor.EMPTY_READING_PAGES_METADATA)
+                        keptWithoutReading = event.metadata.containsKey(PdfExtractor.EMPTY_READING_PAGES_METADATA) ||
+                            event.metadata.containsKey(PAGES_WITHOUT_TEXT_METADATA)
                     }
                     is ExtractionEvent.UnitFailed -> lastFailureCode = event.code
                     // An announcement changes what the document's progress reads, not what this attempt

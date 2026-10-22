@@ -51,14 +51,14 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `a fresh database gets the baseline at version one`() {
+    fun `a fresh database gets the baseline at version two`() {
         newDatabase().use { database ->
             assertEquals(0, database.userVersion())
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(1, database.userVersion())
-            assertEquals(1, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(2, database.userVersion())
+            assertEquals(2, SchemaMigrator.SUPPORTED_VERSION)
             assertEquals(1, count(database, "schema_version"))
         }
     }
@@ -69,7 +69,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(1, database.userVersion())
+            assertEquals(2, database.userVersion())
             assertEquals(1, count(database, "schema_version"), "the baseline must not be applied twice")
         }
     }
@@ -143,6 +143,181 @@ class SchemaMigratorTest {
                 }
             }
             assertTrue(plan.contains("page_text_revisions_unit"), "the citation-to-document resolver must not scan every page: $plan")
+        }
+    }
+
+    /** The baseline as version 1 shipped it: a collection's engine could not be NONE. */
+    private fun versionOneDatabase(): Database {
+        val database = newDatabase()
+        val baseline = requireNotNull(javaClass.classLoader.getResourceAsStream("db/migration/001_baseline.sql"))
+            .use { it.readBytes().decodeToString() }
+        val versionOne = baseline.replace(
+            "CHECK (ocr_engine IN ('TESSERACT', 'SURYA', 'LLM', 'NONE'))",
+            "CHECK (ocr_engine IN ('TESSERACT', 'SURYA', 'LLM'))",
+        )
+        check(versionOne != baseline) { "the baseline no longer carries the version 2 engine constraint" }
+        database.transaction { connection ->
+            connection.createStatement().use { statement ->
+                splitSqlStatements(versionOne).forEach(statement::execute)
+                statement.execute("PRAGMA user_version = 1")
+                statement.execute("INSERT INTO schema_version (version, applied_at) VALUES (1, '2026-01-01T00:00:00Z')")
+            }
+        }
+        val now = "2026-01-01T00:00:00Z"
+        database.transaction { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute(
+                    "INSERT INTO ocr_profile_revisions (revision_id, profile_id, sequence, provider, model, " +
+                        "context_window, max_output_tokens, input_price_per_million, output_price_per_million, " +
+                        "created_at) VALUES ('r1', 'p1', 1, 'OPENAI_COMPATIBLE', 'vision', 1000, 100, 0, 0, '$now')",
+                )
+                statement.execute(
+                    "INSERT INTO ocr_profiles (id, name, enabled, current_revision_id, created_at, updated_at) " +
+                        "VALUES ('p1', 'Vision', 1, 'r1', '$now', '$now')",
+                )
+                statement.execute(
+                    "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at, " +
+                        "ocr_engine, ocr_transcription_profile_id) " +
+                        "VALUES ('c1', 'Case', 'swe', 'ACTIVE', '$now', '$now', 'LLM', 'p1')",
+                )
+                statement.execute(
+                    "INSERT INTO collection_prompts (id, collection_id, role, name, body, version, created_at, " +
+                        "updated_at) VALUES ('q1', 'c1', 'ASK', 'Mine', 'Answer briefly.', 1, '$now', '$now')",
+                )
+                statement.execute("UPDATE collections SET ask_prompt_id = 'q1' WHERE id = 'c1'")
+                statement.execute(
+                    "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, " +
+                        "original_path, size_bytes, status, created_at, updated_at) VALUES ('d1', 'c1', 'abc', " +
+                        "'application/pdf', 'a.pdf', '/tmp/a.pdf', 3, 'QUEUED', '$now', '$now')",
+                )
+            }
+        }
+        return database
+    }
+
+    private fun collectionColumns(database: Database): List<String?> = database.read { connection ->
+        connection.createStatement().use { statement ->
+            statement.executeQuery(
+                "SELECT ocr_engine, ocr_transcription_profile_id, ask_prompt_id, ocr_languages FROM collections " +
+                    "WHERE id = 'c1'",
+            ).use { rows ->
+                rows.next()
+                (1..4).map(rows::getString)
+            }
+        }
+    }
+
+    private fun foreignKeyViolations(database: Database): Int = database.read { connection ->
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA foreign_key_check").use { rows ->
+                var violations = 0
+                while (rows.next()) violations++
+                violations
+            }
+        }
+    }
+
+    private fun setEngineToNone(database: Database) = database.transaction { connection ->
+        connection.createStatement().use { statement ->
+            statement.execute("UPDATE collections SET ocr_engine = 'NONE', ocr_transcription_profile_id = NULL")
+        }
+    }
+
+    @Test
+    fun `a version 1 database upgrades to version 2 with every row and reference intact`() {
+        versionOneDatabase().use { database ->
+            val counts = listOf("collections", "collection_prompts", "documents", "ocr_profiles").map { count(database, it) }
+
+            SchemaMigrator(database).migrate()
+
+            assertEquals(2, database.userVersion())
+            assertEquals(counts, listOf("collections", "collection_prompts", "documents", "ocr_profiles").map { count(database, it) })
+            assertEquals(listOf("LLM", "p1", "q1", "swe"), collectionColumns(database))
+            assertEquals(0, foreignKeyViolations(database))
+            assertEquals("1", pragma(database, "foreign_keys"), "foreign keys were left switched off")
+            assertEquals(2, count(database, "schema_version"))
+        }
+    }
+
+    @Test
+    fun `a foreign key violation already in the database does not block the upgrade`() {
+        versionOneDatabase().use { database ->
+            database.read { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute("PRAGMA foreign_keys = OFF")
+                    statement.execute(
+                        "INSERT INTO jobs (id, collection_id, type, state, created_at, updated_at) " +
+                            "VALUES ('orphan', 'gone', 'IMPORT', 'FAILED', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    )
+                    statement.execute("PRAGMA foreign_keys = ON")
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+
+            assertEquals(2, database.userVersion())
+            assertEquals(1, foreignKeyViolations(database), "the upgrade changed the violation it found")
+        }
+    }
+
+    @Test
+    fun `an upgraded database stores NONE as a collection's engine`() {
+        versionOneDatabase().use { database ->
+            SchemaMigrator(database).migrate()
+
+            setEngineToNone(database)
+
+            assertEquals("NONE", collectionColumns(database).first())
+        }
+    }
+
+    @Test
+    fun `upgrading twice changes nothing`() {
+        versionOneDatabase().use { database ->
+            SchemaMigrator(database).migrate()
+            SchemaMigrator(database).migrate()
+
+            assertEquals(2, database.userVersion())
+            assertEquals(2, count(database, "schema_version"))
+            assertEquals(listOf("LLM", "p1", "q1", "swe"), collectionColumns(database))
+        }
+    }
+
+    @Test
+    fun `a failure inside the upgrade leaves version 1 intact`() {
+        versionOneDatabase().use { database ->
+            assertFailsWith<IllegalStateException> {
+                SchemaMigrator(database, afterCopy = { error("interrupted") }).migrate()
+            }
+
+            assertEquals(1, database.userVersion())
+            assertEquals(listOf("LLM", "p1", "q1", "swe"), collectionColumns(database))
+            assertFalse("collections_v2" in tableNames(database))
+            assertEquals("1", pragma(database, "foreign_keys"), "foreign keys were left switched off")
+            assertFailsWith<java.sql.SQLException> { setEngineToNone(database) }
+
+            SchemaMigrator(database).migrate()
+
+            assertEquals(2, database.userVersion())
+            setEngineToNone(database)
+        }
+    }
+
+    @Test
+    fun `a new database starts at version 2 and accepts NONE`() {
+        newDatabase().use { database ->
+            SchemaMigrator(database).migrate()
+
+            assertEquals(2, database.userVersion())
+            val now = "2026-01-01T00:00:00Z"
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute(
+                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at, " +
+                            "ocr_engine) VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now', 'NONE')",
+                    )
+                }
+            }
         }
     }
 

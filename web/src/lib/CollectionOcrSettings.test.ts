@@ -16,6 +16,7 @@ const collection = (defaultMethod: string | null = 'tesseract'): Collection => (
 const methods: ReadingMethodList = { default: 'tesseract', methods: [
   { method: 'tesseract', label: 'Tesseract', destination: 'this machine', available: true, unavailableReason: null, external: false },
   { method: 'surya', label: 'Surya', destination: 'this machine', available: false, unavailableReason: 'Model is missing', external: false },
+  { method: 'none', label: "No OCR (use the document's own text)", destination: 'this machine', available: true, unavailableReason: null, external: false },
 ] };
 
 describe('CollectionOcrSettings', () => {
@@ -45,6 +46,14 @@ describe('CollectionOcrSettings', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
     await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'swe', defaultMethod: 'tesseract' }));
     expect(onChanged).toHaveBeenCalledOnce();
+  });
+
+  it('offers and saves No OCR as the default', async () => {
+    render(CollectionOcrSettings, { collection: collection(), onChanged: vi.fn() });
+    await screen.findByRole('option', { name: "No OCR (use the document's own text)" });
+    await fireEvent.change(screen.getByLabelText('Default reading method'), { target: { value: 'none' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
+    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng', defaultMethod: 'none' }));
   });
 
   it('saves language when no default method is stored without sending an empty default', async () => {

@@ -35,8 +35,10 @@
   $: pageCount = preview === null ? null : 'totalPages' in preview ? preview.totalPages : preview.pageTotal ?? preview.externalPageUpperBound ?? null;
   $: shownAtLeast = preview !== null && 'atLeast' in preview && preview.atLeast;
   $: documentPageCount = preview !== null && !('files' in preview) && typeof preview.documentPages === 'number' ? preview.documentPages : null;
+  // No OCR reads no page by design, so a zero total is what it is for rather than nothing to do.
+  $: usesOwnText = selectedMethod === 'none';
   // A rescan that keeps every page's text reads none; it may report no total, or a total of zero.
-  $: nothingToRead = preview !== null && !('files' in preview) && (pageCount === 0 || ((preview.pageTotal ?? 0) === 0 && documentPageCount !== null && documentPageCount > 0));
+  $: nothingToRead = !usesOwnText && preview !== null && !('files' in preview) && (pageCount === 0 || ((preview.pageTotal ?? 0) === 0 && documentPageCount !== null && documentPageCount > 0));
   $: importHasNoPagesToRead = preview !== null && 'files' in preview && pageCount === 0;
   $: explicitPages = preview !== null && !('files' in preview) && preview.selection?.mode === 'explicit'
     ? preview.selection.ordinals.map((ordinal) => ordinal + 1)
@@ -50,7 +52,9 @@
     : selectedOption?.destination ?? 'this machine';
   $: unknownExternalTotal = preview !== null && 'files' in preview && preview.external && preview.atLeast;
   $: displayedCost = unknownExternalTotal ? null : costTextFor(preview);
-  $: confirmationLabel = nothingToRead
+  $: confirmationLabel = usesOwnText
+    ? request.kind === 'import' ? "Import with the document's own text" : "Use the document's own text"
+    : nothingToRead
     ? 'No pages to read'
     : importHasNoPagesToRead
       ? 'Import without image reading'
@@ -224,7 +228,9 @@
         {#if 'files' in preview}
           <ul>{#each preview.files as file (file.path)}<li>{file.path}: {file.pages === null ? file.reason ?? 'page count unknown' : typeof file.documentPages === 'number' && file.documentPages > file.pages ? `${file.pages} of ${file.documentPages} pages will be read` : `${file.pages} pages`}</li>{/each}</ul>
         {/if}
-        {#if nothingToRead}
+        {#if usesOwnText}
+          <p>No page is read. Each page keeps the document's own text; pages without text are kept without text.</p>
+        {:else if nothingToRead}
           <p>No page needs reading; the document keeps its text.</p>
         {:else if importHasNoPagesToRead}
           <p>No pages need image reading; the files will still be imported.</p>

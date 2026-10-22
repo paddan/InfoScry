@@ -17,6 +17,9 @@ sealed interface ReadingMethod {
 
     data object Tesseract : ReadingMethod { override val id: String = "tesseract" }
     data object Surya : ReadingMethod { override val id: String = "surya" }
+
+    /** No OCR: every page keeps the text the document itself carries, and nothing is rendered or read. */
+    data object None : ReadingMethod { override val id: String = "none" }
     data class Llm(val profileId: String) : ReadingMethod {
         init { require(profileId.isNotBlank()) { "an LLM reading method needs a profile id" } }
         override val id: String get() = "llm:$profileId"
@@ -27,6 +30,7 @@ sealed interface ReadingMethod {
         fun parse(id: String): ReadingMethod = when {
             id == Tesseract.id -> Tesseract
             id == Surya.id -> Surya
+            id == None.id -> None
             id.startsWith("llm:") && id.substringAfter(':').isNotBlank() -> Llm(id.substringAfter(':'))
             else -> throw IllegalArgumentException("unknown reading method")
         }

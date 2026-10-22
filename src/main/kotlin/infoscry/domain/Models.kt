@@ -299,6 +299,7 @@ data class Collection(
         defaultMethod = when (ocrEngine) {
             infoscry.ocr.OcrEngine.TESSERACT -> infoscry.ocr.ReadingMethod.Tesseract
             infoscry.ocr.OcrEngine.SURYA -> infoscry.ocr.ReadingMethod.Surya
+            infoscry.ocr.OcrEngine.NONE -> infoscry.ocr.ReadingMethod.None
             infoscry.ocr.OcrEngine.LLM -> ocrTranscriptionProfileId
                 ?.takeIf(String::isNotBlank)
                 ?.let(infoscry.ocr.ReadingMethod::Llm)

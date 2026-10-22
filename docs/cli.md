@@ -113,8 +113,9 @@ its top level only; pass `--recursive` to descend into its subdirectories. With
 document (and exits nonzero if any failed). Without a running server, the
 import runs in this process regardless of `--wait`.
 
-`--method tesseract|surya|llm:<profileId>` selects the reading method; without it
-the collection default is used. The command prints pages and destination before
+`--method none|tesseract|surya|llm:<profileId>` selects the reading method; without it
+the collection default is used. `none` (No OCR) reads no page: each page keeps the
+document's own text, and a page without text is kept without text. The command prints pages and destination before
 starting. An external method asks for confirmation; `--yes` confirms the shown
 pages without a prompt. EOF or a negative answer aborts before a job is queued.
 Repeating the same command returns its active or completed job. After `FAILED`

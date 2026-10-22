@@ -99,6 +99,35 @@ class ImageExtractor(
             return@flow
         }
 
+        if (!input.settings.readsPageImages()) {
+            // No OCR: a picture carries no text of its own, so it is kept as one page with no text and
+            // counted, and nothing is decoded or read.
+            input.boundary.unit {
+                if (input.isCommitted(UNIT_KEY)) return@unit
+                emit(
+                    ExtractionEvent.UnitReady(
+                        key = UNIT_KEY,
+                        ordinal = ORDINAL,
+                        unit = ContentUnitDraft(
+                            locator = SourceLocation.Image(input.originalFilename),
+                            extractedText = "",
+                            searchText = "",
+                            method = ExtractionMethod.DIRECT_TEXT,
+                        ),
+                    ),
+                )
+            }
+            input.boundary.unit {
+                emit(
+                    ExtractionEvent.Finished(
+                        metadata = mapOf(IMAGES_METADATA to ONE_UNIT.toString(), PAGES_WITHOUT_TEXT_METADATA to ONE_UNIT.toString()),
+                        totalUnits = ONE_UNIT,
+                    ),
+                )
+            }
+            return@flow
+        }
+
         var abortCode: String? = null
         var confidence: Double? = null
         input.boundary.unit {

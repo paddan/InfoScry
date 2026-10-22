@@ -5,6 +5,7 @@ export const ENGINE_LABELS: Record<OcrEngine, string> = {
   TESSERACT: 'Tesseract (local)',
   SURYA: 'Surya (local)',
   LLM: 'Image model profile',
+  NONE: 'No OCR (document text)',
 };
 
 export const IMPORT_MODE_LABELS: Record<OcrImportMode, string> = {

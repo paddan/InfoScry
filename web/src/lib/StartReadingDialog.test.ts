@@ -15,6 +15,7 @@ const methods: ReadingMethodList = { default: 'surya', methods: [
   { method: 'surya', label: 'Surya', destination: 'this machine', available: true, unavailableReason: null, external: false },
   { method: 'llm:p1', label: 'Cloud OCR', destination: 'api.example.com', available: false, unavailableReason: 'Key variable is missing', external: true },
   { method: 'llm:p2', label: 'LLM: Unchecked', destination: 'api.example.com', available: false, unavailableReason: 'This OCR profile has not passed its image check.', external: true },
+  { method: 'none', label: "No OCR (use the document's own text)", destination: 'this machine', available: true, unavailableReason: null, external: false },
 ] };
 const importPreview: ImportPreview = {
   files: [{ path: '/data/report.pdf', pages: 48, reason: null }], totalPages: 48, atLeast: false,
@@ -182,6 +183,39 @@ describe('StartReadingDialog', () => {
     expect(confirm.disabled).toBe(true);
     await fireEvent.click(confirm);
     expect(api.startRescan).not.toHaveBeenCalled();
+  });
+
+  it('imports with No OCR, saying that no page is read', async () => {
+    vi.mocked(api.previewImport).mockResolvedValue({
+      ...importPreview,
+      files: [{ path: '/data/report.pdf', pages: 0, reason: null, documentPages: 3 }],
+      totalPages: 0,
+    });
+    const onstarted = vi.fn();
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
+    const select = await screen.findByLabelText('Reading method') as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: 'none' } });
+    await waitFor(() => expect(api.previewImport).toHaveBeenLastCalledWith(expect.objectContaining({ method: 'none' })));
+
+    expect(await screen.findByText('No page is read. Each page keeps the document\'s own text; pages without text are kept without text.')).toBeTruthy();
+    expect(screen.getByText('/data/report.pdf: 0 of 3 pages will be read')).toBeTruthy();
+    const confirm = screen.getByRole('button', { name: "Import with the document's own text" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(api.startImport).toHaveBeenCalledWith(expect.objectContaining({ method: 'none' })));
+  });
+
+  it('scans again with No OCR although no page is read', async () => {
+    vi.mocked(api.previewRescan).mockResolvedValue(rescanPreview({ pageTotal: 0, externalPageUpperBound: 0, documentPages: 3 }));
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'rescan', documentId: 'doc-1' }, onstarted: vi.fn(), oncancel: vi.fn() });
+    const select = await screen.findByLabelText('Reading method') as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: 'none' } });
+
+    expect(await screen.findByText('No page is read. Each page keeps the document\'s own text; pages without text are kept without text.')).toBeTruthy();
+    const confirm = await screen.findByRole('button', { name: "Use the document's own text" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(api.startRescan).toHaveBeenCalledTimes(1));
   });
 
   it('still imports files when no page needs image reading', async () => {

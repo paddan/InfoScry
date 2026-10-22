@@ -5,6 +5,7 @@ import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.CollectionId
+import infoscry.domain.ExtractionMethod
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -15,6 +16,7 @@ import infoscry.document.RescanPageSource
 import infoscry.document.RevisionPublicationService
 import infoscry.embedding.DocumentEmbedder
 import infoscry.extract.OcrUnavailableException
+import infoscry.extract.PdfPageCandidate
 import infoscry.library.ManagedLibrary
 import infoscry.ocr.CandidateRevisionPhases
 import infoscry.ocr.ExternalPageAllowanceExceededException
@@ -212,7 +214,9 @@ class RescanJobHandler internal constructor(
             revisionId = snapshot.transcriptionProfileRevisionId,
             dispatchStage = OcrDispatchStage.TRANSCRIPTION,
         )
-        val engine = engineFor(snapshot.engine, snapshot, transcriptionDispatch)
+        // No OCR reads no page: it has no engine, no runtime to compare and no positioning pass.
+        val readsImages = snapshot.engine != infoscry.ocr.OcrEngine.NONE
+        val engine = if (!readsImages) null else engineFor(snapshot.engine, snapshot, transcriptionDispatch)
             ?: fail(
                 stage,
                 operation,
@@ -227,8 +231,8 @@ class RescanJobHandler internal constructor(
         // weights or an inference server that changed between two attempts makes the pages an earlier attempt
         // committed readings of another runtime: they are not reused, and the attempt stops with the remedy
         // that names what has to happen (a new preview, and an operation admitted under the new identity).
-        val runtimeIdentity = engine.runtimeIdentity()
-        if (runtimeIdentity != snapshot.runtimeIdentity) {
+        val runtimeIdentity = engine?.runtimeIdentity()
+        if (engine != null && runtimeIdentity != snapshot.runtimeIdentity) {
             fail(
                 stage,
                 operation,
@@ -245,7 +249,11 @@ class RescanJobHandler internal constructor(
         // needs this; a build with no Tesseract engine configured answers null, which is "no local
         // positioning available" rather than a failure.
         val positioningEngine: PageOcrEngine? =
-            if (snapshot.engine == infoscry.ocr.OcrEngine.TESSERACT) null else engineFor(infoscry.ocr.OcrEngine.TESSERACT, snapshot, null)
+            if (!readsImages || snapshot.engine == infoscry.ocr.OcrEngine.TESSERACT) {
+                null
+            } else {
+                engineFor(infoscry.ocr.OcrEngine.TESSERACT, snapshot, null)
+            }
         val baselineRevisionId = operation.baseRevisionId
         if (revisions.activeRevisionId(document.id) != baselineRevisionId) {
             // Another publication replaced the reading this operation was admitted against. Comparing pages
@@ -278,6 +286,7 @@ class RescanJobHandler internal constructor(
                 renderDpi = snapshot.renderDpi,
                 committedPages = revisions.pages(candidate).filter { it.producerRevisionId == candidate }.associateBy { it.ordinal },
                 selection = operation.selection,
+                readsImages = readsImages,
             )
         }
         val pagesToRead = pageImages.filter(RescanPage::read)
@@ -295,12 +304,15 @@ class RescanJobHandler internal constructor(
         // retried below. Count failures in this attempt only, while successful candidate checkpoints remain
         // durable and are carried into `committed` above.
         var failed = 0
+        // Pages a No-OCR rescan could not take from the managed copy's own text layer.
+        var keptWithoutText = 0
         stage.run(STAGE_OCR) {
             operations.advance(operation.operationId, OcrOperationStage.OCR)
             updateDocumentStatus(operation, DocumentStatus.OCR)
             operations.recordProgress(
                 operationId = operation.operationId,
-                pageTotal = pagesToRead.size,
+                // A rescan that reads no page (No OCR) has no reading total; the row keeps none rather than 0.
+                pageTotal = pagesToRead.size.takeIf { it > 0 },
                 committed = committed,
                 failed = failed,
             )
@@ -321,6 +333,24 @@ class RescanJobHandler internal constructor(
                 // treating the preserved page as committed reading progress or as a failure.
                 val alreadyPreserved = revisions.page(candidate, page.ordinal)
                     ?.let { staged -> staged.unitId.value == page.unitId } == true
+                // An explicit page set limits No OCR to the chosen pages; the others keep their published text.
+                if (!readsImages && operation.selection.selects(page.ordinal, true)) {
+                    // No OCR: a usable text layer replaces the page's published text; a page without one keeps
+                    // what the document publishes for it, or, with nothing published, whatever its layer has.
+                    val ownText = page.ownText
+                    val usable = ownText != null && !PdfPageCandidate.needsOcr(ownText)
+                    if (!usable) keptWithoutText++
+                    if (!alreadyPreserved) {
+                        stage.run(STAGE_COMMIT) {
+                            when {
+                                usable -> stageOwnText(page, checkNotNull(ownText), document, candidate, documentArtifactRoot)
+                                !stageBaselineText(page, document, candidate, documentArtifactRoot) ->
+                                    stageOwnText(page, ownText.orEmpty(), document, candidate, documentArtifactRoot)
+                            }
+                        }
+                    }
+                    continue
+                }
                 if (!alreadyPreserved) {
                     stage.run(STAGE_COMMIT) {
                         stageBaselineText(page, document, candidate, documentArtifactRoot)
@@ -341,7 +371,7 @@ class RescanJobHandler internal constructor(
             }
             completed++
             stage.reportCurrentItem(pageName(completed, pagesToRead.size))
-            val outcome = read(page, engine, snapshot)
+            val outcome = read(page, checkNotNull(engine) { "a page was selected for reading without an engine" }, snapshot)
             val stagedPage = outcome.reading?.let { reading ->
                 phases.acceptedPageOf(
                     page = page,
@@ -422,7 +452,7 @@ class RescanJobHandler internal constructor(
             stage.run(STAGE_RECORD) {
                 updateDocumentStatus(
                     operation,
-                    if (failed == 0) DocumentStatus.COMPLETE else DocumentStatus.COMPLETE_WITH_WARNINGS,
+                    if (failed == 0 && keptWithoutText == 0) DocumentStatus.COMPLETE else DocumentStatus.COMPLETE_WITH_WARNINGS,
                 )
             }
             LOGGER.atInfo()
@@ -477,6 +507,38 @@ class RescanJobHandler internal constructor(
             ),
         )
         return true
+    }
+
+    /**
+     * Stages [text], the managed copy's own text layer for [page], as the candidate's direct-text page.
+     *
+     * Used by a No-OCR rescan. The page is this candidate's own product, so a resumed attempt recognises it as
+     * already staged, and it names no image and no artifact, because nothing was rendered or read.
+     */
+    private fun stageOwnText(
+        page: RescanPage,
+        text: String,
+        document: Document,
+        candidate: String,
+        documentArtifactRoot: Path,
+    ) {
+        revisions.appendPage(
+            candidate,
+            phases.draftOf(
+                page = page.copy(image = null, read = false),
+                document = document,
+                stagedPage = StagedCandidatePage(
+                    text = text,
+                    extractionMethod = ExtractionMethod.DIRECT_TEXT,
+                    approval = PageApproval.APPROVED,
+                    confidence = null,
+                    artifactRelativePath = null,
+                    artifactSha256 = null,
+                ),
+                documentArtifactRoot = documentArtifactRoot,
+                producerRevisionId = candidate,
+            ),
+        )
     }
 
     /** What reading one page produced: a usable reading, or nothing this attempt may stage as text. */

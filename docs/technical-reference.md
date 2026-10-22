@@ -47,10 +47,12 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 The SQLite schema is one baseline,
 [001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql), applied
 to an empty database by [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
-and recorded as `PRAGMA user_version = 1`. It is edited in place when the schema
-changes: there are no incremental migrations and no upgrade path, because no
-deployed archive has to be preserved. A database whose version is newer than the
-build is refused rather than written to.
+and recorded as `PRAGMA user_version = 2`. The baseline always describes the
+current schema. There is one upgrade step: a version 1 database is upgraded to
+version 2 at startup by rebuilding `collections` so a collection's engine may be
+`NONE` (No OCR), in one transaction with foreign keys checked before it commits.
+A database whose version is newer than the build is refused rather than written
+to.
 
 Import deduplicates by collection and SHA-256. External originals are never
 modified or deleted. Content-unit IDs remain stable; extraction results and
@@ -113,6 +115,13 @@ it, and an empty reading on its own never establishes it. A PDF page whose
 raster has ink and whose reading is empty keeps its own text layer (or no
 text) and is counted in the extraction's `empty_reading_pages`, which makes the
 document complete with a warning instead of failing it.
+
+No OCR is the engine `NONE` (method id `none`). It has no `PageOcrEngine`; a
+No-OCR import emits every PDF page as direct text and a picture as one empty
+unit, and counts pages without usable text in `pages_without_text`, which also
+makes the document complete with a warning. A No-OCR rescan stages each page's
+own text layer, keeps the published text of a page whose layer is unusable, and
+records no page total for its operation.
 
 Surya is a vision-language model, so a page is one model call rather than a
 command per line. It is served by `llama-server` from

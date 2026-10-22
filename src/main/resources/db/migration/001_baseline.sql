@@ -33,7 +33,7 @@ CREATE TABLE collections (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     ocr_engine TEXT NOT NULL DEFAULT 'TESSERACT'
-        CHECK (ocr_engine IN ('TESSERACT', 'SURYA', 'LLM')),
+        CHECK (ocr_engine IN ('TESSERACT', 'SURYA', 'LLM', 'NONE')),
     ocr_import_mode TEXT NOT NULL DEFAULT 'FILL_MISSING'
         CHECK (ocr_import_mode IN ('FILL_MISSING', 'CHECK_AND_IMPROVE')),
     ocr_transcription_profile_id TEXT REFERENCES ocr_profiles (id),

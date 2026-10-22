@@ -175,6 +175,28 @@ class CollectionRoutesTest {
     }
 
     @Test
+    fun `a collection can default to No OCR`() = runBlocking {
+        harness.createCollection("No OCR", Credential.BEARER)
+        val id = harness.collectionIdOf("No OCR")
+
+        val response = harness.request(
+            HttpMethod.Patch,
+            "/api/collections/$id/ocr-languages",
+            body = """{"language":"swe","defaultMethod":"none"}""",
+            credential = Credential.CSRF,
+        )
+
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        val saved = harness.context.collectionService.get(CollectionId(id))!!
+        assertEquals(infoscry.ocr.ReadingMethod.None, saved.ocrSettings().defaultMethod)
+        val methods = ApiJson.decodeFromString<ReadingMethodsResponse>(
+            harness.get("/api/collections/$id/reading-methods").bodyAsText(),
+        )
+        assertEquals("none", methods.default)
+        assertTrue(methods.methods.single { it.method == "none" }.available)
+    }
+
+    @Test
     fun `reading method list includes readiness and the collection default`() = runBlocking {
         harness.createCollection("OCR methods", Credential.BEARER)
         val id = harness.collectionIdOf("OCR methods")

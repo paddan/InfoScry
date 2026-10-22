@@ -154,6 +154,7 @@ class CollectionStore(private val database: Database) {
             val (engine, profileId) = when (val method = settings.defaultMethod) {
                 infoscry.ocr.ReadingMethod.Tesseract -> OcrEngine.TESSERACT to null
                 infoscry.ocr.ReadingMethod.Surya -> OcrEngine.SURYA to null
+                infoscry.ocr.ReadingMethod.None -> OcrEngine.NONE to null
                 is infoscry.ocr.ReadingMethod.Llm -> OcrEngine.LLM to method.profileId
             }
             if (existing.ocrLanguages == language && existing.ocrEngine == engine &&

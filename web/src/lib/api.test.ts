@@ -69,12 +69,14 @@ describe('collection response decoding', () => {
     const legacyRows = [
       { id: 'surya', name: 'Surya', ocrLanguages: 'eng', ocrEngine: 'SURYA', ocrTranscriptionProfileId: 'stale', createdAt: '', updatedAt: '', lifecycle: 'ACTIVE', documentCount: 0 },
       { id: 'llm-no-profile', name: 'Local fallback', ocrLanguages: 'eng', ocrEngine: 'LLM', ocrTranscriptionProfileId: null, createdAt: '', updatedAt: '', lifecycle: 'ACTIVE', documentCount: 0 },
+      { id: 'no-ocr', name: 'Own text', ocrLanguages: 'eng', ocrEngine: 'NONE', ocrTranscriptionProfileId: null, createdAt: '', updatedAt: '', lifecycle: 'ACTIVE', documentCount: 0 },
     ];
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ collections: legacyRows }), { status: 200 })));
     const collections = await listCollections();
     expect(collections.map(({ id, language, defaultMethod }) => ({ id, language, defaultMethod }))).toEqual([
       { id: 'surya', language: 'eng', defaultMethod: 'surya' },
       { id: 'llm-no-profile', language: 'eng', defaultMethod: 'tesseract' },
+      { id: 'no-ocr', language: 'eng', defaultMethod: 'none' },
     ]);
   });
 });

@@ -15,6 +15,15 @@ class OcrReadingMethodCatalog(
         val local = listOf(
             local(ReadingMethod.Tesseract, "Tesseract"),
             local(ReadingMethod.Surya, "Surya"),
+            // Needs no tool, model or profile, so it is never unavailable.
+            MethodAvailability(
+                method = ReadingMethod.None,
+                label = "No OCR (use the document's own text)",
+                destination = "this machine",
+                available = true,
+                unavailableReason = null,
+                external = false,
+            ),
         )
         val llm = profiles.list().sortedBy { it.name.lowercase() }.map { profile ->
             val method = ReadingMethod.Llm(profile.id)
@@ -67,6 +76,7 @@ private fun localMethodUnavailableReason(method: ReadingMethod): String? = when 
         null
     }
     is ReadingMethod.Llm -> null
+    ReadingMethod.None -> null
 }
 
 private fun findExecutable(name: String): Path? = System.getenv("PATH")

@@ -72,6 +72,19 @@ class ImportCommandProcessTest {
     }
 
     @Test
+    fun `No OCR says that each page keeps the document's own text`() {
+        val source = writeSource("own-text.txt", "Kept as it is.\n")
+
+        val result = runHarness(
+            "import", "--data-dir", dataDir.toString(), "--collection", "Default",
+            "--method", "none", "--json", source.toString(),
+        )
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertContains(result.stderr, "No OCR: no page is read; each page keeps the document's own text.")
+    }
+
+    @Test
     fun `a foreground import stays alive while the work is blocked and releases the directory when it ends`() {
         val source = writeSource("minutes.txt", "Ett protokoll.\n")
         val process = startHarness(gated = true, "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", source.toString())

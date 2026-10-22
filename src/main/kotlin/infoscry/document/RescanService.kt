@@ -12,6 +12,7 @@ import infoscry.domain.DocumentId
 import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.extract.PageCounter
+import infoscry.extract.PdfBoxPageTextReader
 import infoscry.extract.DefaultPageCounter
 import infoscry.extract.PdfExtractor
 import infoscry.extract.PdfPageRenderer
@@ -128,6 +129,8 @@ data class RescanPage(
     val image: PageImage?,
     val baseline: RevisionPageText?,
     val read: Boolean = true,
+    /** A No-OCR rescan's page text as the managed copy carries it; null when the page is read or has none. */
+    val ownText: String? = null,
 ) {
 
     init {
@@ -203,8 +206,12 @@ class RescanPageSource(
         mediaType: String,
         baseline: Map<Int, RevisionPageText>,
         selection: RescanSelection = RescanSelection.Automatic,
+        readsImages: Boolean = true,
     ): PageCensus = when {
-        mediaType == PDF_MEDIA_TYPE -> pdfCensus(managedPath, baseline, selection)
+        mediaType == PDF_MEDIA_TYPE -> pdfCensus(managedPath, baseline, selection, readsImages)
+        // No OCR reads no page of a picture either; its published text is kept.
+        mediaType in PICTURE_MEDIA_TYPES && !readsImages ->
+            PageCensus(documentPages = pageCount(managedPath, mediaType) ?: 1, pagesToRead = 0)
         mediaType in PICTURE_MEDIA_TYPES -> {
             // A picture is one page and is always read; pageCount refuses a picture that is not there.
             val count = pageCount(managedPath, mediaType) ?: 1
@@ -220,6 +227,7 @@ class RescanPageSource(
         managedPath: Path,
         baseline: Map<Int, RevisionPageText>,
         selection: RescanSelection,
+        readsImages: Boolean,
     ): PageCensus {
         val pdf = openPdf(managedPath) ?: throw RescanRefusalException(
             RescanRefusalException.MANAGED_COPY_MISSING,
@@ -228,7 +236,7 @@ class RescanPageSource(
         return pdf.use { container ->
             val canonical = selection.canonicalized(container.numberOfPages)
             val pagesToRead = (1..container.numberOfPages).count { page ->
-                canonical.selects(page - 1, readsPage(container, page, baseline))
+                readsImages && canonical.selects(page - 1, readsPage(container, page, baseline))
             }
             PageCensus(documentPages = container.numberOfPages, pagesToRead = pagesToRead)
         }
@@ -262,6 +270,7 @@ class RescanPageSource(
         renderDpi: Int? = null,
         committedPages: Map<Int, RevisionPageText> = emptyMap(),
         selection: RescanSelection = RescanSelection.Automatic,
+        readsImages: Boolean = true,
     ): List<RescanPage> = when {
         mediaType == PDF_MEDIA_TYPE -> pdfPages(
             document = document,
@@ -272,6 +281,18 @@ class RescanPageSource(
             renderDpi = renderDpi,
             committedPages = committedPages,
             selection = selection,
+            readsImages = readsImages,
+        )
+
+        // No OCR does not open the picture: its one page keeps the document's published text.
+        mediaType in PICTURE_MEDIA_TYPES && !readsImages -> listOf(
+            RescanPage(
+                ordinal = ORDINAL_OF_THE_ONLY_PAGE,
+                unitId = baseline[ORDINAL_OF_THE_ONLY_PAGE]?.unitId?.value ?: PICTURE_KEY,
+                image = null,
+                baseline = baseline[ORDINAL_OF_THE_ONLY_PAGE],
+                read = false,
+            ),
         )
 
         mediaType in PICTURE_MEDIA_TYPES -> listOf(
@@ -299,6 +320,7 @@ class RescanPageSource(
         renderDpi: Int?,
         committedPages: Map<Int, RevisionPageText>,
         selection: RescanSelection,
+        readsImages: Boolean,
     ): List<RescanPage> {
         val pdf = openPdf(managedPath)
             ?: throw RescanRefusalException(
@@ -313,6 +335,22 @@ class RescanPageSource(
                 val ordinal = page - 1
                 val baselinePage = baseline[ordinal]
                 val unitId = baselinePage?.unitId?.value ?: pdfPageKey(page)
+                if (!readsImages) {
+                    // No OCR: nothing is rendered; the page carries the text its own layer holds, which the
+                    // attempt stages in place of the published text when that layer is usable.
+                    return@map RescanPage(
+                        ordinal = ordinal,
+                        unitId = unitId,
+                        image = null,
+                        baseline = baselinePage,
+                        read = false,
+                        ownText = try {
+                            PdfBoxPageTextReader.read(container, page)
+                        } catch (unreadable: IOException) {
+                            null
+                        },
+                    )
+                }
                 val read = selection.selects(ordinal, readsPage(container, page, baseline))
                 if (!read) {
                     return@map RescanPage(
@@ -555,6 +593,7 @@ class RescanService(
             document.mediaType,
             baseline,
             selection,
+            readsImages = method != ReadingMethod.None,
         )
         val frozenSelection = selection.canonicalized(census.documentPages)
         val pageTotal = census.pagesToRead
@@ -670,7 +709,8 @@ class RescanService(
             requireSnapshotStillResolvable(preview.snapshot)
             requirePreviewStillCurrent(preview, collection)
             requireRescanable(document, preview.snapshot)
-            if (preview.pageTotal == 0) {
+            // No OCR reads no page by design: its rescan replaces text from the document's own layer.
+            if (preview.pageTotal == 0 && preview.snapshot.engine != infoscry.ocr.OcrEngine.NONE) {
                 throw RescanRefusalException(
                     RescanRefusalException.NO_PAGES_TO_READ,
                     "No page needs reading; the document keeps its text.",
@@ -902,7 +942,8 @@ class RescanService(
      * has its key. None of it sends a page anywhere.
      */
     private fun requireReadingUsable(snapshot: OcrSettingsSnapshot) {
-        if (engines(snapshot.engine, snapshot, null) == null) {
+        // No OCR reads no page, so it needs no engine.
+        if (snapshot.engine != infoscry.ocr.OcrEngine.NONE && engines(snapshot.engine, snapshot, null) == null) {
             throw RescanRefusalException(
                 RescanRefusalException.ENGINE_UNAVAILABLE,
                 "no ${snapshot.engine} engine is configured in this build, so a rescan with the settings this " +
@@ -1039,6 +1080,7 @@ class RescanService(
         val selectedMethod = when (shown.engine) {
             infoscry.ocr.OcrEngine.TESSERACT -> ReadingMethod.Tesseract
             infoscry.ocr.OcrEngine.SURYA -> ReadingMethod.Surya
+            infoscry.ocr.OcrEngine.NONE -> ReadingMethod.None
             infoscry.ocr.OcrEngine.LLM -> {
                 val revisionId = shown.transcriptionProfileRevisionId
                     ?: refuse("transcription profile", "none", "missing")
@@ -1112,7 +1154,8 @@ class RescanService(
                 )
             }
         }
-        if (snapshot.engine != infoscry.ocr.OcrEngine.LLM) {
+        // No OCR reads nothing anywhere, so it names no destination.
+        if (snapshot.engine != infoscry.ocr.OcrEngine.LLM && snapshot.engine != infoscry.ocr.OcrEngine.NONE) {
             add(
                 OcrNamedDestination(
                     role = OcrProfileRole.TRANSCRIPTION.name,

@@ -65,7 +65,12 @@ class ImportPreviewService internal constructor(
         val method = catalog.require(request.collection, request.method)
         val selected = selectedFiles(request, ignorePatterns(request.collection))
         val filePreviews = selected.map { source ->
-            val readablePages = runCatching { pageCounter.readablePageCount(source.path) }.getOrNull()
+            // No OCR reads no page: every file's pages keep their own text, so none is counted as read.
+            val readablePages = if (request.method == ReadingMethod.None) {
+                0
+            } else {
+                runCatching { pageCounter.readablePageCount(source.path) }.getOrNull()
+            }
             val documentPages = runCatching { pageCounter.pageCount(source.path) }.getOrNull()
             ImportPreviewFile(
                 path = source.path.toString(),
@@ -133,7 +138,7 @@ class ImportPreviewService internal constructor(
 
     private fun hashOfConfirmed(language: String, method: ReadingMethod, sources: List<ConfirmedImportSource>): String {
         val profileRevision = when (method) {
-            ReadingMethod.Tesseract, ReadingMethod.Surya -> "-"
+            ReadingMethod.Tesseract, ReadingMethod.Surya, ReadingMethod.None -> "-"
             is ReadingMethod.Llm -> profiles.get(method.profileId)?.revision?.revisionId
                 ?: throw IllegalArgumentException("the selected OCR profile is unavailable")
         }

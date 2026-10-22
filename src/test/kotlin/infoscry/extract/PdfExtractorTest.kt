@@ -8,6 +8,8 @@ import infoscry.domain.UnitKind
 import infoscry.ocr.OCR_TRANSCRIPTION_PROMPT_VERSION
 import infoscry.ocr.OcrAttemptIdentity
 import infoscry.ocr.OcrEngine
+import infoscry.ocr.ReadingMethod
+import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrSettingsSnapshot
@@ -811,6 +813,69 @@ class PdfExtractorTest {
     }
 
     @Test
+    fun `no OCR reads no page and keeps every page's own text`() {
+        val spy = OcrSpy()
+        val refusingRenderer = PdfPageRenderer { _, page, _, _ -> error("page $page was rendered under No OCR") }
+
+        val events = collect(
+            pdfExtractor(spy, pageRenderer = refusingRenderer),
+            inputFor(fixture(MIXED_NAME), probe(), settings = noOcr()),
+            probe(),
+        )
+
+        assertTrue(spy.readPages.isEmpty(), "No OCR handed a page to the engine")
+        assertTrue(failures(events).isEmpty(), "No OCR failed a page: ${failures(events)}")
+        val units = units(events)
+        assertEquals((MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES + MIXED_UNRENDERABLE_PAGE).sorted(), units.map { pageOf(it.key) })
+        assertTrue(units.all { it.unit.method == ExtractionMethod.DIRECT_TEXT })
+        val finished = assertIs<ExtractionEvent.Finished>(events.last())
+        // The scans and the page too large to render all carry no text layer of their own.
+        assertEquals((MIXED_SCANNED_PAGES.size + 1).toString(), finished.metadata[PAGES_WITHOUT_TEXT_METADATA])
+    }
+
+    @Test
+    fun `no OCR keeps a page's poor text layer`() {
+        val source = writeDocument(directory.resolve("poor.pdf"), listOf(MemoryPage(text = listOf("ab"), scan = true)))
+        val spy = OcrSpy()
+
+        val events = collect(pdfExtractor(spy), inputFor(source, probe(), settings = noOcr()), probe())
+
+        assertTrue(spy.readPages.isEmpty())
+        val unit = units(events).single()
+        assertEquals(ExtractionMethod.DIRECT_TEXT, unit.unit.method)
+        assertContains(unit.unit.extractedText, "ab")
+        assertEquals("1", assertIs<ExtractionEvent.Finished>(events.last()).metadata[PAGES_WITHOUT_TEXT_METADATA])
+    }
+
+    @Test
+    fun `a resumed no-OCR import does not deliver a committed page again`() {
+        val events = collect(
+            pdfExtractor(OcrSpy()),
+            inputFor(fixture(MIXED_NAME), probe(), committed = setOf("page:1"), settings = noOcr()),
+            probe(),
+        )
+
+        assertTrue(units(events).none { it.key == "page:1" }, "the committed page was delivered twice")
+        assertIs<ExtractionEvent.Finished>(events.last())
+    }
+
+    @Test
+    fun `a resumed no-OCR import still counts a committed page without text`() {
+        val events = collect(
+            pdfExtractor(OcrSpy()),
+            inputFor(fixture(MIXED_NAME), probe(), committed = setOf("page:3"), settings = noOcr()),
+            probe(),
+        )
+
+        assertTrue(units(events).none { it.key == "page:3" }, "the committed page was delivered twice")
+        assertEquals(
+            (MIXED_SCANNED_PAGES.size + 1).toString(),
+            assertIs<ExtractionEvent.Finished>(events.last()).metadata[PAGES_WITHOUT_TEXT_METADATA],
+            "a resumed attempt lost the warning for a page committed before it",
+        )
+    }
+
+    @Test
     fun `a page that reads as empty keeps its own text layer`() {
         // A scanned photograph whose hidden text layer is a few stray characters: the layer is too poor to be
         // the page, so the page is read, and the engine finds nothing. What the page itself carried is then
@@ -1174,6 +1239,11 @@ class PdfExtractorTest {
     /** The fingerprint one attempt's checkpoints are keyed by, which is where its artifacts live. */
     private fun fingerprint(settings: ExtractionSettings): ExtractionFingerprint =
         ExtractionFingerprint.of("b".repeat(64), settings)
+
+    /** The settings of a No-OCR attempt: every page keeps the document's own text. */
+    private fun noOcr(): ExtractionSettings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(
+        OcrSettingsSnapshot.of(CollectionOcrSettings("eng", ReadingMethod.None), EXTRACTOR_SCHEMA_VERSION),
+    )
 
     /** The settings an attempt that reads page images even where a text layer exists runs with. */
     private fun checkAndImprove(

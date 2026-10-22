@@ -60,6 +60,7 @@ import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import kotlin.test.Test
 import kotlin.test.assertContains
+import kotlin.test.assertFalse
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -236,6 +237,146 @@ class RescanJobHandlerTest {
                 assertEquals(baseline[0].unitId, staged[0].unitId, "the clean page changed its identity")
                 assertEquals("the new reading of the scanned page", staged[1].extractedText)
             }
+        }
+    }
+
+    @Test
+    fun `a no-OCR rescan preview reads no page`() {
+        withHarness { harness ->
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = "The committee approved the annual budget after a long discussion of the transport plan.",
+                scannedText = "läst sida 2",
+            )
+
+            val preview = harness.previewOf(picture.documentId, method = ReadingMethod.None)
+
+            assertEquals(0, preview.pageTotal)
+            assertEquals(2, preview.documentPages)
+            assertEquals(0, preview.externalAllowance)
+            assertTrue(preview.destinations.isEmpty(), "No OCR named a destination: ${preview.destinations}")
+        }
+    }
+
+    @Test
+    fun `a no-OCR rescan replaces pages with the managed copy's text layer and keeps an unusable page's text`() {
+        withHarness { harness ->
+            val layer = "The committee approved the annual budget after a long discussion of the transport plan."
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = layer,
+                scannedText = "läst sida 2",
+                publishedCleanText = "OCR text of the first page",
+            )
+            val engine = FakePageEngine(readings = listOf("must not be read"))
+
+            val result = harness.rescan(picture, engine = engine, method = ReadingMethod.None)
+
+            assertEquals(0, engine.calls, "No OCR read a page")
+            assertEquals(OcrOperationStage.COMPLETE, result.operation.stage, "${result.operation.errorMessage}")
+            assertEquals(infoscry.domain.DocumentStatus.COMPLETE_WITH_WARNINGS, result.documentStatus)
+            assertNotEquals(picture.baselineRevisionId, result.activeRevisionId, "nothing was published")
+            val pages = harness.publishedPagesOf(picture)
+            assertEquals(listOf(0, 1), pages.map { it.ordinal })
+            assertContains(pages[0].extractedText, "annual budget")
+            assertEquals(ExtractionMethod.DIRECT_TEXT, pages[0].extractionMethod)
+            assertEquals("läst sida 2", pages[1].extractedText, "the page without a text layer lost its published text")
+        }
+    }
+
+    @Test
+    fun `a no-OCR rescan of selected pages leaves the other pages' published text`() {
+        withHarness { harness ->
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = "The committee approved the annual budget after a long discussion of the transport plan.",
+                scannedText = "läst sida 2",
+                publishedCleanText = "OCR text of the first page",
+            )
+
+            val result = harness.rescan(
+                picture, engine = FakePageEngine(), method = ReadingMethod.None,
+                selection = RescanSelection.explicit(listOf(1)),
+            )
+
+            assertEquals(OcrOperationStage.COMPLETE, result.operation.stage, "${result.operation.errorMessage}")
+            val pages = harness.publishedPagesOf(picture)
+            assertEquals("OCR text of the first page", pages[0].extractedText, "an unselected page was replaced")
+            assertEquals("läst sida 2", pages[1].extractedText)
+        }
+    }
+
+    @Test
+    fun `a no-OCR rescan run twice converges`() {
+        withHarness { harness ->
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = "The committee approved the annual budget after a long discussion of the transport plan.",
+                scannedText = "läst sida 2",
+                publishedCleanText = "OCR text of the first page",
+            )
+
+            harness.rescan(picture, engine = FakePageEngine(), method = ReadingMethod.None)
+            val first = harness.publishedPagesOf(picture).map { it.extractedText }
+            val second = harness.rescan(picture, engine = FakePageEngine(), method = ReadingMethod.None)
+
+            assertEquals(OcrOperationStage.COMPLETE, second.operation.stage, "${second.operation.errorMessage}")
+            assertEquals(first, harness.publishedPagesOf(picture).map { it.extractedText })
+        }
+    }
+
+    @Test
+    fun `an interrupted no-OCR rescan keeps the published text and starts again cleanly`() {
+        withHarness { harness ->
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = "The committee approved the annual budget after a long discussion of the transport plan.",
+                scannedText = "läst sida 2",
+                publishedCleanText = "OCR text of the first page",
+            )
+            val operationId = harness.admit(picture, ReadingMethod.None)
+
+            val interrupted = harness.runAdmitted(
+                operationId, picture, FakePageEngine(),
+                beforeCandidatePublication = { _, _ -> throw kotlinx.coroutines.CancellationException("interrupted") },
+            )
+
+            assertEquals(OcrOperationStage.FAILED, interrupted.operation.stage)
+            assertEquals(picture.baselineRevisionId, interrupted.activeRevisionId, "an interrupted rescan published")
+
+            val again = harness.rescan(picture, engine = FakePageEngine(), method = ReadingMethod.None)
+
+            assertEquals(OcrOperationStage.COMPLETE, again.operation.stage, "${again.operation.errorMessage}")
+            val pages = harness.publishedPagesOf(picture)
+            assertEquals(listOf(0, 1), pages.map { it.ordinal }, "a page was staged twice or lost")
+            assertContains(pages[0].extractedText, "annual budget")
+            assertEquals("läst sida 2", pages[1].extractedText)
+        }
+    }
+
+    @Test
+    fun `a no-OCR rescan renders nothing`() {
+        withHarness { harness ->
+            val picture = harness.importCleanAndScannedPdf(
+                cleanText = "The committee approved the annual budget after a long discussion of the transport plan.",
+                scannedText = "läst sida 2",
+            )
+
+            harness.rescan(picture, engine = FakePageEngine(), method = ReadingMethod.None)
+
+            val images = java.nio.file.Files.walk(harness.archiveDir.resolve("library")).use { paths ->
+                paths.filter { it.fileName.toString().endsWith(".png") }.count()
+            }
+            assertEquals(0L, images, "No OCR rendered a page")
+        }
+    }
+
+    @Test
+    fun `a no-OCR rescan of a picture keeps its published text`() {
+        withHarness { harness ->
+            val picture = harness.importPicture("läst bild")
+            val engine = FakePageEngine(readings = listOf("must not be read"))
+
+            val result = harness.rescan(picture, engine = engine, method = ReadingMethod.None)
+
+            assertEquals(0, engine.calls, "No OCR read the picture")
+            assertEquals(OcrOperationStage.COMPLETE, result.operation.stage, "${result.operation.errorMessage}")
+            assertEquals("läst bild", result.publishedText)
         }
     }
 
@@ -472,7 +613,7 @@ class RescanJobHandlerTest {
                 afterPageStaged = { _, _ -> throw kotlinx.coroutines.CancellationException("simulate a crash") },
             )
 
-            assertTrue(interrupted.failure is kotlinx.coroutines.CancellationException)
+            assertTrue(interrupted.failure is kotlinx.coroutines.CancellationException, "stage=${interrupted.operation.stage} ${interrupted.operation.errorCode} ${interrupted.operation.errorMessage} failure=${interrupted.failure}")
             AppContext.open(harness.archiveDir).use { context ->
                 val directory = context.paths.artifactsDir(CollectionId("default"), picture.documentId)
                     .resolve("structure")
@@ -516,7 +657,7 @@ class RescanJobHandlerTest {
             )
 
             assertEquals(1, firstEngine.calls, "the selected scan page was not read before interruption")
-            assertTrue(interrupted.failure is kotlinx.coroutines.CancellationException)
+            assertTrue(interrupted.failure is kotlinx.coroutines.CancellationException, "stage=${interrupted.operation.stage} ${interrupted.operation.errorCode} ${interrupted.operation.errorMessage} failure=${interrupted.failure}")
             assertEquals(1, interrupted.operation.pageTotal)
             assertEquals(1, interrupted.operation.pagesCommitted)
             assertEquals(0, interrupted.operation.pagesFailed)
@@ -833,7 +974,11 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
      * which is the case a scan presents. The published reading of each page is the one the import committed,
      * with page two's published text given by [scannedText].
      */
-    fun importCleanAndScannedPdf(cleanText: String, scannedText: String): Picture {
+    fun importCleanAndScannedPdf(
+        cleanText: String,
+        scannedText: String,
+        publishedCleanText: String = cleanText,
+    ): Picture {
         val file = harness.sourcesDir.resolve("clean-and-scanned.pdf")
         PDDocument().use { pdf ->
             val clean = PDPage()
@@ -848,7 +993,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
             pdf.addPage(PDPage())
             pdf.save(file.toFile())
         }
-        val run = harness.importDurably(listOf(file), PdfPageUnits(listOf(cleanText, scannedText)))
+        val run = harness.importDurably(listOf(file), PdfPageUnits(listOf(publishedCleanText, scannedText)))
         val documentId = assertNotNull(run.items.single().documentId)
         AppContext.open(harness.dataDir).use { context ->
             val revisionId = assertNotNull(context.revisions.activeRevisionId(documentId))
@@ -915,11 +1060,12 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
     fun previewOf(
         documentId: DocumentId,
         selection: RescanSelection = RescanSelection.Automatic,
+        method: ReadingMethod = ReadingMethod.Surya,
     ): RescanPreview = AppContext.open(harness.dataDir).use { context ->
         writeSelection(context)
         runBlocking {
             rescanServiceOf(context, FakePageEngine()).preview(
-                CollectionId("default"), documentId, ReadingMethod.Surya, selection,
+                CollectionId("default"), documentId, method, selection,
             )
         }
     }
@@ -1004,8 +1150,9 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
         beforePageCommit: (suspend (AppContext, JobId) -> Unit)? = null,
         afterPublication: (suspend (AppContext, JobId) -> Unit)? = null,
         afterPageCommit: (suspend (AppContext, Int) -> Unit)? = null,
+        method: ReadingMethod = ReadingMethod.Surya,
     ): Attempt = AppContext.open(harness.dataDir).use { context ->
-            val operationId = admitFor(context, picture, selection)
+            val operationId = admitFor(context, picture, selection, method)
         runAttempt(context, operationId, engine, embedder, beforePageCommit, picture, afterPublication, afterPageCommit)
     }
 
@@ -1136,16 +1283,41 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
 
     // ---- internals ----
 
+    /** Admits one rescan of [picture] with [method] and answers its operation id, without running it. */
+    fun admit(picture: Picture, method: ReadingMethod): String = AppContext.open(harness.dataDir).use { context ->
+        admitFor(context, picture, method = method)
+    }
+
+    /** Runs one attempt of an admitted operation, optionally stopping it just before publication. */
+    fun runAdmitted(
+        operationId: String,
+        picture: Picture,
+        engine: FakePageEngine,
+        beforeCandidatePublication: (suspend (AppContext, JobId) -> Unit)? = null,
+    ): Attempt = AppContext.open(harness.dataDir).use { context ->
+        runAttempt(
+            context, operationId, engine, TestDocumentEmbedder(), null, picture,
+            beforeCandidatePublication = beforeCandidatePublication,
+        )
+    }
+
+    /** The published page texts of [picture]'s document, in page order. */
+    fun publishedPagesOf(picture: Picture): List<infoscry.storage.RevisionPageText> =
+        AppContext.open(harness.dataDir).use { context ->
+            context.revisions.pages(assertNotNull(context.revisions.activeRevisionId(picture.documentId)))
+        }
+
     private fun admitFor(
         context: AppContext,
         picture: Picture,
         selection: RescanSelection = RescanSelection.Automatic,
+        method: ReadingMethod = ReadingMethod.Surya,
     ): String {
         writeSelection(context)
         val engine = FakePageEngine()
         val service = rescanServiceOf(context, engine)
         return runBlocking {
-            val preview = service.preview(CollectionId("default"), picture.documentId, ReadingMethod.Surya, selection)
+            val preview = service.preview(CollectionId("default"), picture.documentId, method, selection)
             service.admitRescan(
                 collectionId = CollectionId("default"),
                 documentId = picture.documentId,

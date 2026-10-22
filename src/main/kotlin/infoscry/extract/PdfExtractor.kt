@@ -338,7 +338,15 @@ class PdfExtractor(
                 input.boundary.unit {
                     run.total++
                     val key = pageKey(page)
-                    if (input.isCommitted(key)) return@unit
+                    if (input.isCommitted(key)) {
+                        // No OCR's count of pages without text describes the whole document, so a page an
+                        // earlier attempt committed is counted again from its text layer, which costs no
+                        // reading; otherwise a resumed import would lose its warning.
+                        if (!input.settings.readsPageImages() && pageHasNoUsableText(document, page)) {
+                            run.pagesWithoutText++
+                        }
+                        return@unit
+                    }
 
                     // A page whose own text cannot be read is a page this reader has nothing to say
                     // about, which is the first of the three reasons to hand it to OCR. It is not yet a
@@ -349,6 +357,13 @@ class PdfExtractor(
                     } catch (failure: IOException) {
                         run.warnings += "page $page: its own text could not be read (${failure::class.simpleName})"
                         null
+                    }
+                    // No OCR: every page is its own text, whatever that text is. A page with no usable text
+                    // layer is kept with what it has, or nothing, and counted so the document says so.
+                    if (!input.settings.readsPageImages()) {
+                        if (text == null || PdfPageCandidate.needsOcr(text)) run.pagesWithoutText++
+                        emitTextUnit(key = key, page = page, text = text.orEmpty(), method = ExtractionMethod.DIRECT_TEXT)
+                        return@unit
                     }
                     // Fill-missing keeps usable direct text. The read-all and check-and-improve modes keep
                     // the page's own text too, unless the selector says the page must be read: a page with
@@ -513,6 +528,13 @@ class PdfExtractor(
         return run
     }
 
+    /** Whether [page]'s own text layer is missing, unreadable, or not usable as the page's text. */
+    private fun pageHasNoUsableText(document: PDDocument, page: Int): Boolean = try {
+        PdfPageCandidate.needsOcr(pageText.read(document, page))
+    } catch (failure: IOException) {
+        true
+    }
+
     /**
      * Reports a page whose raster could not be produced.
      *
@@ -668,6 +690,9 @@ class PdfExtractor(
         if (run.emptyReadingPages > 0) {
             put(EMPTY_READING_PAGES_METADATA, run.emptyReadingPages.toString())
         }
+        if (run.pagesWithoutText > 0) {
+            put(PAGES_WITHOUT_TEXT_METADATA, run.pagesWithoutText.toString())
+        }
         if (run.warnings.isNotEmpty()) {
             // A count rather than the texts: what a warning says is a tool's message about a page, which is
             // working detail for the log, while the number is what a reader of the document can act on.
@@ -721,6 +746,7 @@ private class PageRun(
     var ocrPages: Int = 0,
     var unreadablePages: Int = 0,
     var emptyReadingPages: Int = 0,
+    var pagesWithoutText: Int = 0,
     var abortCode: String? = null,
     val confidences: MutableList<Double?> = mutableListOf(),
     val warnings: MutableList<String> = mutableListOf(),

@@ -1032,6 +1032,68 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a no-OCR import of a page without text completes with a warning`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val snapshot = OcrSettingsSnapshot.of(
+                infoscry.ocr.CollectionOcrSettings("eng", infoscry.ocr.ReadingMethod.None),
+                EXTRACTOR_SCHEMA_VERSION,
+            )
+            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
+
+            val run = harness.importStaging(
+                listOf(source),
+                StagedUnitsThenFinish(
+                    goodUnits = 2,
+                    failedUnits = 0,
+                    metadata = mapOf(infoscry.extract.PAGES_WITHOUT_TEXT_METADATA to "1"),
+                ),
+                settings,
+                ocr = snapshot,
+            ) {}
+
+            val documentId = assertNotNull(run.items.single().documentId)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, context.documents.get(documentId)?.status)
+                assertEquals(2, context.index().chunkCount(CollectionId("default"), documentId))
+            }
+        }
+    }
+
+    @Test
+    fun `a no-OCR import of a real PDF publishes every page and renders none`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("mixed.pdf")
+            requireNotNull(javaClass.getResourceAsStream("/fixtures/mixed.pdf")).use { stream ->
+                Files.copy(stream, source, StandardCopyOption.REPLACE_EXISTING)
+            }
+            val snapshot = OcrSettingsSnapshot.of(
+                infoscry.ocr.CollectionOcrSettings("eng", infoscry.ocr.ReadingMethod.None),
+                EXTRACTOR_SCHEMA_VERSION,
+            )
+            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
+
+            val run = harness.importStaging(
+                listOf(source),
+                infoscry.extract.PdfExtractor(infoscry.ocr.PageOcrEngines(emptyList())),
+                settings,
+                ocr = snapshot,
+            ) {}
+
+            val documentId = assertNotNull(run.items.single().documentId)
+            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, context.documents.get(documentId)?.status)
+                assertTrue(context.index().chunkCount(CollectionId("default"), documentId) >= 1)
+                val pngs = Files.walk(harness.dataDir.resolve("library")).use { paths ->
+                    paths.filter { it.fileName.toString().endsWith(".png") }.count()
+                }
+                assertEquals(0L, pngs, "No OCR rendered a page")
+            }
+        }
+    }
+
+    @Test
     fun `a staged reading in which every page failed fails the document`() {
         withHarness { harness ->
             val source = harness.writeText("scan.txt", "Ordinary text\n")

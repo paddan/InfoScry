@@ -114,6 +114,62 @@ class ImportPreviewServiceTest {
         assertNotEquals(hashBefore, hashAfter)
     }
 
+    private fun serviceOffering(vararg methods: ReadingMethod): ImportPreviewService {
+        val selection = ImportSelection(MediaTypeDetector(), ExtractorRegistry(listOf(PlainTextExtractor())))
+        return ImportPreviewService(
+            collections = collections,
+            catalog = object : ReadingMethodCatalog {
+                override fun availability(collectionId: CollectionId) = methods.map { method ->
+                    MethodAvailability(
+                        method = method,
+                        label = method.id,
+                        destination = "this machine",
+                        available = true,
+                        unavailableReason = null,
+                        external = false,
+                    )
+                }
+            },
+            profiles = OcrProfileService(OcrProfileStore(database)),
+            pageCounter = object : PageCounter {
+                override fun pageCount(path: Path): Int? = 48
+                override fun readablePageCount(path: Path): Int? = 12
+            },
+            selection = selection,
+            enumerate = { paths, recursive, ignore -> enumerateImportSources(paths, recursive, ignore, selection) },
+            ignorePatterns = { IgnorePatterns.NONE },
+        )
+    }
+
+    @Test
+    fun `a no-OCR preview reads no page and needs no approval`() {
+        val document = directory.resolve("document.pdf").also { Files.writeString(it, "placeholder") }
+
+        val preview = serviceOffering(ReadingMethod.Tesseract, ReadingMethod.None).preview(
+            ImportPreviewRequest(collectionId, listOf(document.toString()), method = ReadingMethod.None),
+        )
+
+        val file = preview.files.single()
+        assertEquals(0, file.pages)
+        assertEquals(48, file.documentPages)
+        assertEquals(0, preview.totalPages)
+        assertEquals(false, preview.atLeast)
+        assertEquals(false, preview.external)
+        assertEquals(null, preview.estimatedCostUsd)
+    }
+
+    @Test
+    fun `a no-OCR preview hash differs from a Tesseract preview of the same files`() {
+        val document = directory.resolve("document.pdf").also { Files.writeString(it, "placeholder") }
+        val service = serviceOffering(ReadingMethod.Tesseract, ReadingMethod.None)
+        val request = ImportPreviewRequest(collectionId, listOf(document.toString()), method = ReadingMethod.None)
+
+        assertNotEquals(
+            service.preview(request).previewHash,
+            service.preview(request.copy(method = ReadingMethod.Tesseract)).previewHash,
+        )
+    }
+
     @Test
     fun `the preview counts the pages that will be read and reports the document's own pages`() {
         val document = directory.resolve("mixed-document.pdf").also { Files.writeString(it, "placeholder") }

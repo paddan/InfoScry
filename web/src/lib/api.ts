@@ -9,7 +9,7 @@
 
 
 /** Which reader a collection's OCR uses; `LLM` reads page images through an OCR profile. */
-export type OcrEngine = 'TESSERACT' | 'SURYA' | 'LLM';
+export type OcrEngine = 'TESSERACT' | 'SURYA' | 'LLM' | 'NONE';
 
 /** Whether a reading only fills pages with no text, or also checks and improves text that exists. */
 export type OcrImportMode = 'FILL_MISSING' | 'CHECK_AND_IMPROVE';
@@ -54,7 +54,9 @@ function decodeCollection(response: CollectionResponse): Collection {
   } = response;
   const derivedMethod = ocrEngine === 'SURYA'
     ? 'surya'
-    : ocrEngine === 'LLM' && ocrTranscriptionProfileId
+    : ocrEngine === 'NONE'
+      ? 'none'
+      : ocrEngine === 'LLM' && ocrTranscriptionProfileId
       ? `llm:${ocrTranscriptionProfileId}`
       : 'tesseract';
   return {

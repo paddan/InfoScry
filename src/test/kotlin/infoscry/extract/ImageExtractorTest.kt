@@ -5,6 +5,7 @@ import infoscry.domain.ExtractionMethod
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.fixtures.OcrFixtureGenerator
+import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OCR_TRANSCRIPTION_PROMPT_VERSION
 import infoscry.ocr.OcrAttemptIdentity
 import infoscry.ocr.OcrEngine
@@ -14,6 +15,7 @@ import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageOcrEngine
 import infoscry.ocr.PageOcrEngines
+import infoscry.ocr.ReadingMethod
 import java.awt.Color
 import java.awt.image.BufferedImage
 import java.awt.image.DataBufferByte
@@ -239,6 +241,24 @@ class ImageExtractorTest {
             Files.exists(oversized.parent.resolve(derivedSource.relativePath)),
             "the derived reference also resolves under the managed copy directory, so the two roots are not distinct",
         )
+    }
+
+    @Test
+    fun `no OCR does not read a picture`() = runBlocking {
+        val managed = managedImage(OcrFixtureGenerator.IMAGE_NAME)
+        val spy = OcrSpy()
+        val probe = PermitProbeBoundary()
+        val noOcr = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(
+            OcrSettingsSnapshot.of(CollectionOcrSettings("eng", ReadingMethod.None), EXTRACTOR_SCHEMA_VERSION),
+        )
+
+        val events = collect(ImageExtractor(PageOcrEngines(listOf(spy))), inputFor(managed, probe, settings = noOcr), probe)
+
+        assertTrue(spy.pages.isEmpty(), "No OCR read the picture")
+        val unit = units(events).single()
+        assertEquals("", unit.unit.extractedText)
+        assertEquals(ExtractionMethod.DIRECT_TEXT, unit.unit.method)
+        assertEquals("1", (events.last() as ExtractionEvent.Finished).metadata[PAGES_WITHOUT_TEXT_METADATA])
     }
 
     @Test

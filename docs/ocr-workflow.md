@@ -24,6 +24,12 @@ remaining OCR/PDF checks complete on 2026-10-11.
    text and is neither rendered for reading nor sent anywhere. The same
    rule applies to every method and is used for the page count, the cost and
    the approval shown in the dialog (amended 2026-10-09; see "Page selection").
+   **No OCR** is a reading method that reads no page: every page keeps the
+   document's own text, a page without usable text is kept without text and the
+   document is **Done** with a warning, and Scan again with No OCR replaces each
+   page with the managed copy's own text layer while a page whose layer is
+   unusable keeps its published text (amended 2026-10-21; see
+   [the design](specs/2026-10-21-no-ocr-reading-method-design.md)).
 4. External sending is approved **once, in the dialog**, for all pages shown.
 5. There is **no reviewer** and no review step. A finished run replaces the
    document's text. The previous version stays in history and can be restored.
@@ -228,6 +234,7 @@ and keeping keys, questions and document text out of logs.
 
 Automatic selection is used for import and ordinary rescans. An explicit
 page set selected in page review overrides the heuristic for manual rescans.
+No OCR selects no page.
 
 Reading every page sent text-only pages to the model for nothing. A PDF page is
 selected for reading when either holds:

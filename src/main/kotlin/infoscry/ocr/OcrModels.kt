@@ -24,6 +24,9 @@ enum class OcrEngine {
     TESSERACT,
     SURYA,
     LLM,
+
+    /** No OCR: the document's own text is used and no page is read. */
+    NONE,
 }
 
 /**
@@ -85,6 +88,9 @@ const val OCR_REVIEW_PROMPT_VERSION = 2
  * gets a new number, so text published under one policy is never attributed to another.
  */
 const val OCR_POLICY_VERSION = 1
+
+/** The structure parser of a No-OCR attempt, which parses no engine output. */
+const val NO_STRUCTURE_PARSER: String = "none"
 
 /**
  * Whether [endpoint] is on this machine or leaves it.
@@ -329,6 +335,7 @@ data class OcrAttemptIdentity(
             OcrEngine.SURYA -> SuryaStructureParser.PARSER
             OcrEngine.LLM -> MarkdownStructureParser.PARSER
             OcrEngine.TESSERACT -> TesseractTsv.PARSER
+            OcrEngine.NONE -> NO_STRUCTURE_PARSER
         }
 }
 
@@ -427,8 +434,10 @@ data class OcrSettingsSnapshot(
                 ReadingMethod.Tesseract -> OcrEngine.TESSERACT
                 ReadingMethod.Surya -> OcrEngine.SURYA
                 is ReadingMethod.Llm -> OcrEngine.LLM
+                ReadingMethod.None -> OcrEngine.NONE
             },
-            mode = OcrImportMode.READ_ALL,
+            // No OCR reads no page, so it never asks for a mode that reads pages with a text layer.
+            mode = if (settings.defaultMethod == ReadingMethod.None) OcrImportMode.FILL_MISSING else OcrImportMode.READ_ALL,
             language = settings.language,
             extractorVersion = extractorVersion,
             transcriptionProfileRevisionId = transcriptionProfileRevisionId,

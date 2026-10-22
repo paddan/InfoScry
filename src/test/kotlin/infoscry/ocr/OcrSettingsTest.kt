@@ -3,6 +3,7 @@ package infoscry.ocr
 import infoscry.domain.CollectionId
 import infoscry.domain.JobId
 import infoscry.extract.ExtractionFingerprint
+import infoscry.extract.EXTRACTOR_SCHEMA_VERSION
 import infoscry.extract.ExtractionSettings
 import infoscry.jobs.ImportJobPayload
 import infoscry.llm.LlmProvider
@@ -64,6 +65,37 @@ class OcrSettingsTest {
     }
 
     // ---- The pinned legacy fingerprint ----
+
+    @Test
+    fun `the catalog always offers No OCR on this machine`() {
+        // Even a machine with no tool installed can use the text a document already carries.
+        val catalog = OcrReadingMethodCatalog(profiles, localUnavailableReason = { "not installed" })
+
+        val none = catalog.availability(CollectionId("unused")).single { it.method == ReadingMethod.None }
+
+        assertEquals("No OCR (use the document's own text)", none.label)
+        assertEquals("this machine", none.destination)
+        assertTrue(none.available)
+        assertFalse(none.external)
+        assertFalse(catalog.availability(CollectionId("unused")).single { it.method == ReadingMethod.Tesseract }.available)
+    }
+
+    @Test
+    fun `a no-OCR snapshot reads nothing and fingerprints apart from Tesseract`() {
+        val none = OcrSettingsSnapshot.of(CollectionOcrSettings("eng", ReadingMethod.None), EXTRACTOR_SCHEMA_VERSION)
+        val tesseract = OcrSettingsSnapshot.of(CollectionOcrSettings("eng", ReadingMethod.Tesseract), EXTRACTOR_SCHEMA_VERSION)
+
+        assertEquals(OcrEngine.NONE, none.engine)
+        assertEquals(OcrImportMode.FILL_MISSING, none.mode)
+        val noneSettings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(none)
+        val tesseractSettings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(tesseract)
+        assertFalse(noneSettings.readsPageImages())
+        assertTrue(tesseractSettings.readsPageImages())
+        assertNotEquals(
+            ExtractionFingerprint.of("a".repeat(64), tesseractSettings),
+            ExtractionFingerprint.of("a".repeat(64), noneSettings),
+        )
+    }
 
     @Test
     fun `settings without an OCR attempt hash exactly as the previous build did`() {
@@ -761,6 +793,7 @@ class OcrSettingsTest {
                     OcrEngine.TESSERACT -> ReadingMethod.Tesseract
                     OcrEngine.SURYA -> ReadingMethod.Surya
                     OcrEngine.LLM -> ReadingMethod.Llm(transcriber.id)
+                    OcrEngine.NONE -> ReadingMethod.None
                 },
             ),
             extractorVersion = "1",

@@ -71,6 +71,17 @@ class CollectionStoreTest {
     }
 
     @Test
+    fun `a collection defaults to No OCR and reads it back`() {
+        val created = store.create("Acme")
+
+        val updated = store.updateOcrSettings(created.id, CollectionOcrSettings("swe", ReadingMethod.None))
+
+        assertEquals(ReadingMethod.None, updated.ocrSettings().defaultMethod)
+        assertEquals(ReadingMethod.None, store.get(created.id)?.ocrSettings()?.defaultMethod)
+        assertNull(store.get(created.id)?.ocrTranscriptionProfileId)
+    }
+
+    @Test
     fun `create and language updates reject a language list that carries a line break`() {
         // A line break in the language list is not a language nobody can read — it is a value no reading
         // can be keyed by, because the fingerprint of an attempt is line-delimited. Refusing it here is what

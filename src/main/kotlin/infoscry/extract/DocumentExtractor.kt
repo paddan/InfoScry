@@ -108,6 +108,12 @@ internal const val OCR_FAILED_CODE: String = "OCR_FAILED"
 internal const val PAGE_BLANK_CODE: String = "PAGE_BLANK"
 
 /**
+ * The extraction metadata key holding how many pages a No-OCR attempt kept without a usable text layer.
+ * A document that has any is complete with a warning rather than complete.
+ */
+internal const val PAGES_WITHOUT_TEXT_METADATA: String = "pages_without_text"
+
+/**
  * The OCR tool cannot read this document at all, so the whole document fails.
  *
  * The distinction matters: a page OCR could not read is one failed unit among many and the rest of the
@@ -270,6 +276,9 @@ data class ExtractionSettings(
      * Surya or refused, never by whichever engine happens to be configured.
      */
     fun readingEngine(): OcrEngine = ocrAttempt?.engine ?: OcrEngine.TESSERACT
+
+    /** Whether this attempt renders and reads any page; No OCR reads none. */
+    fun readsPageImages(): Boolean = readingEngine() != OcrEngine.NONE
 
     /**
      * These settings as one collection's OCR selection makes them.

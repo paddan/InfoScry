@@ -17,6 +17,14 @@ class ReadingMethodTest {
     }
 
     @Test
+    fun `none parses and serializes as none`() {
+        assertEquals("none", ReadingMethod.None.id)
+        assertEquals(ReadingMethod.None, ReadingMethod.parse("none"))
+        assertEquals("\"none\"", Json.encodeToString(ReadingMethod.serializer(), ReadingMethod.None))
+        assertEquals(ReadingMethod.None, Json.decodeFromString(ReadingMethod.serializer(), "\"none\""))
+    }
+
+    @Test
     fun `invalid method ids are rejected`() {
         listOf("", "llm:", "LLM", "unknown").forEach { id ->
             assertFailsWith<IllegalArgumentException> { ReadingMethod.parse(id) }

@@ -718,6 +718,7 @@ class PageOcrEngines(
             "Tesseract is not configured in this build, and nothing else reads a page without a text " +
                 "layer: ${TesseractOcr.installRemedy()}."
         OcrEngine.LLM -> "Install or configure $kind."
+        OcrEngine.NONE -> "No OCR reads no page, so it has nothing to install."
     }
 
     /**
@@ -728,6 +729,8 @@ class PageOcrEngines(
      * answering for another one is a wiring error rather than a page's failure.
      */
     suspend fun transcribe(kind: OcrEngine, page: PageImage, settings: OcrSettingsSnapshot): OcrPageResult {
+        // No OCR reads no page; a caller that gets here has rendered a page it was told not to read.
+        check(kind != OcrEngine.NONE) { "No OCR reads no page" }
         val reading = forKind(kind).transcribe(page, settings)
         check(reading.engine == kind) {
             "the engine configured as $kind answered as ${reading.engine}; a reading is not moved between " +

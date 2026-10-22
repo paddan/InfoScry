@@ -46,7 +46,8 @@ which may be an external service.
 Implementation is in progress. The backend, CLI and web reader exist;
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
 The [OCR workflow](docs/ocr-workflow.md) adds a
-confirmed reading method for every import and rescan, reads selected pages and publishes
+confirmed reading method for every import and rescan (including No OCR, which uses the
+document's own text), reads selected pages and publishes
 a complete reading automatically while keeping previous text in history. Its browser
 gate passes against local test doubles. Remaining product choices are listed in
 [docs/tickets/follow-ups](docs/tickets/follow-ups/STATUS.md). Document paging, selective
