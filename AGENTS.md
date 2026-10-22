@@ -7,6 +7,7 @@ source-viewer finish line remains open. Ask, document paging and page selection
 have `externalTest` Playwright coverage (`DocumentBrowserAcceptanceTest`).
 Ask's per-collection prompt choice is covered there too.
 Investigate's browser flow is covered by `InvestigateBrowserAcceptanceTest`.
+Collection corrections are covered by `CorrectionsBrowserAcceptanceTest`.
 These browser tests use local fake providers and embeddings, not real providers
 or GPU verification.
 

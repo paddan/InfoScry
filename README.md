@@ -16,6 +16,8 @@ reader and a command-line interface.
   High or Extra high effort and optional per-profile overrides.
 - Open cited source passages and manage collections, running jobs and LLM
   profiles in the English web interface.
+- Correct words the reading got wrong (a misread surname, say) across a whole
+  collection with a standing list of corrections; the reading is kept underneath.
 
 ## Get started
 
@@ -98,6 +100,16 @@ never changed. A document's plain first import does not yet
 automatically queue generation (use **Create PDF with selectable text**
 explicitly). The remaining OCR/PDF checks are confirmed complete by the owner.
 See [implementation status](docs/implementation-status.md).
+
+Collection corrections are implemented: a standing per-collection list rewrites
+misread words in every document's published text, now and on later imports, rescans
+and restores, and keeps each corrected page's reading so a removed rule brings it
+back. Rules match whole words in any script (UTF-8 throughout), ignore case unless
+marked exact, and keep the writing they replace. See the
+[design](docs/specs/2026-10-22-collection-corrections-design.md) and
+[usage](docs/usage.md#correct-misread-words). `CorrectionsBrowserAcceptanceTest`
+covers the reader-to-settings flow against fake embeddings; synonyms and
+abbreviations are a separate, later glossary.
 
 The project targets local use on macOS arm64. CI, distributable packaging and
 public or multi-user hosting are outside the current scope.

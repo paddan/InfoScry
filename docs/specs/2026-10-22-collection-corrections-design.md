@@ -1,6 +1,6 @@
 # Collection corrections
 
-Status: design approved 2026-10-22; not implemented.
+Status: implemented 2026-10-22.
 
 ## Goal
 

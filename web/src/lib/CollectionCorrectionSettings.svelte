@@ -38,7 +38,6 @@
 
   $: if (collection.id !== boundId) void load(collection.id);
   $: job = list?.job ?? null;
-  $: active = job !== null && (job.state === 'QUEUED' || job.state === 'RUNNING');
 
   onDestroy(() => stopPolling());
 
@@ -62,7 +61,13 @@
       return;
     }
     stopPolling();
-    if (active) poll = setTimeout(() => void reload(mine), POLL_MILLIS);
+    // Read from the answer itself: the reactive `active` is not recomputed until after this function returns.
+    if (isRunning(list)) poll = setTimeout(() => void reload(mine), POLL_MILLIS);
+  }
+
+  function isRunning(current: CorrectionList | null): boolean {
+    const latest = current?.job ?? null;
+    return latest !== null && (latest.state === 'QUEUED' || latest.state === 'RUNNING');
   }
 
   function stopPolling(): void {

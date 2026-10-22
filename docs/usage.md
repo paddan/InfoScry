@@ -164,6 +164,33 @@ If a failed import item never became a document, add that file again through
 **Add documents**. If the managed copy is missing, that document fails safely.
 Jobs continue on the server after leaving Admin.
 
+## Correct misread words
+
+Sometimes the reading gets a word wrong the same way across many pages: the
+surname *Spinnars* read as *spinners*. **Admin → Collections → Settings →
+Corrections** keeps a standing list of corrections for the collection.
+
+- **Add correction** asks for the wrong text and the correct one. **Preview** shows
+  how many places would change, in how many documents, with a few examples;
+  **Save** stores the rule and rewrites every document that needs it in the
+  background ("Applying: 312 of 1,200 documents").
+- In the reader, select a word and choose **Correct across collection** to start
+  a correction from it.
+- A rule matches whole words or phrases (a phrase also across a line break) and
+  ignores case, unless **Exact case** is set. The replacement keeps the writing it
+  replaces: `SPINNERS` becomes `SPINNARS`, and a replacement with its own capitals,
+  such as a surname, is written as typed. Any script works; in Chinese, Japanese
+  and Thai, which have no spaces between words, a rule matches anywhere.
+- The text follows the list. Each corrected page keeps what was read; a corrected
+  page shows **Corrected** and **Show reading** in the reader. Editing a rule
+  rewrites from the reading, and **Remove** brings the reading back. Later imports,
+  rescans and restores apply today's list.
+- Every change is a new version in **Text history** ("Corrections: spinners →
+  Spinnars (14 matches)"). Saved Ask and Investigate answers keep the text they
+  quoted.
+- Corrections are for wrong text. Abbreviations and synonyms such as *Sthlm* for
+  *Stockholm* are correct as written and are not replaced.
+
 ## Delete documents or collections
 
 - **Delete** removes one document after confirmation.

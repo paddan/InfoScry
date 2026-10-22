@@ -269,6 +269,41 @@ The contract is tested by the parser suites, the derivation and chunker tests,
 `DocumentBrowserAcceptanceTest` scanned-table scenario (fake engine) and
 `SuryaRealToolTest`'s table page on the real runtime.
 
+## Collection corrections
+
+The [design](specs/2026-10-22-collection-corrections-design.md) is implemented.
+
+- **Storage.** `collection_corrections` holds a collection's rules (`find`,
+  `find_key`, `replace`, `exact_case`); `find_key` is the case-folded `find`, or the
+  exact one for an exact-case rule, and is unique per collection
+  (`409 CORRECTION_FIND_TAKEN`). A corrected page keeps its reading in
+  `reading_extracted_text`/`reading_search_text` and the reading's own structure and
+  layout references in `reading_references` (JSON), on both `page_text_revisions`
+  and `content_units`. A revision records `corrections_fingerprint` (SHA-256 of the
+  list's rules) and `corrections_applied` (per rule: find, replace, matches).
+- **Matching** (`CorrectionMatcher`, ICU4J from `lucene-analysis-icu`): over the
+  text's NFC view mapped back to the stored text, on code points; word boundaries
+  are neighbours that are not `L*`, `M*` or `Nd`; full case folding; a rule written
+  only in Han, Kana, Thai, Lao, Khmer or Myanmar matches as a substring; longest
+  match wins, then exact case, then the smaller id; no chaining.
+- **One seam.** `CandidateCorrector` corrects a staged candidate from each page's
+  reading before it is chunked (rescan, check-and-improve import, restore, the
+  `CORRECTIONS` job); `StoredUnitsSink` corrects each unit of a plain import before
+  commit. `PageCorrector` shifts structure ranges and layout spans with an
+  `OffsetMap`, re-verifies them, and falls back to degraded paragraphs or no layout.
+- **Job.** `JobType.CORRECTIONS`, one per collection. Each pass skips documents whose
+  text already follows the list (`wouldChange`), stages a copy of the active revision
+  with its vectors (`stageCorrectionCandidate`, resumable by base and list), re-chunks
+  and embeds only rewritten pages, and publishes through `RevisionPublicationService`.
+  A list changed during a pass takes another pass; a document another publication
+  moved is redone from its new revision (at most 3 times, then `CORRECTIONS_CONFLICT`);
+  no embedder fails it as `EMBEDDING_UNAVAILABLE`.
+- **API.** `GET/PUT/DELETE /api/collections/{id}/corrections[/{ruleId}]`,
+  `POST …/corrections/preview` (a draft, or `removingId`), `POST …/corrections/apply`,
+  `GET …/sources/{sourceId}/reading`; source reads carry `hasReading`, revision views
+  `corrections`. CLI: `infoscry collection corrections list|add|remove|preview`.
+- Rules are user content and stay out of logs and error messages.
+
 ## Privacy and local API boundaries
 
 Originals, extracted text, embeddings, indexes and saved conversations stay

@@ -77,4 +77,21 @@ describe('CollectionCorrectionSettings', () => {
 
     expect(api.applyCorrections).toHaveBeenCalledWith('c1');
   });
+
+  it('keeps reading the list while a job runs, until the documents follow it', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(api.getCorrections)
+        .mockResolvedValueOnce(list({ job: job('RUNNING', 1, 2) }))
+        .mockResolvedValue(list({ job: job('COMPLETE', 2, 2) }));
+      render(CollectionCorrectionSettings, { collection });
+      await vi.waitFor(() => expect(screen.getByText('Applying: 1 of 2 documents')).toBeTruthy());
+
+      await vi.advanceTimersByTimeAsync(2500);
+
+      await vi.waitFor(() => expect(screen.getByText('All documents follow the list')).toBeTruthy());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
