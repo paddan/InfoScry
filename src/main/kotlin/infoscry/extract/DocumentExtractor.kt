@@ -211,6 +211,8 @@ data class ContentUnitDraft(
     val directText: String? = null,
     val layoutReference: LayoutReference? = null,
     val structureReference: StructureReference? = null,
+    /** The unit's reading before corrections, set by the sink that corrected it; extractors never set it. */
+    val reading: infoscry.domain.ReadingText? = null,
 )
 
 /**

@@ -10,12 +10,15 @@ class SchemaVersionTooNewException(val found: Int, val supported: Int) : Illegal
 )
 
 /**
- * Creates the database schema from the baseline script `db/migration/001_baseline.sql`, and upgrades a
- * version 1 database to version 2.
+ * Creates the database schema from the baseline script `db/migration/001_baseline.sql`, and upgrades an
+ * older database one version at a time.
  *
  * The baseline always describes the current schema and creates a new database at [SUPPORTED_VERSION]
- * directly. The one upgrade step, from 1 to 2, rebuilds `collections` so a collection's engine may be
- * `NONE` (No OCR); SQLite cannot change a CHECK constraint in place. Each step runs inside one transaction
+ * directly. The step from 1 to 2 rebuilds `collections` so a collection's engine may be `NONE` (No OCR);
+ * SQLite cannot change a CHECK constraint in place. The step from 2 to 3 adds collection corrections: it
+ * rebuilds `jobs` so a job may be `CORRECTIONS`, adds the reading columns to `content_units` and
+ * `page_text_revisions`, the correction columns to `document_revisions`, and creates
+ * `collection_corrections`. Each step runs inside one transaction
  * that also records `PRAGMA user_version`, so a crash leaves either the old version intact or the new one
  * complete, and a database already at [SUPPORTED_VERSION] is left alone. A database whose `user_version`
  * is newer than this build understands is refused rather than written to, because an older InfoScry would
@@ -36,8 +39,9 @@ class SchemaMigrator(
             throw SchemaVersionTooNewException(found = currentVersion, supported = SUPPORTED_VERSION)
         }
         if (currentVersion == SUPPORTED_VERSION) return
-        if (currentVersion == 1) {
-            upgradeToVersion2()
+        if (currentVersion == 1) upgradeToVersion2()
+        if (currentVersion in 1..2) {
+            upgradeToVersion3()
             return
         }
 
@@ -102,6 +106,44 @@ class SchemaMigrator(
     }
 
     /**
+     * Adds what collection corrections need, the same way [upgradeToVersion2] rebuilds `collections`: `jobs` is
+     * created, copied, dropped and renamed with foreign keys off, so neither its import items nor the OCR
+     * operations that name a job are cascaded away, and the foreign keys are checked before committing.
+     */
+    private fun upgradeToVersion3() {
+        database.read { connection -> connection.createStatement().use { it.execute("PRAGMA foreign_keys = OFF") } }
+        try {
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    val violationsBefore = foreignKeyViolations(statement)
+                    statement.execute(JOBS_VERSION_3)
+                    statement.execute("INSERT INTO jobs_v3 ($JOB_COLUMNS) SELECT $JOB_COLUMNS FROM jobs")
+                    afterCopy()
+                    statement.execute("DROP TABLE jobs")
+                    statement.execute("ALTER TABLE jobs_v3 RENAME TO jobs")
+                    statement.execute("CREATE INDEX jobs_state ON jobs (state)")
+                    statement.execute("CREATE INDEX jobs_collection_state ON jobs (collection_id, state)")
+                    VERSION_3_ADDITIONS.forEach(statement::execute)
+                    val violationsAfter = foreignKeyViolations(statement)
+                    check(violationsAfter.all { (key, count) -> count <= (violationsBefore[key] ?: 0) }) {
+                        "upgrading the schema to version 3 would break a foreign key"
+                    }
+                    statement.execute("PRAGMA user_version = 3")
+                }
+                connection.prepareStatement(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                ).use { statement ->
+                    statement.setInt(1, 3)
+                    statement.setString(2, Instants.now())
+                    statement.executeUpdate()
+                }
+            }
+        } finally {
+            database.read { connection -> connection.createStatement().use { it.execute("PRAGMA foreign_keys = ON") } }
+        }
+    }
+
+    /**
      * How many foreign-key violations the database has, per table and referenced table. Counted rather than
      * listed by row, because rebuilding `collections` may renumber its own rows.
      */
@@ -116,7 +158,57 @@ class SchemaMigrator(
 
     companion object {
         /** The schema version this build writes and understands. */
-        const val SUPPORTED_VERSION = 2
+        const val SUPPORTED_VERSION = 3
+
+        /** Every column of `jobs`, in the order both versions declare them. */
+        private const val JOB_COLUMNS =
+            "id, collection_id, type, state, stage, completed, total, payload, error_code, error_message, " +
+                "cancel_requested, created_at, updated_at, current_item"
+
+        /** `jobs` as version 3 defines it, frozen here so the upgrade does not move with the baseline. */
+        private val JOBS_VERSION_3 = """
+            CREATE TABLE jobs_v3 (
+                id TEXT NOT NULL PRIMARY KEY,
+                collection_id TEXT REFERENCES collections (id) ON DELETE CASCADE,
+                type TEXT NOT NULL CHECK (type IN ('IMPORT', 'REINDEX', 'RETRY', 'RESCAN', 'SELECTABLE_PDF', 'CORRECTIONS')),
+                state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETE', 'FAILED', 'CANCELLED')),
+                stage TEXT,
+                completed INTEGER NOT NULL DEFAULT 0 CHECK (completed >= 0),
+                total INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0),
+                payload TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                current_item TEXT
+            )
+        """.trimIndent()
+
+        /** The tables and columns version 3 adds beside the rebuilt `jobs`, as the baseline declares them. */
+        private val VERSION_3_ADDITIONS = listOf(
+            """
+            CREATE TABLE collection_corrections (
+                id            TEXT    NOT NULL PRIMARY KEY CHECK (length(trim(id)) > 0),
+                collection_id TEXT    NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+                find          TEXT    NOT NULL CHECK (length(find) > 0),
+                find_key      TEXT    NOT NULL CHECK (length(find_key) > 0),
+                replace       TEXT    NOT NULL CHECK (length(replace) > 0),
+                exact_case    INTEGER NOT NULL CHECK (exact_case IN (0, 1)),
+                created_at    TEXT    NOT NULL,
+                updated_at    TEXT    NOT NULL,
+                UNIQUE (collection_id, find_key)
+            )
+            """.trimIndent(),
+            "ALTER TABLE content_units ADD COLUMN reading_extracted_text TEXT",
+            "ALTER TABLE content_units ADD COLUMN reading_search_text TEXT " +
+                "CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL))",
+            "ALTER TABLE page_text_revisions ADD COLUMN reading_extracted_text TEXT",
+            "ALTER TABLE page_text_revisions ADD COLUMN reading_search_text TEXT " +
+                "CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL))",
+            "ALTER TABLE document_revisions ADD COLUMN corrections_fingerprint TEXT",
+            "ALTER TABLE document_revisions ADD COLUMN corrections_applied TEXT",
+        )
 
         /** Every column of `collections`, in the order both versions declare them. */
         private const val COLLECTION_COLUMNS =

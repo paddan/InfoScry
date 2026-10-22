@@ -74,6 +74,23 @@ CREATE TABLE collection_ignore_patterns (
     PRIMARY KEY (collection_id, position)
 ) WITHOUT ROWID;
 
+-- schema 3 begin
+-- One standing correction of a collection: every whole-word occurrence of `find` in its documents' text reads
+-- `replace`. `find_key` is the identity a second rule may not share: the case-folded `find`, or the exact one for
+-- an exact-case rule.
+CREATE TABLE collection_corrections (
+    id            TEXT    NOT NULL PRIMARY KEY CHECK (length(trim(id)) > 0),
+    collection_id TEXT    NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    find          TEXT    NOT NULL CHECK (length(find) > 0),
+    find_key      TEXT    NOT NULL CHECK (length(find_key) > 0),
+    replace       TEXT    NOT NULL CHECK (length(replace) > 0),
+    exact_case    INTEGER NOT NULL CHECK (exact_case IN (0, 1)),
+    created_at    TEXT    NOT NULL,
+    updated_at    TEXT    NOT NULL,
+    UNIQUE (collection_id, find_key)
+);
+-- schema 3 end
+
 -- One immutable imported original. sha256 identifies the bytes; the unique constraint is per
 -- collection, so the same bytes may exist in two collections as two documents.
 --
@@ -121,7 +138,7 @@ CREATE INDEX documents_collection_status ON documents (collection_id, status);
 CREATE TABLE jobs (
     id TEXT NOT NULL PRIMARY KEY,
     collection_id TEXT REFERENCES collections (id) ON DELETE CASCADE,
-    type TEXT NOT NULL CHECK (type IN ('IMPORT', 'REINDEX', 'RETRY', 'RESCAN', 'SELECTABLE_PDF')),
+    type TEXT NOT NULL CHECK (type IN ('IMPORT', 'REINDEX', 'RETRY', 'RESCAN', 'SELECTABLE_PDF', 'CORRECTIONS')),
     state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETE', 'FAILED', 'CANCELLED')),
     stage TEXT,
     completed INTEGER NOT NULL DEFAULT 0 CHECK (completed >= 0),
@@ -265,6 +282,10 @@ CREATE TABLE content_units (
         )
     ),
     structure_sha256         TEXT    CHECK (structure_sha256 IS NULL OR length(structure_sha256) = 64),
+    -- The page's reading before the collection's corrections rewrote it, present only when they changed it;
+    -- the two texts are present together or absent together.
+    reading_extracted_text   TEXT, -- schema 3
+    reading_search_text      TEXT    CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL)), -- schema 3
     UNIQUE (document_id, ordinal),
     -- An artifact reference is complete or absent: a path without a checksum could not be verified,
     -- and a checksum without a path names nothing to check.
@@ -666,6 +687,10 @@ CREATE TABLE document_revisions (
     -- own frozen snapshot (never today's collection settings), so the history can name the engine, mode,
     -- language and versions after the fact. Null for every revision no import or retry produced.
     reading_snapshot   TEXT
+    -- The correction list this revision's text was corrected with, and what each rule changed (JSON). Null for
+    -- a revision no correction pass touched. Leading commas keep each version 3 line removable on its own.
+    , corrections_fingerprint TEXT -- schema 3
+    , corrections_applied     TEXT -- schema 3
 );
 
 -- At most one resumable candidate per document and attempt: two racing resumes adopt the same row.
@@ -770,6 +795,9 @@ CREATE TABLE page_text_revisions (
         )
     ),
     structure_sha256         TEXT    CHECK (structure_sha256 IS NULL OR length(structure_sha256) = 64),
+    -- The page's reading before corrections, as on `content_units`.
+    reading_extracted_text   TEXT, -- schema 3
+    reading_search_text      TEXT    CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL)), -- schema 3
     PRIMARY KEY (revision_id, ordinal),
     CHECK ((artifact_relative_path IS NULL) = (artifact_sha256 IS NULL)),
     CHECK ((layout_relative_path IS NULL) = (layout_sha256 IS NULL)),

@@ -47,10 +47,17 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 The SQLite schema is one baseline,
 [001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql), applied
 to an empty database by [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
-and recorded as `PRAGMA user_version = 2`. The baseline always describes the
-current schema. There is one upgrade step: a version 1 database is upgraded to
-version 2 at startup by rebuilding `collections` so a collection's engine may be
-`NONE` (No OCR), in one transaction with foreign keys checked before it commits.
+and recorded as `PRAGMA user_version = 3`. The baseline always describes the
+current schema. Older databases are upgraded at startup one version at a time, each
+step in one transaction with foreign keys checked before it commits:
+
+- 1 → 2 rebuilds `collections` so a collection's engine may be `NONE` (No OCR).
+- 2 → 3 adds collection corrections: it rebuilds `jobs` so a job may be
+  `CORRECTIONS`, adds `reading_extracted_text`/`reading_search_text` to
+  `content_units` and `page_text_revisions`, adds `corrections_fingerprint` and
+  `corrections_applied` to `document_revisions`, and creates
+  `collection_corrections`. The baseline marks each version 3 addition
+  `-- schema 3` so a test can rebuild the version 2 schema from it.
 A database whose version is newer than the build is refused rather than written
 to.
 

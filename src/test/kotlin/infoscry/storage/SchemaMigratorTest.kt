@@ -51,14 +51,14 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `a fresh database gets the baseline at version two`() {
+    fun `a fresh database gets the baseline at version three`() {
         newDatabase().use { database ->
             assertEquals(0, database.userVersion())
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(2, database.userVersion())
-            assertEquals(2, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(3, database.userVersion())
+            assertEquals(3, SchemaMigrator.SUPPORTED_VERSION)
             assertEquals(1, count(database, "schema_version"))
         }
     }
@@ -69,7 +69,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(2, database.userVersion())
+            assertEquals(3, database.userVersion())
             assertEquals(1, count(database, "schema_version"), "the baseline must not be applied twice")
         }
     }
@@ -146,11 +146,52 @@ class SchemaMigratorTest {
         }
     }
 
+    /**
+     * The baseline as version 2 shipped it: every line the baseline marks `-- schema 3`, and every block between
+     * `-- schema 3 begin` and `-- schema 3 end`, is version 3's, and a job could not be CORRECTIONS.
+     */
+    private fun versionTwoBaseline(): String {
+        val baseline = requireNotNull(javaClass.classLoader.getResourceAsStream("db/migration/001_baseline.sql"))
+            .use { it.readBytes().decodeToString() }
+        val withoutBlocks = Regex("(?s)-- schema 3 begin.*?-- schema 3 end\\n").replace(baseline, "")
+        val withoutLines = withoutBlocks.lines().filterNot { it.trimEnd().endsWith("-- schema 3") }.joinToString("\n")
+        val versionTwo = withoutLines.replace("'SELECTABLE_PDF', 'CORRECTIONS'", "'SELECTABLE_PDF'")
+        check(versionTwo != baseline && "CORRECTIONS" !in versionTwo && "reading_extracted_text" !in versionTwo) {
+            "the baseline no longer marks its version 3 additions"
+        }
+        return versionTwo
+    }
+
+    /** A database exactly as version 2 created it, with a collection, a job and one of its import items. */
+    private fun versionTwoDatabase(): Database {
+        val database = newDatabase()
+        database.transaction { connection ->
+            connection.createStatement().use { statement ->
+                splitSqlStatements(versionTwoBaseline()).forEach(statement::execute)
+                statement.execute("PRAGMA user_version = 2")
+                statement.execute("INSERT INTO schema_version (version, applied_at) VALUES (2, '2026-01-01T00:00:00Z')")
+                val now = "2026-01-01T00:00:00Z"
+                statement.execute(
+                    "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                        "VALUES ('c1', 'Case', 'swe', 'ACTIVE', '$now', '$now')",
+                )
+                statement.execute(
+                    "INSERT INTO jobs (id, collection_id, type, state, created_at, updated_at) " +
+                        "VALUES ('j1', 'c1', 'IMPORT', 'COMPLETE', '$now', '$now')",
+                )
+                statement.execute(
+                    "INSERT INTO import_items (id, job_id, item_key, source_path, outcome, created_at, updated_at) " +
+                        "VALUES ('i1', 'j1', 'k1', '/tmp/a.txt', 'IMPORTED', '$now', '$now')",
+                )
+            }
+        }
+        return database
+    }
+
     /** The baseline as version 1 shipped it: a collection's engine could not be NONE. */
     private fun versionOneDatabase(): Database {
         val database = newDatabase()
-        val baseline = requireNotNull(javaClass.classLoader.getResourceAsStream("db/migration/001_baseline.sql"))
-            .use { it.readBytes().decodeToString() }
+        val baseline = versionTwoBaseline()
         val versionOne = baseline.replace(
             "CHECK (ocr_engine IN ('TESSERACT', 'SURYA', 'LLM', 'NONE'))",
             "CHECK (ocr_engine IN ('TESSERACT', 'SURYA', 'LLM'))",
@@ -224,18 +265,18 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `a version 1 database upgrades to version 2 with every row and reference intact`() {
+    fun `a version 1 database upgrades to version 3 with every row and reference intact`() {
         versionOneDatabase().use { database ->
             val counts = listOf("collections", "collection_prompts", "documents", "ocr_profiles").map { count(database, it) }
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(2, database.userVersion())
+            assertEquals(3, database.userVersion())
             assertEquals(counts, listOf("collections", "collection_prompts", "documents", "ocr_profiles").map { count(database, it) })
             assertEquals(listOf("LLM", "p1", "q1", "swe"), collectionColumns(database))
             assertEquals(0, foreignKeyViolations(database))
             assertEquals("1", pragma(database, "foreign_keys"), "foreign keys were left switched off")
-            assertEquals(2, count(database, "schema_version"))
+            assertEquals(3, count(database, "schema_version"))
         }
     }
 
@@ -255,7 +296,7 @@ class SchemaMigratorTest {
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(2, database.userVersion())
+            assertEquals(3, database.userVersion())
             assertEquals(1, foreignKeyViolations(database), "the upgrade changed the violation it found")
         }
     }
@@ -277,8 +318,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(2, database.userVersion())
-            assertEquals(2, count(database, "schema_version"))
+            assertEquals(3, database.userVersion())
+            assertEquals(3, count(database, "schema_version"))
             assertEquals(listOf("LLM", "p1", "q1", "swe"), collectionColumns(database))
         }
     }
@@ -298,17 +339,17 @@ class SchemaMigratorTest {
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(2, database.userVersion())
+            assertEquals(3, database.userVersion())
             setEngineToNone(database)
         }
     }
 
     @Test
-    fun `a new database starts at version 2 and accepts NONE`() {
+    fun `a new database starts at version 3 and accepts NONE`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
 
-            assertEquals(2, database.userVersion())
+            assertEquals(3, database.userVersion())
             val now = "2026-01-01T00:00:00Z"
             database.transaction { connection ->
                 connection.createStatement().use { statement ->
@@ -316,6 +357,106 @@ class SchemaMigratorTest {
                         "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at, " +
                             "ocr_engine) VALUES ('c1', 'Case', 'eng', 'ACTIVE', '$now', '$now', 'NONE')",
                     )
+                }
+            }
+        }
+    }
+
+    private fun columnNames(database: Database, table: String): List<String> = database.read { connection ->
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info($table)").use { rows ->
+                buildList { while (rows.next()) add(rows.getString("name")) }
+            }
+        }
+    }
+
+    private fun insertCorrectionsJob(database: Database) = database.transaction { connection ->
+        connection.createStatement().use { statement ->
+            statement.execute(
+                "INSERT INTO jobs (id, collection_id, type, state, created_at, updated_at) " +
+                    "VALUES ('j2', 'c1', 'CORRECTIONS', 'QUEUED', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+        }
+    }
+
+    @Test
+    fun `a version 2 database upgrades to version 3 with its jobs and import items intact`() {
+        versionTwoDatabase().use { database ->
+            SchemaMigrator(database).migrate()
+
+            assertEquals(3, database.userVersion())
+            assertEquals(1, count(database, "jobs"))
+            assertEquals(1, count(database, "import_items"))
+            assertEquals(0, foreignKeyViolations(database))
+            assertEquals("1", pragma(database, "foreign_keys"), "foreign keys were left switched off")
+            assertTrue("collection_corrections" in tableNames(database))
+            listOf("page_text_revisions", "content_units").forEach { table ->
+                assertTrue(columnNames(database, table).containsAll(listOf("reading_extracted_text", "reading_search_text")), table)
+            }
+            assertTrue(columnNames(database, "document_revisions").containsAll(listOf("corrections_fingerprint", "corrections_applied")))
+            insertCorrectionsJob(database)
+            assertEquals(2, count(database, "jobs"))
+        }
+    }
+
+    @Test
+    fun `upgrading version 2 twice changes nothing`() {
+        versionTwoDatabase().use { database ->
+            SchemaMigrator(database).migrate()
+            SchemaMigrator(database).migrate()
+
+            assertEquals(3, database.userVersion())
+            assertEquals(2, count(database, "schema_version"))
+            assertEquals(1, count(database, "jobs"))
+        }
+    }
+
+    @Test
+    fun `a failure inside the version 3 upgrade leaves version 2 intact`() {
+        versionTwoDatabase().use { database ->
+            assertFailsWith<IllegalStateException> {
+                SchemaMigrator(database, afterCopy = { error("interrupted") }).migrate()
+            }
+
+            assertEquals(2, database.userVersion())
+            assertEquals(1, count(database, "jobs"))
+            assertFalse("collection_corrections" in tableNames(database))
+            assertFailsWith<java.sql.SQLException> { insertCorrectionsJob(database) }
+
+            SchemaMigrator(database).migrate()
+
+            assertEquals(3, database.userVersion())
+            insertCorrectionsJob(database)
+        }
+    }
+
+    @Test
+    fun `a page reading is stored whole or not at all`() {
+        newDatabase().use { database ->
+            SchemaMigrator(database).migrate()
+            val now = "2026-01-01T00:00:00Z"
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute(
+                        "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                            "VALUES ('c1', 'Case', 'swe', 'ACTIVE', '$now', '$now')",
+                    )
+                    statement.execute(
+                        "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, " +
+                            "original_path, size_bytes, status, created_at, updated_at) VALUES ('d1', 'c1', 'abc', " +
+                            "'text/plain', 'a.txt', '/tmp/a.txt', 3, 'QUEUED', '$now', '$now')",
+                    )
+                }
+            }
+            assertFailsWith<java.sql.SQLException> {
+                database.transaction { connection ->
+                    connection.createStatement().use { statement ->
+                        statement.execute(
+                            "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
+                                "search_text, created_at, updated_at, reading_extracted_text) VALUES ('u1', 'd1', 0, " +
+                                "'TEXT', '{}', 'Spinnars', 'Spinnars', '$now', '$now', 'spinners')",
+                        )
+                    }
                 }
             }
         }

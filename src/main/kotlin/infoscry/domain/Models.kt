@@ -235,6 +235,15 @@ enum class JobType {
      * search index or embeddings. There is no GPU or provider work anywhere in this job.
      */
     SELECTABLE_PDF,
+
+    /**
+     * Applies a collection's correction list to every document of the collection, publishing a corrected
+     * revision for each document whose text the list changes.
+     *
+     * It reads only published text and its reading; nothing is read again from a managed copy and nothing is
+     * sent anywhere. Its only accelerator work is embedding the passages of the pages it rewrote.
+     */
+    CORRECTIONS,
 }
 
 /**
@@ -376,6 +385,8 @@ data class ContentUnit(
      * (or folded it into direct text) would invent a history the archive does not have.
      */
     val extractionMethod: ExtractionMethod? = null,
+    /** The unit's reading before the collection's corrections rewrote it, or `null` when they changed nothing. */
+    val reading: ReadingText? = null,
 ) {
     init {
         require(ordinal >= 0) { "ContentUnit.ordinal must not be negative, was $ordinal" }

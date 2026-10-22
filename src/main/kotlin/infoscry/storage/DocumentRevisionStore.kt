@@ -1,6 +1,9 @@
 package infoscry.storage
 
 import infoscry.chunk.ChunkDraft
+import infoscry.domain.AppliedCorrection
+import infoscry.domain.ReadingText
+import kotlinx.serialization.builtins.ListSerializer
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
@@ -88,6 +91,10 @@ data class DocumentRevision(
     val state: RevisionState,
     val provenance: String,
     val createdAt: String,
+    /** The correction list this revision's text was corrected with, or `null` when no correction pass made it. */
+    val correctionsFingerprint: String? = null,
+    /** What each rule of that list changed in this revision; empty when it changed nothing or none ran. */
+    val correctionsApplied: List<AppliedCorrection> = emptyList(),
 )
 
 /**
@@ -128,6 +135,8 @@ data class RevisionPageText(
      * root; it answers `null` for any damage. Never inferred from equal bytes.
      */
     val structureReference: StructureReference? = null,
+    /** This page's reading before corrections, or `null` when the corrections changed nothing on it. */
+    val reading: ReadingText? = null,
 )
 
 /**
@@ -159,6 +168,8 @@ data class RevisionPageDraft(
     val layoutReference: LayoutReference? = null,
     /** See [RevisionPageText.structureReference]; preserved and restored pages inherit it exactly, including absence. */
     val structureReference: StructureReference? = null,
+    /** See [RevisionPageText.reading]; preserved and restored pages inherit it exactly, including absence. */
+    val reading: ReadingText? = null,
 ) {
     init {
         require(ordinal >= 0) { "RevisionPageDraft.ordinal must not be negative, was $ordinal" }
@@ -685,6 +696,24 @@ class DocumentRevisionStore(private val database: Database, private val content:
         }
     }
 
+    /**
+     * Records the correction list [revisionId]'s text was corrected with and what each rule changed. Writing the
+     * same values again changes nothing, so a resumed correction pass may record them twice.
+     */
+    fun recordCorrections(revisionId: String, fingerprint: String, applied: List<AppliedCorrection>) {
+        require(fingerprint.isNotBlank()) { "a correction pass names the list it applied" }
+        database.transaction { connection ->
+            connection.prepareStatement(
+                "UPDATE document_revisions SET corrections_fingerprint = ?, corrections_applied = ? WHERE id = ?",
+            ).use { statement ->
+                statement.setString(1, fingerprint)
+                statement.setString(2, CORRECTIONS_JSON.encodeToString(ListSerializer(AppliedCorrection.serializer()), applied))
+                statement.setString(3, revisionId)
+                check(statement.executeUpdate() == 1) { "no revision with id $revisionId exists" }
+            }
+        }
+    }
+
     // ---- Restoring a historical revision ----
 
     /**
@@ -1100,10 +1129,11 @@ class DocumentRevisionStore(private val database: Database, private val content:
             "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, extracted_text, " +
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
                 "artifact_sha256, approval, created_at, producer_revision_id, layout_relative_path, layout_sha256, " +
-                "structure_relative_path, structure_sha256) " +
+                "structure_relative_path, structure_sha256, reading_extracted_text, reading_search_text) " +
                 "SELECT ?, ordinal, id, locator, extracted_text, search_text, NULL, extraction_method, " +
                 "mean_confidence, artifact_relative_path, artifact_sha256, ?, ?, ?, NULL, NULL, " +
-                "structure_relative_path, structure_sha256 FROM content_units " +
+                "structure_relative_path, structure_sha256, reading_extracted_text, reading_search_text " +
+                "FROM content_units " +
                 "WHERE document_id = ?",
         ).use { statement ->
             statement.setString(1, revisionId)
@@ -1146,12 +1176,13 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "artifact_sha256, source_image_root, source_image_relative_path, source_image_sha256, " +
                 "source_image_width, source_image_height, source_image_render_version, approval, created_at, " +
                 "producer_revision_id, layout_relative_path, layout_sha256, " +
-                "structure_relative_path, structure_sha256) " +
+                "structure_relative_path, structure_sha256, reading_extracted_text, reading_search_text) " +
                 "SELECT ?, ordinal, unit_id, locator, extracted_text, search_text, text_sha256, " +
                 "extraction_method, mean_confidence, artifact_relative_path, artifact_sha256, " +
                 "source_image_root, source_image_relative_path, source_image_sha256, source_image_width, " +
                 "source_image_height, source_image_render_version, ?, ?, producer_revision_id, " +
-                "layout_relative_path, layout_sha256, structure_relative_path, structure_sha256 " +
+                "layout_relative_path, layout_sha256, structure_relative_path, structure_sha256, " +
+                "reading_extracted_text, reading_search_text " +
                 "FROM page_text_revisions WHERE revision_id = ? AND approval = ?",
         ).use { statement ->
             statement.setString(1, revisionId)
@@ -1225,8 +1256,8 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "artifact_sha256, source_image_root, source_image_relative_path, source_image_sha256, " +
                 "source_image_width, source_image_height, source_image_render_version, approval, " +
                 "created_at, unit_key, producer_revision_id, layout_relative_path, layout_sha256, " +
-                "structure_relative_path, structure_sha256) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "structure_relative_path, structure_sha256, reading_extracted_text, reading_search_text) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (revision_id, ordinal) DO UPDATE SET unit_id = excluded.unit_id, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, text_sha256 = excluded.text_sha256, " +
@@ -1243,7 +1274,9 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "approval = excluded.approval, unit_key = excluded.unit_key, producer_revision_id = excluded.producer_revision_id, " +
                 "layout_relative_path = excluded.layout_relative_path, layout_sha256 = excluded.layout_sha256, " +
                 "structure_relative_path = excluded.structure_relative_path, " +
-                "structure_sha256 = excluded.structure_sha256",
+                "structure_sha256 = excluded.structure_sha256, " +
+                "reading_extracted_text = excluded.reading_extracted_text, " +
+                "reading_search_text = excluded.reading_search_text",
         ).use { statement ->
             statement.setString(1, revisionId)
             statement.setInt(2, page.ordinal)
@@ -1287,6 +1320,8 @@ class DocumentRevisionStore(private val database: Database, private val content:
             statement.setString(23, page.layoutReference?.sha256)
             statement.setString(24, page.structureReference?.relativePath)
             statement.setString(25, page.structureReference?.sha256)
+            statement.setString(26, page.reading?.extractedText)
+            statement.setString(27, page.reading?.searchText)
             statement.executeUpdate()
         }
     }
@@ -1336,6 +1371,10 @@ class DocumentRevisionStore(private val database: Database, private val content:
         state = RevisionState.valueOf(getString("state")),
         provenance = getString("provenance"),
         createdAt = getString("created_at"),
+        correctionsFingerprint = getString("corrections_fingerprint"),
+        correctionsApplied = getString("corrections_applied")
+            ?.let { CORRECTIONS_JSON.decodeFromString(ListSerializer(AppliedCorrection.serializer()), it) }
+            .orEmpty(),
     )
 
     private fun ResultSet.toPageText(): RevisionPageText = RevisionPageText(
@@ -1357,6 +1396,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
         producerRevisionId = getString("producer_revision_id"),
         layoutReference = toLayoutReference(),
         structureReference = toStructureReference(),
+        reading = ReadingText.of(getString("reading_extracted_text"), getString("reading_search_text")),
     )
 
     /** The structure reference the row names, or `null`; one column without the other is corrupt provenance. */
@@ -1469,15 +1509,16 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
     private companion object {
         const val SELECT_REVISIONS =
-            "SELECT id, document_id, parent_revision_id, state, provenance, created_at FROM document_revisions"
+            "SELECT id, document_id, parent_revision_id, state, provenance, created_at, corrections_fingerprint, " +
+                "corrections_applied FROM document_revisions"
 
         const val SELECT_PAGE_TEXTS =
             "SELECT revision_id, ordinal, unit_id, locator, extracted_text, search_text, text_sha256, " +
                 "extraction_method, mean_confidence, artifact_relative_path, artifact_sha256, approval, " +
                 "source_image_root, source_image_relative_path, source_image_sha256, source_image_width, " +
                 "source_image_height, source_image_render_version, producer_revision_id, " +
-                "layout_relative_path, layout_sha256, structure_relative_path, structure_sha256 " +
-                "FROM page_text_revisions"
+                "layout_relative_path, layout_sha256, structure_relative_path, structure_sha256, " +
+                "reading_extracted_text, reading_search_text FROM page_text_revisions"
 
         const val SELECT_CHUNKS =
             "SELECT unit_ordinal, ordinal, text, start_offset, end_offset, token_count, token_start, " +
@@ -1499,6 +1540,8 @@ class DocumentRevisionStore(private val database: Database, private val content:
         private val LOCATOR_JSON = Json { ignoreUnknownKeys = true }
 
         private val READING_JSON = Json { ignoreUnknownKeys = true }
+
+        private val CORRECTIONS_JSON = Json { ignoreUnknownKeys = true }
 
         /** The frozen OCR snapshot of one import or retry, in the form the revision row keeps it. */
         fun encodeReading(snapshot: OcrSettingsSnapshot): String =
