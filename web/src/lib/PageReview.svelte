@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { documentPageReviewImageUrl, getDocumentPageReview, SOURCE_PAGE_CHARS, type PageReviewResponse, type StructureView } from './api';
+  import { documentPageReviewImageUrl, getDocumentPageReview, getRestoreOperation, restoreRevision, SOURCE_PAGE_CHARS, type PageReviewResponse, type RestoreOperation, type StructureView } from './api';
+  import { newRequestId } from './ocrRescan';
+  import { diffText } from './textDiff';
   import SelectablePdfActions from './SelectablePdfActions.svelte';
   import StructuredPage from './StructuredPage.svelte';
 
@@ -8,7 +10,7 @@
   export let documentId: string;
   export let initialOrdinal = 0;
   export let revisionId: string | undefined = undefined;
-  /** A newly published revision observed by the parent; the reader offers an atomic refresh to it. */
+  /** A newly published revision observed by the parent; the reader loads it at once and asks to approve or reject it. */
   export let publishedRevisionId: string | null | undefined = undefined;
   /** Incremented by the enclosing workspace when its own narrow Back button hides this pane. */
   export let clearMarksSignal = 0;
@@ -20,6 +22,7 @@
   export let onBack: () => void;
   /** Sends a zero-based explicit page selection to the shared, confirmed rescan flow. */
   export let onScanPages: ((ordinals: number[]) => void) | undefined = undefined;
+  export let pollMillis = 1000;
 
   let ordinal = initialOrdinal;
   let page: PageReviewResponse | null = null;
@@ -47,14 +50,41 @@
   let observedClearMarksSignal = clearMarksSignal;
   let divider: HTMLElement;
   let resizeObserver: ResizeObserver | null = null;
+  /** The last publication the parent reported; each new one is loaded once. */
+  let handledPublication = publishedRevisionId;
+  /** The new reading on show and the text the person saw before it, which Reject brings back. */
+  let pendingReading: { previous: string; current: string } | null = null;
+  let rejectRequest: { key: string; requestId: string } | null = null;
+  let rejecting = false;
+  let readingError: string | null = null;
+  let readingNotice: string | null = null;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  let destroyed = false;
+  /** The same page in the text shown before the new reading, fetched while the new reading awaits a choice. */
+  let comparison: { ordinal: number; revision: string; text: string; score: number | null; truncated: boolean; loaded: boolean } | null = null;
+  let comparisonError: string | null = null;
+  let comparisonGeneration = 0;
+  let textView: 'new' | 'previous' | 'differences' = 'new';
 
+  $: if (pendingReading === null) {
+    comparison = null;
+    comparisonError = null;
+    textView = 'new';
+  } else if (page !== null && page.revisionId === pendingReading.current &&
+      (comparison?.ordinal !== page.ordinal || comparison.revision !== pendingReading.previous)) {
+    void loadComparison(page.ordinal, pendingReading.previous);
+  }
+  $: comparing = pendingReading !== null && comparison !== null && comparison.loaded && comparison.ordinal === page?.ordinal;
+  $: differences = comparing && textView === 'differences' ? diffText(comparison!.text, text) : null;
   $: imageUrl = page == null ? null : documentPageReviewImageUrl(collectionId, page);
   $: imageIdentity = page == null ? null : `${requestGeneration}:${page.documentId}:${page.revisionId ?? 'unpublished'}:${page.ordinal}:${page.imageKind}:${imageRetry}`;
   $: pageLabel = page?.documentPages == null
     ? `Page ${ordinal + 1} (total unavailable)`
     : `Page ${ordinal + 1} of ${page.documentPages}`;
   $: imageLabel = page?.imageKind === 'ocr' ? `OCR page image, page ${ordinal + 1}` : `Original page image, page ${ordinal + 1}`;
-  $: hasNewPublication = !historical && publishedRevisionId != null && publishedRevisionId !== pinnedRevision;
+  $: if (!historical && savedExcerpt === null && publishedRevisionId != null && publishedRevisionId !== handledPublication) {
+    void showNewReading(publishedRevisionId);
+  }
   $: if (marksDocumentId !== documentId) {
     marksDocumentId = documentId;
     markedOrdinals = new Set();
@@ -75,7 +105,11 @@
     }
     if (savedExcerpt === null) void loadPage(ordinal, pinnedRevision);
   });
-  onDestroy(() => resizeObserver?.disconnect());
+  onDestroy(() => {
+    destroyed = true;
+    resizeObserver?.disconnect();
+    if (restoreTimer !== null) clearTimeout(restoreTimer);
+  });
 
   async function loadPage(nextOrdinal: number, exactRevision = pinnedRevision): Promise<void> {
     const generation = ++requestGeneration;
@@ -154,9 +188,93 @@
     }
   }
 
-  async function refreshLatest(): Promise<void> {
-    const targetRevision = publishedRevisionId ?? undefined;
-    await loadPage(ordinal, targetRevision);
+  /** A finished reading replaces the text on show at once; the text seen before it stays one Reject away. */
+  async function showNewReading(target: string): Promise<void> {
+    handledPublication = target;
+    const previous = pendingReading?.previous ?? pinnedRevision;
+    readingError = null;
+    readingNotice = null;
+    pendingReading = previous === undefined || previous === target ? null : { previous, current: target };
+    await loadPage(ordinal, target);
+  }
+
+  async function loadComparison(pageOrdinal: number, revision: string): Promise<void> {
+    const mine = ++comparisonGeneration;
+    comparison = { ordinal: pageOrdinal, revision, text: '', score: null, truncated: false, loaded: false };
+    comparisonError = null;
+    try {
+      const earlier = await getDocumentPageReview(collectionId, documentId, { ordinal: pageOrdinal, revision, limit: SOURCE_PAGE_CHARS });
+      if (mine !== comparisonGeneration || destroyed) return;
+      comparison = { ordinal: pageOrdinal, revision, text: earlier.text, score: earlier.qualityScore, truncated: earlier.truncated, loaded: true };
+    } catch (failure) {
+      if (mine === comparisonGeneration && !destroyed) comparisonError = `The previous text of this page could not be loaded: ${messageOf(failure)}`;
+    }
+  }
+
+  function qualityComparison(before: number | null, now: number | null): string {
+    const shown = (score: number | null) => score === null ? 'unknown' : `${Math.round(score)}%`;
+    const change = before === null || now === null ? '' : ` (${Math.round(now) - Math.round(before) >= 0 ? '+' : ''}${Math.round(now) - Math.round(before)})`;
+    return `Text quality: ${shown(before)} before, ${shown(now)} now${change}`;
+  }
+
+  function approveReading(): void {
+    pendingReading = null;
+    readingError = null;
+    readingNotice = 'The new reading is kept.';
+  }
+
+  /** Reject restores the earlier text as a new version; the rejected reading stays in history. */
+  async function rejectReading(): Promise<void> {
+    const reading = pendingReading;
+    if (reading === null || rejecting) return;
+    rejecting = true;
+    readingError = null;
+    const key = `${reading.current}|${reading.previous}`;
+    // An identical retry after an unanswered request is the same request, so it cannot restore twice.
+    if (rejectRequest === null || rejectRequest.key !== key) rejectRequest = { key, requestId: newRequestId() };
+    try {
+      const operation = await restoreRevision(collectionId, documentId, rejectRequest.requestId, reading.current, reading.previous);
+      if (destroyed) return;
+      rejectRequest = null;
+      await settleReject(operation);
+    } catch (failure) {
+      if (destroyed) return;
+      const status = (failure as { status?: number | null } | null)?.status ?? null;
+      const code = (failure as { code?: string } | null)?.code ?? '';
+      if (status !== null) rejectRequest = null;
+      readingError = code === 'STALE_DOCUMENT_REVISION'
+        ? 'The document\'s text changed again, so nothing was rejected. Use the document history to choose a version.'
+        : `The previous text could not be restored: ${messageOf(failure)}`;
+      rejecting = false;
+    }
+  }
+
+  async function settleReject(operation: RestoreOperation): Promise<void> {
+    if (operation.phase === 'STAGED') {
+      restoreTimer = setTimeout(() => void pollReject(operation.restoreId), pollMillis);
+      return;
+    }
+    if (operation.phase === 'PUBLISHED') {
+      pendingReading = null;
+      rejecting = false;
+      readingNotice = 'The new reading was rejected. The previous text is back; the rejected reading stays in history.';
+      await loadPage(ordinal, operation.newRevisionId);
+      return;
+    }
+    readingError = `The previous text could not be restored. ${operation.errorMessage ?? 'The new reading is still the document\'s text.'}`;
+    rejecting = false;
+  }
+
+  async function pollReject(restoreId: string): Promise<void> {
+    restoreTimer = null;
+    if (destroyed) return;
+    try {
+      await settleReject(await getRestoreOperation(collectionId, documentId, restoreId));
+    } catch (failure) {
+      if (destroyed) return;
+      readingError = `The restore could not be refreshed: ${messageOf(failure)}`;
+      restoreTimer = setTimeout(() => void pollReject(restoreId), pollMillis);
+    }
   }
 
   function retryImage(): void {
@@ -256,7 +374,6 @@
       <button type="button" aria-label="Zoom out" disabled={zoom <= 0.5} onclick={() => adjustZoom(-0.25)}>−</button>
       <button type="button" aria-label="Fit image" onclick={() => (zoom = 1)}>Fit</button>
       <button type="button" aria-label="Zoom in" disabled={zoom >= 3} onclick={() => adjustZoom(0.25)}>+</button>
-      {#if hasNewPublication}<button type="button" aria-label="Refresh to latest reading" onclick={refreshLatest}>New reading available · Refresh</button>{/if}
       {#if !historical && onScanPages !== undefined}
         <button type="button" aria-label={`Mark page ${ordinal + 1}`} aria-pressed={markedOrdinals.has(ordinal)} onclick={toggleCurrentMark}>
           {markedOrdinals.has(ordinal) ? `Unmark page ${ordinal + 1}` : `Mark page ${ordinal + 1}`}
@@ -264,6 +381,21 @@
       {/if}
     </div>
   </header>
+
+  {#if pendingReading !== null || readingNotice !== null || readingError !== null}
+    <div class="new-reading" role="status" aria-label="New reading">
+      {#if pendingReading !== null}
+        <p>The text below is the new reading. Keep it, or reject it to bring back the previous text.</p>
+        <div class="selection-actions">
+          <button type="button" class="primary" onclick={approveReading} disabled={rejecting}>Approve</button>
+          <button type="button" onclick={() => void rejectReading()} disabled={rejecting}>{rejecting ? 'Rejecting…' : 'Reject'}</button>
+        </div>
+      {:else if readingNotice !== null}
+        <p>{readingNotice}</p>
+      {/if}
+      {#if readingError !== null}<p role="alert">{readingError}</p>{/if}
+    </div>
+  {/if}
 
   {#if !historical && onScanPages !== undefined}
     <div class="page-selection" aria-label="Selected pages">
@@ -339,9 +471,24 @@
         {:else if textError !== null}
           <p role="alert">{textError}</p><button type="button" disabled={loadingText} onclick={retryText}>Retry text</button>
         {:else if page !== null}
-          {#if page.qualityScore !== null}<p class="quality">Text quality: {Math.round(page.qualityScore)}%</p>{/if}
+          {#if comparing}
+            <p class="quality" data-testid="quality-comparison">{qualityComparison(comparison!.score, page.qualityScore)}</p>
+            <div class="compare" role="group" aria-label="Compare readings">
+              <button type="button" aria-pressed={textView === 'new'} onclick={() => (textView = 'new')}>New</button>
+              <button type="button" aria-pressed={textView === 'previous'} onclick={() => (textView = 'previous')}>Previous</button>
+              <button type="button" aria-pressed={textView === 'differences'} onclick={() => (textView = 'differences')}>Differences</button>
+            </div>
+            {#if (page.truncated || comparison!.truncated) && textView !== 'new'}<p class="notice">Only the first part of this page is compared.</p>{/if}
+          {:else if page.qualityScore !== null}<p class="quality">Text quality: {Math.round(page.qualityScore)}%</p>{/if}
+          {#if comparisonError !== null && pendingReading !== null}<p role="alert">{comparisonError}</p>{/if}
           {#if page.structureDegraded}<p class="notice">Layout could not be fully recognised on this page; text is shown as paragraphs.</p>{/if}
-          {#if text.length === 0}<p class="empty">No extracted text for this page.</p>
+          {#if comparing && textView === 'previous'}
+            {#if comparison!.text.length === 0}<p class="empty">The previous reading had no text for this page.</p>
+            {:else}<pre class="review-text" style="min-height: 0; max-height: none; overflow-y: auto;">{comparison!.text}</pre>{/if}
+          {:else if comparing && textView === 'differences'}
+            {#if differences === null}<p class="notice">This page is too long to compare here.</p>
+            {:else}<pre class="review-text diff" style="min-height: 0; max-height: none; overflow-y: auto;">{#each differences as part}{#if part.kind === 'added'}<ins>{part.text}</ins>{:else if part.kind === 'removed'}<del>{part.text}</del>{:else}{part.text}{/if}{/each}</pre>{/if}
+          {:else if text.length === 0}<p class="empty">No extracted text for this page.</p>
           {:else if windows.some((window) => window.structure !== null)}
             <div class="review-structure">
               {#each windows as window}
@@ -364,6 +511,13 @@
   .page-selection { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; margin: 0 0 .8rem; color: #a6adaa; }
   .page-selection p { margin: 0; }
   .selection-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .new-reading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; margin: 0 0 .8rem; border: 1px solid #c4a77d; border-radius: .55rem; padding: .6rem .75rem; color: #d6d0c2; }
+  .new-reading p { margin: 0; }
+  .compare { display: flex; gap: .35rem; margin: 0 0 .5rem; }
+  .compare button[aria-pressed='true'] { border-color: #c4a77d; background: #3a3326; color: #f0e2c8; }
+  .diff ins { background: #1f4a2e; color: #c9f2d4; text-decoration: none; }
+  .diff del { background: #5a2424; color: #f5c9c9; }
+  .new-reading button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
   .page-navigation, .image-controls, .narrow-tabs { display: flex; align-items: center; gap: .5rem; }
   .page-navigation strong { min-width: 9rem; text-align: center; }
   .comparison { display: grid; grid-template-columns: minmax(0, var(--image-width)) .65rem minmax(0, calc(100% - var(--image-width) - .65rem)); grid-template-rows: minmax(0, 1fr); height: min(70vh, 54rem); min-height: 18rem; border: 1px solid #343939; border-radius: .55rem; overflow: hidden; }

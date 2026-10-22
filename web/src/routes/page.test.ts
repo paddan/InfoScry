@@ -743,7 +743,9 @@ describe('app shell', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
     await screen.findByText('Reading revision-1');
-    expect(screen.getByTestId('document-rescan')).toBeTruthy();
+    const readingStatus = screen.getByTestId('document-rescan');
+    // The reading status sits above the page so a running scan is seen without scrolling.
+    expect(readingStatus.compareDocumentPosition(screen.getByRole('region', { name: 'Page review' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Scan this page again' }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(await screen.findByRole('button', { name: 'Read page 1 with Surya' })).toBeTruthy();
@@ -751,9 +753,9 @@ describe('app shell', () => {
     expect(JSON.parse(String(previewCall?.init?.body))).toEqual({ method: 'surya', selection: { mode: 'explicit', ordinals: [0] } });
     await fireEvent.click(screen.getByRole('button', { name: 'Read page 1 with Surya' }));
     await waitFor(() => expect(calls.some((call) => call.url.endsWith('/documents/document-1/ocr/rescan'))).toBe(true));
-    expect(await screen.findByRole('button', { name: 'Refresh to latest reading' }, { timeout: 3000 })).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
-    expect(await screen.findByText('Reading revision-2')).toBeTruthy();
+    expect(await screen.findByText('Reading revision-2', {}, { timeout: 3000 })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
     expect(calls.some((call) => call.url.includes('page-review?ordinal=0&revision=revision-2'))).toBe(true);
   });
 
@@ -901,7 +903,7 @@ describe('app shell', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
     expect(await screen.findByText('Reading revision-1')).toBeTruthy();
     await waitFor(() => expect(revisionLookups).toBe(1));
-    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Back to results' }));
     expect(await screen.findByRole('button', { name: 'Open selected source' })).toBeTruthy();
@@ -917,15 +919,13 @@ describe('app shell', () => {
       resolveFirstLookup(jsonResponse({ revisions: [{ revisionId: 'revision-1', active: true, state: 'PUBLISHED', provenance: 'OCR', createdAt: '', pageCount: 2 }], total: 2, activeRevisionId: 'revision-1' }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     expect(screen.getByText('Reading revision-1')).toBeTruthy();
 
     await act(async () => {
       resolveSecondLookup(jsonResponse({ revisions: [{ revisionId: activeRevisionId, active: true, state: 'PUBLISHED', provenance: 'RESTORE', createdAt: '', pageCount: 2 }], total: 2, activeRevisionId }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh to latest reading' })).toBeTruthy());
-    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
     expect(await screen.findByText('Reading revision-restored')).toBeTruthy();
     expect(calls.some((call) => call.url.includes('page-review?') && call.url.includes('revision=candidate-revision'))).toBe(false);
   });
@@ -971,14 +971,12 @@ describe('app shell', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'Open document' }));
     expect(await screen.findByText('Reading revision-1')).toBeTruthy();
     await waitFor(() => expect(revisionLookups).toBe(1));
-    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Back to results' }));
     expect(await screen.findByRole('button', { name: 'Open selected source' })).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Open selected source' }));
     await waitFor(() => expect(revisionLookups).toBe(2));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh to latest reading' })).toBeTruthy());
-    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
     expect(await screen.findByText('Reading revision-restored')).toBeTruthy();
     expect(calls.some((call) => call.url.includes('page-review?') && call.url.includes('revision=candidate-revision'))).toBe(false);
   });
@@ -1040,9 +1038,9 @@ describe('app shell', () => {
     expect(await screen.findByText('Reading 0 of 1')).toBeTruthy();
     expect(screen.getByText('Reading 0 of 1').closest('[hidden]')).toBeNull();
     expect(screen.getAllByTestId('document-rescan')).toHaveLength(1);
-    expect(await screen.findByRole('button', { name: 'Refresh to latest reading' }, { timeout: 3000 })).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
-    expect(await screen.findByText('Reading revision-2')).toBeTruthy();
+    expect(await screen.findByText('Reading revision-2', {}, { timeout: 3000 })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
     expect(calls.some((call) => call.url.includes('page-review?ordinal=0&revision=revision-2'))).toBe(true);
   });
 
@@ -1110,9 +1108,8 @@ describe('app shell', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Scan this page again' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read page 1 with Surya' }));
     await waitFor(() => expect(calls.some((call) => call.url.includes('/ocr/revisions?'))).toBe(true));
-    expect(await screen.findByRole('button', { name: 'Refresh to latest reading' })).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Refresh to latest reading' }));
     expect(await screen.findByText('Reading revision-1')).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Back to documents' }));
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Scan again' }));
@@ -1123,7 +1120,7 @@ describe('app shell', () => {
     expect(await screen.findByText('Reading revision-2')).toBeTruthy();
     await waitFor(() => expect(calls.slice(callCountBeforeReopen).some((call) => call.url.endsWith('/ocr/operations'))).toBe(true));
 
-    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     expect(calls.slice(callCountBeforeReopen).some((call) => call.url.includes('page-review?') && call.url.includes('revision=revision-1'))).toBe(false);
     await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
     await waitFor(() => expect(calls.some((call) => call.url.includes('page-review?ordinal=1&revision=revision-2&limit=16384'))).toBe(true));
@@ -1183,7 +1180,7 @@ describe('app shell', () => {
     // The old COMPLETE OCR operation still points to revision-1; that must not be offered
     // as a new reading after Restore made revision-restored active.
     await waitFor(() => expect(calls.slice(beforeReopen).some((call) => call.url.includes('/ocr/operations'))).toBe(true));
-    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     expect(calls.slice(beforeReopen).some((call) => call.url.includes('/ocr/revisions?'))).toBe(true);
     expect(calls.slice(beforeReopen).some((call) => call.url.includes('page-review?') && call.url.includes('revision=revision-1'))).toBe(false);
     await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));

@@ -146,6 +146,16 @@ describe('DocumentRescan', () => {
     expect(screen.queryByText(/approval|review/i)).toBeNull();
   });
 
+  it('shows a moving indicator only while a scan is running', async () => {
+    vi.mocked(api.listRescanOperations).mockResolvedValue([operation('OCR')]);
+    vi.mocked(api.getRescanOperation).mockResolvedValue(operation('COMPLETE', { pagesCommitted: 48 }));
+    render(DocumentRescan, { collectionId: 'c', documentId: 'doc-1', documentName: 'report.pdf', pollMillis: 10 });
+    await waitFor(() => expect(screen.getByTestId('document-reading-status').textContent).toContain('Reading 12 of 48'));
+    expect(screen.getByTestId('reading-spinner')).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId('document-reading-status').textContent).toBe('Done'));
+    expect(screen.queryByTestId('reading-spinner')).toBeNull();
+  });
+
   it('shows retry progress and uses the refreshed document status after retry succeeds', async () => {
     vi.mocked(api.listRescanOperations).mockResolvedValue([operation('FAILED', {
       errorCode: 'OCR_PROVIDER_UNAVAILABLE', errorMessage: 'The provider is currently unreachable.',

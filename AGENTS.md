@@ -81,9 +81,11 @@ or GPU verification.
 - OCR workflow (implemented 2026-10-09; remaining OCR/PDF checks confirmed complete by the owner 2026-10-11): the reading method (engine and profile as one
   choice) is confirmed in a start dialog on every import and rescan, with the
   collection default only pre-filling it; every page that can need reading is read (PDF pages with no usable text layer, or a large image and a poor text layer; see the spec); external sending
-  is approved once in that dialog, never by a mid-run pause; there is no
-  reviewer, and a finished run replaces the text with the previous version kept
-  in history. See `docs/ocr-workflow.md`.
+  is approved once in that dialog, never by a mid-run pause; a finished run
+  replaces the text with the previous version kept in history, and page review
+  loads the new text at once with Approve/Reject, where Reject restores the
+  previous version (amended 2026-10-22). Nothing waits for approval. See
+  `docs/ocr-workflow.md`.
 
 ## Embeddings, LLMs, and local boundaries
 

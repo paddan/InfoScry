@@ -130,8 +130,13 @@ selection. Explicit pages are read even when their PDF text layer is usable; oth
 pages retain text, IDs, images and method provenance. Back, changing document or
 opening history clears marks. Empty selection cannot start a run.
 
-Progress appears in the live reader. A completed reading offers **Refresh**, which
-loads image and text from the same active revision; historical review cannot rescan.
+Progress appears in the live reader, with a spinner while the reading runs. A
+completed reading is loaded at once into the text pane, image and text from the
+same active revision, with **Approve** and **Reject**: Approve keeps it, Reject
+restores the text shown before as a new version (the rejected reading stays in
+history). Until you choose, each page shows its text quality before and now, and
+**New**, **Previous** and **Differences** flip between the two texts or mark
+removed and added words. Historical review cannot rescan.
 Leaving pauses UI status polling while server work continues. If start confirmation
 has an uncertain result, retry the frozen request; it keeps the same page set,
 preview and request ID until resolved.

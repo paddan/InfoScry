@@ -1178,6 +1178,19 @@
 
     <div slot="source">
     {#if pageReviewDocument !== null}
+      {#if !pageReviewDocument.historical}
+        <DocumentRescan
+          visible={sourcePaneVisible}
+          collectionId={pageReviewDocument.collectionId}
+          documentId={pageReviewDocument.documentId}
+          documentName="Selected document"
+          statusOnly
+          startedRescan={startedRescan?.documentId === pageReviewDocument.documentId
+            ? { requestId: startedRescan.requestId, operation: startedRescan.operation }
+            : undefined}
+          onPublished={documentReadingPublished}
+        />
+      {/if}
       {#key pageReviewIdentity}
       <PageReview
         collectionId={pageReviewDocument.collectionId}
@@ -1193,19 +1206,6 @@
         visible={sourcePaneVisible}
       />
       {/key}
-      {#if !pageReviewDocument.historical}
-        <DocumentRescan
-          visible={sourcePaneVisible}
-          collectionId={pageReviewDocument.collectionId}
-          documentId={pageReviewDocument.documentId}
-          documentName="Selected document"
-          statusOnly
-          startedRescan={startedRescan?.documentId === pageReviewDocument.documentId
-            ? { requestId: startedRescan.requestId, operation: startedRescan.operation }
-            : undefined}
-          onPublished={documentReadingPublished}
-        />
-      {/if}
     {:else if selectedHit !== null}
       <div class="source-original" style="display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin: 0 0 .8rem;">
         <a href={originalHref(selectedHit)} target="_blank" rel="noopener noreferrer">Open original</a>

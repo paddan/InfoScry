@@ -31,8 +31,14 @@ remaining OCR/PDF checks complete on 2026-10-11.
    unusable keeps its published text (amended 2026-10-21; see
    [the design](specs/2026-10-21-no-ocr-reading-method-design.md)).
 4. External sending is approved **once, in the dialog**, for all pages shown.
-5. There is **no reviewer** and no review step. A finished run replaces the
-   document's text. The previous version stays in history and can be restored.
+5. A finished run replaces the document's text at once; nothing waits for a
+   person. The previous version stays in history and can be restored. When the
+   person is looking at the document in page review, the new text is loaded
+   straight into the text pane with **Approve** and **Reject** (amended
+   2026-10-22). Approve keeps it. Reject restores the text that was on show
+   before, as a new version through the existing Restore; the rejected reading
+   stays in history. Leaving without choosing keeps the new text, and an
+   undecided result never blocks starting again.
 6. OCR language belongs to the collection.
 7. **A stopped run never blocks the next one.** If an import or rescan is
    cancelled, fails, or is cut off in any other way (process killed, provider
@@ -128,6 +134,11 @@ States shown per document: **Imported**, **Reading n of N**, **Done**,
   without a candidate that waits for a person.
 - Cancel stops the run; nothing is published; the existing text is unchanged.
 - The previous version is kept in history. **Restore** is unchanged.
+- Page review shows the new text at once with **Approve** and **Reject**;
+  Reject is a Restore of the version shown before, refused unchanged if the text
+  changed again in the meantime (see rule 5).
+  Until a choice is made, each page shows its text-quality score before and
+  now, and the person can flip between the texts or see the word differences.
 - A run never sends more pages than were confirmed. If it would, it ends as
   Failed with that reason rather than pausing.
 

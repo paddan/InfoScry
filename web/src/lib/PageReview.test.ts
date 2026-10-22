@@ -1,13 +1,17 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageReviewResponse } from './api';
-const mocks = vi.hoisted(() => ({ getPage: vi.fn(), imageUrl: vi.fn(), pdfStatus: vi.fn(), pdfCreate: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  getPage: vi.fn(), imageUrl: vi.fn(), pdfStatus: vi.fn(), pdfCreate: vi.fn(), restore: vi.fn(), restoreStatus: vi.fn(),
+}));
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
   getDocumentPageReview: mocks.getPage,
   documentPageReviewImageUrl: mocks.imageUrl,
   getSelectablePdfStatus: mocks.pdfStatus,
   createSelectablePdf: mocks.pdfCreate,
+  restoreRevision: mocks.restore,
+  getRestoreOperation: mocks.restoreStatus,
 }));
 import PageReview from './PageReview.svelte';
 
@@ -43,6 +47,8 @@ beforeEach(() => {
   mocks.imageUrl.mockImplementation((_collection: string, page: PageReviewResponse | undefined) => page ? `/image/${page.ordinal}` : null);
   mocks.pdfStatus.mockReset();
   mocks.pdfCreate.mockReset();
+  mocks.restore.mockReset();
+  mocks.restoreStatus.mockReset();
   mocks.pdfStatus.mockImplementation(async (_collection: string, _document: string, revisionId: string) => ({
     revisionId, key: null, state: 'NOT_CREATED', selectablePages: 0, totalPages: null, blankPages: 0, unavailablePages: [], reasonCode: null,
   }));
@@ -189,7 +195,7 @@ describe('PageReview', () => {
     expect(getComputedStyle(textPane.querySelector('.review-text')!).overflowY).toBe('auto');
   });
 
-  it('offers publication refresh and binds refreshed text and image to the same revision', async () => {
+  it('loads a new reading at once and keeps it when approved', async () => {
     mocks.imageUrl.mockImplementation((_collection: string, page: PageReviewResponse) => `/image/${page.ordinal}?revision=${page.revisionId}`);
     mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number; revision?: string }) =>
       metadata(options.ordinal, { revisionId: options.revision ?? 'revision-a', text: `Reading ${options.revision ?? 'revision-a'}` }));
@@ -198,19 +204,93 @@ describe('PageReview', () => {
       revisionId: 'revision-a', publishedRevisionId: null, onBack: vi.fn(),
     } });
     expect(await screen.findByText('Reading revision-a')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     await view.rerender({ publishedRevisionId: 'revision-b' });
-    await fireEvent.click(await screen.findByRole('button', { name: 'Refresh to latest reading' }));
     expect(await screen.findByText('Reading revision-b')).toBeTruthy();
-    expect(mocks.getPage).toHaveBeenLastCalledWith('collection-1', 'doc-1', expect.objectContaining({ ordinal: 0, revision: 'revision-b' }));
+    expect(mocks.getPage).toHaveBeenCalledWith('collection-1', 'doc-1', expect.objectContaining({ ordinal: 0, revision: 'revision-b' }));
     expect(screen.getByRole('img').getAttribute('src')).toBe('/image/0?revision=revision-b');
-    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(mocks.restore).not.toHaveBeenCalled();
     await fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
     expect(await screen.findByText('Reading revision-b')).toBeTruthy();
     expect(screen.getByText('Page 2 of 3')).toBeTruthy();
     await view.rerender({ publishedRevisionId: 'revision-c' });
+    expect(await screen.findByText('Reading revision-c')).toBeTruthy();
     expect(screen.getByText('Page 2 of 3')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Refresh to latest reading' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
+  });
+
+  it('restores the text shown before when the new reading is rejected', async () => {
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number; revision?: string }) =>
+      metadata(options.ordinal, { revisionId: options.revision ?? 'revision-a', text: `Reading ${options.revision ?? 'revision-a'}` }));
+    const staged = {
+      restoreId: 'restore-1', documentId: 'doc-1', requestId: 'r', expectedRevisionId: 'revision-b',
+      restoredFromRevisionId: 'revision-a', newRevisionId: 'revision-d', phase: 'STAGED', createdAt: '', updatedAt: '',
+    };
+    mocks.restore.mockResolvedValue(staged);
+    mocks.restoreStatus.mockResolvedValue({ ...staged, phase: 'PUBLISHED' });
+    const view = render(PageReview, { props: {
+      collectionId: 'collection-1', documentId: 'doc-1', revisionId: 'revision-a', publishedRevisionId: null,
+      pollMillis: 5, onBack: vi.fn(),
+    } });
+    expect(await screen.findByText('Reading revision-a')).toBeTruthy();
+    await view.rerender({ publishedRevisionId: 'revision-b' });
+    expect(await screen.findByText('Reading revision-b')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Reject' }));
+    expect(await screen.findByText('Reading revision-d')).toBeTruthy();
+    expect(mocks.restore).toHaveBeenCalledOnce();
+    expect(mocks.restore).toHaveBeenCalledWith('collection-1', 'doc-1', expect.any(String), 'revision-b', 'revision-a');
+    expect(mocks.getPage).toHaveBeenLastCalledWith('collection-1', 'doc-1', expect.objectContaining({ revision: 'revision-d' }));
+    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(screen.getByRole('status', { name: 'New reading' }).textContent).toContain('previous text is back');
+  });
+
+  it('compares the new reading with the previous one by score, flip and differences', async () => {
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number; revision?: string }) => {
+      const revision = options.revision ?? 'revision-a';
+      return metadata(options.ordinal, {
+        revisionId: revision,
+        text: revision === 'revision-a' ? 'Tbe old reading' : 'The new reading',
+        qualityScore: revision === 'revision-a' ? 52.4 : 88,
+      });
+    });
+    const view = render(PageReview, { props: {
+      collectionId: 'collection-1', documentId: 'doc-1', revisionId: 'revision-a', publishedRevisionId: null, onBack: vi.fn(),
+    } });
+    expect(await screen.findByText('Tbe old reading')).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'Compare readings' })).toBeNull();
+    await view.rerender({ publishedRevisionId: 'revision-b' });
+    expect(await screen.findByText('The new reading')).toBeTruthy();
+    expect((await screen.findByTestId('quality-comparison')).textContent).toBe('Text quality: 52% before, 88% now (+36)');
+    expect(mocks.getPage).toHaveBeenCalledWith('collection-1', 'doc-1', expect.objectContaining({ ordinal: 0, revision: 'revision-a' }));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    expect(screen.getByText('Tbe old reading')).toBeTruthy();
+    expect(screen.queryByText('The new reading')).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Differences' }));
+    expect(document.querySelector('.text-pane del')?.textContent).toBe('Tbe old');
+    expect(document.querySelector('.text-pane ins')?.textContent).toBe('The new');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(screen.queryByRole('group', { name: 'Compare readings' })).toBeNull();
+    expect(screen.getByText('The new reading')).toBeTruthy();
+  });
+
+  it('keeps the new reading and explains why when rejecting is refused', async () => {
+    mocks.getPage.mockImplementation(async (_collection: string, _document: string, options: { ordinal: number; revision?: string }) =>
+      metadata(options.ordinal, { revisionId: options.revision ?? 'revision-a', text: `Reading ${options.revision ?? 'revision-a'}` }));
+    mocks.restore.mockRejectedValue(Object.assign(new Error('stale'), { status: 409, code: 'STALE_DOCUMENT_REVISION' }));
+    const view = render(PageReview, { props: {
+      collectionId: 'collection-1', documentId: 'doc-1', revisionId: 'revision-a', publishedRevisionId: null, onBack: vi.fn(),
+    } });
+    expect(await screen.findByText('Reading revision-a')).toBeTruthy();
+    await view.rerender({ publishedRevisionId: 'revision-b' });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Reject' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('changed again');
+    expect(screen.getByText('Reading revision-b')).toBeTruthy();
   });
 
   it('shows an unavailable total and retries the image without replacing page text', async () => {
@@ -271,7 +351,7 @@ describe('PageReview', () => {
     expect(screen.getByText('Citation excerpt')).toBeTruthy();
     expect(screen.getByText(/revision unknown/i)).toBeTruthy();
     expect(screen.queryByRole('img')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Refresh to latest reading' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     expect(screen.queryByRole('button', { name: /scan/i })).toBeNull();
     expect(mocks.getPage).not.toHaveBeenCalled();
   });

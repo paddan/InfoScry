@@ -71,7 +71,8 @@
   }
   $: retryCompletedSuccessfully = retryJob?.state === 'COMPLETE' &&
     ['COMPLETE', 'COMPLETE_WITH_WARNINGS'].includes((retryDocument ?? document)?.status ?? '');
-  $: documentRetryAvailable = retryEligible && ['FAILED', 'NEEDS_TOOL'].includes(document?.status ?? '');
+  $: reading = retryJob !== null ? !retryTerminal(retryJob) : inProgress(latest);
+  $: documentRetryAvailable =retryEligible && ['FAILED', 'NEEDS_TOOL'].includes(document?.status ?? '');
 
   const terminal = (operation: OcrOperation): boolean => ['COMPLETE', 'FAILED', 'CANCELLED', 'NEEDS_TOOL'].includes(operation.stage);
   const inProgress = (operation: OcrOperation | null): boolean => operation !== null && !terminal(operation);
@@ -314,12 +315,13 @@
   });
 </script>
 
-<section class="rescan" aria-label="Rescan this document" data-testid="document-rescan" data-document-name={documentName}>
-  <span class="eyebrow">SCAN AGAIN</span>
+<section class="rescan" class:status-only={statusOnly} class:running={reading} aria-label="Rescan this document" data-testid="document-rescan" data-document-name={documentName}>
+  {#if !statusOnly}<span class="eyebrow">SCAN AGAIN</span>{/if}
   {#if loading}<p class="hint">Loading scan status…</p>{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   <div class="latest" role="group" aria-label="Document reading status">
-    <p class="stage" data-testid="document-reading-status" role="status"><strong>{statusLabel(latest, retryJob, retryDocument, document)}</strong></p>
+    {#if reading}<div class="progress-track" aria-hidden="true"><span class="progress-sweep"></span></div>{/if}
+    <p class="stage" data-testid="document-reading-status" role="status">{#if reading}<span class="spinner" data-testid="reading-spinner" aria-hidden="true"></span>{/if}<strong>{statusLabel(latest, retryJob, retryDocument, document)}</strong></p>
     {#if latest !== null && latest.errorMessage && latest.stage === 'FAILED' && retryJob === null}<p class="problem">{latest.errorMessage}</p>{/if}
     {#if !statusOnly}
     {#if retryJob !== null && !retryTerminal(retryJob)}
@@ -366,5 +368,25 @@
   .hint { color: #929997; font-size: 0.82rem; }
   .problem { color: #d8c9a8; overflow-wrap: anywhere; }
   .latest { display: grid; gap: 0.4rem; border: 1px solid #303535; border-radius: 0.55rem; padding: 0.75rem; }
+  .rescan.status-only { border-top: 0; padding-top: 0; margin: 0 0 .8rem; }
+  .stage { display: flex; align-items: center; gap: 0.6rem; }
+  .running .latest { border-color: #c4a77d; background: #2a2620; }
+  .running .stage { color: #f0e2c8; font-size: 1.05rem; }
+  .spinner {
+    flex: none; width: 1.3rem; height: 1.3rem; border: 3px solid #4a4436; border-top-color: #e2c28f;
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  .progress-track { position: relative; height: 4px; overflow: hidden; border-radius: 2px; background: #3a3428; }
+  .progress-sweep {
+    position: absolute; inset: 0 auto 0 0; width: 35%; border-radius: 2px; background: #e2c28f;
+    animation: sweep 1.4s ease-in-out infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner, .progress-sweep { animation: pulse 1.6s ease-in-out infinite; }
+    .progress-sweep { width: 100%; }
+  }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
 </style>
