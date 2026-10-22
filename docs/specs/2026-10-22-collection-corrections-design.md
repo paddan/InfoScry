@@ -203,10 +203,11 @@ columns are absent again.
 - `GET /api/collections/{id}/corrections` lists rules with match counts and the job status.
 - `PUT /api/collections/{id}/corrections/{ruleId}` creates or replaces a rule; repeating it returns the
   same rule. `DELETE` on the same path removes it; repeating it answers as removed.
+- `POST /api/collections/{id}/corrections/apply` starts the job again (Retry); it returns the running job when there is one.
 - `POST /api/collections/{id}/corrections/preview` takes a draft rule (and an optional `ruleId` it
   replaces) and answers counts and examples. It changes nothing.
 - The existing bearer and CSRF boundaries apply.
-- CLI: `infoscry corrections list|add|remove|preview <collection>`, thin over the same service. A
+- CLI: `infoscry collection corrections list|add|remove|preview <collection>` (beside `collection prompt`), thin over the same service. A
   standalone CLI run owns the job until it completes, as an import does; with a running server the server
   owns it.
 
