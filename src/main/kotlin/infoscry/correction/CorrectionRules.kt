@@ -1,5 +1,7 @@
 package infoscry.correction
 
+import infoscry.domain.ApiStatus
+import infoscry.domain.ApiFaultException
 import com.ibm.icu.lang.UCharacter
 import com.ibm.icu.text.Normalizer2
 import java.security.MessageDigest
@@ -11,7 +13,11 @@ data class CorrectionRuleInput(val find: String, val replace: String, val exactC
 class InvalidCorrectionException(message: String) : IllegalArgumentException(message)
 
 /** Another rule of the collection already finds the same word. */
-class CorrectionFindTakenException : IllegalStateException("another correction already finds that word")
+class CorrectionFindTakenException : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "CORRECTION_FIND_TAKEN",
+    "another correction already finds that word",
+)
 
 /** The rules every stored correction obeys, and the identity of a whole list. */
 object CorrectionRules {

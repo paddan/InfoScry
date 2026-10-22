@@ -1,5 +1,6 @@
 package infoscry.server
 
+import infoscry.domain.AppliedCorrection
 import infoscry.AppContext
 import infoscry.domain.DocumentId
 import infoscry.ocr.OcrOperation
@@ -96,6 +97,8 @@ data class RevisionView(
     val pageChanges: PageChangesView,
     /** True when every published page was read without OCR, so the history says no page needed OCR. */
     val noOcrNeeded: Boolean = false,
+    /** What each correction rule changed in this revision; empty when no correction changed anything. */
+    val corrections: List<AppliedCorrection> = emptyList(),
 )
 
 /** A page of a document's published history, with the revision that is active now. */
@@ -296,6 +299,7 @@ private fun RevisionHistoryEntry.toApiView(): RevisionView = RevisionView(
     pageCount = pageCount,
     publishedAt = publishedAt,
     restoredFromRevisionId = restoredFromRevisionId,
+    corrections = revision.correctionsApplied,
     reading = reading?.let { reading ->
         RevisionReadingView(
             engine = reading.engine,

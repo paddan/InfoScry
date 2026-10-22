@@ -22,6 +22,10 @@ import java.nio.file.LinkOption
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 
+/** A source unit's reading before corrections, or `null` when the corrections changed nothing on it. */
+@Serializable
+data class SourceReadingResponse(val reading: String?)
+
 /** One bounded page of the exact extracted source unit named by a search hit or citation. */
 @Serializable
 data class SourceContentResponse(
@@ -47,6 +51,8 @@ data class SourceContentResponse(
      */
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val qualityScore: Double? = null,
+    /** True when the collection's corrections changed this unit's text; its reading is served beside it. */
+    val hasReading: Boolean = false,
     /**
      * The unit before and after this one in the document, its 1-based place, and the unit count. They
      * describe the live reading only; a read pinned to a revision names none, because the pages that
@@ -162,8 +168,33 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                         position = neighbours?.position,
                         unitCount = neighbours?.total,
                         structure = structure?.let { windowStructure(it, offset, end) },
+                        hasReading = (revisionPage?.reading ?: unit?.reading) != null,
                     ),
                 )
+            }
+        }
+
+        // The unit's text as it was read, before the collection's corrections; null when they changed nothing.
+        get("/reading") {
+            call.handle {
+                val collection = context.collectionService.requireActiveByNameOrId(call.collectionId().value)
+                val sourceId = call.parameters["sourceId"]?.takeIf(String::isNotBlank)
+                    ?: throw BadRequestException("a source needs an id")
+                val unitId = ContentUnitId(sourceId)
+                val missing = { NoSuchElementException("no source with id $sourceId exists in this collection") }
+                val revisionId = call.request.queryParameters["revision"]?.takeIf(String::isNotBlank)
+                val (documentId, reading) = if (revisionId != null) {
+                    val revision = context.revisions.revision(revisionId)
+                        ?.takeIf { it.state == RevisionState.PUBLISHED || it.state == RevisionState.SUPERSEDED }
+                        ?: throw missing()
+                    val page = context.revisions.pageForUnit(revisionId, unitId) ?: throw missing()
+                    revision.documentId to page.reading
+                } else {
+                    val unit = context.content.readUnit(unitId) ?: throw missing()
+                    unit.documentId to unit.reading
+                }
+                if (context.documents.get(documentId)?.collectionId != collection.id) throw missing()
+                call.respondJson(HttpStatusCode.OK, SourceReadingResponse(reading?.extractedText))
             }
         }
     }

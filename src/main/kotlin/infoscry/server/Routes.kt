@@ -334,6 +334,8 @@ fun Application.configureRoutes(
 
             collectionPromptRoutes(context)
 
+            correctionRoutes(context)
+
             patch("/ocr-languages") {
                 call.handle {
                     val id = call.collectionId()
@@ -761,7 +763,7 @@ fun ApplicationCall.collectionId(): CollectionId {
     return CollectionId(raw)
 }
 
-private fun Job.toApiView(context: AppContext) = JobApiView(
+internal fun Job.toApiView(context: AppContext) = JobApiView(
     id = id,
     type = type,
     state = state,
