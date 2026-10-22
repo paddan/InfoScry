@@ -850,6 +850,15 @@ class ImportJobHandler internal constructor(
                         JobType.REINDEX to ReindexJobHandler(reindexService(context)),
                         JobType.RESCAN to rescanHandler,
                         JobType.SELECTABLE_PDF to selectablePdfHandler,
+                        JobType.CORRECTIONS to CorrectionJobHandler(
+                            revisions = context.revisions,
+                            documents = context.documents,
+                            corrections = context.corrections,
+                            corrector = context.candidateCorrector,
+                            publication = context.revisionPublication,
+                            chunker = chunker,
+                            documentEmbedder = documentEmbedder,
+                        ),
                     ),
                 ),
             )

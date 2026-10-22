@@ -1,5 +1,6 @@
 package infoscry.jobs
 
+import infoscry.correction.CorrectionJobFailedException
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobState
@@ -257,6 +258,7 @@ class JobRunner(
         is ExternalPageAllowanceExceededException -> "MORE_PAGES_THAN_CONFIRMED"
         is ImportSourceChangedException -> "IMPORT_SOURCE_CHANGED"
         is RescanAttemptFailedException -> failure.code
+        is CorrectionJobFailedException -> failure.code
         is CollectionNotActiveException -> "COLLECTION_NOT_ACTIVE"
         is MaintenanceInProgressException -> "MAINTENANCE_IN_PROGRESS"
         is IllegalArgumentException -> "INVALID_REQUEST"

@@ -747,6 +747,45 @@ class DocumentRevisionStore(private val database: Database, private val content:
         }
     }
 
+    /**
+     * Opens the candidate a correction pass rewrites [documentId] in: a copy of [baseRevisionId]'s approved pages,
+     * readings included, and of their passages with their vectors, so a page the pass does not change is not
+     * embedded again. The copy is one transaction, so an interrupted pass either finds no candidate or a whole one;
+     * a pass resumed under the same base and list finds the same candidate again.
+     */
+    fun stageCorrectionCandidate(documentId: DocumentId, baseRevisionId: String, fingerprint: String): String {
+        val attempt = "corrections:$baseRevisionId:$fingerprint"
+        resumableCandidate(documentId, attempt)?.let { return it }
+        val id = "revision-" + UUID.randomUUID()
+        database.transaction { connection ->
+            val now = Instants.now()
+            connection.insertRevision(id, documentId, baseRevisionId, RevisionState.CANDIDATE, PROVENANCE_CORRECTIONS, now)
+            connection.prepareStatement("UPDATE document_revisions SET attempt_fingerprint = ? WHERE id = ?").use { statement ->
+                statement.setString(1, attempt)
+                statement.setString(2, id)
+                statement.executeUpdate()
+            }
+            val copied = connection.copyApprovedPages(id, baseRevisionId, now)
+            check(copied > 0) { "revision $baseRevisionId published no page, so there is nothing to correct" }
+            connection.prepareStatement(
+                "INSERT INTO revision_chunks (revision_id, unit_ordinal, ordinal, text, start_offset, end_offset, " +
+                    "token_count, token_start, token_end, embedding, embedding_dimension, created_at) " +
+                    "SELECT ?, c.unit_ordinal, c.ordinal, c.text, c.start_offset, c.end_offset, c.token_count, " +
+                    "c.token_start, c.token_end, c.embedding, c.embedding_dimension, ? FROM revision_chunks c " +
+                    "WHERE c.revision_id = ? AND c.unit_ordinal IN (SELECT ordinal FROM page_text_revisions " +
+                    "WHERE revision_id = ? AND approval = ?)",
+            ).use { statement ->
+                statement.setString(1, id)
+                statement.setString(2, now)
+                statement.setString(3, baseRevisionId)
+                statement.setString(4, baseRevisionId)
+                statement.setString(5, PageApproval.APPROVED.name)
+                statement.executeUpdate()
+            }
+        }
+        return id
+    }
+
     // ---- Restoring a historical revision ----
 
     /**
@@ -1572,6 +1611,9 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
         /** What a revision that is a restore of an earlier one records as its provenance. */
         const val PROVENANCE_RESTORE = "RESTORE"
+
+        /** What a revision a correction pass made records as its provenance. */
+        const val PROVENANCE_CORRECTIONS = "CORRECTIONS"
 
         const val SELECT_INTENTS =
             "SELECT id, document_id, collection_id, base_revision_id, target_revision_id, phase, " +

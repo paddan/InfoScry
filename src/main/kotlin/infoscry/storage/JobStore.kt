@@ -230,6 +230,30 @@ open class JobStore(private val database: Database) {
         }
     }
 
+    /** The queued or running job of [type] for [collectionId], or `null`. */
+    fun activeJob(type: JobType, collectionId: CollectionId): Job? = database.read { connection ->
+        connection.prepareStatement(
+            "$SELECT_JOBS WHERE collection_id = ? AND type = ? AND state IN (?, ?) ORDER BY created_at ASC, rowid ASC LIMIT 1",
+        ).use { statement ->
+            statement.setString(1, collectionId.value)
+            statement.setString(2, type.name)
+            statement.setString(3, JobState.QUEUED.name)
+            statement.setString(4, JobState.RUNNING.name)
+            statement.executeQuery().use { rows -> rows.readAll().firstOrNull() }
+        }
+    }
+
+    /** The most recent job of [type] for [collectionId] in any state, or `null`. */
+    fun latestJob(type: JobType, collectionId: CollectionId): Job? = database.read { connection ->
+        connection.prepareStatement(
+            "$SELECT_JOBS WHERE collection_id = ? AND type = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        ).use { statement ->
+            statement.setString(1, collectionId.value)
+            statement.setString(2, type.name)
+            statement.executeQuery().use { rows -> rows.readAll().firstOrNull() }
+        }
+    }
+
     /** How many imports a collection holds, under the same criteria [listImports] pages through. */
     fun countImports(collectionId: CollectionId): Int = database.read { connection ->
         connection.prepareStatement("SELECT COUNT(*) FROM jobs WHERE collection_id = ? AND type = ?").use { statement ->
