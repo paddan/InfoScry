@@ -11,6 +11,7 @@ import {
   type DocumentsPage,
   type ImportHistoryEntry,
   type ImportHistoryPage,
+  type ImportItemsPage,
   type ImportItemApiView,
   type RetryAdmission,
   type RetryAttempt,
@@ -140,6 +141,10 @@ function importEntry(id: string, over: Partial<ImportHistoryEntry> = {}): Import
 
 function history(imports: ImportHistoryEntry[], total = imports.length): ImportHistoryPage {
   return { imports, total };
+}
+
+function itemsPage(items: ImportItemApiView[], total = items.length): ImportItemsPage {
+  return { items, total };
 }
 
 /** One import file as the job-items route sends it: the file's own name, never the path it came from. */
@@ -728,7 +733,7 @@ describe('collections panel', () => {
   it('refreshes collapsed idle counts after a newly started import and its terminal outcome', async () => {
     api.pickPaths.mockResolvedValue(['/tmp/one.pdf']);
     api.startImport.mockResolvedValue({ job: { id: 'new-import', state: 'COMPLETE', completed: 1, total: 1 } });
-    api.getImportItems.mockResolvedValue([]);
+    api.getImportItems.mockResolvedValue({ items: [], total: 0 });
     api.getCollectionDocumentSummary.mockResolvedValueOnce({ total: 0, byStatus: {} })
       .mockResolvedValue({ total: 1, byStatus: { COMPLETE: 1 } });
     render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
@@ -749,7 +754,7 @@ describe('collections panel', () => {
       api.pickPaths.mockResolvedValue(['/tmp/one.pdf']);
       api.startImport.mockResolvedValue({ job: { id: 'new-import', state: 'RUNNING', completed: 0, total: 1 } });
       api.getJob.mockResolvedValue({ id: 'new-import', state: 'RUNNING', completed: 0, total: 1 });
-      api.getImportItems.mockResolvedValue([]);
+      api.getImportItems.mockResolvedValue({ items: [], total: 0 });
       api.getCollectionDocumentSummary.mockResolvedValueOnce({ total: 0, byStatus: {} })
         .mockResolvedValueOnce({ total: 1, byStatus: { OCR: 1 } })
         .mockResolvedValueOnce({ total: 1, byStatus: { OCR: 1 } })
@@ -1798,7 +1803,7 @@ describe('collections panel', () => {
     api.listCollectionImports.mockResolvedValue(history([
       importEntry('job-1', { state: 'FAILED', errorCode: 'IMPORT_FAILED', filesCompleted: 4, filesTotal: 4 }),
     ]));
-    api.getImportItems.mockResolvedValue([
+    api.getImportItems.mockResolvedValue(itemsPage([
       importItem('i1', 'PENDING', { sourceName: 'still-copying.pdf' }),
       importItem('i2', 'IMPORTED', { sourceName: 'quarterly.pdf', documentId: 'doc-1' }),
       importItem('i3', 'DUPLICATE', { sourceName: 'quarterly-copy.pdf', documentId: 'doc-1' }),
@@ -1813,7 +1818,7 @@ describe('collections panel', () => {
         errorCode: 'NEEDS_TOOL',
         errorMessage: 'this e-book format needs the Calibre converter, which is not installed',
       }),
-    ]);
+    ]));
 
     renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
     await fireEvent.click(
@@ -1821,7 +1826,7 @@ describe('collections panel', () => {
     );
 
     const files = await screen.findByRole('region', { name: 'Import files' });
-    expect(api.getImportItems).toHaveBeenCalledWith('job-1');
+    expect(api.getImportItems).toHaveBeenCalledWith('job-1', { limit: 50, offset: 0 });
     ['Pending', 'Imported', 'Duplicate', 'Failed'].forEach((label) =>
       expect(within(files).getByText(label)).toBeTruthy(),
     );
@@ -1847,6 +1852,31 @@ describe('collections panel', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: 'Hide files for the import started 2026-09-21' }));
     expect(screen.queryByRole('region', { name: 'Import files' })).toBeNull();
+  });
+
+  it('pages the files of a large import fifty at a time', async () => {
+    api.listCollectionImports.mockResolvedValue(history([importEntry('job-1', { filesCompleted: 120, filesTotal: 120 })]));
+    api.getImportItems.mockResolvedValue(itemsPage([importItem('i1', 'IMPORTED', { sourceName: 'first.pdf' })], 120));
+
+    renderExpandedPanel(CollectionsPanel, props({ collections: [collection('Nightfall', 1)], selectedId: 'nightfall' }));
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Show files for the import started 2026-09-21' }),
+    );
+
+    const files = await screen.findByRole('region', { name: 'Import files' });
+    await within(files).findByText('Showing 1–1 of 120 files');
+    expect((within(files).getByRole('button', { name: 'Previous files' }) as HTMLButtonElement).disabled).toBe(true);
+    let finishNext!: (page: ImportItemsPage) => void;
+    api.getImportItems.mockImplementationOnce(() => new Promise<ImportItemsPage>((resolve) => { finishNext = resolve; }));
+    await fireEvent.click(within(files).getByRole('button', { name: 'Next files' }));
+    await waitFor(() => expect(api.getImportItems).toHaveBeenLastCalledWith('job-1', { limit: 50, offset: 50 }));
+    // Until the next page arrives the label still describes the files on screen, and paging waits.
+    expect(within(files).getByText('Showing 1–1 of 120 files')).toBeTruthy();
+    expect((within(files).getByRole('button', { name: 'Next files' }) as HTMLButtonElement).disabled).toBe(true);
+    finishNext(itemsPage([importItem('i51', 'IMPORTED', { sourceName: 'fifty-first.pdf' })], 120));
+    await within(files).findByText('Showing 51–51 of 120 files');
+    expect(within(files).getByText('fifty-first.pdf')).toBeTruthy();
+    expect((within(files).getByRole('button', { name: 'Previous files' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('reports a failed history read, and a failed per-file read, without claiming an empty history', async () => {

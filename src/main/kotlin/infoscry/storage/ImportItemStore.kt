@@ -125,6 +125,25 @@ class ImportItemStore(private val database: Database) {
         }
     }
 
+    /** One page of [listForJob], in the same order, so a job with ten thousand files is never read whole. */
+    fun pageForJob(jobId: JobId, limit: Int, offset: Int): List<ImportItem> = database.read { connection ->
+        connection.prepareStatement("$SELECT_ITEMS WHERE job_id = ? ORDER BY rowid LIMIT ? OFFSET ?").use { statement ->
+            statement.setString(1, jobId.value)
+            statement.setInt(2, limit)
+            statement.setInt(3, offset)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(rows.toItem()) }
+            }
+        }
+    }
+
+    fun countForJob(jobId: JobId): Int = database.read { connection ->
+        connection.prepareStatement("SELECT COUNT(*) FROM import_items WHERE job_id = ?").use { statement ->
+            statement.setString(1, jobId.value)
+            statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+        }
+    }
+
     /**
      * Records the managed document a file became, before the rest of its work has run.
      *

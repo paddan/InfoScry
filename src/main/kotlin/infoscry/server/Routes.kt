@@ -201,9 +201,12 @@ data class PickResponse(val paths: List<String>)
 @Serializable
 data class ImportAcceptedResponse(val accepted: Boolean, val job: JobApiView)
 
-/** One file's result, so a caller can report which documents failed and why. */
+/**
+ * Files' results, so a caller can report which documents failed and why: one page of the job's files and
+ * how many the job has in all.
+ */
 @Serializable
-data class ImportItemsResponse(val items: List<ImportItemApiView>)
+data class ImportItemsResponse(val items: List<ImportItemApiView>, val total: Int)
 
 /**
  * The wire format, in one place.
@@ -493,9 +496,24 @@ fun Application.configureRoutes(
                     if (context.jobs.get(jobId) == null) {
                         throw NoSuchElementException("no job with id ${jobId.value}")
                     }
+                    // A page when a limit is given, as the browser always asks; without one the whole job,
+                    // which is what the CLI's end-of-import report reads.
+                    val limit = call.request.queryParameters["limit"]?.let { parameter ->
+                        parameter.toIntOrNull()?.takeIf { it > 0 }
+                            ?: throw BadRequestException("limit must be a whole number greater than zero, was '$parameter'")
+                    }
+                    val offset = call.request.queryParameters["offset"]?.let { parameter ->
+                        parameter.toIntOrNull()?.takeIf { it >= 0 }
+                            ?: throw BadRequestException("offset must be a whole number, zero or greater, was '$parameter'")
+                    } ?: 0
+                    val items = if (limit == null) {
+                        context.importItems.listForJob(jobId).drop(offset)
+                    } else {
+                        context.importItems.pageForJob(jobId, minOf(limit, MAX_JOB_ITEMS_PER_PAGE), offset)
+                    }
                     call.respondJson(
                         HttpStatusCode.OK,
-                        ImportItemsResponse(context.importItems.listForJob(jobId).map(ImportItem::toApiView)),
+                        ImportItemsResponse(items.map(ImportItem::toApiView), context.importItems.countForJob(jobId)),
                     )
                 }
             }
@@ -554,6 +572,7 @@ private const val STATIC_RESOURCES = "static"
 
 /** How many jobs one page of `GET /api/jobs` returns when the caller does not ask for a size. */
 private const val DEFAULT_JOB_PAGE = 100
+private const val MAX_JOB_ITEMS_PER_PAGE = 500
 
 private const val API_PREFIX = "/api/"
 

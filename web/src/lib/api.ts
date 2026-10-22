@@ -1243,12 +1243,16 @@ export async function cancelJob(id: string): Promise<JobApiView> {
   return body.job;
 }
 
-/** The per-file results an import finished with. */
-export async function getImportItems(id: string): Promise<ImportItemApiView[]> {
-  const body = (await readJson(await fetch(`/api/jobs/${encodeURIComponent(id)}/items`))) as {
-    items: ImportItemApiView[];
-  };
-  return body.items;
+/** A page of one import's files plus how many files the import has in all. */
+export type ImportItemsPage = { items: ImportItemApiView[]; total: number };
+
+/** One page of the per-file results an import finished with, in the order the import worked through them. */
+export async function getImportItems(
+  id: string,
+  page: { limit: number; offset: number },
+): Promise<ImportItemsPage> {
+  const query = new URLSearchParams({ limit: String(page.limit), offset: String(page.offset) });
+  return (await readJson(await fetch(`/api/jobs/${encodeURIComponent(id)}/items?${query}`))) as ImportItemsPage;
 }
 
 /**

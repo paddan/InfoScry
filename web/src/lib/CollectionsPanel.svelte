@@ -248,6 +248,14 @@
   /** The import whose per-file outcomes are shown, and what that read returned. */
   let itemsJobId: string | null = null;
   let items: ImportItemApiView[] = [];
+  /**
+   * The import's files are read a page at a time. `itemsOffset` is the page on screen; `requestedItemsOffset`
+   * is the page being asked for, so a refresh while a page change loads reads the page the reader chose.
+   */
+  let itemsOffset = 0;
+  let requestedItemsOffset = 0;
+  let itemsTotal = 0;
+  let itemsPaging = false;
   let itemsLoading = false;
   let itemsError: string | null = null;
   let itemsGeneration = 0;
@@ -933,26 +941,48 @@
     if (itemsJobId !== jobId) {
       itemsJobId = jobId;
       items = [];
+      itemsOffset = 0;
+      requestedItemsOffset = 0;
+      itemsTotal = 0;
     }
     const generation = ++itemsGeneration;
     itemsError = null;
     itemsLoading = items.length === 0;
     try {
-      const loaded = await getImportItems(jobId);
+      const offset = requestedItemsOffset;
+      const loaded = await getImportItems(jobId, { limit: PAGE_SIZE, offset });
       if (generation !== itemsGeneration) return;
-      items = loaded;
+      items = loaded.items;
+      itemsTotal = loaded.total;
+      itemsOffset = offset;
     } catch (failure) {
       if (generation !== itemsGeneration) return;
+      requestedItemsOffset = itemsOffset;
       itemsError = describe(failure);
     } finally {
-      if (generation === itemsGeneration) itemsLoading = false;
+      if (generation === itemsGeneration) {
+        itemsLoading = false;
+        itemsPaging = false;
+      }
     }
+  }
+
+  /** Shows the previous or next page of the open import's files; the current page stays until the next arrives. */
+  function changeItemsPage(delta: number): void {
+    if (itemsJobId === null || itemsPaging) return;
+    requestedItemsOffset = Math.max(0, itemsOffset + delta * PAGE_SIZE);
+    itemsPaging = true;
+    void loadItems(itemsJobId);
   }
 
   function closeItems(): void {
     itemsGeneration += 1;
     itemsJobId = null;
     items = [];
+    itemsOffset = 0;
+    requestedItemsOffset = 0;
+    itemsTotal = 0;
+    itemsPaging = false;
     itemsError = null;
     itemsLoading = false;
   }
@@ -1738,7 +1768,21 @@
                     {/each}
                   </tbody>
                 </table>
-                <p class="hint">{items.length} {items.length === 1 ? 'file' : 'files'} in this import</p>
+                {#if itemsTotal > PAGE_SIZE}
+                  <div class="paging">
+                    <p class="hint">Showing {itemsOffset + 1}–{itemsOffset + items.length} of {itemsTotal} files</p>
+                    <div class="actions">
+                      <button type="button" disabled={itemsOffset === 0 || itemsPaging} onclick={() => changeItemsPage(-1)}>
+                        Previous files
+                      </button>
+                      <button type="button" disabled={itemsOffset + PAGE_SIZE >= itemsTotal || itemsPaging} onclick={() => changeItemsPage(1)}>
+                        Next files
+                      </button>
+                    </div>
+                  </div>
+                {:else}
+                  <p class="hint">{itemsTotal} {itemsTotal === 1 ? 'file' : 'files'} in this import</p>
+                {/if}
               {/if}
             </section>
           {/if}

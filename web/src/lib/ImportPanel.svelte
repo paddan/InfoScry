@@ -35,7 +35,14 @@
   let error: string | null = null;
   let job: JobApiView | null = null;
   let dialogOpen = false;
+  /** The finished import's files are read a page at a time: an import can hold tens of thousands. */
+  const ITEMS_PAGE_SIZE = 50;
   let items: ImportItemApiView[] = [];
+  let itemsTotal = 0;
+  let itemsOffset = 0;
+  let itemsLoading = false;
+  /** The finished job whose files the table pages through. */
+  let finishedJobId: string | null = null;
   let importGeneration = 0;
   /**
    * How the current poll wait ends. The timer calls it, and so does destroying the panel: a `clearTimeout`
@@ -154,6 +161,9 @@
     const generation = ++importGeneration;
     error = null;
     items = [];
+    itemsTotal = 0;
+    itemsOffset = 0;
+    finishedJobId = null;
     job = null;
     importing = true;
     try {
@@ -171,13 +181,35 @@
       await waitUntilVisible();
       if (generation !== importGeneration) return;
       onImportChanged(collectionId);
-      const results = await getImportItems(current.id);
+      const results = await getImportItems(current.id, { limit: ITEMS_PAGE_SIZE, offset: 0 });
       if (generation !== importGeneration) return;
-      items = results;
+      finishedJobId = current.id;
+      items = results.items;
+      itemsTotal = results.total;
     } catch (failure) {
       if (generation === importGeneration) error = describe(failure);
     } finally {
       if (generation === importGeneration) importing = false;
+    }
+  }
+
+  /** Moves the results table one page back or forward; the page is read again, never kept from before. */
+  async function changeItemsPage(delta: number): Promise<void> {
+    if (finishedJobId === null || itemsLoading) return;
+    const generation = importGeneration;
+    const offset = Math.max(0, itemsOffset + delta * ITEMS_PAGE_SIZE);
+    itemsLoading = true;
+    error = null;
+    try {
+      const page = await getImportItems(finishedJobId, { limit: ITEMS_PAGE_SIZE, offset });
+      if (generation !== importGeneration) return;
+      items = page.items;
+      itemsTotal = page.total;
+      itemsOffset = offset;
+    } catch (failure) {
+      if (generation === importGeneration) error = describe(failure);
+    } finally {
+      if (generation === importGeneration) itemsLoading = false;
     }
   }
 
@@ -196,7 +228,7 @@
    * The status line for the job as it is now. It takes its inputs as arguments so the reactive statement
    * below re-runs whenever the job, the run state or the results change.
    */
-  function jobStatus(current: JobApiView | null, active: boolean, results: ImportItemApiView[]): string {
+  function jobStatus(current: JobApiView | null, active: boolean, files: number): string {
     if (active && current !== null) {
       // The line names the file being imported and the stage a reader can act on: `Importing report.pdf
       // — Copying · 3 of 12 files`. The stage and the file's name are the server's; the words are ours.
@@ -209,14 +241,14 @@
       });
     }
     if (current !== null && TERMINAL_STATES.includes(current.state)) {
-      if (current.state === 'COMPLETE') return `Import complete. ${results.length} file${results.length === 1 ? '' : 's'}.`;
+      if (current.state === 'COMPLETE') return `Import complete. ${files} file${files === 1 ? '' : 's'}.`;
       if (current.state === 'CANCELLED') return 'Import cancelled.';
       return `Import failed${current.errorCode ? ` (${current.errorCode})` : ''}.`;
     }
     return '';
   }
 
-  $: status = jobStatus(job, importing, items);
+  $: status = jobStatus(job, importing, itemsTotal);
 
   function describe(failure: unknown): string {
     if (failure instanceof ApiError) return failure.message;
@@ -330,6 +362,13 @@
         {/each}
       </tbody>
     </table>
+    {#if itemsTotal > ITEMS_PAGE_SIZE}
+      <nav class="paging" aria-label="Import results pages">
+        <p class="hint">Showing {itemsOffset + 1}–{itemsOffset + items.length} of {itemsTotal} files</p>
+        <button type="button" disabled={itemsOffset === 0 || itemsLoading} onclick={() => changeItemsPage(-1)}>Previous files</button>
+        <button type="button" disabled={itemsOffset + ITEMS_PAGE_SIZE >= itemsTotal || itemsLoading} onclick={() => changeItemsPage(1)}>Next files</button>
+      </nav>
+    {/if}
   {/if}
   {#if dialogOpen}
     <StartReadingDialog
@@ -371,6 +410,8 @@
     padding: 0.62rem 0.72rem;
     color: #e8e9e7;
   }
+  .paging { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+  .paging .hint { margin: 0 auto 0 0; }
   .import-row { display: flex; align-items: center; gap: 0.6rem; }
   .import-row .hint { margin: 0; color: #929997; font-size: 0.8rem; }
   .progress { display: grid; gap: 0.45rem; }

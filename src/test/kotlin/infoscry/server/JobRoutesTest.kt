@@ -192,6 +192,31 @@ class JobRoutesTest {
     }
 
     @Test
+    fun `job items are served a page at a time with the job's total, in queue order`() = runBlocking {
+        val job = harness.context.jobs.enqueue(JobType.IMPORT)
+        (1..5).forEach { harness.context.importItems.queue(job.id, "key-$it", "/archive/file-$it.pdf") }
+
+        fun names(query: String): Pair<List<String>, Int> {
+            val body = runBlocking { harness.get("/api/jobs/${job.id.value}/items$query").bodyAsText() }
+            val wire = Json.parseToJsonElement(body).jsonObject
+            return wire["items"]!!.jsonArray.map { it.jsonObject["sourceName"].toString().trim('"') } to
+                wire["total"].toString().toInt()
+        }
+
+        assertEquals(listOf("file-2.pdf", "file-3.pdf") to 5, names("?limit=2&offset=1"))
+        assertEquals(listOf("file-5.pdf") to 5, names("?limit=2&offset=4"))
+        assertEquals(emptyList<String>() to 5, names("?limit=2&offset=9"))
+        // Without a limit the whole job is served, which is what the CLI's own report reads.
+        assertEquals((1..5).map { "file-$it.pdf" } to 5, names(""))
+        // Reading the same page again answers the same page.
+        assertEquals(names("?limit=2&offset=1"), names("?limit=2&offset=1"))
+        listOf("?limit=0", "?limit=-1", "?limit=abc", "?offset=-1", "?offset=1.5").forEach { query ->
+            val response = harness.get("/api/jobs/${job.id.value}/items$query")
+            assertEquals(HttpStatusCode.BadRequest, response.status, "query $query: ${response.bodyAsText()}")
+        }
+    }
+
+    @Test
     fun `accepted import response uses the same safe job DTO`() = runBlocking {
         val privatePath = dataDir.resolve("private/evidence/quarterly-report.pdf").toString()
         Files.createDirectories(Path.of(privatePath).parent)

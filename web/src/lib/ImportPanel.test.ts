@@ -22,7 +22,7 @@ describe('ImportPanel', () => {
     vi.mocked(api.previewImport).mockResolvedValue(preview);
     vi.mocked(api.startImport).mockResolvedValue({ job });
     vi.mocked(api.getJob).mockResolvedValue(job);
-    vi.mocked(api.getImportItems).mockResolvedValue([]);
+    vi.mocked(api.getImportItems).mockResolvedValue({ items: [], total: 0 });
   });
   afterEach(cleanup);
 
@@ -79,5 +79,29 @@ describe('ImportPanel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(screen.queryByText(/approval|review/i)).toBeNull();
+  });
+
+  it('reports every file of a large import but shows its results fifty at a time', async () => {
+    const item = (n: number): api.ImportItemApiView => ({ id: `i${n}`, jobId: 'job-1', documentId: null, sourceName: `file-${n}.pdf`, outcome: 'IMPORTED', createdAt: '', updatedAt: '' });
+    vi.mocked(api.getImportItems).mockImplementation(async (_id, page) => ({
+      items: Array.from({ length: Math.min(page.limit, 120 - page.offset) }, (_, i) => item(page.offset + i + 1)),
+      total: 120,
+    }));
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
+    expect(await screen.findByText('Import complete. 120 files.')).toBeTruthy();
+    expect(api.getImportItems).toHaveBeenLastCalledWith('job-1', { limit: 50, offset: 0 });
+    expect(screen.getAllByRole('row')).toHaveLength(51);
+    expect(screen.getByText('Showing 1–50 of 120 files')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Previous files' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Next files' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Next files' }));
+    await waitFor(() => expect(api.getImportItems).toHaveBeenLastCalledWith('job-1', { limit: 50, offset: 100 }));
+    expect(await screen.findByText('Showing 101–120 of 120 files')).toBeTruthy();
+    expect(screen.getByText('file-120.pdf')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Next files' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
