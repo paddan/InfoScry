@@ -71,6 +71,7 @@ class ImportPipeline(
                 paths = context.paths,
                 documents = context.documents,
                 content = context.content,
+                corrections = context.corrections,
             )
             return ImportPipeline(
                 detector = MediaTypeDetector(),

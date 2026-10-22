@@ -8,6 +8,8 @@ import infoscry.domain.ReadingText
 import infoscry.domain.SourceLocation
 import infoscry.embedding.TestDocumentEmbedder
 import infoscry.jobs.seedCollectionWithId
+import infoscry.ocr.StructureReference
+import infoscry.pdf.LayoutReference
 import infoscry.storage.PageApproval
 import infoscry.storage.RevisionChunkDraft
 import infoscry.storage.RevisionPageDraft
@@ -25,7 +27,12 @@ class ReadingColumnsStoreTest {
 
     private lateinit var dataDir: Path
     private val collection = CollectionId("default")
-    private val reading = ReadingText("Brev från spinners", "Brev från spinners")
+    private val reading = ReadingText(
+        "Brev från spinners",
+        "Brev från spinners",
+        structure = StructureReference("structure/page-000000.${"c".repeat(64)}.structure.json.gz", "c".repeat(64)),
+        layout = LayoutReference("layout/${"d".repeat(64)}.json", "d".repeat(64)),
+    )
 
     @BeforeTest
     fun createTemporaryDataDirectory() {

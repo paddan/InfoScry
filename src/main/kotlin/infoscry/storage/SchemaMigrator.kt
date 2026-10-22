@@ -203,9 +203,13 @@ class SchemaMigrator(
             "ALTER TABLE content_units ADD COLUMN reading_extracted_text TEXT",
             "ALTER TABLE content_units ADD COLUMN reading_search_text TEXT " +
                 "CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL))",
+            "ALTER TABLE content_units ADD COLUMN reading_references TEXT " +
+                "CHECK (reading_references IS NULL OR reading_extracted_text IS NOT NULL)",
             "ALTER TABLE page_text_revisions ADD COLUMN reading_extracted_text TEXT",
             "ALTER TABLE page_text_revisions ADD COLUMN reading_search_text TEXT " +
                 "CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL))",
+            "ALTER TABLE page_text_revisions ADD COLUMN reading_references TEXT " +
+                "CHECK (reading_references IS NULL OR reading_extracted_text IS NOT NULL)",
             "ALTER TABLE document_revisions ADD COLUMN corrections_fingerprint TEXT",
             "ALTER TABLE document_revisions ADD COLUMN corrections_applied TEXT",
         )

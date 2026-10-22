@@ -40,6 +40,10 @@ data class CorrectedPage(
  */
 class PageCorrector(private val matcher: CorrectionMatcher) {
 
+    /**
+     * [base] is the page's reading (or its text when it has none), and [structure] and [layout] are the references
+     * that describe [base].
+     */
     fun correct(
         base: ReadingText,
         ordinal: Int,
@@ -56,7 +60,8 @@ class PageCorrector(private val matcher: CorrectionMatcher) {
         return CorrectedPage(
             extractedText = extracted,
             searchText = search,
-            reading = base,
+            // The references handed in describe [base]; the corrected page gets its own, so the reading keeps these.
+            reading = base.copy(structure = structure, layout = layout),
             structureReference = structure?.let { correctStructure(it, base, result, ordinal, artifactRoot) },
             layoutReference = layout?.let { correctLayout(it, base, result, artifactRoot) },
             matchesByRule = result.matchesByRule(),

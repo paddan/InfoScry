@@ -15,6 +15,7 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /** Where a page's structure artifact lives under the document's artifact root, and the hash of its stored bytes. */
+@kotlinx.serialization.Serializable
 data class StructureReference(val relativePath: String, val sha256: String)
 
 /**

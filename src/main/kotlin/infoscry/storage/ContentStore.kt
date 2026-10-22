@@ -1012,7 +1012,7 @@ class ContentStore(private val database: Database) {
             "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
                 "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
                 "created_at, updated_at, structure_relative_path, structure_sha256, reading_extracted_text, " +
-                "reading_search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "reading_search_text, reading_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (document_id, ordinal) DO UPDATE SET locator_type = excluded.locator_type, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, " +
@@ -1022,7 +1022,8 @@ class ContentStore(private val database: Database) {
                 "structure_relative_path = excluded.structure_relative_path, " +
                 "structure_sha256 = excluded.structure_sha256, " +
                 "reading_extracted_text = excluded.reading_extracted_text, " +
-                "reading_search_text = excluded.reading_search_text",
+                "reading_search_text = excluded.reading_search_text, " +
+                "reading_references = excluded.reading_references",
         ).use { statement ->
             statement.setString(1, id.value)
             statement.setString(2, documentId.value)
@@ -1045,6 +1046,7 @@ class ContentStore(private val database: Database) {
             statement.setString(15, structure?.sha256)
             statement.setString(16, draft.reading?.extractedText)
             statement.setString(17, draft.reading?.searchText)
+            statement.setString(18, draft.reading?.encodedReferences())
             statement.executeUpdate()
         }
         return checkNotNull(connection.selectUnit(documentId, ordinal)) {
@@ -1132,7 +1134,7 @@ class ContentStore(private val database: Database) {
             "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
                 "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
                 "created_at, updated_at, structure_relative_path, structure_sha256, reading_extracted_text, " +
-                "reading_search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "reading_search_text, reading_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (id) DO UPDATE SET document_id = excluded.document_id, " +
                 "ordinal = excluded.ordinal, locator_type = excluded.locator_type, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
@@ -1143,7 +1145,8 @@ class ContentStore(private val database: Database) {
                 "structure_relative_path = excluded.structure_relative_path, " +
                 "structure_sha256 = excluded.structure_sha256, " +
                 "reading_extracted_text = excluded.reading_extracted_text, " +
-                "reading_search_text = excluded.reading_search_text",
+                "reading_search_text = excluded.reading_search_text, " +
+                "reading_references = excluded.reading_references",
         ).use { statement ->
             statement.setString(1, page.unitId.value)
             statement.setString(2, documentId.value)
@@ -1166,6 +1169,7 @@ class ContentStore(private val database: Database) {
             statement.setString(15, page.structureSha256)
             statement.setString(16, page.reading?.extractedText)
             statement.setString(17, page.reading?.searchText)
+            statement.setString(18, page.reading?.encodedReferences())
             statement.executeUpdate()
         }
     }
@@ -1252,7 +1256,9 @@ class ContentStore(private val database: Database) {
         structureRelativePath = getString("structure_relative_path"),
         structureSha256 = getString("structure_sha256"),
         extractionMethod = getString("extraction_method")?.let(ExtractionMethod::valueOf),
-        reading = ReadingText.of(getString("reading_extracted_text"), getString("reading_search_text")),
+        reading = ReadingText.of(
+            getString("reading_extracted_text"), getString("reading_search_text"), getString("reading_references"),
+        ),
     )
 
     private fun ResultSet.toChunk(): Chunk = Chunk(
@@ -1298,7 +1304,7 @@ class ContentStore(private val database: Database) {
         private const val UNIT_COLUMNS =
             "id, document_id, ordinal, locator_type, locator, extracted_text, search_text, " +
                 "artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
-                "structure_relative_path, structure_sha256, reading_extracted_text, reading_search_text"
+                "structure_relative_path, structure_sha256, reading_extracted_text, reading_search_text, reading_references"
 
         /** The current attempt's own row, written by the migration that made it possible to keep one. */
         private const val SELECT_PROGRESS =

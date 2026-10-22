@@ -1,5 +1,8 @@
 package infoscry.jobs
 
+import infoscry.correction.CorrectionMatcher
+import infoscry.correction.correctDraft
+import infoscry.storage.CorrectionStore
 import infoscry.config.AppPaths
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -44,7 +47,18 @@ class StoredUnitsSink(
     private val paths: AppPaths,
     private val documents: DocumentStore,
     private val content: ContentStore,
+    /**
+     * The collection corrections each unit is corrected with before it is committed, or `null` to commit units as
+     * read. A unit keeps its reading beside the corrected text; its checkpoint, which holds no text, is unaffected.
+     */
+    private val corrections: CorrectionStore? = null,
 ) : ExtractionSink {
+
+    /** Each document's matcher, read once at its first unit, or absent when its collection has no corrections. */
+    private val matchers = object : LinkedHashMap<DocumentId, CorrectionMatcher?>(CACHE_CAPACITY, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<DocumentId, CorrectionMatcher?>): Boolean =
+            size > CACHE_CAPACITY
+    }
 
     override val storesUnits: Boolean = true
 
@@ -127,7 +141,7 @@ class StoredUnitsSink(
                     fingerprint = fingerprint,
                     key = event.key,
                     ordinal = event.ordinal,
-                    draft = event.unit,
+                    draft = matcherFor(documentId)?.let { correctDraft(event.unit, it, event.ordinal, root) } ?: event.unit,
                     artifactRoot = root,
                 )
                 commit.artifactIssue?.let { issue ->
@@ -169,6 +183,16 @@ class StoredUnitsSink(
                 totalUnits = event.totalUnits,
             )
         }
+    }
+
+    private fun matcherFor(documentId: DocumentId): CorrectionMatcher? {
+        val store = corrections ?: return null
+        synchronized(matchers) { if (matchers.containsKey(documentId)) return matchers[documentId] }
+        val document = documents.get(documentId)
+            ?: error("a document's units were delivered after the document was deleted")
+        val matcher = store.list(document.collectionId).takeIf { it.isNotEmpty() }?.let(::CorrectionMatcher)
+        synchronized(matchers) { matchers[documentId] = matcher }
+        return matcher
     }
 
     /** Resolves one document's artifact root, serving it from [artifactRoots] when it is already known. */

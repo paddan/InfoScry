@@ -103,6 +103,19 @@ class PageCorrectorTest {
     }
 
     @Test
+    fun `the reading keeps the references that describe it`() {
+        val text = "Hos spinners"
+        val structureRef = structure(text, block(BlockKind.PARAGRAPH, 0, 0, text.length))
+        val layoutRef = layout(text, span(0, text.length, 0))
+
+        val page = corrector("spinners → Spinnars").correct(reading(text), 0, structureRef, layoutRef, root)
+
+        assertEquals(structureRef, page.reading?.structure)
+        assertEquals(layoutRef, page.reading?.layout)
+        assertTrue(page.structureReference != structureRef && page.layoutReference != layoutRef)
+    }
+
+    @Test
     fun `structure ranges move with the text`() {
         val text = "Hos spinners\n\nBrev i dag"
         val ref = structure(text, block(BlockKind.HEADING, 0, 0, 12, level = 1), block(BlockKind.PARAGRAPH, 1, 14, 24))

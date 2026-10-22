@@ -781,6 +781,7 @@ class ImportJobHandler internal constructor(
                 // reading is a revision like any other, and a second way to publish one would be a second
                 // answer to what an unapproved page costs.
                 publication = context.revisionPublication,
+                corrector = context.candidateCorrector,
             )
             val attemptDispatch = AttemptDispatch(
                 operations = context.ocrOperations,

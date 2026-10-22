@@ -286,6 +286,9 @@ CREATE TABLE content_units (
     -- the two texts are present together or absent together.
     reading_extracted_text   TEXT, -- schema 3
     reading_search_text      TEXT    CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL)), -- schema 3
+    -- The reading's own structure and layout references (JSON), which describe the reading rather than the
+    -- corrected text; read only through the artifact stores, which confine every path to the artifact root.
+    reading_references       TEXT    CHECK (reading_references IS NULL OR reading_extracted_text IS NOT NULL), -- schema 3
     UNIQUE (document_id, ordinal),
     -- An artifact reference is complete or absent: a path without a checksum could not be verified,
     -- and a checksum without a path names nothing to check.
@@ -798,6 +801,9 @@ CREATE TABLE page_text_revisions (
     -- The page's reading before corrections, as on `content_units`.
     reading_extracted_text   TEXT, -- schema 3
     reading_search_text      TEXT    CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL)), -- schema 3
+    -- The reading's own structure and layout references (JSON), which describe the reading rather than the
+    -- corrected text; read only through the artifact stores, which confine every path to the artifact root.
+    reading_references       TEXT    CHECK (reading_references IS NULL OR reading_extracted_text IS NOT NULL), -- schema 3
     PRIMARY KEY (revision_id, ordinal),
     CHECK ((artifact_relative_path IS NULL) = (artifact_sha256 IS NULL)),
     CHECK ((layout_relative_path IS NULL) = (layout_sha256 IS NULL)),

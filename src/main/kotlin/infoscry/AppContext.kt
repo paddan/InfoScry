@@ -1,5 +1,7 @@
 package infoscry
 
+import infoscry.correction.CandidateCorrector
+import infoscry.storage.CorrectionStore
 import infoscry.collection.CollectionIndexRemover
 import infoscry.collection.CollectionPromptService
 import infoscry.collection.CollectionService
@@ -396,6 +398,12 @@ class AppContext private constructor(
     )
 
     private val promptService = PromptService()
+
+    /** Each collection's standing corrections. */
+    val corrections: CorrectionStore = CorrectionStore(database)
+
+    /** Applies a collection's corrections to text about to be published. */
+    val candidateCorrector: CandidateCorrector = CandidateCorrector(revisions, corrections, paths)
 
     val collectionPrompts: CollectionPromptService = CollectionPromptService(
         store = CollectionPromptStore(database),

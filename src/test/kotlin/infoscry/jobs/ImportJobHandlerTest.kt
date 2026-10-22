@@ -156,6 +156,37 @@ class ImportJobHandlerTest {
     }
 
     @Test
+    fun `a plain import publishes corrected text and keeps the reading`() {
+        withHarness { harness ->
+            AppContext.open(harness.dataDir).use { context ->
+                context.corrections.put(
+                    CollectionId("default"),
+                    "r1",
+                    infoscry.correction.CorrectionRuleInput("spinners", "Spinnars", exactCase = false),
+                )
+            }
+            val source = harness.writeText("letter.txt", "Brev från spinners")
+
+            val run = harness.importDurably(listOf(source), SingleLargeUnit("Brev från spinners"))
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            val documentId = run.documents.keys.single()
+            AppContext.open(harness.dataDir).use { context ->
+                val unit = context.content.listUnits(documentId, -1, 10).single()
+                assertEquals("Brev från Spinnars", unit.extractedText)
+                assertEquals(infoscry.domain.ReadingText("Brev från spinners", "Brev från spinners"), unit.reading)
+                val revision = checkNotNull(context.revisions.activeRevision(documentId))
+                assertEquals("Brev från Spinnars", context.revisions.pages(revision.id).single().extractedText)
+                assertEquals(unit.reading, context.revisions.pages(revision.id).single().reading)
+                assertEquals(
+                    listOf(infoscry.domain.AppliedCorrection("spinners", "Spinnars", 1)),
+                    revision.correctionsApplied,
+                )
+            }
+        }
+    }
+
+    @Test
     fun `a folder with supported and unsupported files imports only the supported ones`() {
         withHarness { harness ->
             val good = harness.writeText("good.txt", "Alpha\nBeta\n")
@@ -1841,7 +1872,7 @@ internal class Harness(val directory: Path, seedCollection: Boolean = true) : Au
     fun storedPipeline(context: AppContext, extractor: DocumentExtractor): ImportPipeline = ImportPipeline(
         detector = MediaTypeDetector(),
         registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
-        sink = StoredUnitsSink(context.paths, context.documents, context.content),
+        sink = StoredUnitsSink(context.paths, context.documents, context.content, context.corrections),
     )
 
     /** One import through the durable pipeline, from a fresh process over the same data directory. */
@@ -1875,7 +1906,7 @@ internal class Harness(val directory: Path, seedCollection: Boolean = true) : Au
         extractor: DocumentExtractor,
         onCandidate: (CandidateRevisionSink) -> Unit = {},
     ): ImportPipeline {
-        val committed = StoredUnitsSink(context.paths, context.documents, context.content)
+        val committed = StoredUnitsSink(context.paths, context.documents, context.content, context.corrections)
         return ImportPipeline(
             detector = MediaTypeDetector(),
             registry = ExtractorRegistry(listOf(extractor), TextualFallbackExtractor()),
