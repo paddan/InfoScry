@@ -17,6 +17,7 @@ import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionInput
 import infoscry.extract.ExtractionSettings
 import infoscry.extract.ExtractionSink
+import infoscry.extract.PdfExtractor
 import infoscry.extract.UnitBoundary
 import infoscry.extract.UnsupportedMediaTypeException
 import infoscry.ocr.CandidateRevisionPhases
@@ -212,13 +213,17 @@ internal class DocumentIngest(
 
         var finished = false
         var lastFailureCode: String? = null
+        var keptWithoutReading = false
         try {
             // The collector commits inside the boundary's permit: a flow is collected inline, so `emit` does
             // not return until the sink has stored that unit, and the permit is still held while it does.
             // The events are read on the way past because the document's own outcome depends on them: only a
             // flow that reported it delivered everything may be called extracted.
             pipeline.registry.extract(input, mediaType.value).collect { event ->                when (event) {
-                    is ExtractionEvent.Finished -> finished = true
+                    is ExtractionEvent.Finished -> {
+                        finished = true
+                        keptWithoutReading = event.metadata.containsKey(PdfExtractor.EMPTY_READING_PAGES_METADATA)
+                    }
                     is ExtractionEvent.UnitFailed -> lastFailureCode = event.code
                     // An announcement changes what the document's progress reads, not what this attempt
                     // decides about it: the sink persists it and the outcome is unaffected.
@@ -269,19 +274,31 @@ internal class DocumentIngest(
             return IngestResult.Failed
         }
 
+        val warned = lastFailureCode != null || keptWithoutReading
         if (sink.stagesForReview && lastFailureCode != null) {
-            onFailure(
-                lastFailureCode ?: EXTRACTION_FAILED,
-                "the reading did not finish every page, so the previously published text was kept",
-            )
-            return IngestResult.Failed
+            // One page that could not be read does not fail the document: the pages that were read are
+            // published and the document is complete with a warning. Two cases still fail. A reading with no
+            // page at all has nothing to publish. A reading that replaces published text would drop the
+            // missing page's current text, so that text is kept instead.
+            val candidate = sink.candidateRevisionId
+            if (candidate == null) {
+                onFailure(lastFailureCode ?: EXTRACTION_FAILED, ImportJobHandler.messageFor(lastFailureCode ?: EXTRACTION_FAILED))
+                return IngestResult.Failed
+            }
+            if (revisions.revision(candidate)?.parentRevisionId != null) {
+                onFailure(
+                    lastFailureCode ?: EXTRACTION_FAILED,
+                    "the reading did not finish every page, so the previously published text was kept",
+                )
+                return IngestResult.Failed
+            }
         }
         if (sink.stagesForReview) {
-            return publishStagedReading(document, sink, stage, onFailure)
+            return publishStagedReading(document, sink, stage, onFailure, warned)
         }
 
         chunkContent(document, stage)
-        if (!embedAndIndex(collection, document, sink, stage, onFailure, reading)) return IngestResult.Failed
+        if (!embedAndIndex(collection, document, sink, stage, onFailure, reading, warned)) return IngestResult.Failed
         return IngestResult.Complete
     }
 
@@ -297,6 +314,7 @@ internal class DocumentIngest(
         sink: ExtractionSink,
         stage: JobStage,
         onFailure: suspend (String, String) -> Unit,
+        warned: Boolean,
     ): IngestResult {
         val candidate = sink.candidateRevisionId
         if (candidate == null) {
@@ -359,7 +377,12 @@ internal class DocumentIngest(
             onFailure(code ?: EMBEDDING_FAILED, intent?.errorMessage ?: "the staged reading could not be published")
             return IngestResult.Failed
         }
-        stage.run(STAGE_RECORD) { documents.updateStatus(document.id, DocumentStatus.COMPLETE) }
+        stage.run(STAGE_RECORD) {
+            documents.updateStatus(
+                document.id,
+                if (warned) DocumentStatus.COMPLETE_WITH_WARNINGS else DocumentStatus.COMPLETE,
+            )
+        }
         return IngestResult.Complete
     }
 
@@ -380,6 +403,7 @@ internal class DocumentIngest(
         stage: JobStage,
         onFailure: suspend (String, String) -> Unit,
         reading: OcrSettingsSnapshot?,
+        warned: Boolean,
     ): Boolean {
         val embedder = documentEmbedder()
         if (embedder == null) {
@@ -467,7 +491,7 @@ internal class DocumentIngest(
                     // outranks a failed unit because the question a reader has to answer first is "did
                     // someone accept this reading", not "did every unit come back".
                     awaiting > 0 -> DocumentStatus.NEEDS_REVIEW
-                    failedUnits > 0 -> DocumentStatus.COMPLETE_WITH_WARNINGS
+                    failedUnits > 0 || warned -> DocumentStatus.COMPLETE_WITH_WARNINGS
                     else -> DocumentStatus.COMPLETE
                 }
                 documents.updateStatus(document.id, status)

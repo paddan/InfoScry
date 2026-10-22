@@ -110,6 +110,13 @@ States shown per document: **Imported**, **Reading n of N**, **Done**,
   example the provider cannot be reached) ends the run as **Failed** with a
   plain cause label; **Retry** resumes from the committed pages and never pays
   for a page twice.
+- One page does not fail a document (amended 2026-10-21). On import, a page
+  whose reading fails is left out, the other pages are published, and the
+  document is **Done** with a warning; only a reading with no page at all fails.
+  A page the engine reads and finds no text on (a photograph, a drawing) is not
+  a failure: it keeps its own text layer, or no text, and the document is
+  **Done** with a warning. A reading that would replace published text still
+  fails on a missing page, so that page's current text is kept.
 - When every page is read, the new text replaces the document's text and is
   indexed. This is one publication, using the existing publication machinery,
   without a candidate that waits for a person.
@@ -179,8 +186,9 @@ behind.**
 - On startup, runs left in a non-terminal state by a previous process are
   marked **Failed (interrupted)**. Nothing stays "running" or "waiting" across a
   restart.
-- Partial results are never published. A cancelled or failed run leaves the
-  document's text exactly as it was.
+- A cancelled or failed run publishes nothing and leaves the document's text
+  exactly as it was. A finished import with some unread pages is not a failed
+  run; see "Run and document status".
 - Data written by the shipped flow is cleaned up once, by migration or on first
   start: jobs stored as complete with an `awaiting-approval` stage become
   Cancelled; operations that hold a candidate revision with pending pages have

@@ -441,6 +441,20 @@ class PdfExtractor(
                         discardRenderedImage(run, image.imagePath)
                         return@unit
                     }
+                    if (verified.text.isBlank() &&
+                        (verified.errorCode == null || verified.errorCode == OcrPageResult.EMPTY_READING_CODE)
+                    ) {
+                        // The engine read a page with ink on it and found no words: a photograph, a drawing,
+                        // a stamp. That is an answer about the page, not a failure of it, and failing it would
+                        // take every other page of the document down with one picture. The page keeps what
+                        // its own text layer says, or nothing, and the pass counts it so the document is
+                        // complete with a warning.
+                        run.warnings += "page $page: the reading found no text, so the page keeps its own text"
+                        run.emptyReadingPages++
+                        emitTextUnit(key = key, page = page, text = text.orEmpty(), method = ExtractionMethod.DIRECT_TEXT)
+                        discardRenderedImage(run, image.imagePath)
+                        return@unit
+                    }
                     if (verified.text.isBlank() || verified.errorCode != null) {
                         // A reading the engine named a failure is that failure; one that says nothing without
                         // naming a code is still not a reading, and neither is a page of whitespace.
@@ -651,6 +665,9 @@ class PdfExtractor(
         if (run.unreadablePages > 0) {
             put("unreadable_pages", run.unreadablePages.toString())
         }
+        if (run.emptyReadingPages > 0) {
+            put(EMPTY_READING_PAGES_METADATA, run.emptyReadingPages.toString())
+        }
         if (run.warnings.isNotEmpty()) {
             // A count rather than the texts: what a warning says is a tool's message about a page, which is
             // working detail for the log, while the number is what a reader of the document can act on.
@@ -689,6 +706,12 @@ class PdfExtractor(
 
         /** The metadata key holding how many pages of this document produced a warning. */
         internal const val EXTRACTION_WARNINGS_METADATA: String = "extraction_warnings"
+
+        /**
+         * The metadata key holding how many pages were read, found to say nothing, and kept with their own
+         * text instead; a document that has any is complete with a warning rather than complete.
+         */
+        const val EMPTY_READING_PAGES_METADATA: String = "empty_reading_pages"
     }
 }
 
@@ -697,6 +720,7 @@ private class PageRun(
     var total: Int = 0,
     var ocrPages: Int = 0,
     var unreadablePages: Int = 0,
+    var emptyReadingPages: Int = 0,
     var abortCode: String? = null,
     val confidences: MutableList<Double?> = mutableListOf(),
     val warnings: MutableList<String> = mutableListOf(),

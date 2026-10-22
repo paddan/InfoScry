@@ -109,7 +109,10 @@ alternatives, never a chain. `PageOcrEngine` hands an engine one `PageImage`
 and the attempt's settings, and answers with one `OcrPageResult`; an engine
 cannot choose where it dispatches, cannot switch engines, and cannot call a page
 blank. Blankness is a fact about the raster, verified by the caller that holds
-it, and an empty reading on its own never establishes it.
+it, and an empty reading on its own never establishes it. A PDF page whose
+raster has ink and whose reading is empty keeps its own text layer (or no
+text) and is counted in the extraction's `empty_reading_pages`, which makes the
+document complete with a warning instead of failing it.
 
 Surya is a vision-language model, so a page is one model call rather than a
 command per line. It is served by `llama-server` from

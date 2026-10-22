@@ -27,6 +27,7 @@ import infoscry.extract.MediaTypeDetector
 import infoscry.extract.OfficeFormat
 import infoscry.extract.PAGE_IMAGES_UNSUPPORTED_CODE
 import infoscry.extract.PageImageSupport
+import infoscry.extract.PdfExtractor
 import infoscry.extract.PlainTextExtractor
 import infoscry.extract.WordExtractor
 import infoscry.extract.TextualFallbackExtractor
@@ -976,6 +977,79 @@ class ImportJobHandlerTest {
                     "the reading is committed as the document's content units",
                 )
                 assertEquals(2, context.index().chunkCount(CollectionId("default"), document.id))
+            }
+        }
+    }
+
+    @Test
+    fun `a staged reading with one failed page publishes the other pages with a warning`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val snapshot = checkingSnapshot()
+            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
+
+            val run = harness.importStaging(
+                listOf(source),
+                StagedUnitsThenFinish(goodUnits = 2, failedUnits = 1),
+                settings,
+                ocr = snapshot,
+            ) {}
+
+            val documentId = assertNotNull(run.items.single().documentId)
+            assertEquals(ImportItemOutcome.IMPORTED, run.items.single().outcome)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, context.documents.get(documentId)?.status)
+                assertNotNull(context.revisions.activeRevisionId(documentId), "the read pages were not published")
+                assertEquals(2, context.index().chunkCount(CollectionId("default"), documentId))
+            }
+        }
+    }
+
+    @Test
+    fun `a staged reading that kept a page without a reading completes with a warning`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val snapshot = checkingSnapshot()
+            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
+
+            val run = harness.importStaging(
+                listOf(source),
+                StagedUnitsThenFinish(
+                    goodUnits = 2,
+                    failedUnits = 0,
+                    metadata = mapOf(PdfExtractor.EMPTY_READING_PAGES_METADATA to "1"),
+                ),
+                settings,
+                ocr = snapshot,
+            ) {}
+
+            val documentId = assertNotNull(run.items.single().documentId)
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, context.documents.get(documentId)?.status)
+                assertEquals(2, context.index().chunkCount(CollectionId("default"), documentId))
+            }
+        }
+    }
+
+    @Test
+    fun `a staged reading in which every page failed fails the document`() {
+        withHarness { harness ->
+            val source = harness.writeText("scan.txt", "Ordinary text\n")
+            val snapshot = checkingSnapshot()
+            val settings = ExtractionSettings(ocrLanguages = "eng").forOcrSettings(snapshot)
+
+            val run = harness.importStaging(
+                listOf(source),
+                StagedUnitsThenFinish(goodUnits = 0, failedUnits = 2),
+                settings,
+                ocr = snapshot,
+            ) {}
+
+            val documentId = assertNotNull(run.items.single().documentId)
+            AppContext.open(harness.dataDir).use { context ->
+                val document = assertNotNull(context.documents.get(documentId))
+                assertEquals(DocumentStatus.FAILED, document.status)
+                assertEquals(OCR_FAILED_CODE, document.errorCode)
             }
         }
     }
@@ -2659,6 +2733,57 @@ internal class FailedUnitsThenFinish(
         }
         input.boundary.unit {
             emit(ExtractionEvent.Finished(metadata = emptyMap(), totalUnits = goodUnits + failedUnits))
+        }
+    }
+}
+
+/**
+ * [FailedUnitsThenFinish] for a format with page images, so its units are staged as a candidate and
+ * published as one reading. [metadata] is what the finished pass reports about the document.
+ */
+internal class StagedUnitsThenFinish(
+    private val goodUnits: Int,
+    private val failedUnits: Int,
+    private val metadata: Map<String, String> = emptyMap(),
+) : DocumentExtractor {
+
+    override val supportedMediaTypes: Set<String> = setOf("text/plain")
+
+    override val pageImageSupport: PageImageSupport = PageImageSupport.Supported
+
+    override fun extract(input: ExtractionInput): Flow<ExtractionEvent> = flow {
+        repeat(goodUnits) { index ->
+            val key = "unit-$index"
+            if (!input.isCommitted(key)) {
+                input.boundary.unit {
+                    emit(
+                        ExtractionEvent.UnitReady(
+                            key = key,
+                            ordinal = index,
+                            unit = ContentUnitDraft(
+                                locator = SourceLocation.TextLines(start = index + 1, end = index + 1),
+                                extractedText = "unit $index",
+                                searchText = "unit $index",
+                                method = ExtractionMethod.OCR,
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
+        repeat(failedUnits) { index ->
+            input.boundary.unit {
+                emit(
+                    ExtractionEvent.UnitFailed(
+                        key = "unit-failed-$index",
+                        ordinal = goodUnits + index,
+                        code = OCR_FAILED_CODE,
+                    ),
+                )
+            }
+        }
+        input.boundary.unit {
+            emit(ExtractionEvent.Finished(metadata = metadata, totalUnits = goodUnits + failedUnits))
         }
     }
 }

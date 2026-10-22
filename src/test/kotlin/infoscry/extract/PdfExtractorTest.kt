@@ -785,25 +785,53 @@ class PdfExtractorTest {
     }
 
     @Test
-    fun `a page that reads as empty but carries ink fails its unit rather than being committed`() {
-        // Empty output is not an extraction: the raster is asked whether the page is blank, and a page whose
-        // ink OCR could not turn into text is neither blank paper nor read, so its unit fails under the code
-        // an engine answers an empty reading with.
+    fun `a page that reads as empty but carries ink is kept as a page with no text and counted as a warning`() {
+        // A picture page has ink and no words: the engine read it and found nothing, which is not a failure
+        // of the page. It is kept, so one picture cannot take the rest of the document with it, and the
+        // finished pass counts it so the document can say that a page was kept without a reading.
         val spy = OcrSpy(text = { "" }, errorCode = OcrPageResult.EMPTY_READING_CODE)
 
         val events = collect(pdfExtractor(spy), inputFor(fixture(MIXED_NAME), probe()), probe())
 
         assertTrue(
-            failures(events).none { it.code == PAGE_BLANK_CODE },
-            "an inked page whose reading was empty was reported as blank paper",
+            failures(events).none { it.code == PAGE_BLANK_CODE || it.code == OcrPageResult.EMPTY_READING_CODE },
+            "an inked page whose reading was empty was failed",
         )
+        val units = units(events)
+        assertEquals(MIXED_TEXT_PAGES + MIXED_SCANNED_PAGES, units.map { pageOf(it.key) })
+        units.filter { pageOf(it.key) in MIXED_SCANNED_PAGES }.forEach { unit ->
+            assertEquals(ExtractionMethod.DIRECT_TEXT, unit.unit.method)
+            assertNull(unit.unit.meanConfidence, "a page kept without a reading claimed the engine's confidence")
+        }
+        val finished = assertIs<ExtractionEvent.Finished>(events.last())
         assertEquals(
-            MIXED_SCANNED_PAGES.map { page -> "page:$page" to OcrPageResult.EMPTY_READING_CODE },
-            failures(events).filter { it.code == OcrPageResult.EMPTY_READING_CODE }
-                .map { failure -> failure.key to failure.code },
-            "the pages that read as empty were not failed under the code that says they are not readings",
+            MIXED_SCANNED_PAGES.size.toString(),
+            finished.metadata[PdfExtractor.EMPTY_READING_PAGES_METADATA],
         )
-        assertEquals(MIXED_TEXT_PAGES, units(events).map { pageOf(it.key) })
+    }
+
+    @Test
+    fun `a page that reads as empty keeps its own text layer`() {
+        // A scanned photograph whose hidden text layer is a few stray characters: the layer is too poor to be
+        // the page, so the page is read, and the engine finds nothing. What the page itself carried is then
+        // the best text there is, and it is kept rather than dropped.
+        val source = writeDocument(
+            directory.resolve("picture.pdf"),
+            listOf(MemoryPage(text = listOf(". 4/ .... ARREST TO AN ,,,,"), scan = true)),
+        )
+        val spy = OcrSpy(text = { "" }, errorCode = OcrPageResult.EMPTY_READING_CODE)
+
+        val events = collect(pdfExtractor(spy), inputFor(source, probe()), probe())
+
+        assertEquals(listOf(1), spy.readPages)
+        assertTrue(failures(events).isEmpty(), "the page whose reading was empty was failed")
+        val unit = units(events).single()
+        assertEquals(ExtractionMethod.DIRECT_TEXT, unit.unit.method)
+        assertContains(unit.unit.extractedText, "ARREST TO AN")
+        assertEquals(
+            "1",
+            assertIs<ExtractionEvent.Finished>(events.last()).metadata[PdfExtractor.EMPTY_READING_PAGES_METADATA],
+        )
     }
 
     @Test
