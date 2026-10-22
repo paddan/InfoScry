@@ -1,5 +1,12 @@
 package infoscry.cli
 
+import io.ktor.http.encodeURLPathPart
+import infoscry.server.PutCorrectionRequest
+import infoscry.server.PreviewCorrectionRequest
+import infoscry.server.CorrectionRuleWire
+import infoscry.server.CorrectionPreviewWire
+import infoscry.server.CorrectionListWire
+import infoscry.correction.CorrectionRuleInput
 import infoscry.collection.CollectionPrompts
 import infoscry.collection.RolePrompts
 import infoscry.config.RuntimeInfo
@@ -154,6 +161,36 @@ class LoopbackApi(
             setBody(ApiJson.encodeToString(SetPromptDefaultRequest(promptId = promptId)))
         }
         return ApiJson.decodeFromString<PromptDefaultWire>(expect(response)).defaultId
+    }
+
+    suspend fun listCorrections(collection: String): CorrectionListWire {
+        val id = resolveCollectionId(collection)
+        return ApiJson.decodeFromString(expect(client.get("$base/api/collections/$id/corrections") { header() }))
+    }
+
+    suspend fun putCorrection(collection: String, ruleId: String, input: CorrectionRuleInput): CorrectionRuleWire {
+        val id = resolveCollectionId(collection)
+        val response = client.put("$base/api/collections/$id/corrections/${ruleId.encodeURLPathPart()}") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(PutCorrectionRequest(input.find, input.replace, input.exactCase)))
+        }
+        return ApiJson.decodeFromString(expect(response))
+    }
+
+    suspend fun deleteCorrection(collection: String, ruleId: String) {
+        val id = resolveCollectionId(collection)
+        expect(client.delete("$base/api/collections/$id/corrections/${ruleId.encodeURLPathPart()}") { header() })
+    }
+
+    suspend fun previewCorrection(collection: String, input: CorrectionRuleInput): CorrectionPreviewWire {
+        val id = resolveCollectionId(collection)
+        val response = client.post("$base/api/collections/$id/corrections/preview") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(PreviewCorrectionRequest(input.find, input.replace, input.exactCase)))
+        }
+        return ApiJson.decodeFromString(expect(response))
     }
 
     private fun RolePromptsWire.toDomain(collectionId: CollectionId, role: LlmPromptRole) = RolePrompts(

@@ -1,5 +1,11 @@
 package infoscry.cli
 
+import infoscry.server.toApiView
+import infoscry.server.CorrectionRuleWire
+import infoscry.server.CorrectionPreviewWire
+import infoscry.server.CorrectionListWire
+import infoscry.server.CorrectionExampleWire
+import infoscry.correction.CorrectionRuleInput
 import infoscry.AppContext
 import infoscry.collection.CollectionPrompts
 import infoscry.config.AppPaths
@@ -57,6 +63,20 @@ sealed interface CliSession : AutoCloseable {
     suspend fun setPromptDefault(collection: String, role: LlmPromptRole, promptId: String): String
 
     suspend fun listJobs(limit: Int): List<Job>
+
+    /** The correction rules of [collection] with their matches, and its correction job. */
+    suspend fun listCorrections(collection: String): CorrectionListWire
+
+    /** Stores rule [id] and starts the collection's correction job. */
+    suspend fun putCorrection(collection: String, id: String, input: CorrectionRuleInput): CorrectionRuleWire
+
+    /** Removes rule [id]; removing one that is already gone succeeds. */
+    suspend fun deleteCorrection(collection: String, id: String)
+
+    /** What [input] would change, without storing anything. */
+    suspend fun previewCorrection(collection: String, input: CorrectionRuleInput): CorrectionPreviewWire
+
+    suspend fun job(id: JobId): Job
 
     /** Persists the cancellation request and, when this process owns the attempt, interrupts it. */
     suspend fun cancelJob(id: JobId): Job
@@ -121,6 +141,34 @@ sealed interface CliSession : AutoCloseable {
         // can be running this data directory's jobs, because this process holds its lock.
         override suspend fun cancelJob(id: JobId): Job = context.cancelJob(id)
 
+        private fun collectionIdOf(collection: String) = context.collectionService.requireActiveByNameOrId(collection).id
+
+        override suspend fun listCorrections(collection: String): CorrectionListWire {
+            val view = context.correctionService.list(collectionIdOf(collection))
+            return CorrectionListWire(
+                view.rules.map { CorrectionRuleWire(it.rule.id, it.rule.find, it.rule.replace, it.rule.exactCase, it.matches) },
+                view.job?.toApiView(context),
+            )
+        }
+
+        override suspend fun putCorrection(collection: String, id: String, input: CorrectionRuleInput): CorrectionRuleWire =
+            context.correctionService.put(collectionIdOf(collection), id, input)
+                .let { CorrectionRuleWire(it.id, it.find, it.replace, it.exactCase) }
+
+        override suspend fun deleteCorrection(collection: String, id: String) =
+            context.correctionService.delete(collectionIdOf(collection), id)
+
+        override suspend fun previewCorrection(collection: String, input: CorrectionRuleInput): CorrectionPreviewWire =
+            context.correctionService.preview(collectionIdOf(collection), input, replacingId = null).let { preview ->
+                CorrectionPreviewWire(
+                    preview.matches,
+                    preview.documents,
+                    preview.examples.map { CorrectionExampleWire(it.documentId.value, it.unitId.value, it.before, it.after) },
+                )
+            }
+
+        override suspend fun job(id: JobId): Job = context.jobs.get(id) ?: throw NoSuchElementException("no job with id ${id.value}")
+
         override fun close() {
             context.close()
         }
@@ -162,6 +210,18 @@ sealed interface CliSession : AutoCloseable {
         override suspend fun listJobs(limit: Int): List<Job> = api.listJobs(limit)
 
         override suspend fun cancelJob(id: JobId): Job = api.cancelJob(id)
+
+        override suspend fun listCorrections(collection: String): CorrectionListWire = api.listCorrections(collection)
+
+        override suspend fun putCorrection(collection: String, id: String, input: CorrectionRuleInput): CorrectionRuleWire =
+            api.putCorrection(collection, id, input)
+
+        override suspend fun deleteCorrection(collection: String, id: String) = api.deleteCorrection(collection, id)
+
+        override suspend fun previewCorrection(collection: String, input: CorrectionRuleInput): CorrectionPreviewWire =
+            api.previewCorrection(collection, input)
+
+        override suspend fun job(id: JobId): Job = api.getJob(id)
 
         override fun close() {
             api.close()

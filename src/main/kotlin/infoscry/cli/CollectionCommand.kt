@@ -512,7 +512,7 @@ private fun printPromptLines(prompts: CollectionPrompts, only: LlmPromptRole?) {
  * a tab to spaces (seen in `list` output, where the TAB columns came back padded), and the JVM's stdout encoding
  * depends on the locale when output is redirected, so the bytes are written directly.
  */
-private fun writeStdout(text: String) {
+internal fun writeStdout(text: String) {
     System.out.write(text.toByteArray(Charsets.UTF_8))
     System.out.flush()
 }

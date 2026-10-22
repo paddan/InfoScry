@@ -1,5 +1,9 @@
 package infoscry.cli
 
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.Json
 import infoscry.llm.LlmPromptRole
 import infoscry.llm.ShippedPrompts
 import infoscry.server.ApiJson
@@ -329,6 +333,80 @@ class CollectionCommandTest {
         assertTrue(process.waitFor(60, TimeUnit.SECONDS), "show did not finish")
         assertEquals(0, process.exitValue(), String(errors, Charsets.UTF_8))
         return bytes
+    }
+
+    @Test
+    fun `corrections add then list shows the rule`() {
+        CliProcess.run(*args("collection", "create", "Default"))
+
+        val added = CliProcess.run(*args("collection", "corrections", "add", "Default", "spinners", "Spinnars"))
+        val listed = CliProcess.run(*args("collection", "corrections", "list", "Default"))
+
+        assertEquals(0, added.exitCode, added.stderr)
+        assertTrue("0 matches in 0 documents" in added.stdout, added.stdout)
+        assertEquals(0, listed.exitCode, listed.stderr)
+        assertEquals("spinners\tSpinnars\t\t0", listed.stdout.trim())
+    }
+
+    @Test
+    fun `adding the same correction twice keeps one rule`() {
+        CliProcess.run(*args("collection", "create", "Default"))
+
+        CliProcess.run(*args("collection", "corrections", "add", "Default", "spinners", "Spinnars"))
+        val again = CliProcess.run(*args("collection", "corrections", "add", "Default", "spinners", "Spinnars"))
+        val listed = CliProcess.run(*args("collection", "corrections", "list", "Default"))
+
+        assertEquals(0, again.exitCode, again.stderr)
+        assertEquals(1, listed.stdout.trim().lines().size, listed.stdout)
+    }
+
+    @Test
+    fun `removing a correction twice succeeds both times`() {
+        CliProcess.run(*args("collection", "create", "Default"))
+        CliProcess.run(*args("collection", "corrections", "add", "Default", "spinners", "Spinnars"))
+
+        val first = CliProcess.run(*args("collection", "corrections", "remove", "Default", "spinners"))
+        val second = CliProcess.run(*args("collection", "corrections", "remove", "Default", "spinners"))
+        val listed = CliProcess.run(*args("collection", "corrections", "list", "Default"))
+
+        assertEquals(0, first.exitCode, first.stderr)
+        assertEquals(0, second.exitCode, second.stderr)
+        assertEquals("", listed.stdout.trim())
+    }
+
+    @Test
+    fun `a correction preview stores nothing`() {
+        CliProcess.run(*args("collection", "create", "Default"))
+
+        val preview = CliProcess.run(*args("collection", "corrections", "preview", "Default", "spinners", "Spinnars"))
+        val listed = CliProcess.run(*args("collection", "corrections", "list", "Default"))
+
+        assertEquals(0, preview.exitCode, preview.stderr)
+        assertTrue("0 matches in 0 documents" in preview.stdout, preview.stdout)
+        assertEquals("", listed.stdout.trim())
+    }
+
+    @Test
+    fun `corrections in any script round-trip through the command line`() {
+        CliProcess.run(*args("collection", "create", "Default"))
+
+        CliProcess.run(*args("collection", "corrections", "add", "Default", "åsa", "Åsa", "--exact-case"))
+        CliProcess.run(*args("collection", "corrections", "add", "Default", "東京", "東亰"))
+        val listed = CliProcess.run(*args("collection", "corrections", "list", "Default", "--json"))
+
+        assertEquals(0, listed.exitCode, listed.stderr)
+        val rules = Json.parseToJsonElement(listed.stdout.trim()).jsonObject.getValue("rules").jsonArray.map { it.jsonObject }
+        assertEquals(listOf("åsa" to "Åsa", "東京" to "東亰"), rules.map { it.getValue("find").jsonPrimitive.content to it.getValue("replace").jsonPrimitive.content })
+        assertEquals(true, rules.first().getValue("exactCase").jsonPrimitive.content.toBoolean())
+    }
+
+    @Test
+    fun `an invalid correction is refused with a non-zero exit`() {
+        CliProcess.run(*args("collection", "create", "Default"))
+
+        val refused = CliProcess.run(*args("collection", "corrections", "add", "Default", "--", "-x", "y"))
+
+        assertTrue(refused.exitCode != 0)
     }
 
     private fun args(vararg extra: String): Array<String> =

@@ -103,6 +103,38 @@ infoscry collection prompt delete Notes --role ask --prompt Short
 Options: `--role` (`ask` or `investigate`; required except for `list`), `--prompt`,
 `--name`, `--file`, `--json`, `--data-dir`.
 
+### collection corrections
+
+Lists, previews and changes a collection's standing corrections: words the
+reading got wrong, such as `spinners` for the surname `Spinnars`. A rule matches
+whole words and ignores case unless `--exact-case` is given; the replacement keeps
+the writing it replaces. Saving or removing a rule rewrites every document that
+needs it, as new revisions; with no running server the command does that work
+here and waits for it, as `import` does. Text is UTF-8, so a rule may be in any
+script.
+
+```bash
+infoscry collection corrections list Notes
+infoscry collection corrections preview Notes spinners Spinnars
+infoscry collection corrections add Notes spinners Spinnars
+infoscry collection corrections add Notes AB Ab --exact-case
+infoscry collection corrections remove Notes spinners
+```
+
+- `list <collection>` prints one line per rule: find, replace, `exact` for an
+  exact-case rule, and the number of places it changed. `--json` prints the list
+  and the correction job.
+- `preview <collection> <find> <replace>` prints `N matches in M documents` and a
+  few examples, and stores nothing.
+- `add <collection> <find> <replace>` prints the preview, saves the rule and applies
+  it. Adding the same rule again replaces it. `--id` names the rule; by default the
+  id is derived from the word it finds.
+- `remove <collection> <find-or-id>` removes a rule; the text returns to what was
+  read. A rule already gone is reported as nothing to remove, not as an error.
+
+Use `--` before a word that starts with `-`. Options: `--exact-case`, `--id`,
+`--json`, `--data-dir`.
+
 ## import
 
 Import files or directories into a collection as immutable managed copies.
