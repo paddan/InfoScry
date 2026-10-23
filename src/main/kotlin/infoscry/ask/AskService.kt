@@ -11,6 +11,8 @@ import infoscry.llm.requireDispatchable
 import infoscry.llm.LlmCompletionClient
 import infoscry.llm.PromptService
 import infoscry.llm.ResolvedPrompt
+import infoscry.glossary.Glossary
+import infoscry.glossary.glossaryPromptFor
 import infoscry.llm.RequestBudget
 import infoscry.search.SearchFilters
 import infoscry.search.SearchHit
@@ -70,6 +72,8 @@ class AskService(
      * Markdown here; the default sends each hit's own text.
      */
     private val evidenceSession: (CollectionId) -> (SearchHit) -> String = { _ -> SearchHit::text },
+    /** The collection's glossary; a lookup that fails sends no glossary block. */
+    private val glossary: (CollectionId) -> Glossary = { Glossary.empty(it) },
 ) {
     constructor(
         search: SearchService,
@@ -77,7 +81,8 @@ class AskService(
         client: (LlmProfile) -> LlmStreamingClient,
         persistence: AskPersistence,
         evidenceSession: (CollectionId) -> (SearchHit) -> String = { _ -> SearchHit::text },
-    ) : this(AskSearch(search::search), prompt, client, persistence, evidenceSession)
+        glossary: (CollectionId) -> Glossary = { Glossary.empty(it) },
+    ) : this(AskSearch(search::search), prompt, client, persistence, evidenceSession, glossary)
 
     fun ask(request: AskRequest): Flow<AskEvent> = flow {
         if (request.question.isBlank()) {
@@ -100,6 +105,7 @@ class AskService(
                 request.profile.maxOutputTokens,
                 request.profile,
                 evidenceText = evidenceSession(request.collectionId),
+                glossary = glossaryPromptFor(glossary, request.collectionId, investigate = false),
             )
             // requireFits is deliberately immediately before stream: an irreducible failure makes zero calls.
             if (!budget.measure(request.profile, packed.request).fits) throw ContextBudgetExceeded()

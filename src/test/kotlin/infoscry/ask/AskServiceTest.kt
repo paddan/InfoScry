@@ -188,6 +188,46 @@ class AskServiceTest {
         assertEquals("| rendered | table |", assertIs<AskEvent.Done>(events.last()).evidence.single().text)
     }
 
+    @Test
+    fun `the glossary groups the question names are in the request sent`() = runBlocking {
+        val provider = ScriptedProvider(
+            streamed = listOf(LlmEvent.TextDelta("answer [S1]"), LlmEvent.Usage(TokenUsage(1, 1))),
+            completion = LlmCompletion("unused"),
+        )
+        val group = infoscry.glossary.GlossaryGroup(
+            "g1", CollectionId("collection"),
+            infoscry.glossary.GlossaryRules.normalize(listOf(infoscry.glossary.GlossaryTermInput("Sthlm"), infoscry.glossary.GlossaryTermInput("Stockholm"))),
+            "t", "t",
+        )
+        val service = AskService(
+            CapturedSearch(listOf(hit())), PromptService(), client = { provider },
+            persistence = { _, _, _, _, _, _, _ -> "conversation-id" },
+            glossary = { id -> infoscry.glossary.Glossary(id, listOf(group)) },
+        )
+
+        service.ask(request().copy(question = "Vad hände i Sthlm?")).toList()
+
+        assertTrue(provider.streamRequests.single().messages.first().content.contains("- Sthlm = Stockholm"))
+    }
+
+    @Test
+    fun `a glossary that cannot be read still answers`() = runBlocking {
+        val provider = ScriptedProvider(
+            streamed = listOf(LlmEvent.TextDelta("answer [S1]"), LlmEvent.Usage(TokenUsage(1, 1))),
+            completion = LlmCompletion("unused"),
+        )
+        val service = AskService(
+            CapturedSearch(listOf(hit())), PromptService(), client = { provider },
+            persistence = { _, _, _, _, _, _, _ -> "conversation-id" },
+            glossary = { error("database is locked") },
+        )
+
+        val events = service.ask(request()).toList()
+
+        assertIs<AskEvent.Done>(events.last())
+        assertTrue(!provider.streamRequests.single().messages.first().content.contains("Glossary"))
+    }
+
     private fun service(search: AskSearch, provider: AskProvider, persistence: AskPersistence): AskService =
         AskService(search, PromptService(), client = { provider }, persistence = persistence)
 

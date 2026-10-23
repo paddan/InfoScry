@@ -1,6 +1,8 @@
 package infoscry.ask
 
 import infoscry.domain.SourceLocation
+import infoscry.glossary.GlossaryGroup
+import infoscry.glossary.GlossaryPrompt
 import infoscry.llm.LlmMessage
 import infoscry.llm.LlmRequest
 import infoscry.llm.RequestBudget
@@ -40,6 +42,7 @@ class ContextPacker(private val maxEvidence: Int = DEFAULT_MAX_EVIDENCE) {
         maxOutputTokens: Int,
         profile: LlmProfile? = null,
         evidenceText: (SearchHit) -> String = SearchHit::text,
+        glossary: GlossaryPrompt? = null,
     ): PackedContext {
         val unique = ArrayList<SearchHit>()
         for (hit in hits) {
@@ -50,10 +53,22 @@ class ContextPacker(private val maxEvidence: Int = DEFAULT_MAX_EVIDENCE) {
         // rendered once, on first use, because a hit that never reaches a request is never sent.
         val sent = HashMap<SearchHit, String>()
         fun textOf(hit: SearchHit): String = sent.getOrPut(hit) { evidenceText(hit) }
-        fun fits(candidate: List<SearchHit>): Boolean {
-            val request = request(question, systemPrompt, candidate, ::textOf, maxOutputTokens)
-            return if (profile == null) budget.fit(request) else budget.measure(profile, request).fits
-        }
+        fun measure(request: LlmRequest) = if (profile == null) budget.measure(request) else budget.measure(profile, request)
+        fun fitsWith(system: String, candidate: List<SearchHit>): Boolean =
+            measure(request(question, system, candidate, ::textOf, maxOutputTokens)).fits
+        // What the glossary block adds to a request, in the budget's own units.
+        fun blockCost(groups: List<GlossaryGroup>): Int =
+            measure(LlmRequest(listOf(LlmMessage("system", glossary?.withBlock(systemPrompt, groups) ?: systemPrompt)), maxOutputTokens = 1)).serializedBytes -
+                measure(LlmRequest(listOf(LlmMessage("system", systemPrompt)), maxOutputTokens = 1)).serializedBytes
+
+        // The question's groups are reserved before any evidence, so evidence is chosen around them.
+        val questionGroups = glossary?.let { prompt ->
+            prompt.choose(emptyList(), prompt.groupsIn(listOf(question)), ::blockCost) { groups ->
+                fitsWith(prompt.withBlock(systemPrompt, groups), emptyList())
+            }
+        }.orEmpty()
+        val reservedSystem = glossary?.withBlock(systemPrompt, questionGroups) ?: systemPrompt
+        fun fits(candidate: List<SearchHit>): Boolean = fitsWith(reservedSystem, candidate)
 
         val selected = ArrayList<SearchHit>()
         val documents = HashSet<String>()
@@ -85,7 +100,14 @@ class ContextPacker(private val maxEvidence: Int = DEFAULT_MAX_EVIDENCE) {
                 hit.revisionId,
             )
         }
-        val finalRequest = request(question, systemPrompt, selected, ::textOf, maxOutputTokens)
+        // The sent evidence's groups are added only where they still fit; evidence is never dropped for them.
+        val groups = glossary?.let { prompt ->
+            prompt.choose(questionGroups, prompt.groupsIn(selected.map(::textOf)), ::blockCost) { trial ->
+                fitsWith(prompt.withBlock(systemPrompt, trial), selected)
+            }
+        }.orEmpty()
+        val finalSystem = glossary?.withBlock(systemPrompt, groups) ?: systemPrompt
+        val finalRequest = request(question, finalSystem, selected, ::textOf, maxOutputTokens)
         if (profile == null) budget.requireFits(finalRequest) else if (!budget.measure(profile, finalRequest).fits) throw ContextBudgetExceeded()
         return PackedContext(evidences, finalRequest)
     }

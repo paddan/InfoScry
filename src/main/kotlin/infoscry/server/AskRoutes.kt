@@ -62,6 +62,7 @@ fun Routing.configureAskRoutes(context: AppContext) {
                         .also { conversationId = it }
                 },
                 evidenceSession = StructuredEvidenceSource(context.content, context.paths).let { source -> { id -> source.session(id)::textOf } },
+                glossary = context.glossaryService::snapshot,
             )
             call.respondOutputStream(ContentType.Text.EventStream, HttpStatusCode.OK) {
                 service.ask(AskRequest(collectionId, body.question, profile, prompt)).collect { event ->

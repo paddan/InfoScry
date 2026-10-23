@@ -17,6 +17,50 @@ class ContextPackerTest {
         SourceLocation.TextLines(1, 2), "lines 1-2", emptySet(),
     )
 
+    private fun glossaryGroup(id: String, vararg texts: String) = infoscry.glossary.GlossaryGroup(
+        id, CollectionId("c"), infoscry.glossary.GlossaryRules.normalize(texts.map { infoscry.glossary.GlossaryTermInput(it) }), "t", "t",
+    )
+
+    private val stockholm = glossaryGroup("s", "Stockholm", "Sthlm")
+    private val kth = glossaryGroup("k", "KTH", "Kungliga Tekniska högskolan")
+    private val glossary = infoscry.glossary.GlossaryPrompt(infoscry.glossary.Glossary(CollectionId("c"), listOf(stockholm, kth)), investigate = false)
+
+    @Test
+    fun theQuestionsAndTheSentEvidencesGroupsAreInTheSystemMessage() {
+        val packed = ContextPacker().pack(
+            "Vad hände i Sthlm?", "core",
+            listOf(hit("d1", "rektor på KTH")),
+            RequestBudget(10_000), 10, glossary = glossary,
+        )
+        val system = packed.request.messages[0].content
+        assertTrue(system.startsWith("core\n\nGlossary for this collection."))
+        assertTrue(system.contains("- Stockholm = Sthlm"))
+        assertTrue(system.contains("- KTH = Kungliga Tekniska högskolan"))
+    }
+
+    @Test
+    fun evidenceThatIsLeftOutBringsNoGroup() {
+        val packed = ContextPacker(maxEvidence = 1).pack(
+            "question", "core",
+            listOf(hit("d1", "first excerpt"), hit("d2", "rektor på KTH")),
+            RequestBudget(10_000), 10, glossary = glossary,
+        )
+        assertEquals("core", packed.request.messages[0].content)
+    }
+
+    @Test
+    fun evidenceIsNeverDroppedForTheGlossary() {
+        val hits = listOf(hit("d1", "rektor på KTH " + "x".repeat(300)))
+        val alone = ContextPacker().pack("question", "core", hits, RequestBudget(100_000), 10)
+        // Exactly room for the excerpt without the glossary block.
+        val tight = RequestBudget(RequestBudget(100_000).measure(alone.request).serializedBytes + 10 + 1_024, safetyMargin = 1_024)
+
+        val packed = ContextPacker().pack("question", "core", hits, tight, 10, glossary = glossary)
+
+        assertEquals(1, packed.evidences.size)
+        assertEquals("core", packed.request.messages[0].content)
+    }
+
     @Test
     fun collapsesDuplicatesAndKeepsDocumentDiversity() {
         val packed = ContextPacker().pack(

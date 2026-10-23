@@ -54,7 +54,8 @@ class AskCommand : CliktCommand(name = "ask") {
                 }
             }, persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
                 open.conversations.persistAsk(ask.collectionId, ask.profile, ask.prompt, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
-            }, evidenceSession = StructuredEvidenceSource(open.content, open.paths).let { source -> { id -> source.session(id)::textOf } })
+            }, evidenceSession = StructuredEvidenceSource(open.content, open.paths).let { source -> { id -> source.session(id)::textOf } },
+                glossary = open.glossaryService::snapshot)
             runBlocking {
                 val events = mutableListOf<AskEvent>()
                 val streamed = StringBuilder()
