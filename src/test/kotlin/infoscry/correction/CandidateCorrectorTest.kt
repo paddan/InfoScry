@@ -200,4 +200,28 @@ class CandidateCorrectorTest {
             assertNull(context.revisions.pages(candidate).single().reading)
         }
     }
+
+    @Test
+    fun `a failing correction follow-up never fails the publication it follows`() {
+        AppContext.open(dataDir).use { context ->
+            val documentId = RestoreFixtures.importDocument(context, dataDir, collection, "x")
+            // A rule row no matcher can compile, as damaged data would leave it.
+            context.database.transaction { connection ->
+                connection.createStatement().use {
+                    it.execute(
+                        "INSERT INTO collection_corrections (id, collection_id, find, find_key, replace, exact_case, created_at, updated_at) " +
+                            "VALUES ('bad', 'default', ' ', 'fold: ', 'x', 0, 't', 't')",
+                    )
+                }
+            }
+            val candidate = RestoreFixtures.stage(context, documentId, null, listOf("hos spinners"), listOf(ContentUnitId.new()))
+
+            val steps = mutableListOf<infoscry.document.PublicationStep>()
+            runBlocking { context.revisionPublication.publish(documentId, null, candidate) { steps += it } }
+
+            assertEquals(candidate, context.revisions.activeRevisionId(documentId))
+            assertTrue(infoscry.document.PublicationStep.CLEANED in steps, "the publication finished its own cleanup: $steps")
+            assertEquals(emptyList(), context.revisions.intentsAwaitingCleanup())
+        }
+    }
 }

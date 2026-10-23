@@ -118,7 +118,10 @@ class CorrectionMatcher(rules: List<CorrectionRule>) {
                 if (!text.startsWith(token, cursor)) return null
                 cursor + token.length
             } else {
-                val runEnd = nonWhitespaceEnd(text, cursor)
+                // A word can be no longer than its token (folding never shortens text), so the scan stops one code
+                // point past that: enough to tell an inner token from a longer run, and cheap on a long token.
+                val limit = rule.tokens[index].length.coerceAtLeast(rule.folded[index].length) + 1
+                val runEnd = nonWhitespaceEnd(text, cursor, limit)
                 if (last) {
                     lastTokenEnd(rule, index, text, cursor, runEnd) ?: return null
                 } else {
@@ -192,9 +195,13 @@ class CorrectionMatcher(rules: List<CorrectionRule>) {
     private fun boundaryAfter(text: String, position: Int): Boolean =
         position == text.length || !isWordCodePoint(text.codePointAt(position))
 
-    private fun nonWhitespaceEnd(text: String, from: Int): Int {
+    private fun nonWhitespaceEnd(text: String, from: Int, maxCodePoints: Int): Int {
         var end = from
-        while (end < text.length && !UCharacter.isUWhiteSpace(text.codePointAt(end))) end += Character.charCount(text.codePointAt(end))
+        var codePoints = 0
+        while (end < text.length && codePoints < maxCodePoints && !UCharacter.isUWhiteSpace(text.codePointAt(end))) {
+            end += Character.charCount(text.codePointAt(end))
+            codePoints++
+        }
         return end
     }
 

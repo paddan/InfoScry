@@ -287,19 +287,21 @@ class AppContext private constructor(
      * or restore corrected before a rule changed, an import that straddled a change). It never throws: a publication
      * is never failed by its follow-up, and a collection being deleted needs no corrections.
      */
-    internal fun followCorrectionsFor(collectionId: CollectionId) {
-        try {
-            correctionService.apply(collectionId)
-        } catch (gone: NoSuchElementException) {
-            // The collection is being deleted; there is nothing left to correct.
-        }
-    }
+    internal fun followCorrectionsFor(collectionId: CollectionId) = followCorrections(collectionId) { true }
 
-    internal fun followCorrections(collectionId: CollectionId, revisionId: String) {
+    internal fun followCorrections(collectionId: CollectionId, revisionId: String) =
+        followCorrections(collectionId) { candidateCorrector.wouldChange(collectionId, revisionId) }
+
+    private fun followCorrections(collectionId: CollectionId, needed: () -> Boolean) {
         try {
-            if (candidateCorrector.wouldChange(collectionId, revisionId)) correctionService.apply(collectionId)
+            if (needed()) correctionService.apply(collectionId)
         } catch (gone: NoSuchElementException) {
             // The collection is being deleted; there is nothing left to correct.
+        } catch (failure: Exception) {
+            // The publication is already live; a later publication or a saved rule starts the job again.
+            LoggerFactory.getLogger(AppContext::class.java).atWarn()
+                .addKeyValue("error", failure::class.simpleName)
+                .log("the corrections follow-up of a publication could not start")
         }
     }
 

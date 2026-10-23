@@ -162,4 +162,16 @@ class CorrectionMatcherTest {
         val millis = (System.nanoTime() - started) / 1_000_000
         kotlin.test.assertTrue(millis < 500, "a page of dot leaders took $millis ms")
     }
+
+    @Test
+    fun `a long run without spaces stays fast`() {
+        val rules = (1..20).map { index -> rule("ord$index → Ord$index", "r$index") }
+        val page = (1..4).joinToString(" ") { (1..20_000).joinToString(".") { "a" } }
+        val started = System.nanoTime()
+
+        CorrectionMatcher(rules).apply(page)
+
+        val millis = (System.nanoTime() - started) / 1_000_000
+        kotlin.test.assertTrue(millis < 1000, "a page of one long dotted token took $millis ms")
+    }
 }
