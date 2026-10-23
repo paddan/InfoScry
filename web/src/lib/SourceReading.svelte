@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ApiError, readSourceReading } from './api';
   import CorrectionDialog from './CorrectionDialog.svelte';
+  import GlossaryDialog from './GlossaryDialog.svelte';
 
   export let collectionId: string;
   export let sourceId: string;
@@ -19,6 +20,8 @@
   let selected: string | null = null;
   let correcting: string | null = null;
   let correctButton: HTMLElement | null = null;
+  let glossaryTerm: string | null = null;
+  let glossaryButton: HTMLElement | null = null;
   let boundKey = '';
 
   $: if (`${collectionId}/${sourceId}/${revisionId ?? ''}` !== boundKey) reset();
@@ -69,6 +72,16 @@
     correcting = null;
     if (correctButton?.isConnected) correctButton.focus();
   }
+
+  function openGlossary(event: MouseEvent): void {
+    glossaryButton = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    glossaryTerm = selected;
+  }
+
+  function closeGlossary(): void {
+    glossaryTerm = null;
+    if (glossaryButton?.isConnected) glossaryButton.focus();
+  }
 </script>
 
 <div class="source-reading">
@@ -82,6 +95,7 @@
       {/if}
       {#if selected !== null && !showingReading}
         <button type="button" onclick={openCorrection}>Correct across collection</button>
+        <button type="button" onclick={openGlossary}>Add to glossary</button>
       {/if}
     </div>
   {/if}
@@ -101,6 +115,15 @@
     {/if}
   </div>
 </div>
+
+{#if glossaryTerm !== null}
+  <GlossaryDialog
+    {collectionId}
+    initialTerm={glossaryTerm}
+    onClose={closeGlossary}
+    onSaved={closeGlossary}
+  />
+{/if}
 
 {#if correcting !== null}
   <CorrectionDialog

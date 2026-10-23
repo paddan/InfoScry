@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { applyCorrections, deleteCorrection, getCorrections, previewCorrection, previewCorrectionRemoval, putCorrection, readSourceReading, createCollectionPrompt, deleteCollectionPrompt, getCollectionPrompts, setCollectionPromptDefault, updateCollectionPrompt, fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { listGlossary, putGlossaryGroup, deleteGlossaryGroup, searchCollection, applyCorrections, deleteCorrection, getCorrections, previewCorrection, previewCorrectionRemoval, putCorrection, readSourceReading, createCollectionPrompt, deleteCollectionPrompt, getCollectionPrompts, setCollectionPromptDefault, updateCollectionPrompt, fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -575,5 +575,50 @@ describe('collection correction requests', () => {
       { url: '/api/collections/c/corrections/apply', method: 'POST', body: undefined },
       { url: '/api/collections/c/sources/u%2F1/reading?revision=rev-1', method: 'GET', body: undefined },
     ]);
+  });
+});
+
+describe('collection glossary', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('lists, stores and removes groups through the glossary routes', async () => {
+    const group = { id: 'g1', terms: [{ text: 'Stockholm', prefix: false }, { text: 'Sthlm', prefix: true }] };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-test' }), { status: 200 });
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+      if (init?.method === 'PUT') return new Response(String(init.body), { status: 200 });
+      return new Response(JSON.stringify({ groups: [group] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await listGlossary('c 1')).toEqual([group]);
+    expect(await putGlossaryGroup('c 1', 'g1', group.terms)).toEqual({ terms: group.terms });
+    await deleteGlossaryGroup('c 1', 'g1');
+
+    const urls = fetchMock.mock.calls.map(([input, init]) => `${init?.method ?? 'GET'} ${String(input)}`);
+    expect(urls).toContain('GET /api/collections/c%201/glossary');
+    expect(urls).toContain('PUT /api/collections/c%201/glossary/g1');
+    expect(urls).toContain('DELETE /api/collections/c%201/glossary/g1');
+  });
+
+  it('reads the details a refusal carries', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-test' }), { status: 200 });
+      return new Response(JSON.stringify({ error: { code: 'GLOSSARY_TERM_TAKEN', message: 'taken', details: { term: '1', groupId: 'g1' } } }), { status: 409 });
+    }));
+
+    const failure = await putGlossaryGroup('c1', 'g2', []).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).details).toEqual({ term: '1', groupId: 'g1' });
+  });
+
+  it('defaults a search without glossary fields to no expansion', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ hits: [], staleFiltered: 0 }), { status: 200 })));
+
+    const response = await searchCollection('c1', 'Sthlm', 'KEYWORD');
+
+    expect(response.expandedWith).toEqual([]);
+    expect(response.expansionTruncated).toBe(false);
   });
 });

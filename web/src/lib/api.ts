@@ -147,7 +147,14 @@ export type SearchHit = {
   revisionId?: string;
 };
 
-export type SearchResponse = { hits: SearchHit[]; staleFiltered: number };
+export type SearchResponse = {
+  hits: SearchHit[];
+  staleFiltered: number;
+  /** The glossary groups the search also searched; empty when none applied. */
+  expandedWith: GlossaryGroup[];
+  /** True when some alternatives were left out to keep the query within its bound. */
+  expansionTruncated: boolean;
+};
 
 export type AskEvidence = {
   id: string;
@@ -401,12 +408,15 @@ export class ApiError extends Error {
   readonly code: string;
   /** The HTTP status the failure arrived with; null for a failure that never reached the server. */
   readonly status: number | null;
+  /** Structured facts the refusal carries beside its code (an index, an id); null when it carries none. */
+  readonly details: Record<string, string> | null;
 
-  constructor(code: string, message: string, status: number | null = null) {
+  constructor(code: string, message: string, status: number | null = null, details: Record<string, string> | null = null) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -573,7 +583,8 @@ export async function searchCollection(collection: string, query: string, mode: 
   if (filters.status) parameters.append('status', filters.status);
   if (filters.ocrOnly) parameters.set('ocrOnly', 'true');
   const response = await fetch(`/api/search?${parameters.toString()}`);
-  return (await readJson(response)) as SearchResponse;
+  const body = (await readJson(response)) as Partial<SearchResponse> & { hits: SearchHit[]; staleFiltered: number };
+  return { ...body, expandedWith: body.expandedWith ?? [], expansionTruncated: body.expansionTruncated ?? false };
 }
 
 export async function askDefaultProfile(): Promise<string> {
@@ -1464,6 +1475,32 @@ export async function applyCorrections(collectionId: string): Promise<JobApiView
   return ((await mutate(`${correctionsPath(collectionId)}/apply`, 'POST')) as { job: JobApiView }).job;
 }
 
+// ---- collection glossary ----
+
+/** One name of a glossary group; a prefix term also matches words that start with it. */
+export type GlossaryTerm = { text: string; prefix: boolean };
+
+/** Names with the same meaning in a collection, in the order they were typed. */
+export type GlossaryGroup = { id: string; terms: GlossaryTerm[] };
+
+const glossaryPath = (collectionId: string): string => `/api/collections/${encodeURIComponent(collectionId)}/glossary`;
+
+/** The collection's glossary groups, oldest first. */
+export async function listGlossary(collectionId: string): Promise<GlossaryGroup[]> {
+  const body = (await readJson(await fetch(glossaryPath(collectionId)))) as { groups?: GlossaryGroup[] };
+  return body.groups ?? [];
+}
+
+/** Creates or replaces group [groupId]; repeating it stores nothing new. */
+export async function putGlossaryGroup(collectionId: string, groupId: string, terms: GlossaryTerm[]): Promise<GlossaryGroup> {
+  return (await mutate(`${glossaryPath(collectionId)}/${encodeURIComponent(groupId)}`, 'PUT', { terms })) as GlossaryGroup;
+}
+
+/** Removes a group; one already gone is not an error. */
+export async function deleteGlossaryGroup(collectionId: string, groupId: string): Promise<void> {
+  await mutate(`${glossaryPath(collectionId)}/${encodeURIComponent(groupId)}`, 'DELETE');
+}
+
 /** A source unit's text as it was read, before corrections; null when the corrections changed nothing. */
 export async function readSourceReading(collectionId: string, sourceId: string, revisionId?: string | null): Promise<string | null> {
   const revision = revisionId ? `?revision=${encodeURIComponent(revisionId)}` : '';
@@ -1685,8 +1722,8 @@ async function readJson(response: Response): Promise<unknown> {
     }
   }
   if (!response.ok) {
-    const error = (body as { error?: { code?: string; message?: string } } | null)?.error;
-    throw new ApiError(error?.code ?? `HTTP_${response.status}`, error?.message ?? response.statusText, response.status);
+    const error = (body as { error?: { code?: string; message?: string; details?: Record<string, string> } } | null)?.error;
+    throw new ApiError(error?.code ?? `HTTP_${response.status}`, error?.message ?? response.statusText, response.status, error?.details ?? null);
   }
   return body;
 }

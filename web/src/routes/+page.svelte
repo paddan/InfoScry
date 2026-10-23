@@ -49,6 +49,7 @@
     type RetryAttempt,
     type RetryOcrChoice,
     type SearchHit,
+    type GlossaryGroup,
     type SearchFilters,
     type SearchMode,
     type SourceContentResponse,
@@ -104,6 +105,9 @@
   let askProfileStatus = 'Loading profiles…';
   let investigateProfileStatus = 'Loading profiles…';
   let hits: SearchHit[] = [];
+  /** The other names the last search also searched, and whether some were left out. */
+  let alsoSearched: string[] = [];
+  let expansionTruncated = false;
   let hasSearched = false;
   let collectionError: string | null = null;
   let searchError: string | null = null;
@@ -404,13 +408,19 @@
     hasSearched = true;
     searchError = null;
     hits = [];
+    alsoSearched = [];
+    expansionTruncated = false;
     try {
       const filters: SearchFilters = {
         mediaType, path: pathContains, text: textContains,
         from: importedFrom, until: importedUntil, status: statusFilter, ocrOnly,
       };
       const response = await searchCollection(selectedCollectionId, text, mode, filters);
-      if (generation === searchGeneration) hits = response.hits;
+      if (generation === searchGeneration) {
+        hits = response.hits;
+        alsoSearched = otherNames(response.expandedWith, text);
+        expansionTruncated = response.expansionTruncated;
+      }
     } catch (failure) {
       if (generation === searchGeneration) searchError = describe(failure);
     } finally {
@@ -566,10 +576,22 @@
    * whatever collection is listed first: admitting a collection deletion refreshes this list at once,
    * while the deletion's own completion event only arrives later, once the server reports it done.
    */
+  /** The glossary terms a search used that the query did not already say, prefix terms marked `*`. */
+  function otherNames(groups: GlossaryGroup[], text: string): string[] {
+    const fold = (value: string) => value.normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase('en-US');
+    const query = fold(text);
+    const words = new Set(query.split(/[^\p{L}\p{N}]+/u).filter((word) => word !== ''));
+    return groups.flatMap((group) => group.terms)
+      .filter((term) => !words.has(fold(term.text)) && fold(term.text) !== query.trim())
+      .map((term) => (term.prefix ? `${term.text}*` : term.text));
+  }
+
   function invalidateResults(): void {
     searchGeneration += 1;
     searching = false;
     hits = [];
+    alsoSearched = [];
+    expansionTruncated = false;
     hasSearched = false;
     searchError = null;
   }
@@ -1097,6 +1119,9 @@
         <!-- The list itself is not a live region: announcing it would read every hit aloud on each
              keystroke. The count is what a screen reader needs to know that results changed. -->
         <p class="visually-hidden" role="status">{hits.length} {hits.length === 1 ? 'result' : 'results'}.</p>
+        {#if alsoSearched.length > 0}
+          <p class="meta also-searched">Also searched: {alsoSearched.join(', ')}{#if expansionTruncated} <span>(some alternatives were left out)</span>{/if}</p>
+        {/if}
         <ol class="results" aria-label="Search results">
           {#each hits as hit (`${hit.unitId}-${hit.chunkOrdinal}`)}
             <li>

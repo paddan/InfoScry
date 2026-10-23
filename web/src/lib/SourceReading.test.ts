@@ -8,6 +8,7 @@ vi.mock('./api', async (importOriginal) => ({
   readSourceReading: vi.fn(),
   previewCorrection: vi.fn(),
   putCorrection: vi.fn(),
+  putGlossaryGroup: vi.fn(),
 }));
 
 /** Selects [text] inside the element, the way a reader's drag does, and lets go of the mouse. */
@@ -57,6 +58,16 @@ describe('SourceReading', () => {
     const dialog = await screen.findByRole('dialog');
     expect((screen.getByLabelText('Wrong') as HTMLInputElement).value).toBe('spinners');
     expect(dialog).toBeTruthy();
+  });
+
+  it('offers to add a selected word to the glossary, filled in as the first term', async () => {
+    render(SourceReadingHarness, { hasReading: false, text: 'brev från Sthlm igen' });
+
+    await select(screen.getByText('brev från Sthlm igen'), 'Sthlm');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add to glossary' }));
+
+    await screen.findByRole('dialog');
+    expect((screen.getByLabelText('Term 1') as HTMLInputElement).value).toBe('Sthlm');
   });
 
   it('offers nothing for a selection longer than a rule may be', async () => {

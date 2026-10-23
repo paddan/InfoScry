@@ -426,6 +426,38 @@ describe('app shell', () => {
     expect(call?.init?.method).toBeUndefined();
   });
 
+  it('says which other names a search also searched', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({
+        hits: [hit('Default', 'Page 12')],
+        staleFiltered: 0,
+        expandedWith: [{ id: 'g1', terms: [{ text: 'Sthlm', prefix: true }, { text: 'Stockholm', prefix: false }, { text: 'Sthlms stad', prefix: false }] }],
+      }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'sthlm' } });
+
+    expect(await screen.findByText('Also searched: Stockholm, Sthlms stad')).toBeTruthy();
+    expect(screen.queryByText('(some alternatives were left out)')).toBeNull();
+  });
+
+  it('says nothing about alternatives when the search had none', async () => {
+    stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [hit('Default', 'Page 12')], staleFiltered: 0 }),
+    });
+
+    render(Page);
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'tax' } });
+
+    expect(await screen.findByText('Page 12')).toBeTruthy();
+    expect(screen.queryByText(/Also searched/)).toBeNull();
+  });
+
   it('searches as the reader types, without pressing Search', async () => {
     const { calls } = stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),
