@@ -429,6 +429,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
             }
         },
         persistence = persistence,
+        glossary = context.glossaryService::snapshot,
     )
 }
 

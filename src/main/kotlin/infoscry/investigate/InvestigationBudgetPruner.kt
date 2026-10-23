@@ -1,5 +1,7 @@
 package infoscry.investigate
 
+import infoscry.glossary.GlossaryGroup
+import infoscry.glossary.GlossaryPrompt
 import infoscry.llm.LlmMessage
 import infoscry.llm.LlmRequest
 import infoscry.llm.RequestBudget
@@ -66,4 +68,49 @@ fun pruneToFit(
     }
 
     return PrunedRequest(messages, omitted)
+}
+/**
+ * [pruneToFit] with the collection glossary's block on the system message.
+ *
+ * The groups the conversation's questions name ride on group 0, which is never pruned, so they are part of what the
+ * pruning fits around. The groups the remaining tool results name are added afterwards, one at a time while the
+ * request still fits; pruning never runs again for them, so no tool result is dropped to make room. The block is
+ * built for this request only and never stored: callers persist the system message they composed.
+ */
+fun pruneWithGlossary(
+    glossary: GlossaryPrompt?,
+    profile: LlmProfile,
+    budget: RequestBudget,
+    allMessages: List<LlmMessage>,
+    groups: List<Pair<Int, Int>>,
+    tools: List<infoscry.llm.ToolDefinition>,
+    maxOutputTokens: Int,
+    reasoning: NativeReasoning = NativeReasoning.None,
+): PrunedRequest {
+    if (glossary == null || allMessages.isEmpty()) {
+        return pruneToFit(profile, budget, allMessages, groups, tools, maxOutputTokens, reasoning)
+    }
+    val system = allMessages.first()
+    fun withSystem(messages: List<LlmMessage>, content: String) = listOf(system.copy(content = content)) + messages.drop(1)
+    fun measure(messages: List<LlmMessage>) =
+        budget.measure(profile, LlmRequest(messages, tools, maxOutputTokens = maxOutputTokens, reasoning = reasoning), stream = true)
+    fun cost(chosen: List<GlossaryGroup>): Int =
+        measure(listOf(system.copy(content = glossary.withBlock(system.content, chosen)))).serializedBytes -
+            measure(listOf(system)).serializedBytes
+
+    val questionGroups = glossary.choose(
+        emptyList(),
+        glossary.groupsIn(allMessages.filter { it.role == "user" }.map { it.content }),
+        ::cost,
+    ) { true }
+    val pruned = pruneToFit(
+        profile, budget, withSystem(allMessages, glossary.withBlock(system.content, questionGroups)),
+        groups, tools, maxOutputTokens, reasoning,
+    )
+    val evidenceGroups = glossary.groupsIn(pruned.messages.filter { it.role == "tool" }.map { it.content })
+    val chosen = glossary.choose(questionGroups, evidenceGroups, ::cost) { trial ->
+        measure(withSystem(pruned.messages, glossary.withBlock(system.content, trial))).fits
+    }
+    if (chosen == questionGroups) return pruned
+    return pruned.copy(messages = withSystem(pruned.messages, glossary.withBlock(system.content, chosen)))
 }

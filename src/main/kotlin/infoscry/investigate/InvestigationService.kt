@@ -15,6 +15,8 @@ import infoscry.llm.LlmProfile
 import infoscry.llm.LlmRequest
 import infoscry.llm.LlmStreamingClient
 import infoscry.llm.PromptService
+import infoscry.glossary.Glossary
+import infoscry.glossary.glossaryPromptFor
 import infoscry.llm.ResolvedPrompt
 import infoscry.llm.RequestBudget
 import infoscry.llm.TokenUsage
@@ -187,6 +189,8 @@ class InvestigationService(
      */
     private val providerInactivityMs: Long? = null,
     private val nanoTime: () -> Long = System::nanoTime,
+    /** The collection's glossary, read again before every model call; a failed read sends no glossary block. */
+    private val glossary: (CollectionId) -> Glossary = { Glossary.empty(it) },
 ) {
     fun investigate(request: InvestigateRequest): Flow<InvestigateEvent> = flow {
         if (request.question.isBlank()) {
@@ -575,7 +579,7 @@ class InvestigationService(
                 emit(InvestigateEvent.Limit(limitCode, limitMessage))
                 emit(InvestigateEvent.AnswerStart)
 
-                val pruned = pruneToFit(profile, budget, conversationMessages.map { it.copy(assistantContent = null) }, conversationGroups, tools.definitions, profile.maxOutputTokens)
+                val pruned = pruneWithGlossary(glossaryPromptFor(glossary, collectionId, investigate = true), profile, budget, conversationMessages.map { it.copy(assistantContent = null) }, conversationGroups, tools.definitions, profile.maxOutputTokens)
                 // Eligibility is exactly the evidence the pruned request carried: the union of the
                 // surviving groups' ids. Dropped evidence stays in the ledger for older displayed
                 // citations but can justify no new one.
@@ -712,7 +716,7 @@ class InvestigationService(
                     synthesizeFromEvidence("MAX_ROUNDS", "Tool round limit reached; preparing an answer from collected sources.")
                     break
                 }
-                val pruned = pruneToFit(profile, budget, conversationMessages.toList(), conversationGroups, tools.definitions, profile.maxOutputTokens, reasoning = request.reasoning)
+                val pruned = pruneWithGlossary(glossaryPromptFor(glossary, collectionId, investigate = true), profile, budget, conversationMessages.toList(), conversationGroups, tools.definitions, profile.maxOutputTokens, reasoning = request.reasoning)
                 val candidateRequest = LlmRequest(pruned.messages, tools.definitions, maxOutputTokens = profile.maxOutputTokens, reasoning = request.reasoning)
                 val omittedGroups = pruned.omittedGroupIds
                 val measurement = budget.measure(profile, candidateRequest, stream = true)

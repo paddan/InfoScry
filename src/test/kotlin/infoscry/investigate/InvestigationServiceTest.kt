@@ -89,6 +89,7 @@ class InvestigationServiceTest {
         // Null keeps the production inactivity cap; a deterministic test injects a short one.
         providerInactivityMs: Long? = null,
         nanoTime: () -> Long = System::nanoTime,
+        glossary: (CollectionId) -> infoscry.glossary.Glossary = { infoscry.glossary.Glossary.empty(it) },
     ) = InvestigationService(
         tools,
         PromptService(),
@@ -97,6 +98,7 @@ class InvestigationServiceTest {
         turnTimeoutMs = turnTimeoutMs,
         providerInactivityMs = providerInactivityMs,
         nanoTime = nanoTime,
+        glossary = glossary,
     )
 
     private fun request() = InvestigateRequest(CollectionId("collection"), "question", profile(), prompt = defaultTestPrompt())
@@ -120,6 +122,34 @@ class InvestigationServiceTest {
         assertEquals(NativeReasoning.None, provider.streamRequests.last().reasoning)
         assertTrue(provider.streamRequests.last().messages.all { it.assistantContent == null })
         assertTrue(persistence.appended.single().second.messages.all { it.second.assistantContent == null })
+    }
+
+    @Test
+    fun `each request carries the glossary as it is then, and the stored history does not`() = runBlocking {
+        val collection = CollectionStore(database).create("Glossary research").id
+        val unitId = addUnit(insertDocument(collection), 0, "glossary-unit", "The meeting in Stockholm began at noon.")
+        val tool = infoscry.llm.ToolCall("c1", "read_content_unit", """{"contentUnitId":"${unitId.value}"}""")
+        val provider = PerRoundProvider(listOf(
+            listOf(LlmEvent.ToolCallReady(tool), LlmEvent.Completed),
+            listOf(LlmEvent.TextDelta("At noon [S1]."), LlmEvent.Completed),
+        ))
+        val group = infoscry.glossary.GlossaryGroup(
+            "g1", collection,
+            infoscry.glossary.GlossaryRules.normalize(listOf(infoscry.glossary.GlossaryTermInput("Sthlm"), infoscry.glossary.GlossaryTermInput("Stockholm"))),
+            "t", "t",
+        )
+        var lookups = 0
+        val persistence = FakePersistence()
+        service(tools(collection), provider, persistence, glossary = { id ->
+            lookups++
+            infoscry.glossary.Glossary(id, if (lookups == 1) listOf(group) else emptyList())
+        }).investigate(InvestigateRequest(collection, "When in Sthlm?", profile(), prompt = defaultTestPrompt())).toList()
+
+        val first = provider.streamRequests.first().messages.first().content
+        assertTrue(first.contains(infoscry.glossary.GlossaryPrompt.INVESTIGATE_NOTE))
+        assertTrue(first.contains("- Sthlm = Stockholm"))
+        assertFalse(provider.streamRequests.last().messages.first().content.contains("Glossary"))
+        assertTrue(persistence.appended.single().second.messages.none { it.second.content.contains("Glossary") })
     }
 
     @Test
