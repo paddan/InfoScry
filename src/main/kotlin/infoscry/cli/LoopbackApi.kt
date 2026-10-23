@@ -6,6 +6,10 @@ import infoscry.server.PreviewCorrectionRequest
 import infoscry.server.CorrectionRuleWire
 import infoscry.server.CorrectionPreviewWire
 import infoscry.server.CorrectionListWire
+import infoscry.server.GlossaryGroupWire
+import infoscry.server.GlossaryListWire
+import infoscry.server.GlossaryTermWire
+import infoscry.server.PutGlossaryGroupRequest
 import infoscry.correction.CorrectionRuleInput
 import infoscry.collection.CollectionPrompts
 import infoscry.collection.RolePrompts
@@ -191,6 +195,26 @@ class LoopbackApi(
             setBody(ApiJson.encodeToString(PreviewCorrectionRequest(input.find, input.replace, input.exactCase)))
         }
         return ApiJson.decodeFromString(expect(response))
+    }
+
+    suspend fun listGlossary(collection: String): GlossaryListWire {
+        val id = resolveCollectionId(collection)
+        return ApiJson.decodeFromString(expect(client.get("$base/api/collections/$id/glossary") { header() }))
+    }
+
+    suspend fun putGlossaryGroup(collection: String, groupId: String, terms: List<GlossaryTermWire>): GlossaryGroupWire {
+        val id = resolveCollectionId(collection)
+        val response = client.put("$base/api/collections/$id/glossary/${groupId.encodeURLPathPart()}") {
+            header()
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(PutGlossaryGroupRequest(terms)))
+        }
+        return ApiJson.decodeFromString(expect(response))
+    }
+
+    suspend fun deleteGlossaryGroup(collection: String, groupId: String) {
+        val id = resolveCollectionId(collection)
+        expect(client.delete("$base/api/collections/$id/glossary/${groupId.encodeURLPathPart()}") { header() })
     }
 
     private fun RolePromptsWire.toDomain(collectionId: CollectionId, role: LlmPromptRole) = RolePrompts(

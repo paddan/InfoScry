@@ -2,6 +2,11 @@ package infoscry.cli
 
 import infoscry.server.toApiView
 import infoscry.server.CorrectionRuleWire
+import infoscry.server.GlossaryGroupWire
+import infoscry.server.GlossaryListWire
+import infoscry.server.GlossaryTermWire
+import infoscry.server.toWire
+import infoscry.glossary.GlossaryTermInput
 import infoscry.server.CorrectionPreviewWire
 import infoscry.server.CorrectionListWire
 import infoscry.server.CorrectionExampleWire
@@ -75,6 +80,15 @@ sealed interface CliSession : AutoCloseable {
 
     /** What [input] would change, without storing anything. */
     suspend fun previewCorrection(collection: String, input: CorrectionRuleInput): CorrectionPreviewWire
+
+    /** The glossary groups of [collection]. */
+    suspend fun listGlossary(collection: String): GlossaryListWire
+
+    /** Creates or replaces glossary group [id]. */
+    suspend fun putGlossaryGroup(collection: String, id: String, terms: List<GlossaryTermWire>): GlossaryGroupWire
+
+    /** Removes glossary group [id]; removing one that is already gone succeeds. */
+    suspend fun deleteGlossaryGroup(collection: String, id: String)
 
     suspend fun job(id: JobId): Job
 
@@ -167,6 +181,15 @@ sealed interface CliSession : AutoCloseable {
                 )
             }
 
+        override suspend fun listGlossary(collection: String): GlossaryListWire =
+            GlossaryListWire(context.glossaryService.list(collectionIdOf(collection)).groups.map { it.toWire() })
+
+        override suspend fun putGlossaryGroup(collection: String, id: String, terms: List<GlossaryTermWire>): GlossaryGroupWire =
+            context.glossaryService.put(collectionIdOf(collection), id, terms.map { GlossaryTermInput(it.text, it.prefix) }).toWire()
+
+        override suspend fun deleteGlossaryGroup(collection: String, id: String) =
+            context.glossaryService.delete(collectionIdOf(collection), id)
+
         override suspend fun job(id: JobId): Job = context.jobs.get(id) ?: throw NoSuchElementException("no job with id ${id.value}")
 
         override fun close() {
@@ -220,6 +243,13 @@ sealed interface CliSession : AutoCloseable {
 
         override suspend fun previewCorrection(collection: String, input: CorrectionRuleInput): CorrectionPreviewWire =
             api.previewCorrection(collection, input)
+
+        override suspend fun listGlossary(collection: String): GlossaryListWire = api.listGlossary(collection)
+
+        override suspend fun putGlossaryGroup(collection: String, id: String, terms: List<GlossaryTermWire>): GlossaryGroupWire =
+            api.putGlossaryGroup(collection, id, terms)
+
+        override suspend fun deleteGlossaryGroup(collection: String, id: String) = api.deleteGlossaryGroup(collection, id)
 
         override suspend fun job(id: JobId): Job = api.getJob(id)
 
