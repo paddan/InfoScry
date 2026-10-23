@@ -115,7 +115,7 @@ async function selectCollection(page, name) {
   const documents = page.locator(`${PANEL} .document-overview > button`).first();
   if (await documents.count() && await documents.getAttribute('aria-expanded') === 'false') await documents.click();
   const settings = page.locator(`${PANEL} .secondary-settings`);
-  if (await settings.count() && await settings.getAttribute('open') === null) await settings.locator('summary').click();
+  if (await settings.count() && await settings.getAttribute('open') === null) await settings.locator(':scope > summary').click();
 }
 
 async function openDetails(page, filename) {

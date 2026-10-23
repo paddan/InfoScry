@@ -135,7 +135,7 @@ async function openLegacyControls(page) {
   if (await documents.getAttribute('aria-expanded') === 'false') await documents.click();
   for (const selector of ['.secondary-settings', '.import-history > details']) {
     const disclosure = page.locator(`${PANEL} ${selector}`);
-    if (await disclosure.getAttribute('open') === null) await disclosure.locator('summary').click();
+    if (await disclosure.getAttribute('open') === null) await disclosure.locator(':scope > summary').click();
   }
   await page.waitForFunction(() => !(document.querySelector('#admin-panel-collections')?.textContent ?? '').includes('Loading documents…'));
 }
@@ -416,9 +416,9 @@ const scenarios = {
       await page.getByRole('button', { name: 'Add documents', exact: true }).waitFor({ state: 'visible' });
       for (const selector of ['.secondary-settings', '.import-history > details']) {
         const details = page.locator(`${PANEL} ${selector}`);
-        await details.locator('summary').click();
+        await details.locator(':scope > summary').click();
         assert(await details.getAttribute('open') !== null, `${selector} is reachable while documents are collapsed`);
-        await details.locator('summary').click();
+        await details.locator(':scope > summary').click();
       }
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), `${width}px collapsed page must fit`);
       await page.locator(`${PANEL} .document-overview`).scrollIntoViewIfNeeded();
@@ -580,17 +580,21 @@ const scenarios = {
     await selectCollection(page, 'Notes', false);
     await chooseAndImport(page, 'folder');
     await waitForImportRunning(page);
-    // Reopen Admin so the standalone import form is gone: the persisted job drives active progress.
+    // Reopen Admin: the persisted unfinished job reopens the import panel with its progress.
     await page.click('#tab-search');
     await enterAdmin(page);
     await selectCollection(page, 'Notes', false);
-    const active = page.locator(`${PANEL} .active-imports`);
-    await active.waitFor({ state: 'visible' });
+    const active = page.locator('.import-panel p[role="status"]', { hasText: 'Importing' });
+    await active.waitFor({ state: 'visible', timeout: 30_000 });
     assert(await page.locator('table.documents').count() === 0, 'documents stay collapsed during import');
     assert(await page.locator('.import-history > details').getAttribute('open') === null, 'history stays closed during import');
     assert(await active.evaluate(node => !node.closest('details') && /of 3 files/.test(node.textContent)), 'active progress is readable outside history disclosure');
     mark('compact-progress-observed');
-    await page.waitForFunction(() => !document.querySelector('#admin-panel-collections .active-imports'), null, { timeout: 60_000 });
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('.import-panel p[role="status"]')].every((node) => !/Importing/.test(node.textContent ?? '')),
+      null,
+      { timeout: 60_000 },
+    );
     await page.getByRole('button', { name: '3 total', exact: true }).waitFor();
     const importsPattern = '**/api/collections/*/imports*';
     await page.route(importsPattern, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'UNAVAILABLE', message: 'Acceptance history unavailable' } }) }));
@@ -750,7 +754,13 @@ const scenarios = {
     await chooseAndImport(page, 'folder');
     const finished = await waitForImportFinished(page);
     assert(/Import complete/.test(finished), `importing the fixture folder must finish, panel said ${JSON.stringify(finished)}`);
-    const bulkResults = await importResults(page);
+    // The results are paged fifty files at a time.
+    const firstResults = await importResults(page);
+    assert(firstResults.length === 50, `the first page of results must list 50 files, got ${firstResults.length}`);
+    await page.locator('.import-panel').getByText('Showing 1–50 of 55 files').waitFor();
+    await page.locator('.import-panel').getByRole('button', { name: 'Next files' }).click();
+    await page.locator('.import-panel').getByText('Showing 51–55 of 55 files').waitFor({ timeout: 20_000 });
+    const bulkResults = [...firstResults, ...await importResults(page)];
     assert(bulkResults.length === 55, `the import results must list 55 files, got ${bulkResults.length}`);
     assert(bulkResults.every((item) => item.outcome === 'Imported'), 'every fixture file must be reported as imported');
 
