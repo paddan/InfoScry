@@ -51,14 +51,14 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `a fresh database gets the baseline at version three`() {
+    fun `a fresh database gets the baseline at version four`() {
         newDatabase().use { database ->
             assertEquals(0, database.userVersion())
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
-            assertEquals(3, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(4, database.userVersion())
+            assertEquals(4, SchemaMigrator.SUPPORTED_VERSION)
             assertEquals(1, count(database, "schema_version"))
         }
     }
@@ -69,7 +69,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
+            assertEquals(4, database.userVersion())
             assertEquals(1, count(database, "schema_version"), "the baseline must not be applied twice")
         }
     }
@@ -146,13 +146,55 @@ class SchemaMigratorTest {
         }
     }
 
+    /** The baseline as version 3 shipped it: every block between `-- schema 4 begin` and `-- schema 4 end` is version 4's. */
+    private fun versionThreeBaseline(): String {
+        val baseline = requireNotNull(javaClass.classLoader.getResourceAsStream("db/migration/001_baseline.sql"))
+            .use { it.readBytes().decodeToString() }
+        val versionThree = Regex("(?s)-- schema 4 begin.*?-- schema 4 end\\n").replace(baseline, "")
+        check(versionThree != baseline && "collection_glossary" !in versionThree) {
+            "the baseline no longer marks its version 4 additions"
+        }
+        return versionThree
+    }
+
+    /** A database exactly as version 3 created it, with a collection. */
+    private fun versionThreeDatabase(): Database {
+        val database = newDatabase()
+        database.transaction { connection ->
+            connection.createStatement().use { statement ->
+                splitSqlStatements(versionThreeBaseline()).forEach(statement::execute)
+                statement.execute("PRAGMA user_version = 3")
+                statement.execute("INSERT INTO schema_version (version, applied_at) VALUES (3, '2026-01-01T00:00:00Z')")
+                statement.execute(
+                    "INSERT INTO collections (id, name, ocr_languages, lifecycle, created_at, updated_at) " +
+                        "VALUES ('c1', 'Case', 'swe', 'ACTIVE', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                )
+            }
+        }
+        return database
+    }
+
+    @Test
+    fun `a version 3 database upgrades to version 4 with the glossary tables and its collections intact`() {
+        versionThreeDatabase().use { database ->
+            SchemaMigrator(database).migrate()
+            SchemaMigrator(database).migrate()
+
+            assertEquals(4, database.userVersion())
+            assertEquals(2, count(database, "schema_version"))
+            assertEquals(1, count(database, "collections"))
+            assertEquals(0, foreignKeyViolations(database))
+            assertEquals("1", pragma(database, "foreign_keys"), "foreign keys were left switched off")
+            assertTrue(tableNames(database).containsAll(listOf("collection_glossary_groups", "collection_glossary_terms")))
+        }
+    }
+
     /**
      * The baseline as version 2 shipped it: every line the baseline marks `-- schema 3`, and every block between
      * `-- schema 3 begin` and `-- schema 3 end`, is version 3's, and a job could not be CORRECTIONS.
      */
     private fun versionTwoBaseline(): String {
-        val baseline = requireNotNull(javaClass.classLoader.getResourceAsStream("db/migration/001_baseline.sql"))
-            .use { it.readBytes().decodeToString() }
+        val baseline = versionThreeBaseline()
         val withoutBlocks = Regex("(?s)-- schema 3 begin.*?-- schema 3 end\\n").replace(baseline, "")
         val withoutLines = withoutBlocks.lines().filterNot { it.trimEnd().endsWith("-- schema 3") }.joinToString("\n")
         val versionTwo = withoutLines.replace("'SELECTABLE_PDF', 'CORRECTIONS'", "'SELECTABLE_PDF'")
@@ -265,18 +307,18 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `a version 1 database upgrades to version 3 with every row and reference intact`() {
+    fun `a version 1 database upgrades to version 4 with every row and reference intact`() {
         versionOneDatabase().use { database ->
             val counts = listOf("collections", "collection_prompts", "documents", "ocr_profiles").map { count(database, it) }
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
+            assertEquals(4, database.userVersion())
             assertEquals(counts, listOf("collections", "collection_prompts", "documents", "ocr_profiles").map { count(database, it) })
             assertEquals(listOf("LLM", "p1", "q1", "swe"), collectionColumns(database))
             assertEquals(0, foreignKeyViolations(database))
             assertEquals("1", pragma(database, "foreign_keys"), "foreign keys were left switched off")
-            assertEquals(3, count(database, "schema_version"))
+            assertEquals(4, count(database, "schema_version"))
         }
     }
 
@@ -296,7 +338,7 @@ class SchemaMigratorTest {
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
+            assertEquals(4, database.userVersion())
             assertEquals(1, foreignKeyViolations(database), "the upgrade changed the violation it found")
         }
     }
@@ -318,8 +360,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
-            assertEquals(3, count(database, "schema_version"))
+            assertEquals(4, database.userVersion())
+            assertEquals(4, count(database, "schema_version"))
             assertEquals(listOf("LLM", "p1", "q1", "swe"), collectionColumns(database))
         }
     }
@@ -339,17 +381,17 @@ class SchemaMigratorTest {
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
+            assertEquals(4, database.userVersion())
             setEngineToNone(database)
         }
     }
 
     @Test
-    fun `a new database starts at version 3 and accepts NONE`() {
+    fun `a new database starts at version 4 and accepts NONE`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
+            assertEquals(4, database.userVersion())
             val now = "2026-01-01T00:00:00Z"
             database.transaction { connection ->
                 connection.createStatement().use { statement ->
@@ -380,11 +422,11 @@ class SchemaMigratorTest {
     }
 
     @Test
-    fun `a version 2 database upgrades to version 3 with its jobs and import items intact`() {
+    fun `a version 2 database upgrades to version 4 with its jobs and import items intact`() {
         versionTwoDatabase().use { database ->
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
+            assertEquals(4, database.userVersion())
             assertEquals(1, count(database, "jobs"))
             assertEquals(1, count(database, "import_items"))
             assertEquals(0, foreignKeyViolations(database))
@@ -405,8 +447,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
-            assertEquals(2, count(database, "schema_version"))
+            assertEquals(4, database.userVersion())
+            assertEquals(3, count(database, "schema_version"))
             assertEquals(1, count(database, "jobs"))
         }
     }
@@ -425,7 +467,7 @@ class SchemaMigratorTest {
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.userVersion())
+            assertEquals(4, database.userVersion())
             insertCorrectionsJob(database)
         }
     }

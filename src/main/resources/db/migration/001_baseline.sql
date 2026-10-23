@@ -91,6 +91,30 @@ CREATE TABLE collection_corrections (
 );
 -- schema 3 end
 
+-- schema 4 begin
+-- A group of names with the same meaning in a collection: searching one finds the others. Nothing in the text is
+-- changed by it.
+CREATE TABLE collection_glossary_groups (
+    id            TEXT NOT NULL PRIMARY KEY CHECK (length(trim(id)) > 0),
+    collection_id TEXT NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+-- One name of a group, as typed (NFC). `match_key` is its tokens under the search analyzer joined by one space; a
+-- key belongs to at most one group of the collection. A `prefix` term also matches words that start with its key.
+CREATE TABLE collection_glossary_terms (
+    group_id      TEXT    NOT NULL REFERENCES collection_glossary_groups (id) ON DELETE CASCADE,
+    collection_id TEXT    NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    ordinal       INTEGER NOT NULL CHECK (ordinal >= 0),
+    text          TEXT    NOT NULL CHECK (length(text) > 0),
+    match_key     TEXT    NOT NULL CHECK (length(match_key) > 0),
+    prefix        INTEGER NOT NULL CHECK (prefix IN (0, 1)),
+    PRIMARY KEY (group_id, ordinal),
+    UNIQUE (collection_id, match_key)
+);
+-- schema 4 end
+
 -- One immutable imported original. sha256 identifies the bytes; the unique constraint is per
 -- collection, so the same bytes may exist in two collections as two documents.
 --

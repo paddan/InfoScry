@@ -29,4 +29,7 @@ abstract class ApiFaultException(
     cause: Throwable? = null,
 ) : IllegalStateException(message, cause) {
     open fun clientMessage(): String = message.orEmpty()
+
+    /** Structured facts a client may act on beside [code] (an index, an id); never user content. */
+    open fun details(): Map<String, String>? = null
 }

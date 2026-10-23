@@ -40,8 +40,9 @@ class SchemaMigrator(
         }
         if (currentVersion == SUPPORTED_VERSION) return
         if (currentVersion == 1) upgradeToVersion2()
-        if (currentVersion in 1..2) {
-            upgradeToVersion3()
+        if (currentVersion in 1..2) upgradeToVersion3()
+        if (currentVersion in 1..3) {
+            upgradeToVersion4()
             return
         }
 
@@ -143,6 +144,23 @@ class SchemaMigrator(
         }
     }
 
+    /** Adds the collection glossary's two tables; nothing existing is rebuilt, so foreign keys stay on. */
+    private fun upgradeToVersion4() {
+        database.transaction { connection ->
+            connection.createStatement().use { statement ->
+                VERSION_4_ADDITIONS.forEach(statement::execute)
+                statement.execute("PRAGMA user_version = 4")
+            }
+            connection.prepareStatement(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            ).use { statement ->
+                statement.setInt(1, 4)
+                statement.setString(2, Instants.now())
+                statement.executeUpdate()
+            }
+        }
+    }
+
     /**
      * How many foreign-key violations the database has, per table and referenced table. Counted rather than
      * listed by row, because rebuilding `collections` may renumber its own rows.
@@ -158,7 +176,7 @@ class SchemaMigrator(
 
     companion object {
         /** The schema version this build writes and understands. */
-        const val SUPPORTED_VERSION = 3
+        const val SUPPORTED_VERSION = 4
 
         /** Every column of `jobs`, in the order both versions declare them. */
         private const val JOB_COLUMNS =
@@ -184,6 +202,30 @@ class SchemaMigrator(
                 current_item TEXT
             )
         """.trimIndent()
+
+        /** The tables version 4 adds, as the baseline declares them. */
+        private val VERSION_4_ADDITIONS = listOf(
+            """
+            CREATE TABLE collection_glossary_groups (
+                id            TEXT NOT NULL PRIMARY KEY CHECK (length(trim(id)) > 0),
+                collection_id TEXT NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE collection_glossary_terms (
+                group_id      TEXT    NOT NULL REFERENCES collection_glossary_groups (id) ON DELETE CASCADE,
+                collection_id TEXT    NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+                ordinal       INTEGER NOT NULL CHECK (ordinal >= 0),
+                text          TEXT    NOT NULL CHECK (length(text) > 0),
+                match_key     TEXT    NOT NULL CHECK (length(match_key) > 0),
+                prefix        INTEGER NOT NULL CHECK (prefix IN (0, 1)),
+                PRIMARY KEY (group_id, ordinal),
+                UNIQUE (collection_id, match_key)
+            )
+            """.trimIndent(),
+        )
 
         /** The tables and columns version 3 adds beside the rebuilt `jobs`, as the baseline declares them. */
         private val VERSION_3_ADDITIONS = listOf(
