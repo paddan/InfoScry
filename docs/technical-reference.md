@@ -47,7 +47,7 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 The SQLite schema is one baseline,
 [001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql), applied
 to an empty database by [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
-and recorded as `PRAGMA user_version = 3`. The baseline always describes the
+and recorded as `PRAGMA user_version = 4`. The baseline always describes the
 current schema. Older databases are upgraded at startup one version at a time, each
 step in one transaction with foreign keys checked before it commits:
 
@@ -58,6 +58,9 @@ step in one transaction with foreign keys checked before it commits:
   `corrections_applied` to `document_revisions`, and creates
   `collection_corrections`. The baseline marks each version 3 addition
   `-- schema 3` so a test can rebuild the version 2 schema from it.
+- 3 → 4 creates `collection_glossary_groups` and `collection_glossary_terms` for
+  the collection glossary; nothing is rebuilt. The baseline marks them between
+  `-- schema 4 begin` and `-- schema 4 end`.
 A database whose version is newer than the build is refused rather than written
 to.
 
@@ -308,6 +311,38 @@ The [design](specs/2026-10-22-collection-corrections-design.md) is implemented.
   `GET …/sources/{sourceId}/reading`; source reads carry `hasReading`, revision views
   `corrections`. CLI: `infoscry collection corrections list|add|remove|preview`.
 - Rules are user content and stay out of logs and error messages.
+
+## Collection glossary
+
+The [design](specs/2026-10-23-collection-glossary-design.md) is implemented.
+
+- **Storage.** `collection_glossary_groups` and `collection_glossary_terms` (`text`
+  as typed, NFC; `match_key`, the term's tokens under the index analyzer joined by
+  one space; `prefix`). A key is unique per collection
+  (`409 GLOSSARY_TERM_TAKEN`, `details.term` and `details.groupId`); a group id
+  another collection owns is `409 GLOSSARY_ID_TAKEN`; an invalid group is
+  `400 INVALID_GLOSSARY_GROUP` with `details.term` when one term is at fault. Rules
+  in `GlossaryRules`: 2–20 terms, at most 200 characters and 8 tokens each, prefix
+  only on one token of at least 3 characters.
+- **Search.** `GlossaryService.snapshot` (cached per collection, dropped on every
+  write) feeds `SearchService`. `LuceneIndex.expandKeyword` parses the query and
+  `GlossaryQueryRewriter` adds alternatives to runs of plain text-field term
+  clauses and to phrases (`GlossaryMatcher`: longest match, prefix, no chaining):
+  SHOULD hits gain SHOULD alternatives, MUST hits become one MUST choice, phrases
+  gain up to 16 variants, prefix terms are `PrefixQuery`. At most 256 added clauses
+  and the whole query within `MAX_QUERY_TOKENS`; `expansionTruncated` reports what
+  was left out. Across collections each expansion is filtered to its collection.
+  Alternatives also anchor `hasLexicalAnchor` and are highlighted. A glossary
+  failure leaves the search unexpanded. The search response carries
+  `expandedWith` and `expansionTruncated`, omitted when empty.
+- **LLM.** `GlossaryPrompt` renders the groups a request names after the
+  collection prompt in the system message, at most 40 groups and 1 500 budget
+  units. `ContextPacker` reserves the question's groups before choosing evidence
+  and adds the evidence's groups only where they fit; `pruneWithGlossary` does the
+  same for each Investigate call and never stores the block.
+- **API.** `GET/PUT/DELETE /api/collections/{id}/glossary[/{groupId}]`. CLI:
+  `infoscry collection glossary list|add|remove`.
+- Terms are user content and stay out of logs and error messages.
 
 ## Privacy and local API boundaries
 

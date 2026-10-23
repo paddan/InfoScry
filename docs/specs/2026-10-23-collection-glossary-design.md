@@ -1,6 +1,6 @@
 # Collection glossary
 
-Status: approved design, not implemented.
+Status: implemented 2026-10-23.
 
 ## Goal
 

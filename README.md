@@ -18,6 +18,8 @@ reader and a command-line interface.
   profiles in the English web interface.
 - Correct words the reading got wrong (a misread surname, say) across a whole
   collection with a standing list of corrections; the reading is kept underneath.
+- Keep a glossary of names with the same meaning (*Sthlm* and *Stockholm*): a
+  search for one finds the others, and Ask and Investigate are told they match.
 
 ## Get started
 
@@ -108,8 +110,15 @@ back. Rules match whole words in any script (UTF-8 throughout), ignore case unle
 marked exact, and keep the writing they replace. See the
 [design](docs/specs/2026-10-22-collection-corrections-design.md) and
 [usage](docs/usage.md#correct-misread-words). `CorrectionsBrowserAcceptanceTest`
-covers the reader-to-settings flow against fake embeddings; synonyms and
-abbreviations are a separate, later glossary.
+covers the reader-to-settings flow against fake embeddings.
+
+The collection glossary is implemented: groups of names with the same meaning
+expand keyword search at query time (no reindexing; the semantic half is
+unchanged), and Ask and Investigate receive the groups their question and
+evidence name within the request budget. See the
+[design](docs/specs/2026-10-23-collection-glossary-design.md) and
+[usage](docs/usage.md#names-with-the-same-meaning). `GlossaryBrowserAcceptanceTest`
+covers settings-to-search against fake embeddings.
 
 The project targets local use on macOS arm64. CI, distributable packaging and
 public or multi-user hosting are outside the current scope.

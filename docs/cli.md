@@ -135,6 +135,31 @@ infoscry collection corrections remove Notes spinners
 Use `--` before a word that starts with `-`. Options: `--exact-case`, `--id`,
 `--json`, `--data-dir`.
 
+### collection glossary
+
+Lists and changes a collection's glossary: groups of names with the same
+meaning, such as `Sthlm` and `Stockholm`. A keyword search for one term also
+finds the others; nothing in the text changes, and nothing runs in the
+background.
+
+```bash
+infoscry collection glossary list Notes
+infoscry collection glossary add Notes Stockholm Sthlm "Sthlms stad"
+infoscry collection glossary add Notes Stockholm Sthlm --prefix Sthlm
+infoscry collection glossary remove Notes 0b6f2c1e-8d4a-4f3b-9a51-2c7e5d9f1a03
+```
+
+- `list <collection>` prints one line per group: its id, then its terms separated
+  by tabs, a prefix term followed by `*`. `--json` prints the list.
+- `add <collection> <term>...` saves a group of two or more terms. `--prefix <term>`
+  (repeatable) marks one of the terms to also match words that start with it.
+  `--group <id>` replaces that group; without it, a group with exactly these terms
+  is left as it is, so the command can be run again.
+- `remove <collection> <group-id>` removes a group; a group already gone succeeds.
+- A term another group of the collection has is refused with a non-zero exit.
+
+Options: `--prefix`, `--group`, `--json`, `--data-dir`.
+
 ## import
 
 Import files or directories into a collection as immutable managed copies.

@@ -189,7 +189,28 @@ Corrections** keeps a standing list of corrections for the collection.
   Spinnars (14 matches)"). Saved Ask and Investigate answers keep the text they
   quoted.
 - Corrections are for wrong text. Abbreviations and synonyms such as *Sthlm* for
-  *Stockholm* are correct as written and are not replaced.
+  *Stockholm* are correct as written and are not replaced; put them in the
+  [glossary](#names-with-the-same-meaning) instead.
+
+## Names with the same meaning
+
+A collection's **Glossary**, in its settings below **Corrections**, lists groups
+of names that mean the same: an abbreviation and the full name, an old and a new
+name, two spellings. Nothing in the text is changed.
+
+- **Add group** opens a form with one field per term; **Add term** adds another
+  (2 to 20 terms). Selecting a word in the reader offers **Add to glossary**, with
+  the word filled in.
+- A keyword search for any term also finds the others, and the results say so:
+  *Also searched: Stockholm, Sthlms stad*. Hybrid search widens its keyword half
+  the same way; semantic search is unchanged. A change applies from the next search.
+- Terms match whole words and phrases, ignoring case and accents as search does.
+  **Also match words that start with this** makes a single word of at least three
+  letters match longer words too (*Sthlm* finds *Sthlms*).
+- A term belongs to one group per collection; saving it in a second group is
+  refused, naming the group that has it.
+- Ask and Investigate are told which of the groups their question and the sent
+  excerpts name, so the model treats the names as the same thing.
 
 ## Delete documents or collections
 
