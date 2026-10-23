@@ -4,6 +4,7 @@ import infoscry.correction.CorrectionJobFailedException
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobState
+import infoscry.domain.JobType
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.JobStore
@@ -34,13 +35,18 @@ import java.util.concurrent.ConcurrentHashMap
  * spends most of its time in a child process so it gets one worker per couple of cores up to four, and
  * embeddings share one accelerator session, where a second concurrent session competes for the same
  * device memory rather than finishing sooner.
+ *
+ * Selectable-PDF jobs have a lane of their own, [selectablePdfs] beside [jobs]: one takes seconds and
+ * an archive import takes hours, so sharing the bound would leave a finished document's PDF waiting
+ * behind every running import, and a burst of PDFs would hold back an import.
  */
-data class JobConcurrency(val jobs: Int, val ocr: Int, val embeddings: Int) {
+data class JobConcurrency(val jobs: Int, val ocr: Int, val embeddings: Int, val selectablePdfs: Int = 1) {
 
     init {
         require(jobs >= 1) { "the job limit must be at least one, was $jobs" }
         require(ocr >= 1) { "the OCR limit must be at least one, was $ocr" }
         require(embeddings >= 1) { "the embedding limit must be at least one, was $embeddings" }
+        require(selectablePdfs >= 1) { "the selectable-PDF limit must be at least one, was $selectablePdfs" }
     }
 
     companion object {
@@ -87,7 +93,11 @@ class JobRunner(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val permits = Semaphore(concurrency.jobs)
+    /** Each lane claims only its own kinds under its own permits; together they cover every [JobType]. */
+    private val lanes = listOf(
+        Lane(JobType.entries.toSet() - SELECTABLE_PDF_TYPES, Semaphore(concurrency.jobs)),
+        Lane(SELECTABLE_PDF_TYPES, Semaphore(concurrency.selectablePdfs)),
+    )
 
     private val attempts = ConcurrentHashMap<JobId, kotlinx.coroutines.Job>()
 
@@ -97,7 +107,7 @@ class JobRunner(
     @Volatile
     private var closing = false
 
-    private var dispatcher: kotlinx.coroutines.Job? = null
+    private var dispatchers: List<kotlinx.coroutines.Job>? = null
 
     /**
      * Begins claiming queued jobs. Calling it twice is a mistake, not a second worker.
@@ -105,8 +115,8 @@ class JobRunner(
     fun start() {
         synchronized(lifecycle) {
             check(!closing) { "the job runner is closed" }
-            check(dispatcher == null) { "the job runner is already started" }
-            dispatcher = scope.launch { dispatch() }
+            check(dispatchers == null) { "the job runner is already started" }
+            dispatchers = lanes.map { lane -> scope.launch { dispatch(lane) } }
         }
     }
 
@@ -138,13 +148,14 @@ class JobRunner(
         synchronized(lifecycle) { closing = true }
         scope.cancel()
         runBlocking {
-            dispatcher?.join()
+            dispatchers?.forEach { it.join() }
             attempts.values.toList().forEach { it.join() }
         }
         store.resetInterrupted()
     }
 
-    private suspend fun dispatch() {
+    private suspend fun dispatch(lane: Lane) {
+        val permits = lane.permits
         var consecutiveFailures = 0
         while (currentCoroutineContext().isActive) {
             // The permit is reserved *before* the claim, so a claim always has a worker behind it. The row
@@ -152,7 +163,7 @@ class JobRunner(
             // for a permit afterwards would mark work running that no stage is executing.
             permits.acquire()
             val claimed = try {
-                store.claimNextQueued()
+                store.claimNextQueued(lane.types)
             } catch (cancelled: CancellationException) {
                 // Also covers a cancellation while suspended above, so the reserved permit is never lost.
                 permits.release()
@@ -177,7 +188,7 @@ class JobRunner(
                 delay(pollIntervalMillis)
                 continue
             }
-            launchAttempt(claimed)
+            launchAttempt(claimed, permits)
         }
     }
 
@@ -194,7 +205,7 @@ class JobRunner(
      * The attempt owns the permit [dispatch] already reserved for it and releases it when the attempt
      * ends, which is what keeps the number of `RUNNING` rows equal to the number of executing attempts.
      */
-    private fun launchAttempt(claimed: Job) {
+    private fun launchAttempt(claimed: Job, permits: Semaphore) {
         val attempt = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 runAttempt(claimed)
@@ -271,7 +282,11 @@ class JobRunner(
             ?: failure::class.simpleName
             ?: "the attempt failed without a message"
 
+    /** The kinds of job one dispatcher claims, and the permits its attempts run under. */
+    private class Lane(val types: Set<JobType>, val permits: Semaphore)
+
     private companion object {
+        val SELECTABLE_PDF_TYPES = setOf(JobType.SELECTABLE_PDF)
         const val DEFAULT_POLL_MILLIS = 50L
         const val JOB_ID_FIELD = "job_id"
         const val ERROR_CODE_FIELD = "error_code"

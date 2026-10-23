@@ -72,6 +72,11 @@ A standalone CLI import owns processing until completion, regardless of
 profile-management commands require exclusive ownership of the archive;
 the browser manages profiles through the running server.
 
+The job worker runs two lanes, each claiming its oldest queued job: up to two
+imports, rescans, retries, reindexes or correction runs at once, and beside
+them one selectable-PDF job at a time. A short PDF job therefore never waits
+behind a long import, and PDF jobs never take an import's place.
+
 ## Mutation, deletion and recovery
 
 Services share mutation admission and exclusive maintenance. Reindexing pauses

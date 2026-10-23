@@ -90,6 +90,17 @@ class JobStoreTest {
     }
 
     @Test
+    fun `a lane claims only its own kinds of job, oldest first`() {
+        val import = jobs.enqueue(JobType.IMPORT, collectionId)
+        val pdf = jobs.enqueue(JobType.SELECTABLE_PDF, collectionId)
+
+        assertEquals(pdf.id, jobs.claimNextQueued(setOf(JobType.SELECTABLE_PDF))?.id, "the older import is skipped")
+        assertNull(jobs.claimNextQueued(setOf(JobType.SELECTABLE_PDF)), "no other PDF is queued")
+        assertNull(jobs.claimNextQueued(emptySet()), "a lane with no kinds claims nothing")
+        assertEquals(import.id, jobs.claimNextQueued(setOf(JobType.IMPORT, JobType.RESCAN))?.id)
+    }
+
+    @Test
     fun `progress is only accepted from a running job`() {
         val job = jobs.enqueue(JobType.IMPORT, collectionId)
 

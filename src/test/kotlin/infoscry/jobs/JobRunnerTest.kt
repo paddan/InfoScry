@@ -137,6 +137,36 @@ class JobRunnerTest {
     }
 
     @Test
+    fun `selectable-PDF jobs run in their own lane beside imports`() = runBlocking {
+        // A selectable PDF takes seconds; an archive import takes hours. With one shared bound the PDF waited
+        // behind the import, and an import must equally never wait behind a queue of PDFs.
+        val inside = AtomicInteger()
+        val twoInside = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        runner(
+            testHandler { _, _ ->
+                if (inside.incrementAndGet() == 2) twoInside.complete(Unit)
+                withTimeout(TIMEOUT_MILLIS) { release.await() }
+            },
+            concurrency = JobConcurrency(jobs = 1, ocr = 1, embeddings = 1, selectablePdfs = 1),
+        ).use { runner ->
+            runner.start()
+            val firstPdf = jobs.enqueue(JobType.SELECTABLE_PDF, collectionId)
+            val secondPdf = jobs.enqueue(JobType.SELECTABLE_PDF, collectionId)
+            val import = jobs.enqueue(JobType.IMPORT, collectionId)
+
+            withTimeout(TIMEOUT_MILLIS) { twoInside.await() }
+            delay(POLL_SETTLE_MILLIS)
+            assertEquals(JobState.RUNNING, jobs.get(firstPdf.id)?.state)
+            assertEquals(JobState.RUNNING, jobs.get(import.id)?.state, "an import never waits behind PDFs")
+            assertEquals(JobState.QUEUED, jobs.get(secondPdf.id)?.state, "a PDF never takes an import's slot")
+            release.complete(Unit)
+
+            listOf(firstPdf, secondPdf, import).forEach { awaitState(it.id, JobState.COMPLETE) }
+        }
+    }
+
+    @Test
     fun `a cancelled attempt stops at its next stage and keeps what it committed`() = runBlocking {
         val firstStageCommitted = CompletableDeferred<JobId>()
         val observedCancellation = AtomicReference<Throwable?>()
@@ -346,10 +376,10 @@ class JobRunnerTest {
 
         val claims = AtomicInteger()
 
-        override fun claimNextQueued(): Job? {
+        override fun claimNextQueued(types: Set<JobType>?): Job? {
             val attempt = claims.incrementAndGet()
             if (attempt <= failures) throw IllegalStateException("the queue could not be read (attempt $attempt)")
-            return super.claimNextQueued()
+            return super.claimNextQueued(types)
         }
     }
 

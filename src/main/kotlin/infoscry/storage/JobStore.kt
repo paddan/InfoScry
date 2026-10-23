@@ -281,12 +281,17 @@ open class JobStore(private val database: Database) {
      * Open so a test can make one claim fail and prove the dispatcher keeps claiming afterwards — a
      * failure here used to end the claim loop silently, which left a live runner with a full queue and no
      * worker.
+     *
+     * [types] limits the claim to the kinds a worker lane runs; `null` takes any kind.
      */
-    open fun claimNextQueued(): Job? = database.transaction { connection ->
+    open fun claimNextQueued(types: Set<JobType>? = null): Job? = database.transaction { connection ->
+        if (types != null && types.isEmpty()) return@transaction null
+        val typeFilter = types?.joinToString(prefix = " AND type IN (", postfix = ")") { "?" } ?: ""
         val next = connection.prepareStatement(
-            "$SELECT_JOBS WHERE state = ? ORDER BY created_at, rowid LIMIT 1",
+            "$SELECT_JOBS WHERE state = ?$typeFilter ORDER BY created_at, rowid LIMIT 1",
         ).use { statement ->
             statement.setString(1, JobState.QUEUED.name)
+            types?.forEachIndexed { index, type -> statement.setString(index + 2, type.name) }
             statement.executeQuery().use { rows -> if (rows.next()) rows.toJob() else null }
         } ?: return@transaction null
         claimIn(connection, next.id)
