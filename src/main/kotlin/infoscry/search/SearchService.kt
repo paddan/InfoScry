@@ -1,5 +1,8 @@
 package infoscry.search
 
+import infoscry.glossary.Glossary
+import infoscry.glossary.GlossaryGroup
+
 import infoscry.chunk.carriesMeaning
 import infoscry.chunk.hasSearchableWord
 import infoscry.domain.CollectionId
@@ -54,6 +57,11 @@ class SearchService(
      * revisions — a test, or a command with no publication service — should see.
      */
     private val snapshots: RevisionSnapshotGate = RevisionSnapshotGate(),
+    /**
+     * The glossaries a keyword search expands with: the scoped collection's, or, for a search across collections,
+     * every active collection's that has groups. A lookup that fails leaves the search unexpanded.
+     */
+    private val glossaries: (CollectionId?) -> Map<CollectionId, Glossary> = { emptyMap() },
 ) {
 
     /**
@@ -113,12 +121,15 @@ class SearchService(
             )
         }
 
+        val expansion = if (mode == SearchMode.SEMANTIC) null else expand(normalizedFilters.collectionId, queryText)
+        val alternatives = expansion?.groups.orEmpty()
         val keyword = when (mode) {
-            SearchMode.KEYWORD, SearchMode.HYBRID -> validatedCandidates(SearchMode.KEYWORD, queryText) { limit ->
-                searchRefusingOverbroad {
-                    index().searchKeyword(normalizedFilters.collectionId, queryText, documentIds, limit, scope)
+            SearchMode.KEYWORD, SearchMode.HYBRID ->
+                validatedCandidates(SearchMode.KEYWORD, queryText, alternatives = alternatives) { limit ->
+                    searchRefusingOverbroad {
+                        index().searchKeyword(normalizedFilters.collectionId, queryText, documentIds, limit, scope, expansion)
+                    }
                 }
-            }
             SearchMode.SEMANTIC -> ValidatedCandidates.empty()
         }
 
@@ -131,6 +142,7 @@ class SearchService(
                     documentIds,
                     requireLexicalAnchor,
                     scope,
+                    alternatives.flatMap { group -> group.terms.flatMap { it.tokens } },
                 )
             ) {
                 semanticSearch(queryText, normalizedFilters, documentIds, scope)
@@ -148,7 +160,25 @@ class SearchService(
         }
 
         val resolved = keyword.resolved + semantic.resolved.filterKeys { it !in keyword.resolved }
-        return publish(fused, queryText, resolved, (keyword.staleKeys + semantic.staleKeys).size)
+        return publish(fused, queryText, resolved, (keyword.staleKeys + semantic.staleKeys).size, alternatives)
+            .copy(expandedWith = alternatives, expansionTruncated = expansion?.truncated ?: false)
+    }
+
+    /**
+     * The keyword query expanded by the glossaries that apply, or `null` for the plain query. A glossary that
+     * cannot be read, or an expansion that fails, never fails the search; a query that is too long still does.
+     */
+    private fun expand(collectionId: CollectionId?, queryText: String): KeywordExpansion? = try {
+        val applying = glossaries(collectionId).filterValues { it.groups.isNotEmpty() }
+        if (applying.isEmpty()) null else index().expandKeyword(collectionId, queryText, applying)
+    } catch (refused: SearchUnavailableException) {
+        throw refused
+    } catch (failure: RuntimeException) {
+        LOGGER.atWarn()
+            .addKeyValue(LogFields.COMPONENT, COMPONENT_VALUE)
+            .addKeyValue(ERROR_TYPE_FIELD, failure.javaClass.simpleName)
+            .log("the collection glossary could not be applied; searching without it")
+        null
     }
 
     /**
@@ -216,9 +246,10 @@ class SearchService(
         documentIds: Set<String>?,
         requireLexicalAnchor: Boolean,
         scope: RevisionScope,
+        alternativeTokens: List<String>,
     ): Boolean {
         if (!requireLexicalAnchor || keywordHits.isNotEmpty()) return true
-        return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds, scope)
+        return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds, scope, alternativeTokens)
     }
 
     /**
@@ -233,6 +264,7 @@ class SearchService(
         mode: SearchMode,
         queryText: String,
         expectedCandidateCount: Int? = null,
+        alternatives: List<GlossaryGroup> = emptyList(),
         retrieve: (Int) -> List<IndexHit>,
     ): ValidatedCandidates {
         val checked = mutableMapOf<HitKey, CandidateValidation>()
@@ -248,7 +280,7 @@ class SearchService(
                     if (!hasSearchableWord(hit.text)) CandidateValidation()
                     else if (mode == SearchMode.SEMANTIC && !carriesMeaning(hit.text)) CandidateValidation()
                     else {
-                        val published = resolveHit(FusedSearchHit(hit, setOf(mode), 0.0), queryText)
+                        val published = resolveHit(FusedSearchHit(hit, setOf(mode), 0.0), queryText, alternatives)
                         CandidateValidation(published, stale = published == null)
                     }
                 }
@@ -277,6 +309,7 @@ class SearchService(
         queryText: String,
         resolved: Map<HitKey, SearchHit>,
         staleCount: Int,
+        alternatives: List<GlossaryGroup>,
     ): SearchOutcome = SearchOutcome(
         hits = fused.mapNotNull { fusedHit ->
             val key = fusedHit.hit.searchKey()
@@ -284,7 +317,7 @@ class SearchService(
             hit.copy(
                 matchedBy = fusedHit.matchedBy,
                 highlighted = if (SearchMode.KEYWORD in fusedHit.matchedBy) {
-                    hit.highlighted ?: highlight(hit.text, queryText)
+                    hit.highlighted ?: highlight(hit.text, queryText, alternatives)
                 } else null,
             )
         },
@@ -315,7 +348,11 @@ class SearchService(
      * stale rows — a fabricated fallback citation would be worse than the miss, because this
      * application's core promise is exact page/section/cell citations.
      */
-    internal fun resolveHit(fusedHit: FusedSearchHit, queryText: String): SearchHit? {
+    internal fun resolveHit(
+        fusedHit: FusedSearchHit,
+        queryText: String,
+        alternatives: List<GlossaryGroup> = emptyList(),
+    ): SearchHit? {
         val collection = collections.get(CollectionId(fusedHit.hit.collectionId))
         val document = documents.get(DocumentId(fusedHit.hit.documentId))
         val live = collection != null &&
@@ -338,7 +375,7 @@ class SearchService(
             chunkOrdinal = fusedHit.hit.chunkOrdinal,
             text = fusedHit.hit.text,
             highlighted = if (SearchMode.KEYWORD in fusedHit.matchedBy) {
-                highlight(fusedHit.hit.text, queryText)
+                highlight(fusedHit.hit.text, queryText, alternatives)
             } else {
                 null
             },
@@ -349,11 +386,19 @@ class SearchService(
         )
     }
 
-    /** Marks matched source tokens in one pass, escaping every untrusted segment independently. */
-    private fun highlight(text: String, queryText: String): String? {
-        val terms = queryTerms(queryText)
-        if (terms.isEmpty()) return null
-        val spans = mutableListOf<IntRange>()
+    /**
+     * Marks matched source tokens in one pass, escaping every untrusted segment independently.
+     *
+     * A token is marked when it contains a query word, a single-word alternative or a prefix term from
+     * [alternatives]; a multi-word alternative is marked only where all its words follow one another.
+     */
+    private fun highlight(text: String, queryText: String, alternatives: List<GlossaryGroup> = emptyList()): String? {
+        val terms = (queryTerms(queryText) + alternatives.flatMap { group ->
+            group.terms.filter { it.tokens.size == 1 }.map { it.matchKey }
+        }).distinct()
+        val phrases = alternatives.flatMap { group -> group.terms.filter { it.tokens.size > 1 }.map { it.tokens } }.distinct()
+        if (terms.isEmpty() && phrases.isEmpty()) return null
+        val tokens = mutableListOf<IntRange>()
         var tokenStart = -1
         var offset = 0
         while (offset < text.length) {
@@ -362,16 +407,22 @@ class SearchService(
             if (isWordCodePoint(codePoint)) {
                 if (tokenStart < 0) tokenStart = offset
             } else if (tokenStart >= 0) {
-                if (foldForHighlight(text.substring(tokenStart, offset)).let { token -> terms.any(token::contains) }) {
-                    spans += tokenStart until offset
-                }
+                tokens += tokenStart until offset
                 tokenStart = -1
             }
             offset = end
         }
-        if (tokenStart >= 0 && foldForHighlight(text.substring(tokenStart)).let { token -> terms.any(token::contains) }) {
-            spans += tokenStart until text.length
+        if (tokenStart >= 0) tokens += tokenStart until text.length
+        val folded = tokens.map { foldForHighlight(text.substring(it.first, it.last + 1)) }
+        val marked = BooleanArray(tokens.size) { index -> terms.any(folded[index]::contains) }
+        for (phrase in phrases) {
+            for (start in 0..tokens.size - phrase.size) {
+                if ((phrase.indices).all { folded[start + it] == phrase[it] }) {
+                    for (index in start until start + phrase.size) marked[index] = true
+                }
+            }
         }
+        val spans = tokens.filterIndexed { index, _ -> marked[index] }
         if (spans.isEmpty()) return null
 
         return buildString {
@@ -478,3 +529,6 @@ private const val COMPONENT_VALUE: String = "search"
 
 /** The structured field carrying the unit id of a hit dropped because its locator would not decode. */
 private const val UNIT_ID_FIELD: String = "unit_id"
+
+/** The failure's class only: a glossary failure's message could carry its terms. */
+private const val ERROR_TYPE_FIELD: String = "error_type"

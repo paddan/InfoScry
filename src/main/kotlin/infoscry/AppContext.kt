@@ -554,6 +554,13 @@ class AppContext private constructor(
             queryEmbedder = injectedQueryEmbedder
                 ?: pinnedEmbedder,
             snapshots = revisionSnapshots,
+            glossaries = { collectionId ->
+                if (collectionId != null) {
+                    mapOf(collectionId to glossaryService.snapshot(collectionId))
+                } else {
+                    collectionService.list().associate { it.id to glossaryService.snapshot(it.id) }
+                }
+            },
         )
     }
 

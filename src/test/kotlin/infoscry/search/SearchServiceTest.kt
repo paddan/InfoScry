@@ -1,5 +1,10 @@
 package infoscry.search
 
+import infoscry.glossary.Glossary
+import infoscry.glossary.GlossaryGroup
+import infoscry.glossary.GlossaryRules
+import infoscry.glossary.GlossaryTermInput
+
 import infoscry.config.AppPaths
 import infoscry.domain.Chunk
 import infoscry.domain.ChunkId
@@ -34,6 +39,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertContains
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -784,12 +790,79 @@ class SearchServiceTest {
         }
     }
 
+    private fun glossaryOf(collection: CollectionId, vararg terms: GlossaryTermInput) = Glossary(
+        collection,
+        listOf(GlossaryGroup("g1", collection, GlossaryRules.normalize(terms.toList()), "t", "t")),
+    )
+
+    @Test
+    fun `a glossary group expands keyword search, says so and highlights the other names`() {
+        val collection = collections.create("glossary")
+        val letter = insertDocument(collection.id, "letter.txt", "text/plain")
+        val minutes = insertDocument(collection.id, "minutes.txt", "text/plain")
+        val glossary = glossaryOf(collection.id, GlossaryTermInput("Sthlm", prefix = true), GlossaryTermInput("Stockholm"), GlossaryTermInput("Sthlms stad"))
+        val (service, index) = openService(absentEmbedder(), glossaries = { mapOf(collection.id to glossary) })
+        try {
+            runBlocking {
+                indexChunk(index, collection.id, letter.id, "brev från Stockholm och stad")
+                indexChunk(index, collection.id, minutes.id, "möte i Sthlms stad om Sthlmsregionen")
+            }
+
+            val outcome = service.search("Sthlm", mode = SearchMode.KEYWORD, filters = SearchFilters(collection.id))
+
+            assertEquals(2, outcome.hits.size)
+            assertEquals(listOf("g1"), outcome.expandedWith.map { it.id })
+            assertFalse(outcome.expansionTruncated)
+            val letterHit = outcome.hits.single { it.documentId == letter.id }.highlighted
+            assertEquals("brev från <mark>Stockholm</mark> och stad", letterHit)
+            val minutesHit = outcome.hits.single { it.documentId == minutes.id }.highlighted
+            assertEquals("möte i <mark>Sthlms</mark> <mark>stad</mark> om <mark>Sthlmsregionen</mark>", minutesHit)
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
+    fun `a glossary that cannot be read leaves the search unexpanded`() {
+        val collection = collections.create("glossary-failure")
+        val document = insertDocument(collection.id, "letter.txt", "text/plain")
+        val (service, index) = openService(absentEmbedder(), glossaries = { error("database is locked") })
+        try {
+            runBlocking { indexChunk(index, collection.id, document.id, "brev från Sthlm") }
+
+            val outcome = service.search("Sthlm", mode = SearchMode.KEYWORD, filters = SearchFilters(collection.id))
+
+            assertEquals(1, outcome.hits.size)
+            assertTrue(outcome.expandedWith.isEmpty())
+        } finally {
+            index.close()
+        }
+    }
+
+    @Test
+    fun `an interactive hybrid search keeps semantic hits for another name of the word`() {
+        val collection = collections.create("glossary-hybrid")
+        val document = insertDocument(collection.id, "letter.txt", "text/plain")
+        val glossary = glossaryOf(collection.id, GlossaryTermInput("Sthlm"), GlossaryTermInput("Stockholm"))
+        val (service, index) = openService(embedder = { FixedQueryEmbedder() }, glossaries = { mapOf(collection.id to glossary) })
+        try {
+            runBlocking { indexChunk(index, collection.id, document.id, "brev från Stockholm") }
+
+            val outcome = service.search("Sthlm", filters = SearchFilters(collection.id), requireLexicalAnchor = true)
+
+            assertEquals(document.id, outcome.hits.single().documentId)
+        } finally {
+            index.close()
+        }
+    }
+
     // ---- fixtures ----
 
     /** One LuceneIndex for the whole test, shared by indexing and the service. */
     private fun openService(
         embedder: () -> QueryEmbedder?,
         maxScopeTerms: Int = SearchService.DEFAULT_MAX_SCOPE_TERMS,
+        glossaries: (CollectionId?) -> Map<CollectionId, Glossary> = { emptyMap() },
     ): Pair<SearchService, LuceneIndex> {
         val index = LuceneIndex.open(paths.indexDir, IDENTITY)
         val service = SearchService(
@@ -798,6 +871,7 @@ class SearchServiceTest {
             index = { index },
             queryEmbedder = embedder,
             maxScopeTerms = maxScopeTerms,
+            glossaries = glossaries,
         )
         return service to index
     }

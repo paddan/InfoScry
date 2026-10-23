@@ -150,6 +150,76 @@ class LuceneIndexTest {
         }
     }
 
+    private fun glossaryOf(collection: CollectionId, vararg terms: infoscry.glossary.GlossaryTermInput) =
+        infoscry.glossary.Glossary(
+            collection,
+            listOf(infoscry.glossary.GlossaryGroup("g-${collection.value}", collection, infoscry.glossary.GlossaryRules.normalize(terms.toList()), "t", "t")),
+        )
+
+    private fun term(text: String, prefix: Boolean = false) = infoscry.glossary.GlossaryTermInput(text, prefix)
+
+    @Test
+    fun `a glossary expansion finds the other names in its collection only`() {
+        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+            runBlocking {
+                index.replaceDocument(chunksFor(DOCUMENT, listOf("brev från Stockholm", "Sthlms hamn")))
+                index.replaceDocument(chunksFor(OTHER_DOCUMENT, listOf("resa till Stockholm"), collection = OTHER_COLLECTION))
+            }
+            val glossaries = mapOf(COLLECTION to glossaryOf(COLLECTION, term("Stockholm"), term("Sthlm", prefix = true)))
+
+            val scoped = index.expandKeyword(COLLECTION, "Sthlm", glossaries)
+            assertEquals(listOf("g-nightfall"), scoped.groups.map { it.id })
+            assertEquals(2, index.searchKeyword(COLLECTION, "Sthlm", limit = 10, expansion = scoped).size)
+            val reverse = index.expandKeyword(COLLECTION, "Stockholm", glossaries)
+            assertEquals(
+                setOf("brev från Stockholm", "Sthlms hamn"),
+                index.searchKeyword(COLLECTION, "Stockholm", limit = 10, expansion = reverse).map { it.text }.toSet(),
+            )
+
+            val other = index.expandKeyword(OTHER_COLLECTION, "Sthlm", glossaries)
+            assertTrue(other.groups.isEmpty())
+            assertTrue(index.searchKeyword(OTHER_COLLECTION, "Sthlm", limit = 10, expansion = other).isEmpty())
+
+            val everywhere = index.expandKeyword(null, "Stockholm", glossaries)
+            assertEquals(
+                setOf("brev från Stockholm", "Sthlms hamn", "resa till Stockholm"),
+                index.searchKeyword(null, "Stockholm", limit = 10, expansion = everywhere).map { it.text }.toSet(),
+            )
+            val sthlmEverywhere = index.expandKeyword(null, "Sthlm", glossaries)
+            assertEquals(
+                setOf("brev från Stockholm", "Sthlms hamn"),
+                index.searchKeyword(null, "Sthlm", limit = 10, expansion = sthlmEverywhere).map { it.text }.toSet(),
+                "another collection's Stockholm is not found by this collection's Sthlm",
+            )
+        }
+    }
+
+    @Test
+    fun `an expansion keeps the whole query within the clause ceiling`() {
+        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+            val groups = (1..300).map { n ->
+                infoscry.glossary.GlossaryGroup("g$n", COLLECTION, infoscry.glossary.GlossaryRules.normalize(listOf(term("w$n"), term("x$n"))), "t", "t")
+            }
+            val query = (1..900).joinToString(" ") { "w$it" }
+
+            val expansion = index.expandKeyword(COLLECTION, query, mapOf(COLLECTION to infoscry.glossary.Glossary(COLLECTION, groups)))
+
+            assertTrue(expansion.truncated)
+            assertTrue(GlossaryQueryRewriter.clauseCount(expansion.query) <= LuceneIndex.MAX_QUERY_TOKENS)
+            index.searchKeyword(COLLECTION, query, limit = 1, expansion = expansion)
+        }
+    }
+
+    @Test
+    fun `an alternative's word anchors a query`() {
+        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+            runBlocking { index.replaceDocument(chunksFor(DOCUMENT, listOf("brev från Stockholm"))) }
+
+            assertFalse(index.hasLexicalAnchor("Sthlm", COLLECTION))
+            assertTrue(index.hasLexicalAnchor("Sthlm", COLLECTION, extraTokens = listOf("stockholm")))
+        }
+    }
+
     @Test
     fun `a lexical anchor is a token prefix of an indexed term in the given scope`() {
         LuceneIndex.open(indexDir, IDENTITY).use { index ->

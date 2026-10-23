@@ -38,6 +38,7 @@ import org.apache.lucene.queryparser.classic.ParseException
 import org.apache.lucene.queryparser.classic.QueryParser
 import org.apache.lucene.search.BooleanClause
 import org.apache.lucene.search.BooleanQuery
+import infoscry.glossary.Glossary
 import org.apache.lucene.search.IndexSearcher
 import org.apache.lucene.search.KnnFloatVectorQuery
 import org.apache.lucene.search.MatchAllDocsQuery
@@ -440,11 +441,79 @@ class LuceneIndex private constructor(
         limit: Int,
         documentIds: Set<String>? = null,
         revisionScope: RevisionScope = RevisionScope.EVERYTHING,
+        expansion: KeywordExpansion? = null,
     ): List<IndexHit> {
-        requireQueryWithinClauseCeiling(queryText)
-        val parsed = parseSafely(queryText)
+        val parsed = expansion?.query ?: run {
+            requireQueryWithinClauseCeiling(queryText)
+            parseSafely(queryText)
+        }
         val query = filteredBy(parsed, collectionId, documentIds, revisionScope)
         return toHits(searcher, searcher.search(query, limit))
+    }
+
+    /**
+     * [queryText] parsed and expanded by the collections' glossaries, for [searchKeyword] to run.
+     *
+     * Scoped to [collectionId], that collection's glossary applies. Across collections the query keeps its own
+     * meaning everywhere and each glossary applies only inside its collection:
+     * `(Q AND NOT in(expanded collections)) OR (collection = A AND E_A) OR …`. Either way the whole query stays
+     * within [MAX_QUERY_TOKENS] clauses; what does not fit is left out and [KeywordExpansion.truncated] says so.
+     */
+    fun expandKeyword(
+        collectionId: CollectionId?,
+        queryText: String,
+        glossaries: Map<CollectionId, Glossary>,
+    ): KeywordExpansion {
+        requireQueryWithinClauseCeiling(queryText)
+        val parsed = parseSafely(queryText)
+        val base = GlossaryQueryRewriter.clauseCount(parsed)
+        fun rewriter(room: Int) = GlossaryQueryRewriter(maxAddedClauses = minOf(GlossaryQueryRewriter.DEFAULT_MAX_ADDED_CLAUSES, room.coerceAtLeast(0)))
+        if (collectionId != null) {
+            val glossary = glossaries[collectionId] ?: return KeywordExpansion(parsed, emptyList(), false)
+            val result = rewriter(MAX_QUERY_TOKENS - base).rewrite(parsed, glossary)
+            return KeywordExpansion(result.query, result.groups, result.truncated)
+        }
+        val expanded = mutableListOf<Pair<CollectionId, Query>>()
+        val groups = mutableListOf<infoscry.glossary.GlossaryGroup>()
+        var truncated = false
+        // Each expanded collection repeats the query once inside its own branch, plus its collection term.
+        var used = base + 1
+        for ((id, glossary) in glossaries.entries.sortedBy { it.key.value }) {
+            val result = rewriter(MAX_QUERY_TOKENS - used - base - 2).rewrite(parsed, glossary)
+            truncated = truncated || result.truncated
+            if (result.groups.isEmpty()) continue
+            val cost = GlossaryQueryRewriter.clauseCount(result.query) + 2
+            if (used + cost > MAX_QUERY_TOKENS) {
+                truncated = true
+                continue
+            }
+            used += cost
+            expanded += id to result.query
+            groups += result.groups
+        }
+        if (expanded.isEmpty()) return KeywordExpansion(parsed, emptyList(), truncated)
+        val query = BooleanQuery.Builder().apply {
+            add(
+                BooleanQuery.Builder().apply {
+                    add(parsed, BooleanClause.Occur.MUST)
+                    add(
+                        TermInSetQuery(LuceneSchema.FIELD_COLLECTION_ID, expanded.map { BytesRef(it.first.value) }),
+                        BooleanClause.Occur.MUST_NOT,
+                    )
+                }.build(),
+                BooleanClause.Occur.SHOULD,
+            )
+            expanded.forEach { (id, query) ->
+                add(
+                    BooleanQuery.Builder().apply {
+                        add(query, BooleanClause.Occur.MUST)
+                        add(TermQuery(Term(LuceneSchema.FIELD_COLLECTION_ID, id.value)), BooleanClause.Occur.FILTER)
+                    }.build(),
+                    BooleanClause.Occur.SHOULD,
+                )
+            }
+        }.build()
+        return KeywordExpansion(query, groups, truncated)
     }
 
     /**
@@ -479,9 +548,10 @@ class LuceneIndex private constructor(
         documentIds: Set<String>? = null,
         limit: Int,
         revisionScope: RevisionScope = RevisionScope.EVERYTHING,
+        expansion: KeywordExpansion? = null,
     ): List<IndexHit> {
         return readSearcher { searcher ->
-            searchKeywordWithReader(searcher, collectionId, queryText, limit, documentIds, revisionScope)
+            searchKeywordWithReader(searcher, collectionId, queryText, limit, documentIds, revisionScope, expansion)
         }
     }
 
@@ -501,8 +571,10 @@ class LuceneIndex private constructor(
         collectionId: CollectionId?,
         documentIds: Set<String>? = null,
         revisionScope: RevisionScope = RevisionScope.EVERYTHING,
+        extraTokens: List<String> = emptyList(),
     ): Boolean = readSearcher { searcher ->
-        analyzeTokens(queryText)
+        (analyzeTokens(queryText) + extraTokens)
+            .distinct()
             .filter { it.length >= MIN_ANCHOR_PREFIX }
             .any { token ->
                 val query = filteredBy(
@@ -963,6 +1035,9 @@ class LuceneIndex private constructor(
         }
     }
 }
+
+/** A parsed keyword query with the glossary alternatives it gained, the groups they came from, and whether some were left out. */
+data class KeywordExpansion(val query: Query, val groups: List<infoscry.glossary.GlossaryGroup>, val truncated: Boolean)
 
 /** What one generation is: its name, its directory, its identity, and the handle to its writer. */
 private class GenerationInfo internal constructor(

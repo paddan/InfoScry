@@ -45,7 +45,14 @@ data class SearchHitResponse(
 
 /** What one search returned, plus how many index rows pointed at database rows that no longer exist. */
 @Serializable
-data class SearchResponse(val hits: List<SearchHitResponse>, val staleFiltered: Int)
+data class SearchResponse(
+    val hits: List<SearchHitResponse>,
+    val staleFiltered: Int,
+    /** The glossary groups the search also searched; absent when none applied. */
+    val expandedWith: List<GlossaryGroupWire>? = null,
+    /** Present and true only when some alternatives were left out. */
+    val expansionTruncated: Boolean? = null,
+)
 
 /** What `POST /api/reindex` answers: the request was accepted, and a job carries it. */
 @Serializable
@@ -167,6 +174,8 @@ private suspend fun ApplicationCall.runSearch(
             )
         },
         staleFiltered = outcome.staleFiltered,
+        expandedWith = outcome.expandedWith.map { it.toWire() }.ifEmpty { null },
+        expansionTruncated = outcome.expansionTruncated.takeIf { it },
     )
 }
 

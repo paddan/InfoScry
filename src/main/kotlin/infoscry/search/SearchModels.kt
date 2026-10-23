@@ -146,6 +146,10 @@ data class SearchHit(
 data class SearchOutcome(
     val hits: List<SearchHit>,
     val staleFiltered: Int,
+    /** The glossary groups whose alternatives the keyword half searched, in query order. */
+    val expandedWith: List<infoscry.glossary.GlossaryGroup> = emptyList(),
+    /** Whether some alternatives were left out to keep the query within its bound. */
+    val expansionTruncated: Boolean = false,
 )
 
 /**

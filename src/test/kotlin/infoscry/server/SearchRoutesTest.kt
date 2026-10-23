@@ -130,6 +130,23 @@ class SearchRoutesTest {
     }
 
     @Test
+    fun `a search expanded by the glossary names the groups it used`() = runBlocking {
+        seedUnit(document = "letter.txt", text = "brev från Stockholm")
+        harness.context.glossaryService.put(
+            defaultCollectionId,
+            "g1",
+            listOf(infoscry.glossary.GlossaryTermInput("Sthlm"), infoscry.glossary.GlossaryTermInput("Stockholm")),
+        )
+
+        val response = harness.get("/api/search?collection=Default&q=Sthlm&mode=keyword")
+
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        val body = response.bodyAsText()
+        assertContains(body, "<mark>Stockholm</mark>")
+        assertContains(body, """"expandedWith":[{"id":"g1","terms":[{"text":"Sthlm","prefix":false},{"text":"Stockholm","prefix":false}]}]""")
+    }
+
+    @Test
     fun `a keyword search with no matches is a stable empty result, not an error`() = runBlocking {
         val response = harness.get("/api/search?collection=Default&q=zzzzzz&mode=keyword")
 
