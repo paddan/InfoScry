@@ -375,7 +375,7 @@ async function scenarioAskOldCitation(page) {
   await page.fill('#question', 'What does the archive say on the first page?');
   await page.waitForFunction(() => !document.querySelector('#panel-ask button[type="submit"]')?.disabled, null, { timeout: 20_000 });
   await page.locator('#panel-ask button[type="submit"]').click();
-  const citation = page.locator('#panel-ask button.citation');
+  const citation = page.locator('#panel-ask button.citation[aria-label^="Open source"]');
   await citation.waitFor({ timeout: 30_000 });
   assert((await page.locator('[aria-label="Answer"]').textContent()).includes('page one'), 'Ask shows its cited answer');
   const answerLayouts = [];
@@ -479,7 +479,7 @@ async function scenarioAskImageOldCitation(page) {
   await page.fill('#question', 'What phrase is stamped on the cobalt lantern?');
   await page.waitForFunction(() => !document.querySelector('#panel-ask button[type="submit"]')?.disabled, null, { timeout: 20_000 });
   await page.locator('#panel-ask button[type="submit"]').click();
-  const citation = page.locator('#panel-ask button.citation');
+  const citation = page.locator('#panel-ask button.citation[aria-label^="Open source"]');
   await citation.waitFor({ timeout: 30_000 });
   assert((await page.locator('[aria-label="Answer"]').textContent()).includes('cobalt lantern 419'), 'Ask shows its image citation answer');
   console.log('MARK: ask-finished');
@@ -522,7 +522,7 @@ async function scenarioAskImageCreate(page) {
   await page.fill('#question', 'What phrase is stamped on the cobalt lantern?');
   await page.waitForFunction(() => !document.querySelector('#panel-ask button[type="submit"]')?.disabled, null, { timeout: 20_000 });
   await page.locator('#panel-ask button[type="submit"]').click();
-  const citation = page.locator('#panel-ask button.citation');
+  const citation = page.locator('#panel-ask button.citation[aria-label^="Open source"]');
   await citation.waitFor({ timeout: 30_000 });
   assert(CITATION_REVISION_ID, 'the test must name the reading being retired');
   await page.waitForFunction(async ({ citationRevisionId }) => {
@@ -602,7 +602,7 @@ async function scenarioAskImageUnknownCitation(page) {
   assert(evidence.locator.type === 'image', `the unknown-revision fixture keeps its image locator: ${JSON.stringify(evidence.locator)}`);
   assert(askWireEvidence[0]?.revisionIds.length > 0 && askWireEvidence[0].revisionIds.every((revisionId) => revisionId == null),
     `the UI's ordinary Ask-history GET sees the post-mutation unknown revision: ${JSON.stringify({ askWireEvidence, askNetworkResponses })}`);
-  const savedCitation = page.locator('#panel-ask button.citation');
+  const savedCitation = page.locator('#panel-ask button.citation[aria-label^="Open source"]');
   await savedCitation.waitFor({ timeout: 20_000 });
   await savedCitation.click();
   const source = page.locator('.source-pane');
@@ -795,8 +795,7 @@ async function scenarioPageSelection(page) {
     }
     return operation.stage === 'COMPLETE';
   }, { documentId: DOCUMENT_ID, operationId: started.operationId }, { timeout: 90_000 });
-  await page.waitForFunction(() => !!document.querySelector('.page-review button[aria-label="Refresh to latest reading"]'), null, { timeout: 30_000 });
-  await review.getByRole('button', { name: 'Refresh to latest reading' }).click();
+  // A finished run's text replaces the page in review at once; nothing needs refreshing.
   const textTab = review.getByRole('tab', { name: 'Text' });
   if (await textTab.count() > 0) await textTab.click();
   await review.locator('.review-text').getByText('OCR result for scanned page', { exact: false }).waitFor({ timeout: 20_000 });
@@ -957,9 +956,6 @@ async function scenarioPageSelectionRetry(page) {
   }, { documentId: DOCUMENT_ID, operationId }, { timeout: 90_000 });
   await details.locator('button', { hasText: 'Open document' }).click();
   await review.waitFor({ timeout: 20_000 });
-  const refreshLatest = review.getByRole('button', { name: 'Refresh to latest reading' });
-  await refreshLatest.waitFor({ timeout: 20_000 });
-  await refreshLatest.click();
   const textTab = review.getByRole('tab', { name: 'Text' });
   if (await textTab.count() > 0) await textTab.click();
   await review.getByRole('button', { name: 'Next page' }).click();
@@ -1004,7 +1000,7 @@ async function scenarioScannedTable(page) {
   await page.fill('#question', 'What amount was approved for archive scanning?');
   await page.waitForFunction(() => !document.querySelector('#panel-ask button[type="submit"]')?.disabled, null, { timeout: 20_000 });
   await page.locator('#panel-ask button[type="submit"]').click();
-  await page.locator('#panel-ask button.citation').waitFor({ timeout: 30_000 });
+  await page.locator('#panel-ask button.citation[aria-label^="Open source"]').waitFor({ timeout: 30_000 });
   assert((await page.locator('[aria-label="Answer"]').textContent()).includes('approved'), 'Ask shows the cited answer');
   console.log('PASS scanned-table-ask');
 }
