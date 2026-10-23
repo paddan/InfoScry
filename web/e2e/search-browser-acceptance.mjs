@@ -110,13 +110,15 @@ try {
   await page.fill('#query', '7');
   await page.waitForFunction(() => document.querySelector('.result-title')?.textContent === 'number.txt');
 
-  // A mode change must rerun the query against the same actual date-filtered archive.
+  // A mode change must rerun the query against the same actual date-filtered archive. A passage of a lone
+  // digit carries no meaning, so it is never a semantic neighbour and stays a keyword match for its text.
   await page.selectOption('#mode', 'SEMANTIC');
-  await page.waitForFunction(() => document.querySelector('.results')?.textContent.includes('Matched by semantic'));
+  await page.waitForSelector('text=No results found.');
   await page.selectOption('#mode', 'HYBRID');
   await page.waitForFunction(() => {
     const results = document.querySelector('.results')?.textContent ?? '';
-    return results.includes('keyword') && results.includes('semantic');
+    return document.querySelector('.result-title')?.textContent === 'number.txt' &&
+      results.includes('Matched by keyword') && !results.includes('semantic');
   });
   // Every advanced control must apply without resubmitting the query.
   await page.selectOption('#media-type', 'application/pdf');
