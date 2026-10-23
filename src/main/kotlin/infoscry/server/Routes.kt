@@ -49,7 +49,7 @@ import kotlinx.serialization.json.Json
 const val PRODUCT_NAME = "InfoScry"
 
 @Serializable
-data class ApiError(val code: String, val message: String)
+data class ApiError(val code: String, val message: String, val details: Map<String, String>? = null)
 
 @Serializable
 data class ApiErrorResponse(val error: ApiError)
@@ -335,6 +335,8 @@ fun Application.configureRoutes(
             collectionPromptRoutes(context)
 
             correctionRoutes(context)
+
+            glossaryRoutes(context)
 
             patch("/ocr-languages") {
                 call.handle {
@@ -829,7 +831,7 @@ suspend fun ApplicationCall.handle(block: suspend () -> Unit) {
         // sentence a client may see. See infoscry.domain.ApiFaultException.
         respondJson(
             fault.apiStatus.toHttpStatusCode(),
-            ApiErrorResponse(ApiError(code = fault.code, message = fault.clientMessage())),
+            ApiErrorResponse(ApiError(code = fault.code, message = fault.clientMessage(), details = fault.details())),
         )
     } catch (missing: NoSuchElementException) {
         respondJson(

@@ -1,6 +1,8 @@
 package infoscry
 
 import infoscry.correction.CorrectionService
+import infoscry.glossary.GlossaryService
+import infoscry.storage.GlossaryStore
 import infoscry.correction.CandidateCorrector
 import infoscry.domain.CollectionId
 import infoscry.storage.CorrectionStore
@@ -439,6 +441,13 @@ class AppContext private constructor(
         revisions = revisions,
         documents = documents,
         jobs = jobs,
+        collections = collectionService,
+        mutations = mutations,
+    )
+
+    /** A collection's glossary: names with the same meaning, for search and for Ask and Investigate. */
+    val glossaryService: GlossaryService = GlossaryService(
+        store = GlossaryStore(database),
         collections = collectionService,
         mutations = mutations,
     )
