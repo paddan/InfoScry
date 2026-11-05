@@ -42,21 +42,21 @@ class ConversationStore(private val database: Database) {
         val persistedAnswer = correction?.answer ?: answer
         database.transaction { connection ->
             connection.prepareStatement("INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,prompt_id,prompt_name,prompt_body,retrieval_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
-                listOf(conversationId, collectionId.value, "ASK", profile.provider.name, profile.endpoint, profile.model, profile.name, prompt.version.toString(), prompt.id, prompt.name, prompt.body, retrievalSnapshot, Instants.now()).forEachIndexed { i, v -> s.setString(i + 1, v) }; s.executeUpdate()
+                listOf(conversationId, collectionId.value, "ASK", profile.provider.name, profile.endpoint, profile.model, profile.name, prompt.version.toString(), prompt.id, prompt.name, prompt.body, retrievalSnapshot, Instants.now()).forEachIndexed { i, v -> s.setString(i + 1, v) }; s.setInt(8, prompt.version); s.executeUpdate()
             }
             connection.prepareStatement("INSERT INTO messages (id,conversation_id,seq,role,content,created_at) VALUES (?,?,?,?,?,?)").use { s ->
                 listOf(UUID.randomUUID().toString() to question, UUID.randomUUID().toString() to persistedAnswer).forEachIndexed { i, pair -> s.setString(1,pair.first); s.setString(2,conversationId); s.setInt(3,i); s.setString(4,if(i==0) "user" else "assistant"); s.setString(5,pair.second); s.setString(6,Instants.now()); s.addBatch() }; s.executeBatch()
             }
             val initialCost = cost(profile, initialUsage)
             connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
-                listOf(callId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,prompt.version.toString(),Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,initialUsage.inputTokens); s.setLong(12,initialUsage.outputTokens); s.setLong(13,initialUsage.cacheReadTokens); s.setDouble(14,initialCost); s.executeUpdate()
+                listOf(callId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,prompt.version.toString(),Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setInt(7,prompt.version); s.setLong(11,initialUsage.inputTokens); s.setLong(12,initialUsage.outputTokens); s.setLong(13,initialUsage.cacheReadTokens); s.setDouble(14,initialCost); s.executeUpdate()
             }
             persistCitationAudit(connection, conversationId, callId, evidence, initialCitations)
             val correctionUsage = correction?.usage
             correction?.let { c ->
                 val correctionId = UUID.randomUUID().toString(); val correctionCost = cost(profile, c.usage)
                 connection.prepareStatement("INSERT INTO model_calls (id,conversation_id,provider,endpoint,model,profile_name,prompt_version,requested_at,response_at,status,input_tokens,output_tokens,cache_read_tokens,cost_usd,correction_of) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
-                    listOf(correctionId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,prompt.version.toString(),Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setLong(11,c.usage.inputTokens); s.setLong(12,c.usage.outputTokens); s.setLong(13,c.usage.cacheReadTokens); s.setDouble(14,correctionCost); s.setString(15,callId); s.executeUpdate()
+                    listOf(correctionId,conversationId,profile.provider.name,profile.endpoint,profile.model,profile.name,prompt.version.toString(),Instants.now(),Instants.now(),"SUCCEEDED").forEachIndexed { i,v -> s.setString(i+1,v) }; s.setInt(7,prompt.version); s.setLong(11,c.usage.inputTokens); s.setLong(12,c.usage.outputTokens); s.setLong(13,c.usage.cacheReadTokens); s.setDouble(14,correctionCost); s.setString(15,callId); s.executeUpdate()
                 }
                 persistCitationAudit(connection, conversationId, correctionId, evidence, c.citations)
             }

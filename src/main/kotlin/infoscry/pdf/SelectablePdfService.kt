@@ -260,7 +260,7 @@ class SelectablePdfService(
     }
 
     /**
-     * The fast, SQLite-only half of one build attempt: resolves fresh inputs and either settles a
+     * The fast, database-only half of one build attempt: resolves fresh inputs and either settles a
      * terminal FAILED result itself (nothing further to do) or marks the row BUILDING under the key
      * this attempt resolved and hands back the request to write. Called from inside a job stage.
      */
@@ -302,7 +302,7 @@ class SelectablePdfService(
     }
 
     /**
-     * The fast, SQLite-only half that follows a successful [SelectablePdfWriter.write]: writes the
+     * The fast, database-only half that follows a successful [SelectablePdfWriter.write]: writes the
      * manifest atomically, reopens and hashes both files independently of what the writer returned
      * in-process, and publishes a verified READY/PARTIAL result — or FAILED if either file does not
      * verify. Called from inside a job stage, after the write itself ran outside one.

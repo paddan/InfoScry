@@ -1,5 +1,7 @@
 package infoscry.collection
 
+import infoscry.storage.withTestDatabase
+
 import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.domain.Chunk
@@ -563,7 +565,7 @@ class CollectionDeletionRecoveryTest {
             COLLECTION_NAME,
             "--stop-after",
             stopAfter.name,
-        ).redirectErrorStream(true).start()
+        ).withTestDatabase().redirectErrorStream(true).start()
 
         val output = Collections.synchronizedList(mutableListOf<String>())
         val pump = Thread {

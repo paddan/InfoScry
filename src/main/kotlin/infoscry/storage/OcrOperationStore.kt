@@ -81,7 +81,7 @@ class OcrAttemptInProgressException(val operationId: String, val jobId: String) 
  */
 class OcrOperationStore(private val database: Database) {
 
-    /** Composes operation, document and job writes into one SQLite commit. */
+    /** Composes operation, document and job writes into one Postgres commit. */
     fun <T> atomically(block: () -> T): T = database.transaction { block() }
 
     // ---- previews ----
@@ -364,7 +364,7 @@ class OcrOperationStore(private val database: Database) {
                 "UPDATE ocr_operations SET stage = ?, error_code = 'INTERRUPTED', " +
                     "error_message = 'the previous reading was interrupted; start it again', " +
                     "current_job_id = NULL, updated_at = ? WHERE operation_id = ? AND stage = ? " +
-                    "AND current_job_id IS ?",
+                    "AND current_job_id IS NOT DISTINCT FROM ?",
             ).use { statement ->
                 statement.setString(1, OcrOperationStage.FAILED.name)
                 statement.setString(2, Instants.now())
@@ -381,7 +381,7 @@ class OcrOperationStore(private val database: Database) {
         database.transaction { connection ->
             connection.prepareStatement(
                 "UPDATE ocr_operations SET pending_review_count = 0, updated_at = ? WHERE operation_id = ? " +
-                    "AND stage = ? AND candidate_revision_id IS ? AND pending_review_count = ?",
+                    "AND stage = ? AND candidate_revision_id IS NOT DISTINCT FROM ? AND pending_review_count = ?",
             ).use { statement ->
                 statement.setString(1, Instants.now())
                 statement.setString(2, operationId)
@@ -614,8 +614,8 @@ class OcrOperationStore(private val database: Database) {
             if (connection.pageAlreadySent(owner, documentId, unitId)) return@transaction true
             if (connection.countSentPages(owner) >= allowance) return@transaction false
             connection.prepareStatement(
-                "INSERT OR IGNORE INTO ocr_external_pages (owner_kind, owner_id, document_id, unit_id, " +
-                    "ordinal, first_sent_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO ocr_external_pages (owner_kind, owner_id, document_id, unit_id, " +
+                    "ordinal, first_sent_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
             ).use { statement ->
                 statement.setString(1, owner.kind.name)
                 statement.setString(2, owner.id)
@@ -647,7 +647,7 @@ class OcrOperationStore(private val database: Database) {
                 "INSERT INTO ocr_external_calls (owner_kind, owner_id, document_id, unit_id, ordinal, stage, " +
                     "calls, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?) " +
                     "ON CONFLICT (owner_kind, owner_id, document_id, unit_id, stage) DO UPDATE SET " +
-                    "calls = calls + 1, updated_at = excluded.updated_at",
+                    "calls = ocr_external_calls.calls + 1, updated_at = excluded.updated_at",
             ).use { statement ->
                 statement.setString(1, owner.kind.name)
                 statement.setString(2, owner.id)

@@ -1,5 +1,7 @@
 package infoscry.cli
 
+import infoscry.storage.withTestDatabase
+
 import infoscry.config.AppPaths
 import infoscry.config.BearerToken
 import infoscry.config.RuntimeInfo
@@ -506,7 +508,7 @@ class ImportCommandProcessTest {
 
     /** Starts the CLI harness, optionally with the extractor held at its gate. */
     private fun startHarness(gated: Boolean, vararg args: String): HarnessCli {
-        val builder = ProcessBuilder(harnessArgs(*args).toList())
+        val builder = ProcessBuilder(harnessArgs(*args).toList()).withTestDatabase()
         if (gated) {
             builder.environment()["INFOSCRY_TEST_GATE"] = gate.toString()
         } else {
@@ -577,7 +579,7 @@ class ImportCommandProcessTest {
 
     /** Runs the harness CLI to completion and returns what it produced, the way a script reads it. */
     private fun runHarness(vararg args: String): CliResult {
-        val child = ProcessBuilder(harnessArgs(*args).toList()).start()
+        val child = ProcessBuilder(harnessArgs(*args).toList()).withTestDatabase().start()
         child.outputStream.close()
         val harness = HarnessCli(child)
         if (!harness.waitFor(WAIT_SECONDS)) {

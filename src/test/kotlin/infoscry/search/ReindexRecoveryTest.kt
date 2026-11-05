@@ -1,5 +1,7 @@
 package infoscry.search
 
+import infoscry.storage.withTestDatabase
+
 import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.domain.Chunk
@@ -683,7 +685,7 @@ class ReindexRecoveryTest {
             dataDir.toString(),
             "--stop-after",
             step.name,
-        ).redirectErrorStream(true).start()
+        ).withTestDatabase().redirectErrorStream(true).start()
 
         val output = Collections.synchronizedList(mutableListOf<String>())
         val pump = Thread {

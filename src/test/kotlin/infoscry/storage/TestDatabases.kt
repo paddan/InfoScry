@@ -83,6 +83,20 @@ object TestDatabases {
         )
     }
 
+    /**
+     * The environment for a child JVM started with [command]: the database of its `--data-dir`, or else of
+     * the first argument naming a directory this JVM already gave a database, or else of the first argument
+     * that is an existing directory. A command naming none gets nothing.
+     */
+    @Synchronized
+    fun environmentForCommand(command: List<String>): Map<String, String> {
+        val dataDir = command.indexOf("--data-dir").takeIf { it >= 0 }?.let { command.getOrNull(it + 1) }
+            ?: command.firstOrNull { it.startsWith("--data-dir=") }?.removePrefix("--data-dir=")
+            ?: command.firstOrNull { arg -> runCatching { nameFor(Path.of(arg)) in created }.getOrDefault(false) }
+            ?: command.firstOrNull { arg -> runCatching { java.nio.file.Files.isDirectory(Path.of(arg)) }.getOrDefault(false) }
+        return dataDir?.let { environmentFor(Path.of(it)) } ?: emptyMap()
+    }
+
     /** Drops every database created since the last call, closing whatever connections a test left open. */
     @Synchronized
     fun dropCreatedSinceMark() {
@@ -132,6 +146,11 @@ object TestDatabases {
             container.username,
             container.password,
         ).use(block)
+}
+
+/** Gives the child JVM this builder starts the database of the data directory its command names. */
+fun ProcessBuilder.withTestDatabase(): ProcessBuilder = apply {
+    environment().putAll(TestDatabases.environmentForCommand(command()))
 }
 
 /** A database for [path], opened the way a test used to open the SQLite file at that path. */

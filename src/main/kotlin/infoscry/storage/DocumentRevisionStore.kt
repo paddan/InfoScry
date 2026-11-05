@@ -265,7 +265,7 @@ data class PublicationIntent(
  * - **Nothing here decides when a publication is allowed.** The deletion, lifecycle and maintenance
  *   rechecks belong to the publication boundary; this class only records what the boundary decided.
  *
- * Every write composes with the caller's transaction (SQLite savepoints), so the boundary's authority
+ * Every write composes with the caller's transaction (savepoints), so the boundary's authority
  * commit is one transaction covering the published text, its chunks and the marker that says which side
  * of the handoff a crash landed on.
  */
@@ -922,7 +922,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
     /**
      * When each revision of [documentId] became its published text, by revision id.
      *
-     * The instant is the one the SQLite authority moved, which is the only moment a revision *became* the
+     * The instant is the one the Postgres authority moved, which is the only moment a revision *became* the
      * document's text. A revision that never went through a publication — an import's, or the backfill's —
      * has no entry, and is not given one.
      */
@@ -1423,7 +1423,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 statement.setInt(8, chunk.tokenStart)
                 statement.setInt(9, chunk.tokenEnd)
                 if (chunk.embedding == null) {
-                    statement.setNull(10, Types.BLOB)
+                    statement.setNull(10, Types.BINARY)
                     statement.setNull(11, Types.INTEGER)
                 } else {
                     statement.setBytes(10, encodeEmbedding(chunk.embedding))

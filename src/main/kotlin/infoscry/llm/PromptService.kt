@@ -4,7 +4,7 @@ package infoscry.llm
  * Composes the two prompt layers of an Ask or Investigate system prompt:
  *
  * 1. the immutable core rules (source discipline, citation rules, tool rules), shipped in code and
- *    never replaceable from SQLite, always first;
+ *    never replaceable from Postgres, always first;
  * 2. the selected prompt body: the collection's chosen prompt, or the shipped Default.
  */
 class PromptService {

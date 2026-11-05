@@ -119,7 +119,7 @@ class RestoreRequestConflictException(val requestId: String) : ApiFaultException
  * unit ids, same recorded provenance, same page images — nothing is read again, so no OCR engine is reachable
  * from here), its passages are embedded with the embedder this process has, and it is published through
  * [RevisionPublicationService]. That is the same recoverable protocol a rescan publishes through — PREPARED
- * intent, staged index commit, SQLite authority, reader-snapshot switch — so a restore has no consistency
+ * intent, staged index commit, Postgres authority, reader-snapshot switch — so a restore has no consistency
  * boundary of its own and can be neither more nor less coherent than a rescan.
  *
  * What it adds to that protocol is admission and a request record:

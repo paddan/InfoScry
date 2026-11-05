@@ -7,7 +7,7 @@ import infoscry.config.AppPaths
  *
  * A running InfoScry reads the database from the environment ([DatabaseConfig.fromEnvironment]); the data
  * directory only holds managed files, models, logs and scratch space. The test suite replaces [resolve] so
- * every temporary data directory gets a database of its own, the way each one used to get its own SQLite
+ * every temporary data directory gets a database of its own, the way each one used to get its own Postgres
  * file.
  */
 object DatabaseResolver {

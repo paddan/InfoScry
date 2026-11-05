@@ -34,7 +34,7 @@ import org.slf4j.LoggerFactory
  * These are the instants the fault-injection tests stop at, and they are the service's own protocol
  * rather than a second copy of it. Each handoff the contract names has an instant on either side of it:
  *
- * - the staged index rows exist but are not durable — [ROWS_STAGED]; they are durable and the SQLite
+ * - the staged index rows exist but are not durable — [ROWS_STAGED]; they are durable and the Postgres
  *   authority has not moved — [STAGED_COMMITTED],
  * - the authority has moved and readers still lease the previous snapshot — [AUTHORITATIVE]; the
  *   snapshot that names the target is published — [SNAPSHOT_PUBLISHED],
@@ -79,7 +79,7 @@ fun interface RevisionPublishedHook {
  * Publishes a staged candidate revision of one document, and finishes the publications a previous
  * process left behind.
  *
- * There is no transaction spanning SQLite and Lucene, and this class does not pretend there is one. What
+ * There is no transaction spanning Postgres and Lucene, and this class does not pretend there is one. What
  * it has instead is a protocol whose every intermediate state is one recovery can read:
  *
  * 1. The intent is persisted PREPARED. Its durable artifacts are the candidate revision's own pages,
@@ -87,7 +87,7 @@ fun interface RevisionPublishedHook {
  *    candidate's rows do not exist anywhere a reader could find them.
  * 2. Inside one short shared boundary — a mutation permit, then the snapshot gate's write lock — the
  *    document's deletion state, its collection's lifecycle and the revision the caller named as the base
- *    are rechecked, the candidate's rows are written and committed, and the SQLite transaction that makes
+ *    are rechecked, the candidate's rows are written and committed, and the Postgres transaction that makes
  *    the target authoritative also records that authority moved. Writing the rows only here is what keeps
  *    a candidate unexposable: no reader can acquire a snapshot while the gate is held, and a reader that
  *    already held one is inside the searcher it leased, which the new rows are not in yet.
@@ -95,7 +95,7 @@ fun interface RevisionPublishedHook {
  *    readers already inside a lease keep seeing the old one. Then the attempt is marked PUBLISHED — which
  *    is why a failure after the authority commit is never reported as a failure: recovery completes it.
  * 4. The rows of the reading that was replaced are removed only after the readers that could still be
- *    reading them have drained. SQLite keeps the text of every revision either way.
+ *    reading them have drained. Postgres keeps the text of every revision either way.
  *
  * Every step is idempotent, so recovery is the same code path as publication rather than a second one.
  */
@@ -254,7 +254,7 @@ class RevisionPublicationService(
                 // the authority has moved and the replaced reading's rows are removed, all in the same handoff —
                 // so a revealed target means the index, the snapshot and the database already agree and the
                 // failure was bookkeeping afterwards; refusing readers then would punish a coherent archive.
-                // A hidden target means the switch never happened: SQLite already serves the new reading while
+                // A hidden target means the switch never happened: Postgres already serves the new reading while
                 // search still serves the old one, which is the one state that must refuse. It refuses *before*
                 // the roll-forward below rather than after it, because the roll-forward stages and commits rows
                 // outside a handoff, and a reader admitted in that window would see the old reading beside the

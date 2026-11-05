@@ -47,7 +47,7 @@ data class ImportsResponse(val imports: List<ImportHistoryEntry>, val total: Int
  * newest first.
  *
  * The read is what lets Admin show current and previous imports after a reload, a navigation away, or a
- * server restart: everything here comes from SQLite, not from a browser's memory of an in-flight job.
+ * server restart: everything here comes from Postgres, not from a browser's memory of an in-flight job.
  *
  * A read like every other read route: loopback-only, no credential (the guard in `configureRoutes`
  * already answered the caller who was not on loopback). [limit] defaults to 50, is clamped to at most

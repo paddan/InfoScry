@@ -43,7 +43,7 @@ data class DeletionsResponse(val deletions: List<DeletionOperationApiView>)
 /**
  * `GET /api/deletions` and `GET /api/deletions/{operationId}` — read-only deletion status.
  *
- * The status is read from SQLite, not from the memory of the request that asked for the deletion, so it
+ * The status is read from Postgres, not from the memory of the request that asked for the deletion, so it
  * answers after the collection's own row is gone and after the process that admitted the deletion has
  * been replaced. That is what lets the initiating UI follow a deletion to `DONE` and a reopened Admin
  * restore the ones that are still unfinished. Nothing here is a managed or trash path.

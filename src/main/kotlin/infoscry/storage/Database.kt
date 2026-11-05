@@ -46,7 +46,7 @@ class DatabaseConfig(val url: String, val user: String, private val password: St
  * [read] and nested [transaction] calls on that thread use the same connection, so they see the
  * transaction's own writes.
  *
- * Transactions still run one at a time in the process, as they did when SQLite had one writer: a store that
+ * Transactions still run one at a time in the process, as they did when Postgres had one writer: a store that
  * reads a row and writes a decision based on it relies on no other writer in between. Concurrent writers
  * come with the multi-user edit rules, not with this store.
  */

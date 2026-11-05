@@ -8,7 +8,7 @@ import kotlinx.serialization.Serializable
  *
  * The hierarchy is closed: every extractor must express its unit as one of these variants, so a
  * citation can always be rendered against the original document. Serial names are explicit because
- * these values are persisted as JSON in SQLite and must survive package renames.
+ * these values are persisted as JSON in Postgres and must survive package renames.
  *
  * Positions are one-based where they address a human-visible page, slide, or text line, matching
  * how a reader counts them.

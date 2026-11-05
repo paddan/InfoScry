@@ -1,5 +1,7 @@
 package infoscry.document
 
+import infoscry.storage.withTestDatabase
+
 import infoscry.AppContext
 import infoscry.collection.DeletionStep
 import infoscry.config.AppPaths
@@ -1317,7 +1319,7 @@ class DocumentDeletionRecoveryTest {
             staged.targets.joinToString(",") { it.value },
             "--stop-after",
             stopAfter.name,
-        ).redirectErrorStream(true).start()
+        ).withTestDatabase().redirectErrorStream(true).start()
 
         val output = java.util.Collections.synchronizedList(mutableListOf<String>())
         val pump = Thread {

@@ -136,4 +136,55 @@ class DatabaseTest {
             assertEquals(emptyList(), database.notes())
         }
     }
+
+    @Test
+    fun `a read on another thread sees committed state while a transaction is still open`() {
+        newDatabase().use { database ->
+            database.prepareProbeTable()
+            database.transaction { connection -> insertNote(connection, "committed") }
+
+            val seenDuringWrite = database.transaction { connection ->
+                insertNote(connection, "pending")
+                // The read must neither wait for this transaction nor see its uncommitted row.
+                val reader = java.util.concurrent.CompletableFuture.supplyAsync { database.notes() }
+                reader.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+
+            assertEquals(listOf("committed"), seenDuringWrite)
+            assertEquals(listOf("committed", "pending"), database.notes())
+        }
+    }
+
+    @Test
+    fun `a read inside a transaction sees the transaction's own writes`() {
+        newDatabase().use { database ->
+            database.prepareProbeTable()
+
+            database.transaction { connection ->
+                insertNote(connection, "mine")
+                assertEquals(listOf("mine"), database.notes())
+            }
+        }
+    }
+
+    @Test
+    fun `a second process claim is refused until the first is released`() {
+        val directory = Files.createTempDirectory("infoscry-ownership")
+        temporaryDirectories.add(directory)
+        Database(directory).use { first ->
+            Database(directory).use { second ->
+                val claim = ProcessOwnership.acquire(first)
+                val refused = assertFailsWith<DatabaseOwnedElsewhere> { ProcessOwnership.acquire(second) }
+                kotlin.test.assertTrue(
+                    refused.message!!.contains("pid ${ProcessHandle.current().pid()}"),
+                    "the refusal names the holder: ${refused.message}",
+                )
+
+                claim.close()
+                ProcessOwnership.acquire(second).close()
+                // Claiming again after a release is the normal restart, not an error.
+                ProcessOwnership.acquire(first).close()
+            }
+        }
+    }
 }

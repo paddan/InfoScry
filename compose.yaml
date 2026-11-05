@@ -1,0 +1,25 @@
+# PostgreSQL for InfoScry: `docker compose up -d` (or `podman compose up -d`), then `infoscry serve`.
+# InfoScry itself runs on the host so it can use the Apple GPU; only the database runs here.
+# Configuration comes from .env; copy .env.example to .env and set a password first.
+services:
+  postgres:
+    # ParadeDB is PostgreSQL 17 with pgvector and pg_search, pinned to the version InfoScry is tested with.
+    image: docker.io/paradedb/paradedb:0.26.5-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${INFOSCRY_DATABASE_NAME:-infoscry}
+      POSTGRES_USER: ${INFOSCRY_DATABASE_USER:-infoscry}
+      POSTGRES_PASSWORD: ${INFOSCRY_DATABASE_PASSWORD:?set INFOSCRY_DATABASE_PASSWORD in .env}
+    ports:
+      # Loopback only: the database is reached by the InfoScry process on this machine.
+      - "127.0.0.1:${INFOSCRY_DATABASE_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  pgdata:

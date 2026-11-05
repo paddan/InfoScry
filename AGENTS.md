@@ -52,8 +52,9 @@ or GPU verification.
 
 - Use Kotlin/JVM 25 for application services and TypeScript/SvelteKit for the
   static frontend. Keep HTTP routes and CLI commands thin over shared services.
-- Use one application process and one Gradle backend module. SQLite owns
-  authoritative state; Lucene and generated artifacts are rebuildable.
+- Use one application process and one Gradle backend module. PostgreSQL (run by
+  `compose.yaml`) owns authoritative state; Lucene and generated artifacts are
+  rebuildable. Tests run against a Testcontainers Postgres and need Docker or Podman.
 - Keep product copy in English and the UI restrained, accessible, and based on
   normal HTML/CSS. Follow the design's v1 scope.
 - Never modify or delete external original source files. Managed copies are

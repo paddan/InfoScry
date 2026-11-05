@@ -143,7 +143,7 @@ data class OcrSettingsUpdate(
  * Collections: the one place that changes them, and the state machine that removes one.
  *
  * Deletion is a durable, resumable operation rather than a sequence of calls, because it spans three
- * places that cannot be changed together — files on disk, rows in SQLite, and entries in the search
+ * places that cannot be changed together — files on disk, rows in Postgres, and entries in the search
  * index. Every phase is recorded before the next one starts, so a process that dies anywhere between
  * them is resumed by [recoverDeletions] instead of leaving an archive that is half deleted.
  *

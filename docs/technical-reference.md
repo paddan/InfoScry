@@ -17,7 +17,7 @@ and served by Ktor.
 |---|---|
 | Backend and CLI | Kotlin, Java 25, Ktor, Clikt |
 | Web reader | SvelteKit, Svelte and TypeScript |
-| Authoritative state and extracted text | SQLite |
+| Authoritative state and extracted text | PostgreSQL 17 (ParadeDB image, `compose.yaml`) |
 | Rebuildable keyword and vector index | Apache Lucene |
 | Local embeddings | Multilingual E5, ONNX Runtime and CoreML |
 | Extraction | Tika, PDFBox, POI, jsoup and Commons CSV |
@@ -35,7 +35,6 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 
 | Path | Contents |
 |---|---|
-| `infoscry.db` | Authoritative SQLite state |
 | `infoscry.lock` | Process ownership lock |
 | `runtime.json` | Running-server connection information |
 | `library/` | Immutable managed copies and document artifacts |
@@ -44,25 +43,31 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 | `logs/` | Structured application logs |
 | `tmp/` | Temporary work and GPU profiling artifacts |
 
-The SQLite schema is one baseline,
+Authoritative state lives in PostgreSQL, not in the data directory. The process
+reads its connection from `INFOSCRY_DATABASE_URL`, `INFOSCRY_DATABASE_USER` and
+`INFOSCRY_DATABASE_PASSWORD` (defaults `jdbc:postgresql://127.0.0.1:5432/infoscry`
+and `infoscry`; the password is never logged). `compose.yaml` runs the pinned
+`paradedb/paradedb:0.26.5-pg17` image. [Database](../src/main/kotlin/infoscry/storage/Database.kt)
+reads through a HikariCP pool; a transaction binds one connection to its thread,
+nests through savepoints, and transactions still run one at a time in the process.
+Unique and foreign-key violations are recognized by SQLSTATE. Case-insensitive
+names use the ICU collation `infoscry_nocase`.
+
+The schema is one baseline,
 [001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql), applied
 to an empty database by [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
-and recorded as `PRAGMA user_version = 4`. The baseline always describes the
-current schema. Older databases are upgraded at startup one version at a time, each
-step in one transaction with foreign keys checked before it commits:
-
-- 1 → 2 rebuilds `collections` so a collection's engine may be `NONE` (No OCR).
-- 2 → 3 adds collection corrections: it rebuilds `jobs` so a job may be
-  `CORRECTIONS`, adds `reading_extracted_text`/`reading_search_text` to
-  `content_units` and `page_text_revisions`, adds `corrections_fingerprint` and
-  `corrections_applied` to `document_revisions`, and creates
-  `collection_corrections`. The baseline marks each version 3 addition
-  `-- schema 3` so a test can rebuild the version 2 schema from it.
-- 3 → 4 creates `collection_glossary_groups` and `collection_glossary_terms` for
-  the collection glossary; nothing is rebuilt. The baseline marks them between
-  `-- schema 4 begin` and `-- schema 4 end`.
+in one transaction and recorded in `schema_version` as version 1. The baseline
+always describes the current schema and has no upgrade path. Values keep their
+earlier representations: instants are ISO-8601 text, flags 0/1 integers.
 A database whose version is newer than the build is refused rather than written
-to.
+to. SQLite archives from earlier builds are not read or migrated; collections are
+imported again.
+
+Besides the data-directory lock, a process claims the database with a
+session-level advisory lock held on its own connection
+([ProcessOwnership](../src/main/kotlin/infoscry/storage/ProcessOwnership.kt)). A
+second process is refused at once with the holder's host and pid; a killed
+process releases the claim with its connection.
 
 Import deduplicates by collection and SHA-256. External originals are never
 modified or deleted. Content-unit IDs remain stable; extraction results and
@@ -399,7 +404,7 @@ row) or a stored prompt of the collection and role.
 - `collections.ask_prompt_id` and `collections.investigate_prompt_id` hold each role's
   collection default. `NULL` means Default. They reference `collection_prompts` with
   `ON DELETE SET NULL`, so deleting a prompt falls back to Default.
-- `version` grows only when the body changes. Each write is one SQLite transaction and
+- `version` grows only when the body changes. Each write is one database transaction and
   every operation is idempotent.
 - A conversation records its prompt when it is created: `prompt_id` (nullable and
   without a foreign key, so it survives the prompt's deletion), `prompt_name`,

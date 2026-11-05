@@ -1,5 +1,7 @@
 package infoscry.cli
 
+import infoscry.storage.withTestDatabase
+
 import java.nio.file.Path
 import java.util.Collections
 import java.util.concurrent.TimeUnit
@@ -46,13 +48,12 @@ internal object CliProcess {
     fun start(vararg args: String, environment: Map<String, String> = emptyMap()): Process {
         val builder = ProcessBuilder(
             javaExecutable(),
-            // The SQLite driver loads a native library; without this the JDK warns on every run.
             "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
             "-cp",
             System.getProperty("java.class.path"),
             "infoscry.MainKt",
             *args,
-        )
+        ).withTestDatabase()
         builder.environment().putAll(environment)
         return builder.start()
     }

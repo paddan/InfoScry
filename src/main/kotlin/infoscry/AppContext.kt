@@ -83,7 +83,7 @@ import org.slf4j.LoggerFactory
 /**
  * One open InfoScry data directory: every service the process needs, wired by hand and closed together.
  *
- * There is one of these per process, because there is one authoritative SQLite database and one search
+ * There is one of these per process, because there is one authoritative Postgres database and one search
  * index. [open] takes the single-writer [ProcessLock] first, so a second process fails with an
  * actionable error instead of corrupting the archive, and it finishes any collection deletion that a
  * previous process did not complete **before** the context is handed out: from that moment the server

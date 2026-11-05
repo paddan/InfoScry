@@ -155,8 +155,8 @@ class LlmProfileStore(private val database: Database) {
                         "api_key_environment_variable = ?, context_window = ?, max_output_tokens = ?, " +
                         "input_price_per_million = ?, output_price_per_million = ?, " +
                         "cache_read_price_per_million = ?, enabled = ?, " +
-                        "tool_calling_measured = CASE WHEN provider IS NOT ? OR endpoint IS NOT ? OR model IS NOT ? THEN NULL ELSE tool_calling_measured END, " +
-                        "capability_checked_at = CASE WHEN provider IS NOT ? OR endpoint IS NOT ? OR model IS NOT ? THEN NULL ELSE capability_checked_at END, " +
+                        "tool_calling_measured = CASE WHEN provider IS DISTINCT FROM ? OR endpoint IS DISTINCT FROM ? OR model IS DISTINCT FROM ? THEN NULL ELSE tool_calling_measured END, " +
+                        "capability_checked_at = CASE WHEN provider IS DISTINCT FROM ? OR endpoint IS DISTINCT FROM ? OR model IS DISTINCT FROM ? THEN NULL ELSE capability_checked_at END, " +
                         "updated_at = ?, effort_overrides_json = ? WHERE id = ?",
                 ).use { statement ->
                     statement.setString(1, profile.name.trim())

@@ -36,11 +36,11 @@ enum class SearchMode {
  * [collectionId] is applied inside Lucene (it is an exact index filter). The remaining criteria describe
  * the *document* the chunk belongs to — media type, filename or original path, title/author/language probe,
  * ISO import-date bounds, processing status, and whether the content was OCR-derived — and are applied by
- * pre-selecting matching documents from SQLite **before** Lucene retrieval, never as a post-filter over
+ * pre-selecting matching documents from Postgres **before** Lucene retrieval, never as a post-filter over
  * results.
  *
  * Date strings accept ISO dates or offset-bearing ISO instants. [normalized] converts them to the
- * millisecond UTC format stored by SQLite before criteria reach persistence.
+ * millisecond UTC format stored by Postgres before criteria reach persistence.
  */
 data class SearchFilters(
     val collectionId: CollectionId? = null,
