@@ -7,7 +7,8 @@ Status: approved 2026-11-05. Nothing here is implemented yet; the search spike (
 InfoScry becomes a server that several people use at once. Each person signs in with their own account,
 sees the collections they are members of, and can tell who imported a document, approved a page, wrote a
 correction or changed a prompt. The local single-user archive (SQLite and Lucene in `~/.infoscry`, open
-API on loopback) is retired; an existing archive is moved over once by a migration command.
+API on loopback) is retired. Existing archives are not migrated: a new installation starts empty and
+collections are imported again (decided 2026-11-05).
 
 InfoScry itself stays one process running directly on the host, so CoreML embeddings and Surya on the
 Apple GPU work exactly as today. Only PostgreSQL runs in Docker, started with `docker compose up`.
@@ -35,7 +36,7 @@ This replaces several architecture rules in [AGENTS.md](../../AGENTS.md); they a
 | Audit log, retention, GDPR | Out of scope |
 | Single-user local mode | Removed; every installation has accounts |
 | CLI | An HTTP client authenticated with a personal access token, plus admin commands |
-| Existing archives | One-time, repeatable `migrate-archive` from a SQLite archive, keeping OCR and vectors |
+| Existing archives | Not migrated; collections are imported again |
 
 ### Approaches considered for search
 
@@ -108,9 +109,10 @@ browser ──HTTP(S)──▶ InfoScry process (host) ──JDBC──▶ postg
 
 ### Data
 
-- The SQLite baseline is translated into one Postgres baseline migration (numbered SQL files run by
+- The current SQLite baseline is translated into one Postgres baseline migration (numbered SQL files run by
   `SchemaMigrator` at start, inside the advisory lock). Table and column names stay; types become native
-  (`timestamptz`, `jsonb` for payloads). A database whose schema is newer than the build is refused.
+  (`timestamptz`, `jsonb` for payloads). A database whose schema is newer than the build is refused. The SQLite upgrade steps (1 → 4) are
+  dropped with SQLite.
 - `chunks.embedding` becomes `halfvec(768)` with an HNSW index (`halfvec_ip_ops`, matching today's
   dot-product similarity). Filtered queries by collection, document and revision scope use pgvector's
   iterative index scans (`hnsw.iterative_scan = relaxed_order`) so a selective filter still returns
@@ -225,8 +227,8 @@ a record and, where InfoScry already keeps history, who did each earlier step.
 | Conversation and investigation | `owner_id` |
 | LLM and OCR profile | `created_by`, `updated_by` |
 
-- Every attribution column references `users(id)` and is non-null for records created after the
-  migration. Records from a migrated archive are attributed to the user named in `migrate-archive`.
+- Every attribution column references `users(id)` and is non-null. Records written before ticket 7
+  adds attribution are attributed to the first administrator when the columns are added.
 - Work a job does on a user's behalf (OCR, chunking, embedding) is attributed to the job's `started_by`.
   Recovery after a restart does not change attribution.
 - The UI shows attribution next to timestamps it already shows, for example "Imported by Anna,
@@ -271,21 +273,6 @@ GPU. Tests keep the fake embedder.
   shows a launchd agent that starts `infoscry server` at login and restarts it if it exits.
 - The application, a `Dockerfile` and a containerized embedder are out of scope.
 
-## Migrating an existing archive
-
-`infoscry admin migrate-archive --from ~/.infoscry --owner <username>` with the server stopped (it takes
-the same advisory lock and is refused while a server runs):
-
-- Copies managed files into the data directory's `library/` (skipping blobs already present by hash, so
-  `--from` may be the data directory itself) and every row from `infoscry.db` into Postgres, keeping all
-  IDs, revisions, checkpoints and vectors. No OCR or embedding runs again.
-- Attributes every migrated record to `--owner` and makes that user `OWNER` of every migrated collection.
-- The Lucene index is not migrated; the BM25 index is built by Postgres from the migrated text.
-- Idempotent: rows are inserted by ID and skipped when identical, so an interrupted migration is run
-  again from the start. A row that exists with different content stops the migration with its table and
-  ID, without partial writes for that table batch.
-- The source archive is only read. Afterwards the old `infoscry.db` and `index/` can be removed by hand.
-
 ## Privacy and logging
 
 - The existing rules stay: keys, questions, answers, document text, prompts, corrections, glossary terms
@@ -316,7 +303,7 @@ and English product copy.
   `./gradlew check` needs a running Docker daemon. Each test class gets its own database.
 - Every new operation gets the idempotence tests the project already requires: run twice, and interrupt
   at each step and run again. That covers sign-in, user administration, membership changes, restart with
-  running jobs, the advisory lock and `migrate-archive`.
+  running jobs and the advisory lock.
 - Authorization is tested route by route against the table above, including 404 for non-members.
 - Concurrency tests: two users editing the same glossary group, two decisions on one page, two starts of
   the same rescan, the process killed mid-unit and started again.
@@ -342,8 +329,7 @@ published images, and a single-user mode without accounts.
 6. Memberships and the authorization seam; private conversations.
 7. Attribution columns and UI; optimistic edits and concurrent-use rules.
 8. Uploads and import roots.
-9. `migrate-archive`.
-10. README, AGENTS.md, technical reference and installation docs updated; old local-mode docs removed.
+9. README, AGENTS.md, technical reference and installation docs updated; old local-mode docs removed.
 
 ## Open questions
 
