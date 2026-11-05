@@ -150,6 +150,29 @@ class LuceneIndexTest {
         }
     }
 
+    @Test
+    fun `a question mark ending a word and a colon are plain text, not query syntax`() {
+        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+            runBlocking {
+                index.replaceDocument(
+                    chunksFor(DOCUMENT, listOf("tvångsvård av unga", "lagen (1962:700)", "SFS 2010:800 gäller")),
+                )
+            }
+            fun texts(query: String) = index.searchKeyword(COLLECTION, query, limit = 10).map { it.text }.toSet()
+
+            assertEquals(setOf("tvångsvård av unga"), texts("unga?"))
+            assertEquals(setOf("tvångsvård av unga"), texts("vem beslutar om tvångsvård av unga?"))
+            assertEquals(setOf("lagen (1962:700)"), texts("1962:700"))
+            assertEquals(setOf("SFS 2010:800 gäller"), texts("+SFS +2010:800"))
+            assertEquals(setOf("SFS 2010:800 gäller"), texts("\"SFS 2010:800\""))
+            // Syntax the search box offers keeps working: a wildcard inside a word, a prefix, phrases and operators.
+            assertEquals(setOf("tvångsvård av unga"), texts("u?ga"))
+            assertEquals(setOf("tvångsvård av unga"), texts("tvångs*"))
+            assertEquals(setOf("lagen (1962:700)"), texts("lagen AND 1962"))
+            assertEquals(setOf("SFS 2010:800 gäller"), texts("2010 -lagen"))
+        }
+    }
+
     private fun glossaryOf(collection: CollectionId, vararg terms: infoscry.glossary.GlossaryTermInput) =
         infoscry.glossary.Glossary(
             collection,

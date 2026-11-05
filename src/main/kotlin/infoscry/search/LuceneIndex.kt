@@ -788,13 +788,24 @@ class LuceneIndex private constructor(
     }
 
     /**
+     * [queryText] with the two reserved characters that ordinary prose uses escaped: every unescaped `:`,
+     * because the only searchable field is the text field and `1962:700` or `SFS 2010:800` would otherwise
+     * name a field `1962`; and every unescaped `?` that ends a word, because a question such as
+     * `… av unga?` would otherwise search `unga` plus one character. A `?` inside a word (`u?ga`) stays a
+     * single-character wildcard; phrases, `*`, `+/-` and `AND/OR/NOT` are untouched.
+     */
+    private fun asPlainText(queryText: String): String =
+        PLAIN_TRAILING_QUESTION_MARKS.replace(queryText) { "\\?".repeat(it.value.length) }
+            .let { escaped -> PLAIN_COLON.replace(escaped) { "\\:" } }
+
+    /**
      * Parses a user query, falling back to the parser's own escaping when the input is not valid syntax.
      *
      * `QueryParser.escape` quotes every reserved character, so the escaped text is always parseable and the
      * result matches the user's words literally rather than failing on their phrasing.
      */
     private fun parseSafely(queryText: String): Query = try {
-        QueryParser(LuceneSchema.FIELD_TEXT, handle.analyzer).parse(queryText)
+        QueryParser(LuceneSchema.FIELD_TEXT, handle.analyzer).parse(asPlainText(queryText))
     } catch (failure: ParseException) {
         QueryParser(LuceneSchema.FIELD_TEXT, handle.analyzer).parse(QueryParser.escape(queryText))
     }
@@ -871,6 +882,12 @@ class LuceneIndex private constructor(
          * letters still ground a partial word like "wat" in "watergate".
          */
         const val MIN_ANCHOR_PREFIX: Int = 3
+
+        /** A `:` the user did not escape. */
+        private val PLAIN_COLON = Regex("""(?<!\\):""")
+
+        /** A run of unescaped `?` not followed by a letter or digit: question marks ending a word. */
+        private val PLAIN_TRAILING_QUESTION_MARKS = Regex("""(?<!\\)\?+(?![\p{L}\p{N}])""")
 
         /** The code a refusal carries when a query analyzes into more tokens than the ceiling can hold. */
         const val QUERY_TOO_LONG_CODE: String = "QUERY_TOO_LONG"
