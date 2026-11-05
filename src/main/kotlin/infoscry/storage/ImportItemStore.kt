@@ -117,7 +117,7 @@ class ImportItemStore(private val database: Database) {
 
     /** One job's items in the order they were queued, which is the order the attempt worked through them. */
     fun listForJob(jobId: JobId): List<ImportItem> = database.read { connection ->
-        connection.prepareStatement("$SELECT_ITEMS WHERE job_id = ? ORDER BY rowid").use { statement ->
+        connection.prepareStatement("$SELECT_ITEMS WHERE job_id = ? ORDER BY insert_order").use { statement ->
             statement.setString(1, jobId.value)
             statement.executeQuery().use { rows ->
                 buildList { while (rows.next()) add(rows.toItem()) }
@@ -127,7 +127,7 @@ class ImportItemStore(private val database: Database) {
 
     /** One page of [listForJob], in the same order, so a job with ten thousand files is never read whole. */
     fun pageForJob(jobId: JobId, limit: Int, offset: Int): List<ImportItem> = database.read { connection ->
-        connection.prepareStatement("$SELECT_ITEMS WHERE job_id = ? ORDER BY rowid LIMIT ? OFFSET ?").use { statement ->
+        connection.prepareStatement("$SELECT_ITEMS WHERE job_id = ? ORDER BY insert_order LIMIT ? OFFSET ?").use { statement ->
             statement.setString(1, jobId.value)
             statement.setInt(2, limit)
             statement.setInt(3, offset)

@@ -3,6 +3,8 @@ package infoscry
 import infoscry.correction.CorrectionService
 import infoscry.glossary.GlossaryService
 import infoscry.storage.GlossaryStore
+import infoscry.storage.DatabaseResolver
+import infoscry.storage.ProcessOwnership
 import infoscry.correction.CandidateCorrector
 import infoscry.domain.CollectionId
 import infoscry.storage.CorrectionStore
@@ -128,6 +130,8 @@ class AppContext private constructor(
     private val injectedDocumentIndexRemover: DocumentIndexRemover,
     initialIndex: LuceneIndex,
     private val lock: ProcessLock,
+    /** This process's claim on the database; released with [lock], after the database closes. */
+    private val ownership: ProcessOwnership,
     /**
      * The query embedder the retrieval path uses, or null for the pinned CoreML model.
      *
@@ -630,6 +634,7 @@ class AppContext private constructor(
         // The lock is released last: while the database is closing, this process still owns the data
         // directory, so no second process may open it in between.
         runCatching { database.close() }
+        runCatching { ownership.close() }
         lock.close()
     }
 
@@ -675,7 +680,15 @@ class AppContext private constructor(
 
             val lock = ProcessLock.acquire(paths.lockFile)
             try {
-                val database = Database(paths.databaseFile)
+                val database = Database(DatabaseResolver.resolve(paths))
+                // The database's own claim beside the data directory's: two data directories pointed at one
+                // database would otherwise run two job workers against the same rows.
+                val ownership = try {
+                    ProcessOwnership.acquire(database)
+                } catch (failure: Throwable) {
+                    runCatching { database.close() }
+                    throw failure
+                }
                 try {
                     SchemaMigrator(database).migrate()
                     val collections = CollectionStore(database)
@@ -716,6 +729,7 @@ class AppContext private constructor(
                             injectedDocumentIndexRemover = documentIndex,
                             initialIndex = searchIndex,
                             lock = lock,
+                            ownership = ownership,
                             injectedQueryEmbedder = queryEmbedder,
                             injectedRetryPrerequisites = retryPrerequisites,
                             injectedRescanEmbedder = rescanEmbedder,
@@ -787,6 +801,7 @@ class AppContext private constructor(
                     }
                 } catch (failure: Throwable) {
                     runCatching { database.close() }
+                    runCatching { ownership.close() }
                     throw failure
                 }
             } catch (failure: Throwable) {

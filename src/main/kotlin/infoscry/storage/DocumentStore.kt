@@ -66,7 +66,7 @@ class DocumentBeingDeletedException(val documentId: DocumentId) : ApiFaultExcept
  * The document-level criteria a search can be restricted by, in the storage vocabulary.
  *
  * [filenameOrPathContains] and [titleAuthorOrLanguageContains] match anywhere in the named columns,
- * case-insensitively via SQLite's LIKE; [ocrOnly] keeps only documents that have at least one content
+ * case-insensitively via ILIKE; [ocrOnly] keeps only documents that have at least one content
  * unit read by OCR (a unit whose mean confidence is recorded). Dates are ISO-8601 UTC strings, which
  * compare lexicographically.
  */
@@ -91,8 +91,8 @@ data class DocumentCriterion(
 enum class DocumentSort(internal val orderBy: String) {
     NEWEST("created_at DESC, id"),
     OLDEST("created_at ASC, id"),
-    NAME_ASC("original_filename COLLATE NOCASE ASC, id"),
-    NAME_DESC("original_filename COLLATE NOCASE DESC, id"),
+    NAME_ASC("original_filename COLLATE infoscry_nocase ASC, id"),
+    NAME_DESC("original_filename COLLATE infoscry_nocase DESC, id"),
 }
 
 /**
@@ -154,12 +154,12 @@ class DocumentStore(private val database: Database) {
             append(")")
         }
         if (criterion.filenameOrPathContains != null) {
-            append(" AND (d.original_filename LIKE ? ESCAPE '\\' OR d.original_path LIKE ? ESCAPE '\\')")
+            append(" AND (d.original_filename ILIKE ? ESCAPE '\\' OR d.original_path ILIKE ? ESCAPE '\\')")
         }
         if (criterion.titleAuthorOrLanguageContains != null) {
             append(
-                " AND (d.title LIKE ? ESCAPE '\\' OR d.author LIKE ? ESCAPE '\\' " +
-                    "OR d.language LIKE ? ESCAPE '\\')",
+                " AND (d.title ILIKE ? ESCAPE '\\' OR d.author ILIKE ? ESCAPE '\\' " +
+                    "OR d.language ILIKE ? ESCAPE '\\')",
             )
         }
         criterion.importedFrom?.let { append(" AND d.created_at >= ?") }
@@ -333,7 +333,7 @@ class DocumentStore(private val database: Database) {
         val clause = StringBuilder("collection_id = ?")
         val parameters = mutableListOf(listing.collectionId.value)
         listing.filenameContains?.let { contains ->
-            clause.append(" AND original_filename LIKE ? ESCAPE '\\'")
+            clause.append(" AND original_filename ILIKE ? ESCAPE '\\'")
             parameters += likePattern(contains)
         }
         if (listing.statuses.isNotEmpty()) {
@@ -402,9 +402,9 @@ class DocumentStore(private val database: Database) {
         }
 
     private fun SQLException.rethrowAsConstraintViolation(document: Document): Nothing = when {
-        message?.contains("UNIQUE", ignoreCase = true) == true ->
+        Database.isUniqueViolation(this) ->
             throw DuplicateDocumentException(document.collectionId, document.sha256)
-        message?.contains("FOREIGN KEY", ignoreCase = true) == true ->
+        Database.isForeignKeyViolation(this) ->
             throw NoSuchElementException("no collection with id ${document.collectionId.value}")
         else -> throw this
     }

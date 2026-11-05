@@ -278,7 +278,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
     /** One document's revisions, oldest first, so a reader can walk the history of its text. */
     fun revisions(documentId: DocumentId): List<DocumentRevision> = database.read { connection ->
-        connection.prepareStatement("$SELECT_REVISIONS WHERE document_id = ? ORDER BY created_at, rowid").use { statement ->
+        connection.prepareStatement("$SELECT_REVISIONS WHERE document_id = ? ORDER BY created_at, insert_order").use { statement ->
             statement.setString(1, documentId.value)
             statement.executeQuery().use { rows ->
                 buildList { while (rows.next()) add(rows.toRevision()) }
@@ -452,7 +452,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
         } catch (e: java.sql.SQLException) {
             // A unique constraint violation when attemptFingerprint is not null means a candidate with
             // the same document+fingerprint already exists. Adopt it instead of failing.
-            if (e.message?.contains("UNIQUE constraint failed") == true && attemptFingerprint != null) {
+            if (Database.isUniqueViolation(e) && attemptFingerprint != null) {
                 val existing = resumableCandidate(documentId, attemptFingerprint)
                     ?: throw IllegalStateException(
                         "a unique constraint violation suggests an existing candidate, but resumableCandidate found none",
@@ -894,7 +894,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
     /** Every restore request of one document, oldest first. */
     fun restores(documentId: DocumentId): List<RevisionRestoreRecord> = database.read { connection ->
-        connection.prepareStatement("$SELECT_RESTORES WHERE document_id = ? ORDER BY created_at, rowid").use { statement ->
+        connection.prepareStatement("$SELECT_RESTORES WHERE document_id = ? ORDER BY created_at, insert_order").use { statement ->
             statement.setString(1, documentId.value)
             statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRestore()) } }
         }
@@ -911,7 +911,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
     /** Every restore request that has not finished, oldest first: what a startup has to resolve. */
     fun unfinishedRestores(): List<RevisionRestoreRecord> = database.read { connection ->
-        connection.prepareStatement("$SELECT_RESTORES WHERE phase = ? ORDER BY created_at, rowid").use { statement ->
+        connection.prepareStatement("$SELECT_RESTORES WHERE phase = ? ORDER BY created_at, insert_order").use { statement ->
             statement.setString(1, RestorePhase.STAGED.name)
             statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRestore()) } }
         }

@@ -67,7 +67,6 @@ internal object PrivatePermissions {
  */
 class AppPaths private constructor(val root: Path) {
 
-    val databaseFile: Path = root.resolve("infoscry.db")
     val lockFile: Path = root.resolve("infoscry.lock")
     val runtimeFile: Path = root.resolve("runtime.json")
     val libraryDir: Path = root.resolve(LIBRARY_DIRECTORY)

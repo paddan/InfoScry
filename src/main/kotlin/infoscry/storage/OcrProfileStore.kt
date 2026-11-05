@@ -49,7 +49,7 @@ class OcrProfileStore(private val database: Database) {
     /** Every profile, enabled or not, in name order, each joined to the revision it current reads. */
     fun list(): List<OcrProfile> = database.read { connection ->
         connection.createStatement().use { statement ->
-            statement.executeQuery("$SELECT_PROFILE ORDER BY p.name COLLATE NOCASE").use { rows ->
+            statement.executeQuery("$SELECT_PROFILE ORDER BY p.name COLLATE infoscry_nocase").use { rows ->
                 buildList { while (rows.next()) add(rows.toProfile()) }
             }
         }
@@ -268,11 +268,11 @@ class OcrProfileStore(private val database: Database) {
     }
 
     /**
-     * The schema's unique index on `name COLLATE NOCASE` is the authority on duplicate names, so the store
+     * The schema's unique index on `name COLLATE infoscry_nocase` is the authority on duplicate names, so the store
      * translates its violation instead of racing a `SELECT` before every insert or update.
      */
     private fun SQLException.rethrowAsNameConflict(name: String): Nothing =
-        if (message?.contains("UNIQUE", ignoreCase = true) == true) {
+        if (Database.isUniqueViolation(this)) {
             throw DuplicateOcrProfileNameException(name)
         } else {
             throw this

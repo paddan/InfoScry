@@ -322,7 +322,7 @@ class OcrOperationStore(private val database: Database) {
             val latest = LinkedHashMap<DocumentId, OcrOperation>()
             connection.prepareStatement(
                 "$SELECT_OPERATION WHERE document_id IN ($placeholders) " +
-                    "ORDER BY document_id, created_at DESC, rowid DESC",
+                    "ORDER BY document_id, created_at DESC, insert_order DESC",
             ).use { statement ->
                 ids.forEachIndexed { index, id -> statement.setString(index + 1, id.value) }
                 statement.executeQuery().use { rows ->
@@ -714,7 +714,7 @@ class OcrOperationStore(private val database: Database) {
 
     private fun Connection.selectOperations(documentId: DocumentId): List<OcrOperation> {
         val found = mutableListOf<OcrOperation>()
-        prepareStatement("$SELECT_OPERATION WHERE document_id = ? ORDER BY created_at DESC, rowid DESC")
+        prepareStatement("$SELECT_OPERATION WHERE document_id = ? ORDER BY created_at DESC, insert_order DESC")
             .use { statement ->
                 statement.setString(1, documentId.value)
                 statement.executeQuery().use { rows -> while (rows.next()) found += rows.toOperation(this) }
@@ -725,7 +725,7 @@ class OcrOperationStore(private val database: Database) {
     /** The row that holds this document, as [activeOperation]'s predicate states it in SQL. */
     private fun Connection.selectActiveOperation(documentId: DocumentId): OcrOperation? =
         selectOperation(this, "$SELECT_OPERATION WHERE document_id = ? AND ($HOLDS_DOCUMENT) " +
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1") { statement ->
+            "ORDER BY created_at DESC, insert_order DESC LIMIT 1") { statement ->
             statement.setString(1, documentId.value)
         }
 

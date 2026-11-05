@@ -29,7 +29,7 @@ class DatabaseTest {
 
     private fun Database.prepareProbeTable() {
         transaction { connection ->
-            connection.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY, note TEXT NOT NULL)")
+            connection.execute("CREATE TABLE probe (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note TEXT NOT NULL)")
         }
     }
 

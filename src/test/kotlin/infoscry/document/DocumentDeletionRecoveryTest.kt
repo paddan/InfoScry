@@ -1358,7 +1358,7 @@ class DocumentDeletionRecoveryTest {
      */
     private fun assertInterruptedState(stopAfter: StopAfter, staged: Staged) {
         val paths = AppPaths.from(dataDir)
-        val operation = Database(paths.databaseFile).use { database ->
+        val operation = Database(paths.root).use { database ->
             DeletionStore(database).unfinishedFor(staged.collectionId, DeletionKind.DOCUMENT).singleOrNull()
                 ?: error("no unfinished document deletion for collection ${staged.collectionId.value}")
         }

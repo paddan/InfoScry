@@ -194,7 +194,7 @@ class CollectionPromptService(
     private fun <T> withNameConflictTranslated(write: () -> T): T = try {
         write()
     } catch (failure: SQLException) {
-        if (failure.message?.contains("UNIQUE", ignoreCase = true) == true) throw PromptNameTaken() else throw failure
+        if (infoscry.storage.Database.isUniqueViolation(failure)) throw PromptNameTaken() else throw failure
     }
 
     private fun sameName(a: String, b: String): Boolean =

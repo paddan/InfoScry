@@ -195,7 +195,8 @@ class ContentStoreKillTest {
         dataDir.toAbsolutePath().toString(),
         units.toString(),
         progress.toAbsolutePath().toString(),
-    ).redirectErrorStream(true)
+    ).also { it.environment().putAll(TestDatabases.environmentFor(dataDir)) }
+        .redirectErrorStream(true)
         .redirectOutput(ProcessBuilder.Redirect.to(dataDir.resolve("child.log").toFile()))
         .start()
 
