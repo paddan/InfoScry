@@ -57,6 +57,18 @@ through `pg_search` (ICU tokenizer, lower case, ASCII folding) and compare the t
 glossary expansion against current Lucene. The spike reports the differences; the owner decides between
 approach 1 and 2.
 
+**Spike result (2026-11-05, [report](../../scripts/spikes/pg_search/README.md)).** On 29,161 chunks of
+Swedish statutes `pg_search` gave the same tokens, the same BM25 scores (times the constant `k1 + 1`) and
+the same matches as Lucene; the differences were query syntax only. The search port therefore follows
+these rules:
+
+- Queries are built with the query-builder functions (`|||`, `###`, `pdb.regex`, boolean SQL), never by
+  passing user text to `pdb.parse`. An unqualified `pdb.parse` also searches the key column, rejects
+  ordinary text such as `3 kap. 5 §`, and does not support prefixes.
+- A prefix term is folded by the index analyzer, regex-escaped and sent as `pdb.regex('<prefix>.*')`.
+- The single BM25 index per table includes the collection, document and revision filter fields from
+  its first version, since a table can have only one ParadeDB index.
+
 ### Approaches considered for deployment
 
 1. **Postgres in Docker, InfoScry natively (chosen).** The Apple GPU stays reachable, the existing GPU

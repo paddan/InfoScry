@@ -1,0 +1,50 @@
+# id	category	lucene query	pg_search (Tantivy) query
+t1	term	skatteverket	skatteverket
+t2	term	arbetsgivare	arbetsgivare
+t3	term	sekretess	sekretess
+t4	term	vårdnadshavare	vårdnadshavare
+t5	term	strandskydd	strandskydd
+t6	term	personuppgifter	personuppgifter
+t7	term	brottsbalken	brottsbalken
+m1	or	uppsägning arbetsbrist	uppsägning arbetsbrist
+m2	or	överklagande förvaltningsrätt	överklagande förvaltningsrätt
+m3	or	hyresgäst besittningsskydd	hyresgäst besittningsskydd
+m4	or	barn vårdnad umgänge	barn vårdnad umgänge
+m5	or	tillstånd vapen	tillstånd vapen
+p1	phrase	"allmän handling"	"allmän handling"
+p2	phrase	"god man"	"god man"
+p3	phrase	"särskilda skäl"	"särskilda skäl"
+p4	phrase	"ringa brott"	"ringa brott"
+p5	phrase	"allmän förvaltningsdomstol"	"allmän förvaltningsdomstol"
+x1	prefix	förvaltn*	förvaltn*
+x2	prefix	upphandl*	upphandl*
+x3	prefix	sekretess*	sekretess*
+b1	boolean	+sekretess +sjukvård	+sekretess +sjukvård
+b2	boolean	tillstånd -vapen	tillstånd -vapen
+b3	boolean	(polis OR polismyndigheten) AND husrannsakan	(polis OR polismyndigheten) AND husrannsakan
+b4	boolean	"god man" AND ensamkommande	"god man" AND ensamkommande
+f1	folding	overklagande	overklagande
+f2	folding	ÖVERKLAGANDE	ÖVERKLAGANDE
+f3	folding	naringsidkare	naringsidkare
+n1	number	3 kap. 5 §	3 kap. 5 §
+n2	number	SFS 2010:800	SFS 2010:800
+n3	number	1962:700	1962:700
+s1	special	e-post	e-post
+s2	special	och/eller	och/eller
+s3	special	C-körkort	C-körkort
+q1	question	vilka regler gäller för uppsägning på grund av arbetsbrist	vilka regler gäller för uppsägning på grund av arbetsbrist
+q2	question	får en arbetsgivare kontrollera anställdas e-post	får en arbetsgivare kontrollera anställdas e-post
+q3	question	hur länge måste bokföring sparas	hur länge måste bokföring sparas
+q4	question	vad händer om man kör bil utan körkort	vad händer om man kör bil utan körkort
+q5	question	vem beslutar om tvångsvård av unga?	vem beslutar om tvångsvård av unga?
+g1	glossary	skattemyndigheten skatteverket	skattemyndigheten skatteverket
+g2	glossary	brb brottsbalken	brb brottsbalken
+g3	glossary	(socialnämnden OR socialtjänsten) ingripande	(socialnämnden OR socialtjänsten) ingripande
+g4	glossary	förvaltningsrätten länsrätt*	förvaltningsrätten länsrätt*
+g5	glossary	"allmän handling" "allmänna handlingar"	"allmän handling" "allmänna handlingar"
+x1b	builder	förvaltn*	-	text @@@ pdb.regex('forvaltn.*')
+x2b	builder	upphandl*	-	text @@@ pdb.regex('upphandl.*')
+x3b	builder	sekretess*	-	text @@@ pdb.regex('sekretess.*')
+g4b	builder	förvaltningsrätten länsrätt*	-	text ||| 'förvaltningsrätten' OR text @@@ pdb.regex('lansratt.*')
+s1b	builder	e-post	-	text ||| 'e-post'
+s2b	builder	och/eller	-	text ||| 'och/eller'

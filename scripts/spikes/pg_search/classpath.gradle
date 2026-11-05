@@ -1,0 +1,2 @@
+// Prints the Lucene and ICU jars of the backend's runtime classpath for the pg_search spike.
+allprojects { tasks.register("printSpikeClasspath") { doLast { println("CP=" + project.configurations.getByName("runtimeClasspath").files.findAll { it.name.contains("lucene") || it.name.contains("icu4j") }.join(":")) } } }
