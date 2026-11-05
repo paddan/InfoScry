@@ -1,7 +1,7 @@
 # Ticket 2: Postgres storage
 
 Spec: [Multi-user server](../../specs/2026-11-05-multi-user-server-design.md), ticket 2 of the suggested
-order. Status: in progress on branch `postgres-storage` (2026-11-05).
+order. Status: implemented on branch `postgres-storage` (2026-11-05), not yet merged to `main`.
 
 ## Goal
 
@@ -63,3 +63,18 @@ migration of existing archives.
   database with a newer `schema_version` is refused.
 - Manual on this Mac: `docker compose up -d` (or Podman), `infoscry serve`, import a fixture collection
   with the real CoreML embedder, search it, restart the server and search again.
+
+## Verification record (2026-11-05)
+
+- `./gradlew check` passed on this Mac with Podman: 2,237 backend tests and 576 frontend tests, 0
+  failures. The backend suite took about 6.5 minutes.
+- New tests in `DatabaseTest`: a read on another thread sees committed state while a transaction is open,
+  a read inside a transaction sees its writes, and a second process claim is refused (naming the holder)
+  until the first is released.
+- Manual with the real CoreML embedder and a ParadeDB container: a standalone CLI import of three fixtures
+  (`--method none`), keyword, semantic and hybrid search, `infoscry serve`, a second `serve` against the
+  same database refused with the holder's pid, a restart and the same search again.
+- Not run: `externalTest` (browser acceptance, Tesseract) and `gpuIntegrationTest`. `docker compose` itself
+  was not run (no Compose provider is installed for Podman here); the same image and settings were run
+  with `podman run`.
+

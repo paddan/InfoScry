@@ -41,11 +41,19 @@ class ProcessOwnership private constructor(private val connection: Connection) :
             }
         }
 
+        /**
+         * Who holds the claim, in the 63 characters Postgres keeps of an ASCII `application_name`: the pid and start minute
+         * first, the host last, so a long host name is what gets cut.
+         */
         private fun holderName(): String {
             val host = runCatching { InetAddress.getLocalHost().hostName }.getOrDefault("unknown host")
-            return "infoscry on $host, pid ${ProcessHandle.current().pid()}, started " +
-                Instants.format(java.time.Instant.ofEpochMilli(ManagementFactory.getRuntimeMXBean().startTime))
+            val started = java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm'Z'")
+                .withZone(java.time.ZoneOffset.UTC)
+                .format(java.time.Instant.ofEpochMilli(ManagementFactory.getRuntimeMXBean().startTime))
+            return "infoscry pid ${ProcessHandle.current().pid()} since $started on $host".take(MAX_NAME_LENGTH)
         }
+
+        private const val MAX_NAME_LENGTH = 63
 
         private fun holder(connection: Connection): String? =
             connection.prepareStatement(

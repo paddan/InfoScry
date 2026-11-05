@@ -109,10 +109,11 @@ browser ──HTTP(S)──▶ InfoScry process (host) ──JDBC──▶ postg
 
 ### Data
 
-- The current SQLite baseline is translated into one Postgres baseline migration (numbered SQL files run by
-  `SchemaMigrator` at start, inside the advisory lock). Table and column names stay; types become native
-  (`timestamptz`, `jsonb` for payloads). A database whose schema is newer than the build is refused. The SQLite upgrade steps (1 → 4) are
-  dropped with SQLite.
+- The current SQLite baseline is translated into one Postgres baseline migration (numbered SQL files run
+  by `SchemaMigrator` at start, inside an advisory lock). Table and column names stay, and so do value
+  representations (ISO-8601 text instants, 0/1 flags, JSON as text); converting them to `timestamptz` and
+  `jsonb` is a later cleanup (decided in ticket 2). A database whose schema is newer than the build is
+  refused. The SQLite upgrade steps (1 → 4) are dropped with SQLite.
 - `chunks.embedding` becomes `halfvec(768)` with an HNSW index (`halfvec_ip_ops`, matching today's
   dot-product similarity). Filtered queries by collection, document and revision scope use pgvector's
   iterative index scans (`hnsw.iterative_scan = relaxed_order`) so a selective filter still returns

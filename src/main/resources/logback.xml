@@ -37,6 +37,9 @@
     <encoder class="infoscry.logging.JsonLogEncoder"/>
   </appender>
 
+  <!-- The connection pool announces every start and shutdown; only its problems belong in a CLI's output. -->
+  <logger name="com.zaxxer.hikari" level="WARN"/>
+
   <root level="INFO">
     <appender-ref ref="CONSOLE"/>
     <appender-ref ref="FILE"/>
