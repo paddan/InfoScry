@@ -10,29 +10,15 @@ import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.required
 import com.github.ajalt.clikt.parameters.options.split
 import com.github.ajalt.clikt.parameters.types.path
-import infoscry.AppContext
-import infoscry.config.AppPaths
-import infoscry.config.ProcessLockUnavailable
-import infoscry.embedding.DocumentEmbedder
-import infoscry.config.RuntimeInfo
-import infoscry.diagnostics.ToolProbe
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobState
-import infoscry.domain.JobType
 import infoscry.jobs.ExtensionFilter
-import infoscry.jobs.ImportJobHandler
-import infoscry.jobs.ImportJobPayload
-import infoscry.jobs.ImportPipeline
-import infoscry.logging.LoggingBootstrap
 import infoscry.server.ApiJson
-import infoscry.server.PRODUCT_NAME
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
-import infoscry.storage.MaintenanceInProgressException
 import java.nio.file.Files
 import java.nio.file.Path
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 
@@ -42,7 +28,6 @@ data class ImportAccepted(
     val accepted: Boolean,
     val jobId: String,
     val state: String,
-    val executedHere: Boolean,
 )
 
 /** What `infoscry import --json --wait` reports once the import ended. */
@@ -69,20 +54,13 @@ data class ImportItemResult(
 )
 
 /**
- * `infoscry import` — put files into a collection.
+ * `infoscry import` — ask the server to put files into a collection.
  *
- * Where the work happens is decided by who owns the data directory, not by preference. If a server is
- * running, this command hands the request over and answers with the job it was accepted as; if nothing
- * owns the directory, the command takes the lock itself and runs the import **in this process**, because a
- * job must never outlive the process that owns its archive — a detached worker would be a second writer
- * with no way to report back. That is why a foreground import waits regardless of `--wait`: it holds the
- * only key to the archive, and giving the key back before the work is done is what leaves an import
- * ownerless.
+ * The paths are paths on the server's file system. The command previews the import, confirms sending pages
+ * to an external endpoint when the reading method does, and answers with the job the server accepted; with
+ * `--wait` it follows the job and reports every document.
  */
-class ImportCommand(
-    private val pipeline: (AppContext) -> ImportPipeline = { context -> ImportPipeline.production(context) },
-    private val importEmbedder: (AppContext) -> () -> DocumentEmbedder? = ::productionImportEmbedder,
-) : CliktCommand(name = "import") {
+class ImportCommand : CliktCommand(name = "import") {
 
     private val collection by option(
         "--collection",
@@ -119,30 +97,16 @@ class ImportCommand(
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
-        // Refused before the data directory is looked at, so a bad extension list has no effect at all.
+        val options = resolveOptions(parentOptions, jsonFlag, null)
+        // Refused before anything is sent, so a bad extension list has no effect at all.
         val extensions = extensionFilter()
-        val paths = AppPaths.of(options.dataDir)
         val requested = canonicalSources(sources)
-
         try {
-            val remote = RuntimeInfo.discover(paths.runtimeFile)
-            if (remote != null) {
-                importThroughServer(remote, requested, extensions, options)
-                return
-            }
-            importHere(paths, requested, extensions, options)
-        } catch (unavailable: infoscry.ocr.ReadingMethodUnavailableException) {
-            throw CliFailure("METHOD_UNAVAILABLE: ${unavailable.reason}", unavailable)
-        } catch (stale: infoscry.jobs.StaleImportPreviewException) {
-            throw CliFailure(stale.message.orEmpty(), stale)
-        } catch (conflict: infoscry.storage.StartRequestConflictException) {
-            throw CliFailure("REQUEST_ID_CONFLICT: ${conflict.message.orEmpty()}", conflict)
+            importThroughServer(requested, extensions, options)
         } catch (invalid: IllegalArgumentException) {
             throw CliFailure(invalid.message.orEmpty(), invalid)
         }
@@ -160,82 +124,14 @@ class ImportCommand(
         }
     }
 
-    /**
-     * Runs the import in this process, holding the data directory for as long as it takes.
-     *
-     * The lock is the reason this cannot be a fire-and-forget: only the process that holds it may write,
-     * so the command stays alive until every document is done and then reports each result itself.
-     */
-    private fun importHere(paths: AppPaths, requested: List<String>, extensions: ExtensionFilter, options: CliOptions) {
-        LoggingBootstrap.useLogsDirectory(paths)
-        val context = try {
-            AppContext.open(paths)
-        } catch (unavailable: ProcessLockUnavailable) {
-            // Somebody took the directory between the discovery above and here — a server that is starting,
-            // most likely. Asking it is the right answer; failing with "already running" would be true but
-            // useless.
-            val appeared = RuntimeInfo.discover(paths.runtimeFile)
-                ?: throw CliFailure(
-                    unavailable.message ?: "another InfoScry process owns ${paths.root}",
-                    unavailable,
-                )
-            importThroughServer(appeared, requested, extensions, options)
-            return
-        }
-
-        context.use { open ->
-            echo(
-                "No $PRODUCT_NAME server owns ${paths.root}; importing in this process and holding the " +
-                    "data directory until it finishes.",
-                err = true,
-            )
-            val collection = open.collectionService.requireActiveByNameOrId(collection)
-            val method = methodOption?.let(infoscry.ocr.ReadingMethod::parse) ?: collection.ocrSettings().defaultMethod
-            val previewRequest = infoscry.jobs.ImportPreviewRequest(collection = collection.id, paths = requested,
-                recursive = recursiveFlag, include = extensions.include, exclude = extensions.exclude, method = method)
-            val preview = open.importPreviewService.preview(previewRequest)
-            confirmPreview(preview, method.id)
-            val job = try {
-                runBlocking {
-                    open.importStartService.start(infoscry.jobs.ImportStartRequest(collectionId = collection.id,
-                        paths = requested, recursive = recursiveFlag, include = extensions.include,
-                        exclude = extensions.exclude, method = method, previewHash = preview.previewHash,
-                        requestId = commandRequestId(previewRequest, preview.previewHash), restartStopped = true))
-                }
-            } catch (maintenance: MaintenanceInProgressException) {
-                throw CliFailure("MAINTENANCE_IN_PROGRESS: ${maintenance.message.orEmpty()}", maintenance)
-            }
-            // The worker is attached after the job exists, so there is no window where the runner is
-            // claiming from a queue this command has not filled yet.
-            ImportJobHandler.attachTo(open, pipeline(open), documentEmbedder = importEmbedder(open))
-            echo("Importing ${requested.size} path(s) as job ${job.id.value}.")
-            val finished = runBlocking {
-                awaitTerminalJob(
-                    lookup = {
-                        open.jobs.get(job.id)
-                            ?: throw NoSuchElementException("no job with id ${job.id.value}")
-                    },
-                    what = "import",
-                )
-            }
-            val items = open.importItems.listForJob(job.id)
-            report(
-                job = finished,
-                items = items,
-                options = options,
-                executedHere = true,
-            )
-        }
-    }
-
-    /** Enqueues the import on the server that owns the data directory. */
+    /** Previews and enqueues the import on the server. */
     private fun importThroughServer(
-        runtime: RuntimeInfo,
         requested: List<String>,
         extensions: ExtensionFilter,
         options: CliOptions,
     ) {
-        LoopbackApi(runtime).use { api ->
+        CliSession.connect().use { session ->
+            val api = session.api
             val accepted = try {
                 runBlocking {
                     val selected = api.listCollections().let { all ->
@@ -255,12 +151,12 @@ class ImportCommand(
                 throw CliFailure("${failure.code}: ${failure.message}", failure)
             }
             if (!waitFlag) {
-                reportAccepted(accepted.job.id, accepted.job.state, options, executedHere = false)
+                reportAccepted(accepted.job.id, accepted.job.state, options)
                 return
             }
             val finished = runBlocking { awaitTerminalJob(lookup = { api.getJob(accepted.job.id) }, what = "import") }
             val items = runBlocking { api.importItems(accepted.job.id) }
-            report(finished, items, options, executedHere = false)
+            report(finished, items, options)
         }
     }
 
@@ -297,7 +193,7 @@ class ImportCommand(
         return "cli-import-" + java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))
     }
 
-    private fun reportAccepted(jobId: JobId, state: JobState, options: CliOptions, executedHere: Boolean) {
+    private fun reportAccepted(jobId: JobId, state: JobState, options: CliOptions) {
         if (options.json) {
             echo(
                 ApiJson.encodeToString(
@@ -305,19 +201,13 @@ class ImportCommand(
                         accepted = true,
                         jobId = jobId.value,
                         state = state.name,
-                        executedHere = executedHere,
                     ),
                 ),
             )
             return
         }
-        val where = if (executedHere) "in this process" else "by the running server"
-        echo("Accepted job ${jobId.value} ($state), running $where.")
-        if (executedHere) {
-            echo("Use `infoscry jobs` to watch it.", err = true)
-        } else {
-            echo("Use `infoscry jobs` or `infoscry import --wait` to watch it.", err = true)
-        }
+        echo("Accepted job ${jobId.value} ($state).")
+        echo("Use `infoscry jobs` or `infoscry import --wait` to watch it.", err = true)
     }
 
     /**
@@ -330,7 +220,6 @@ class ImportCommand(
         job: Job,
         items: List<ImportItem>,
         options: CliOptions,
-        executedHere: Boolean,
     ) {
         val counts = items.groupingBy { it.outcome }.eachCount()
         val imported = counts[ImportItemOutcome.IMPORTED] ?: 0
@@ -365,8 +254,7 @@ class ImportCommand(
             items.forEach { item -> echo(describe(item)) }
             echo("Imported $imported, duplicate $duplicates, failed $failed of ${items.size}.")
             if (job.state == JobState.FAILED) {
-                val detail = if (executedHere) " ${job.errorMessage.orEmpty()}" else
-                    ". Detailed failure text is omitted by the local API; see the server log."
+                val detail = ". Detailed failure text is omitted by the API; see the server log."
                 echo("The job failed: ${job.errorCode ?: "JOB_FAILED"}$detail".trim(), err = true)
             }
         }
@@ -375,8 +263,7 @@ class ImportCommand(
             throw CliFailure("the import was cancelled; ${items.size - failed} document(s) had been processed")
         }
         if (job.state == JobState.FAILED) {
-            val detail = if (executedHere) " ${job.errorMessage.orEmpty()}" else
-                ". Detailed failure text is omitted by the local API; see the server log."
+            val detail = ". Detailed failure text is omitted by the API; see the server log."
             throw CliFailure(
                 "the import failed: ${job.errorCode ?: "JOB_FAILED"}$detail".trim(),
             )
@@ -384,7 +271,7 @@ class ImportCommand(
         if (failed > 0) {
             throw CliFailure("$failed of ${items.size} document(s) could not be imported")
         }
-        if (executedHere && job.state != JobState.COMPLETE) {
+        if (job.state != JobState.COMPLETE) {
             throw CliFailure("the import ended as ${job.state} without processing every document")
         }
     }

@@ -133,7 +133,7 @@ class GlossaryRoutesTest {
 
         val refused = put(id, "g1", "Stockholm", "Sthlm", credential = Credential.WRONG_CSRF)
 
-        assertEquals(HttpStatusCode.Unauthorized, refused.status)
+        assertEquals(HttpStatusCode.Forbidden, refused.status)
         assertEquals(0, list(id).getValue("groups").jsonArray.size)
     }
 }

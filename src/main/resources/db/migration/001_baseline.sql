@@ -1282,3 +1282,54 @@ CREATE TABLE search_index_state (
     dimension         BIGINT NOT NULL CHECK (dimension > 0),
     updated_at        TEXT   NOT NULL
 );
+
+-- ---------------------------------------------------------------------------------------------
+-- Accounts: users, browser sessions and personal access tokens
+-- ---------------------------------------------------------------------------------------------
+
+-- A person who signs in. Users are never deleted, so attribution always resolves to a name; an
+-- administrator deactivates them instead. Usernames are unique regardless of case. `password_hash` is an
+-- Argon2id PHC string that carries its own parameters. `created_by` and `updated_by` are NULL only for an
+-- account nobody signed in made (the first administrator, created with `infoscry admin create-user`).
+CREATE TABLE users (
+    id                   TEXT    NOT NULL PRIMARY KEY,
+    username             TEXT    NOT NULL CHECK (length(trim(username)) > 0),
+    display_name         TEXT    NOT NULL CHECK (length(trim(display_name)) > 0),
+    password_hash        TEXT    NOT NULL,
+    role                 TEXT    NOT NULL CHECK (role IN ('ADMIN', 'USER')),
+    active               INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1)),
+    created_at           TEXT    NOT NULL,
+    created_by           TEXT    REFERENCES users (id),
+    updated_at           TEXT    NOT NULL,
+    updated_by           TEXT    REFERENCES users (id),
+    last_sign_in_at      TEXT
+);
+CREATE UNIQUE INDEX users_username_unique ON users (username COLLATE infoscry_nocase);
+
+-- A signed-in browser. The cookie holds a random ID; only its SHA-256 is stored, so a copy of the
+-- database cannot be replayed as a session. A session ends when it is idle too long, reaches its absolute
+-- expiry, is signed out, or its user is deactivated or has their password reset.
+CREATE TABLE sessions (
+    id_hash      TEXT NOT NULL PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    user_agent   TEXT
+);
+CREATE INDEX sessions_user ON sessions (user_id);
+
+-- A personal access token the CLI presents as a bearer token. Only its SHA-256 is stored; the value is
+-- shown once, when it is created. A revoked token keeps its row so its name still shows as revoked.
+CREATE TABLE access_tokens (
+    id           TEXT NOT NULL PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    name         TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    token_hash   TEXT NOT NULL UNIQUE,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT,
+    last_used_at TEXT,
+    revoked_at   TEXT
+);
+CREATE INDEX access_tokens_user ON access_tokens (user_id);

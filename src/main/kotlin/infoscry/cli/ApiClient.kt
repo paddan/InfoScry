@@ -13,7 +13,6 @@ import infoscry.server.PutGlossaryGroupRequest
 import infoscry.correction.CorrectionRuleInput
 import infoscry.collection.CollectionPrompts
 import infoscry.collection.RolePrompts
-import infoscry.config.RuntimeInfo
 import infoscry.domain.CollectionId
 import infoscry.domain.Collection
 import infoscry.domain.Job
@@ -36,11 +35,16 @@ import infoscry.server.IgnorePatternsBody
 import infoscry.server.ImportAcceptedResponse
 import infoscry.server.ImportRequest
 import infoscry.server.JobResponse
-import infoscry.server.LOOPBACK_HOST
 import infoscry.server.ReindexAcceptedResponse
 import infoscry.server.SearchResponse
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.defaultRequest
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.timeout
+import io.ktor.client.request.preparePost
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.utils.io.readUTF8Line
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.post
@@ -64,18 +68,43 @@ import io.ktor.client.request.url
 class RemoteApiFailure(val code: String, override val message: String) : IllegalStateException(message)
 
 /**
- * The CLI's path to a server that owns the data directory.
+ * Where the CLI finds the server and how it proves who it is: `INFOSCRY_URL` (default
+ * `http://127.0.0.1:8080`) and the personal access token in `INFOSCRY_TOKEN`.
  *
- * A CLI command cannot open the database while a server has it — one writer is the whole point of the
- * process lock — so when `runtime.json` names a live server, the CLI asks that server instead of
- * touching the files. The bearer token comes from the same private file the server published it in.
+ * The token is a credential, so [toString] never shows it.
  */
-class LoopbackApi(
-    private val runtime: RuntimeInfo,
-    private val client: HttpClient = HttpClient(CIO),
+class ServerAddress(val url: String, internal val token: String) {
+    override fun toString(): String = "ServerAddress(url=$url)"
+
+    companion object {
+        const val DEFAULT_URL = "http://127.0.0.1:8080"
+
+        /** The address in [environment], or a [CliFailure] that says how to get a token when there is none. */
+        fun fromEnvironment(environment: Map<String, String> = System.getenv()): ServerAddress {
+            val url = environment["INFOSCRY_URL"]?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: DEFAULT_URL
+            require(url.startsWith("http://") || url.startsWith("https://")) { "INFOSCRY_URL must be an http or https URL, was '$url'" }
+            val token = environment["INFOSCRY_TOKEN"]?.trim()?.takeIf { it.isNotEmpty() }
+                ?: throw CliFailure(
+                    "INFOSCRY_TOKEN is not set. Sign in to InfoScry at $url, create a personal access token " +
+                        "under Account, and export it as INFOSCRY_TOKEN.",
+                )
+            return ServerAddress(url, token)
+        }
+    }
+}
+
+/**
+ * The CLI's HTTP client of the InfoScry server. Every request carries the personal access token.
+ */
+class ApiClient(
+    address: ServerAddress,
+    private val client: HttpClient = HttpClient(CIO) {
+        install(HttpTimeout)
+        defaultRequest { headers.append(HttpHeaders.Authorization, "Bearer ${address.token}") }
+    },
 ) : AutoCloseable {
 
-    private val base: String = "http://$LOOPBACK_HOST:${runtime.port}"
+    private val base: String = address.url
 
     suspend fun listCollections(): List<Collection> =
         ApiJson.decodeFromString<CollectionsResponse>(expect(client.get("$base/api/collections"))).collections
@@ -87,7 +116,6 @@ class LoopbackApi(
     ): Collection {
         val request = CreateCollectionRequest(name = name, description = description, ocrLanguages = ocrLanguages)
         val response = client.post("$base/api/collections") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(request))
         }
@@ -97,7 +125,7 @@ class LoopbackApi(
     /** The ignore patterns of the collection named or identified by [collection]. */
     suspend fun ignorePatterns(collection: String): List<String> {
         val id = resolveCollectionId(collection)
-        val response = client.get("$base/api/collections/$id/ignore-patterns") { header() }
+        val response = client.get("$base/api/collections/$id/ignore-patterns")
         return ApiJson.decodeFromString<IgnorePatternsBody>(expect(response)).patterns
     }
 
@@ -105,7 +133,6 @@ class LoopbackApi(
     suspend fun setIgnorePatterns(collection: String, patterns: List<String>): List<String> {
         val id = resolveCollectionId(collection)
         val response = client.put("$base/api/collections/$id/ignore-patterns") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(IgnorePatternsBody(patterns)))
         }
@@ -115,7 +142,7 @@ class LoopbackApi(
     /** The prompts of the collection named or identified by [collection], the shipped Default first in each role. */
     suspend fun listPrompts(collection: String): CollectionPrompts {
         val id = resolveCollectionId(collection)
-        val response = client.get("$base/api/collections/$id/prompts") { header() }
+        val response = client.get("$base/api/collections/$id/prompts")
         val wire = ApiJson.decodeFromString<CollectionPromptsWire>(expect(response))
         val collectionId = CollectionId(id)
         return CollectionPrompts(
@@ -128,7 +155,6 @@ class LoopbackApi(
     suspend fun createPrompt(collection: String, role: LlmPromptRole, name: String, body: String): CollectionPrompt {
         val id = resolveCollectionId(collection)
         val response = client.post("$base/api/collections/$id/prompts") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(CreatePromptRequest(role = role, name = name, body = body)))
         }
@@ -144,7 +170,6 @@ class LoopbackApi(
     ): CollectionPrompt {
         val id = resolveCollectionId(collection)
         val response = client.put("$base/api/collections/$id/prompts/$promptId") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(UpdatePromptRequest(name = name, body = body)))
         }
@@ -153,14 +178,13 @@ class LoopbackApi(
 
     suspend fun deletePrompt(collection: String, promptId: String) {
         val id = resolveCollectionId(collection)
-        expect(client.delete("$base/api/collections/$id/prompts/$promptId") { header() })
+        expect(client.delete("$base/api/collections/$id/prompts/$promptId"))
     }
 
     /** Selects the default for [role]; the server answers with the id it now holds. */
     suspend fun setPromptDefault(collection: String, role: LlmPromptRole, promptId: String): String {
         val id = resolveCollectionId(collection)
         val response = client.put("$base/api/collections/$id/prompt-defaults/${role.name.lowercase()}") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(SetPromptDefaultRequest(promptId = promptId)))
         }
@@ -169,13 +193,12 @@ class LoopbackApi(
 
     suspend fun listCorrections(collection: String): CorrectionListWire {
         val id = resolveCollectionId(collection)
-        return ApiJson.decodeFromString(expect(client.get("$base/api/collections/$id/corrections") { header() }))
+        return ApiJson.decodeFromString(expect(client.get("$base/api/collections/$id/corrections")))
     }
 
     suspend fun putCorrection(collection: String, ruleId: String, input: CorrectionRuleInput): CorrectionRuleWire {
         val id = resolveCollectionId(collection)
         val response = client.put("$base/api/collections/$id/corrections/${ruleId.encodeURLPathPart()}") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(PutCorrectionRequest(input.find, input.replace, input.exactCase)))
         }
@@ -184,13 +207,12 @@ class LoopbackApi(
 
     suspend fun deleteCorrection(collection: String, ruleId: String) {
         val id = resolveCollectionId(collection)
-        expect(client.delete("$base/api/collections/$id/corrections/${ruleId.encodeURLPathPart()}") { header() })
+        expect(client.delete("$base/api/collections/$id/corrections/${ruleId.encodeURLPathPart()}"))
     }
 
     suspend fun previewCorrection(collection: String, input: CorrectionRuleInput): CorrectionPreviewWire {
         val id = resolveCollectionId(collection)
         val response = client.post("$base/api/collections/$id/corrections/preview") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(PreviewCorrectionRequest(input.find, input.replace, input.exactCase)))
         }
@@ -199,13 +221,12 @@ class LoopbackApi(
 
     suspend fun listGlossary(collection: String): GlossaryListWire {
         val id = resolveCollectionId(collection)
-        return ApiJson.decodeFromString(expect(client.get("$base/api/collections/$id/glossary") { header() }))
+        return ApiJson.decodeFromString(expect(client.get("$base/api/collections/$id/glossary")))
     }
 
     suspend fun putGlossaryGroup(collection: String, groupId: String, terms: List<GlossaryTermWire>): GlossaryGroupWire {
         val id = resolveCollectionId(collection)
         val response = client.put("$base/api/collections/$id/glossary/${groupId.encodeURLPathPart()}") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(PutGlossaryGroupRequest(terms)))
         }
@@ -214,7 +235,7 @@ class LoopbackApi(
 
     suspend fun deleteGlossaryGroup(collection: String, groupId: String) {
         val id = resolveCollectionId(collection)
-        expect(client.delete("$base/api/collections/$id/glossary/${groupId.encodeURLPathPart()}") { header() })
+        expect(client.delete("$base/api/collections/$id/glossary/${groupId.encodeURLPathPart()}"))
     }
 
     private fun RolePromptsWire.toDomain(collectionId: CollectionId, role: LlmPromptRole) = RolePrompts(
@@ -246,7 +267,6 @@ class LoopbackApi(
 
     suspend fun previewImport(request: infoscry.jobs.ImportPreviewRequest): infoscry.jobs.ImportPreview {
         val response = client.post("$base/api/imports/preview") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(request))
         }
@@ -255,7 +275,6 @@ class LoopbackApi(
 
     suspend fun enqueueImport(request: ImportRequest): ImportAcceptedResponse {
         val response = client.post("$base/api/imports") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(request))
         }
@@ -277,7 +296,6 @@ class LoopbackApi(
         limit: Int,
     ): infoscry.search.SearchOutcome {
         val response = client.get("$base/api/search") {
-            header()
             url {
                 parameters.append("collection", collection)
                 parameters.append("q", query)
@@ -315,7 +333,6 @@ class LoopbackApi(
     suspend fun enqueueReindex(collection: String?): ReindexAcceptedResponse {
         val request = infoscry.server.ReindexApiRequest(collection = collection)
         val response = client.post("$base/api/reindex") {
-            header()
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(request))
         }
@@ -334,7 +351,6 @@ class LoopbackApi(
 
     suspend fun cancelJob(id: JobId): Job {
         val response = client.post("$base/api/jobs/${id.value}/cancel") {
-            header()
         }
         return ApiJson.decodeFromString<JobResponse>(expect(response)).job.toDomain()
     }
@@ -343,9 +359,6 @@ class LoopbackApi(
         client.close()
     }
 
-    private fun io.ktor.client.request.HttpRequestBuilder.header() {
-        headers.append(HttpHeaders.Authorization, "Bearer ${runtime.bearerToken.value}")
-    }
 
     private fun infoscry.server.JobApiView.toDomain() = Job(
         id = id,
@@ -383,6 +396,63 @@ class LoopbackApi(
         createdAt = createdAt,
         updatedAt = updatedAt,
     )
+
+    /**
+     * Asks a question and hands each streamed event to [onEvent] as it arrives. A refusal before the stream
+     * starts (an unknown profile, a disabled one, an unknown prompt) is a [RemoteApiFailure].
+     */
+    internal suspend fun ask(request: infoscry.server.AskApiRequest, onEvent: (infoscry.server.AskWire) -> Unit) {
+        client.preparePost("$base/api/ask") {
+            contentType(ContentType.Application.Json)
+            setBody(ApiJson.encodeToString(request))
+            timeout { requestTimeoutMillis = io.ktor.client.plugins.HttpTimeoutConfig.INFINITE_TIMEOUT_MS }
+        }.execute { response ->
+            if (!response.status.isSuccess()) {
+                expect(response)
+                return@execute
+            }
+            val channel = response.bodyAsChannel()
+            while (true) {
+                val line = channel.readUTF8Line() ?: break
+                if (!line.startsWith("data: ")) continue
+                onEvent(ApiJson.decodeFromString<infoscry.server.AskWire>(line.removePrefix("data: ")))
+            }
+        }
+    }
+
+    // ---- LLM profiles ----
+
+    suspend fun listLlmProfiles(): infoscry.server.LlmProfilesResponse =
+        ApiJson.decodeFromString(expect(client.get("$base/api/llm/profiles")))
+
+    suspend fun createLlmProfile(request: infoscry.server.LlmProfileRequest): infoscry.server.LlmProfileApiView =
+        ApiJson.decodeFromString<infoscry.server.LlmProfileResponse>(
+            expect(
+                client.post("$base/api/llm/profiles") {
+                    contentType(ContentType.Application.Json)
+                    setBody(ApiJson.encodeToString(request))
+                },
+            ),
+        ).profile
+
+    suspend fun setLlmDefault(role: LlmPromptRole, profileId: String): infoscry.server.LlmDefaultResponse =
+        ApiJson.decodeFromString(
+            expect(
+                client.put("$base/api/llm/defaults/${role.name}") {
+                    contentType(ContentType.Application.Json)
+                    setBody(ApiJson.encodeToString(infoscry.server.LlmDefaultRequest(profileId)))
+                },
+            ),
+        )
+
+    suspend fun probeLlmProfile(profileId: String): infoscry.server.LlmProfileProbeResponse =
+        ApiJson.decodeFromString(
+            expect(
+                client.post("$base/api/llm/profiles/${profileId.encodeURLPathPart()}/probe") {
+                    timeout { requestTimeoutMillis = io.ktor.client.plugins.HttpTimeoutConfig.INFINITE_TIMEOUT_MS }
+                },
+            ),
+        )
 
     private suspend fun expect(response: HttpResponse): String {
         val body = response.bodyAsText()

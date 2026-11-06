@@ -10,20 +10,9 @@ import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.options.required
 import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.path
-import infoscry.AppContext
-import infoscry.config.AppPaths
-import infoscry.config.ProcessLockUnavailable
-import infoscry.config.RuntimeInfo
 import infoscry.domain.DocumentStatus
-import infoscry.logging.LoggingBootstrap
-import infoscry.search.SearchMode
 import infoscry.search.SearchOutcome
-import infoscry.search.SearchUnavailableException
-import infoscry.search.InvalidSearchFilterException
 import infoscry.server.ApiJson
-import infoscry.server.PRODUCT_NAME
-import java.nio.file.Files
-import java.nio.file.Path
 import kotlinx.coroutines.runBlocking
 
 /** What `infoscry search --json` reports, in the shape the API reports it in. */
@@ -88,60 +77,24 @@ class SearchCommand : CliktCommand(name = "search") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
-        val paths = AppPaths.of(options.dataDir)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
         val outcome = try {
-            RuntimeInfo.discover(paths.runtimeFile)?.let { remote ->
-                searchThroughServer(remote)
-            } ?: searchHere(paths)
-        } catch (refused: SearchUnavailableException) {
-            // A search can be refused for something the caller can fix (an over-long query) or something
-            // the environment has to fix (no model, no usable GPU). Either way the status code travels
-            // as the failure text, so the terminal says what to do instead of a stack trace.
-            throw CliFailure("search was refused ${refused.code}: ${refused.remedy}", refused)
+            CliSession.connect().use { session ->
+                runBlocking {
+                    session.api.search(collection = collection, query = query, mode = mode, filters = buildFilters(), limit = limit)
+                }
+            }
         } catch (remote: RemoteApiFailure) {
-            throw CliFailure(remote.message.orEmpty(), remote)
-        } catch (invalid: InvalidSearchFilterException) {
+            // The code travels with the remedy, so a script can tell "install the model" from "fix the query".
+            throw CliFailure("search was refused ${remote.code}: ${remote.message}", remote)
+        } catch (invalid: IllegalArgumentException) {
             throw CliFailure("search filter is invalid: ${invalid.message}", invalid)
         }
         report(outcome, options)
-    }
-
-    /** Asks the server that owns the data directory, so the lock is never contended for a read. */
-    private fun searchThroughServer(runtime: RuntimeInfo): SearchOutcome {
-        LoopbackApi(runtime).use { api ->
-            return runBlocking {
-                api.search(collection = collection, query = query, mode = mode, filters = buildFilters(), limit = limit)
-            }
-        }
-    }
-
-    /** Opens the archive for this one read: nobody else owns the directory. */
-    private fun searchHere(paths: AppPaths): SearchOutcome {
-        LoggingBootstrap.useLogsDirectory(paths)
-        val context = try {
-            AppContext.open(paths)
-        } catch (unavailable: ProcessLockUnavailable) {
-            throw CliFailure(unavailable.message ?: "another InfoScry process owns ${paths.root}", unavailable)
-        }
-        context.use { open ->
-            return runBlocking {
-                val collection = open.collectionService.requireActiveByNameOrId(collection)
-                open.search.search(
-                    queryText = query,
-                    mode = infoscry.server.parseSearchMode(mode),
-                    filters = buildFilters(collectionId = collection.id),
-                    // The command is the same interactive surface as the web Search box: a query the
-                    // archive has never seen a word of is answered with nothing, not with neighbours.
-                    requireLexicalAnchor = true,
-                )
-            }
-        }
     }
 
     private fun buildFilters(collectionId: infoscry.domain.CollectionId? = null) = infoscry.search.SearchFilters(

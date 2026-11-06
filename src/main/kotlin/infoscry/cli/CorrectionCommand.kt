@@ -6,16 +6,13 @@ import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
-import com.github.ajalt.clikt.parameters.types.path
 import com.ibm.icu.lang.UCharacter
-import infoscry.config.AppPaths
 import infoscry.correction.CorrectionRuleInput
 import infoscry.correction.CorrectionRules
 import infoscry.correction.InvalidCorrectionException
 import infoscry.domain.Job
 import infoscry.domain.JobState
 import infoscry.server.CorrectionListWire
-import infoscry.jobs.ImportJobHandler
 import infoscry.server.ApiJson
 import infoscry.server.CorrectionPreviewWire
 import java.util.UUID
@@ -46,14 +43,13 @@ class ListCorrectionsCommand : CliktCommand(name = "list") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val list = runBlocking { session.listCorrections(collection) }
                 if (options.json) {
                     echo(ApiJson.encodeToString(list))
@@ -83,15 +79,14 @@ class AddCorrectionCommand : CliktCommand(name = "add") {
 
     private val id by option("--id", help = "The rule's id; by default one derived from the word it finds")
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, false, dataDirOption)
+        val options = resolveOptions(parentOptions, false, null)
         val input = CorrectionRuleInput(find, replace, exactCase)
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val ruleId = id ?: existingIdOf(runBlocking { session.listCorrections(collection) }, input) ?: UUID.randomUUID().toString()
                 echo(describe(runBlocking { session.previewCorrection(collection, input) }))
                 runBlocking { session.putCorrection(collection, ruleId, input) }
@@ -113,14 +108,13 @@ class RemoveCorrectionCommand : CliktCommand(name = "remove") {
 
     private val rule by argument("rule", help = "The word the rule finds, or its id")
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, false, dataDirOption)
+        val options = resolveOptions(parentOptions, false, null)
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val folded = UCharacter.foldCase(rule, UCharacter.FOLD_CASE_DEFAULT)
                 val match = runBlocking { session.listCorrections(collection) }.rules.firstOrNull {
                     it.id == rule || UCharacter.foldCase(it.find, UCharacter.FOLD_CASE_DEFAULT) == folded
@@ -154,14 +148,13 @@ class PreviewCorrectionCommand : CliktCommand(name = "preview") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val preview = runBlocking { session.previewCorrection(collection, CorrectionRuleInput(find, replace, exactCase)) }
                 if (options.json) {
                     echo(ApiJson.encodeToString(preview))
@@ -195,14 +188,11 @@ private fun existingIdOf(list: CorrectionListWire, input: CorrectionRuleInput): 
 }
 
 /**
- * Runs the collection's correction job here and waits for it when this process owns the archive; with a server
- * running, the server owns it and this returns `null` at once.
+ * Waits for the collection's correction job, which the server started when the rule was saved or removed;
+ * `null` when there is none.
  */
 private fun followJob(session: CliSession, collection: String): Job? {
-    val local = session as? CliSession.Local ?: return null
-    val context = local.context
-    val job = context.correctionService.apply(context.collectionService.requireActiveByNameOrId(collection).id)
-    ImportJobHandler.attachTo(context, documentEmbedder = productionImportEmbedder(context))
+    val job = runBlocking { session.listCorrections(collection) }.job ?: return null
     return runBlocking { awaitTerminalJob(lookup = { session.job(job.id) }, what = "corrections") }
 }
 

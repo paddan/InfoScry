@@ -20,7 +20,6 @@ import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
-import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.llm.CollectionPrompt
 import infoscry.llm.LlmPromptRole
@@ -39,15 +38,14 @@ class ListCollectionsCommand : CliktCommand(name = "list") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
 
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val collections = runBlocking { session.listCollections() }
                 if (options.json) {
                     echo(ApiJson.encodeToString(CollectionsResponse(collections)))
@@ -82,25 +80,19 @@ class CreateCollectionCommand : CliktCommand(name = "create") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
 
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val created = runBlocking { session.createCollection(name, description) }
                 if (options.json) {
                     echo(ApiJson.encodeToString(CollectionResponse(created)))
                 } else {
                     echo("Created collection '${created.name}' (${created.id.value}).")
-                    if (session.isRemote) {
-                        // Worth saying: the collection lives in the running server, not in this
-                        // short-lived process, so it survives this command finishing.
-                        echo("Added through the running server.", err = true)
-                    }
                 }
             }
         } catch (failure: Exception) {
@@ -135,16 +127,15 @@ class ListIgnoreCommand : CliktCommand(name = "list") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
         val target = ignoreTarget()
 
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 printPatterns(runBlocking { session.ignorePatterns(target) }, options.json)
             }
         } catch (failure: Exception) {
@@ -169,12 +160,11 @@ class SetIgnoreCommand : CliktCommand(name = "set") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
         val target = ignoreTarget()
         val lines = patterns + (file?.let { Files.readAllLines(it) } ?: emptyList())
         if (clear && lines.isNotEmpty()) throw CliFailure("--clear cannot be combined with patterns or --file")
@@ -185,7 +175,7 @@ class SetIgnoreCommand : CliktCommand(name = "set") {
         try {
             // Validated here as well as by the service, so a bad pattern is refused before a server is contacted.
             IgnorePatterns.of(lines)
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 printPatterns(runBlocking { session.setIgnorePatterns(target, lines) }, options.json)
             }
         } catch (failure: Exception) {
@@ -245,15 +235,14 @@ class ListPromptsCommand : CliktCommand(name = "list") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
 
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val prompts = runBlocking { session.listPrompts(collection) }
                 if (options.json) {
                     echo(ApiJson.encodeToString(prompts.toWire()))
@@ -278,15 +267,14 @@ class ShowPromptCommand : CliktCommand(name = "show") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
 
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val selected = selectPrompt(runBlocking { session.listPrompts(collection) }, role, prompt, collection)
                 if (options.json) echo(ApiJson.encodeToString(selected.toWire())) else writeStdout(selected.body)
             }
@@ -309,16 +297,15 @@ class CreatePromptCommand : CliktCommand(name = "create") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
 
         try {
             val body = readPromptBody(file)
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val created = runBlocking { session.createPrompt(collection, role, name, body) }
                 if (options.json) {
                     echo(ApiJson.encodeToString(created.toWire()))
@@ -350,17 +337,16 @@ class UpdatePromptCommand : CliktCommand(name = "update") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
         if (name == null && file == null) throw CliFailure("Give --name or --file to change, or both.")
 
         try {
             val newBody = file?.let { readPromptBody(it) }
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val current = selectPrompt(runBlocking { session.listPrompts(collection) }, role, prompt, collection)
                 val saved = runBlocking {
                     session.updatePrompt(collection, role, current.id, name ?: current.name, newBody ?: current.body)
@@ -391,15 +377,14 @@ class DeletePromptCommand : CliktCommand(name = "delete") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
 
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val found = findPrompt(runBlocking { session.listPrompts(collection) }.roleOf(role), prompt)
                 if (found != null) runBlocking { session.deletePrompt(collection, found.id) }
                 if (options.json) {
@@ -427,15 +412,14 @@ class UsePromptCommand : CliktCommand(name = "use") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
 
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val target = selectPrompt(runBlocking { session.listPrompts(collection) }, role, prompt, collection)
                 val selected = runBlocking { session.setPromptDefault(collection, role, target.id) }
                 if (options.json) {

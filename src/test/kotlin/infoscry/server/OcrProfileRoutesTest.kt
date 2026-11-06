@@ -359,8 +359,8 @@ class OcrProfileRoutesTest {
             credential = Credential.WRONG_CSRF,
         )
 
-        assertEquals(HttpStatusCode.Unauthorized, unauthenticated.status, unauthenticated.bodyAsText())
-        assertEquals(HttpStatusCode.Unauthorized, wrongCredential.status, wrongCredential.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, unauthenticated.status, unauthenticated.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, wrongCredential.status, wrongCredential.bodyAsText())
         // Only the rightly credentialed create happened, and the refused delete disabled nothing.
         assertEquals(1, profileCount())
         assertTrue(harness.context.ocr.require(profileIdOf(created)).enabled)
@@ -545,7 +545,7 @@ class OcrProfileRoutesTest {
             credential = Credential.CSRF,
         )
 
-        assertEquals(HttpStatusCode.Unauthorized, unauthenticated.status, unauthenticated.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, unauthenticated.status, unauthenticated.bodyAsText())
         assertEquals(HttpStatusCode.BadRequest, withBody.status, withBody.bodyAsText())
         assertContains(withBody.bodyAsText(), "INVALID_REQUEST")
         // Whitespace is a caller sending a body, and the endpoint takes none: reading it as "blank" would
@@ -597,6 +597,7 @@ class OcrProfileRoutesTest {
                         "POST /api/ocr/profiles/$id/probe HTTP/1.1\r\n" +
                             "Host: 127.0.0.1:$port\r\n" +
                             "$CSRF_HEADER: ${harness.csrfToken}\r\n" +
+                            "Cookie: $SESSION_COOKIE=${harness.sessionCookie}\r\n" +
                             "Content-Type: application/json\r\n" +
                             "Content-Length: 12\r\n" +
                             "Connection: close\r\n\r\n"
@@ -740,7 +741,7 @@ class OcrProfileRoutesTest {
         val llm = llmProfile("Reader", "gpt-4o")
         harness.context.llm.update(llm.id, llm.copy(enabled = false))
         assertEquals(HttpStatusCode.BadRequest, fromLlm(llm.id).status)
-        assertEquals(HttpStatusCode.Unauthorized, fromLlm(llm.id, Credential.NONE).status)
+        assertEquals(HttpStatusCode.Forbidden, fromLlm(llm.id, Credential.NONE).status)
         assertEquals(0, profileCount())
     }
 

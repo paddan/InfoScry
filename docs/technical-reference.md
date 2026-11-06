@@ -8,7 +8,7 @@ Current feature contracts: [OCR workflow](ocr-workflow.md),
 
 ## Architecture
 
-One Kotlin/JVM process owns the services, loopback web server, persistent jobs,
+One Kotlin/JVM process owns the services, web server, persistent jobs,
 managed library, database, search index and LLM adapters. HTTP routes and CLI
 commands delegate to shared services. The frontend is built as static assets
 and served by Ktor.
@@ -36,7 +36,6 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 | Path | Contents |
 |---|---|
 | `infoscry.lock` | Process ownership lock |
-| `runtime.json` | Running-server connection information |
 | `library/` | Immutable managed copies and document artifacts |
 | `models/` | Installed embedding model and tokenizer |
 | `logs/` | Structured application logs |
@@ -74,10 +73,10 @@ checkpoints are committed per unit with durable artifact references. Restarting
 resumes committed work, including OCR. Re-embedding does not invalidate
 extraction checkpoints.
 
-A standalone CLI import owns processing until completion, regardless of
-`--wait`. With a running server, that server owns queued jobs. CLI
-profile-management commands require exclusive ownership of the archive;
-the browser manages profiles through the running server.
+The server owns every job. The CLI is an HTTP client of it (`INFOSCRY_URL`,
+`INFOSCRY_TOKEN`) and never opens the database, except `infoscry admin`, which
+changes account rows directly so the first administrator can be created before
+the server runs.
 
 The job worker runs two lanes, each claiming its oldest queued job: up to two
 imports, rescans, retries, reindexes or correction runs at once, and beside
@@ -387,26 +386,48 @@ The [design](specs/2026-10-23-collection-glossary-design.md) is implemented.
   `infoscry collection glossary list|add|remove`.
 - Terms are user content and stay out of logs and error messages.
 
-## Privacy and local API boundaries
+## Privacy and API boundaries
 
 Originals, extracted text, embeddings, indexes and saved conversations stay
 local. Ask and Investigate send prompts, questions, selected evidence and
 citation metadata to the configured OpenAI-compatible or Anthropic endpoint.
 That endpoint may be external; these features are not necessarily offline.
 
-The server binds only to `127.0.0.1` and checks loopback Host headers. Read-only
-requests need no credential. Mutations require either the CLI's bearer token or
-the browser's CSRF token; credentials are generated per server launch.
-See [Security.kt](../src/main/kotlin/infoscry/server/Security.kt).
+The server binds `INFOSCRY_BIND` (default `127.0.0.1:8080`). The `Host` header
+must be a loopback name or the host of `INFOSCRY_PUBLIC_ORIGIN`, and a mutation
+whose `Origin` is present must come from that origin or the loopback origin it
+addressed. Every `/api/` route except `GET /api/session`, sign-in and sign-out
+needs a signed-in caller: a browser session (cookie `infoscry_session`,
+`HttpOnly`, `SameSite=Lax`, `Secure` behind HTTPS) or a personal access token
+(`Authorization: Bearer isc_…`). A mutation with the cookie also carries the
+session's CSRF token in `X-InfoScry-Csrf`; it is derived from the session ID,
+so it is bound to that session. Only SHA-256 digests of session IDs and tokens
+are stored. A user whose password was reset may only change it. See
+[Security.kt](../src/main/kotlin/infoscry/server/Security.kt) and
+[AccountService](../src/main/kotlin/infoscry/account/AccountService.kt).
+
+Accounts are local: usernames are case-insensitive, passwords are at least 12
+characters and hashed with Argon2id (19 MiB, two passes, one lane; the
+parameters are stored in the hash). Sessions end after 12 idle hours or 14
+days. Failed sign-ins are limited to 10 per username and 50 per client address
+in 15 minutes (429 with `Retry-After`); the answer never says whether the
+username exists. Users are never deleted; deactivation ends their sessions and
+revokes their tokens, and the last active administrator cannot be deactivated
+or demoted. Personal access tokens are created and revoked only from a browser
+session. Until memberships exist (ticket 6 of the multi-user spec), every
+signed-in user can use every collection and only user management is limited to
+administrators.
 
 API keys are read only from environment variables. Profiles and browser requests
 carry the variable's name, never its value. Keys, questions, answers, document
-text and provider authorization headers must stay out of logs and errors.
+text, provider authorization headers, passwords, session IDs, CSRF tokens and
+access tokens must stay out of logs and errors; usernames may be logged for
+sign-in and administration events.
 
 Imported instructions are untrusted source data. LLM tools use collection-scoped
 opaque IDs: they cannot switch collections, access arbitrary paths or browse
-the web. Multi-user/public hosting, Windows, knowledge graphs, DRM bypass and
-an external MCP server are outside the local-use scope.
+the web. Windows, knowledge graphs, DRM bypass and an external MCP server are
+outside scope.
 
 ## LLM profiles and model catalog
 
@@ -417,7 +438,8 @@ default profiles.
 
 Admin's model picker uses read-only `GET /api/llm/presets` and
 `GET /api/llm/catalog`. Catalog parameters are `provider`, `endpoint` and
-`apiKeyEnvironmentVariable`; these GET requests need no bearer or CSRF token.
+`apiKeyEnvironmentVariable`. The catalog sends the server's key to the named
+endpoint, so it asks what a mutation does: a token, or the session's CSRF token.
 Only the server reads the named API-key variable.
 
 Catalog prices come from OpenRouter's `/models` response, the built-in

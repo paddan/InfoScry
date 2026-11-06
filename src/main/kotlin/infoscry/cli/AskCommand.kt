@@ -3,90 +3,55 @@ package infoscry.cli
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.findObject
 import com.github.ajalt.clikt.parameters.arguments.argument
+import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.options.required
-import com.github.ajalt.clikt.parameters.options.flag
-import com.github.ajalt.clikt.parameters.types.path
-import infoscry.AppContext
-import infoscry.ask.AskEvent
-import infoscry.ask.AskRequest
-import infoscry.ask.AskService
-import infoscry.ask.StructuredEvidenceSource
-import infoscry.collection.InvalidPromptRequest
-import infoscry.config.AppPaths
-import infoscry.domain.CollectionId
-import infoscry.llm.AnthropicClient
-import infoscry.llm.LlmProvider
-import infoscry.llm.LlmPromptRole
-import infoscry.llm.OpenAiCompatibleClient
-import infoscry.llm.PromptService
-import infoscry.llm.requireDispatchable
 import infoscry.server.ApiJson
+import infoscry.server.AskApiRequest
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.flow.collect
 
+/** `infoscry ask` — one question to a collection, answered by the server and streamed here. */
 class AskCommand : CliktCommand(name = "ask") {
     private val collection by option("--collection").required()
     private val profile by option("--profile").required()
     private val promptRef by option("--prompt", help = "The Ask prompt's name or id (default: the collection default)")
     private val question by argument()
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
-        val context = AppContext.open(AppPaths.of(options.dataDir))
-        context.use { open ->
-            val selected = open.llm.findByName(profile) ?: throw CliFailure("no such LLM profile")
-            // `ask` is a call, so it obeys the same rule the routes do: a profile retired by a person, or
-            // switched off because its address carried a credential, is refused
-            // instead of dispatched to.
-            try {
-                selected.requireDispatchable()
-            } catch (refused: IllegalArgumentException) {
-                throw CliFailure(refused.message ?: "the LLM profile '$profile' is disabled", refused)
-            }
-            val service = AskService(open.search, PromptService(), client = { p ->
-                when (p.provider) {
-                    LlmProvider.OPENAI_COMPATIBLE -> OpenAiCompatibleClient(p, System::getenv)
-                    LlmProvider.ANTHROPIC -> AnthropicClient(p, System::getenv)
-                }
-            }, persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
-                open.conversations.persistAsk(ask.collectionId, ask.profile, ask.prompt, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
-            }, evidenceSession = StructuredEvidenceSource(open.content, open.paths).let { source -> { id -> source.session(id)::textOf } },
-                glossary = open.glossaryService::snapshot)
-            runBlocking {
-                val events = mutableListOf<AskEvent>()
-                val streamed = StringBuilder()
-                val collectionId = CollectionId(open.collectionService.requireActiveByNameOrId(collection).id.value)
-                val prompt = try {
-                    open.collectionPrompts.resolve(collectionId, LlmPromptRole.ASK, promptRef)
-                } catch (refused: InvalidPromptRequest) {
-                    // With a reference, the service refuses only a name or id it did not find; without one, its
-                    // message is the explanation.
-                    val reference = promptRef ?: throw CliFailure(refused.message ?: "the Ask prompt is not available", refused)
-                    throw CliFailure("no Ask prompt named or identified by '$reference' in collection '$collection'", refused)
-                }
-                service.ask(AskRequest(collectionId, question, selected, prompt)).collect { event ->
-                    if (options.json) events += event else when (event) {
-                        is AskEvent.Delta -> { streamed.append(event.text); echo(event.text, trailingNewline = false) }
-                        is AskEvent.Citation -> echo(" [${event.evidenceId}]")
-                        // A correction replaces the streamed text; surface it instead of the uncorrected answer.
-                        is AskEvent.Done -> correctedTail(streamed.toString(), event.answer)?.let { echo("\n\nCorrected answer:\n$it") }
-                        is AskEvent.Error -> throw CliFailure("${event.code}: ${event.message}")
-                        else -> Unit
+        val options = resolveOptions(parentOptions, jsonFlag, null)
+        val streamed = StringBuilder()
+        var answer: String? = null
+        val errors = mutableListOf<String>()
+        try {
+            CliSession.connect().use { session ->
+                runBlocking {
+                    session.api.ask(AskApiRequest(collection, question, profile, promptRef)) { event ->
+                        when (event.type) {
+                            "delta" -> {
+                                streamed.append(event.text.orEmpty())
+                                if (!options.json) echo(event.text.orEmpty(), trailingNewline = false)
+                            }
+                            "citation" -> if (!options.json) echo(" [${event.id}]")
+                            "done" -> {
+                                answer = event.text.orEmpty()
+                                if (!options.json) correctedTail(streamed.toString(), answer.orEmpty())?.let { echo("\n\nCorrected answer:\n$it") }
+                            }
+                            "error" -> {
+                                errors += event.code.orEmpty()
+                                if (!options.json) throw CliFailure("${event.code}: ${event.message}")
+                            }
+                        }
                     }
                 }
-                if (options.json) echo(jsonResult(events))
             }
+        } catch (refused: RemoteApiFailure) {
+            throw CliFailure(refused.message, refused)
         }
-    }
-
-    private fun jsonResult(events: List<AskEvent>): String {
-        val answer = events.filterIsInstance<AskEvent.Done>().lastOrNull()?.answer.orEmpty()
-        val errors = events.filterIsInstance<AskEvent.Error>().map { it.code }
-        return "{\"answer\":${ApiJson.encodeToString(answer)},\"errors\":${ApiJson.encodeToString(errors)}}"
+        if (options.json) {
+            echo("{\"answer\":${ApiJson.encodeToString(answer.orEmpty())},\"errors\":${ApiJson.encodeToString(errors.toList())}}")
+        }
     }
 }
 

@@ -1,8 +1,8 @@
 # InfoScry
 
-InfoScry is a local, single-user application for searching a document archive
-and asking questions with citations back to the sources. It provides a web
-reader and a command-line interface.
+InfoScry is a server for searching a document archive and asking questions with
+citations back to the sources. People sign in with their own accounts; it
+provides a web reader and a command-line interface that talks to the server.
 
 ## What you can do
 
@@ -47,9 +47,11 @@ which may be an external service.
 
 ## Project status
 
-Implementation is in progress. The backend, CLI and web reader exist; state is
-stored in PostgreSQL as the first step of the
-[multi-user server](docs/specs/2026-11-05-multi-user-server-design.md);
+Implementation is in progress. The backend, CLI and web reader exist. The
+[multi-user server](docs/specs/2026-11-05-multi-user-server-design.md) is under
+way: state and search are in PostgreSQL, people sign in with local accounts, and
+the CLI is a client of the server with a personal access token. Memberships and
+per-collection roles, attribution and uploads come next;
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
 The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan (including No OCR, which uses the
@@ -122,8 +124,9 @@ evidence name within the request budget. See the
 [usage](docs/usage.md#names-with-the-same-meaning). `GlossaryBrowserAcceptanceTest`
 covers settings-to-search against fake embeddings.
 
-The project targets local use on macOS arm64. CI, distributable packaging and
-public or multi-user hosting are outside the current scope.
+The server runs on macOS arm64 (CoreML embeddings), with Postgres in Docker. CI,
+distributable packaging and a containerized application are outside the current
+scope.
 
 ## License
 

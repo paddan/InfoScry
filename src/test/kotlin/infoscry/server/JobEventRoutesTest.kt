@@ -62,7 +62,7 @@ class JobEventRoutesTest {
         val job = harness.context.jobs.enqueue(JobType.IMPORT, total = 3)
 
         withTimeout(STREAM_TIMEOUT_MILLIS) {
-            harness.client.prepareGet(harness.url + eventsPath(job)).execute { response ->
+            harness.client.prepareGet(harness.url + eventsPath(job)) { harness.signedIn(this) }.execute { response ->
                 assertEquals(HttpStatusCode.OK, response.status)
                 val event = assertNotNull(
                     readEvent(response.bodyAsChannel()),
@@ -83,7 +83,7 @@ class JobEventRoutesTest {
         harness.context.jobs.claim(job.id)
 
         withTimeout(STREAM_TIMEOUT_MILLIS) {
-            harness.client.prepareGet(harness.url + eventsPath(job)).execute { response ->
+            harness.client.prepareGet(harness.url + eventsPath(job)) { harness.signedIn(this) }.execute { response ->
                 val channel = response.bodyAsChannel()
                 val first = assertNotNull(readEvent(channel), "the stream must emit the current state first")
                 assertEquals(JobState.RUNNING, decode(first.data).state)
@@ -109,7 +109,7 @@ class JobEventRoutesTest {
         harness.context.jobs.claim(job.id)
 
         withTimeout(STREAM_TIMEOUT_MILLIS) {
-            harness.client.prepareGet(harness.url + eventsPath(job)).execute { response ->
+            harness.client.prepareGet(harness.url + eventsPath(job)) { harness.signedIn(this) }.execute { response ->
                 val channel = response.bodyAsChannel()
                 assertNotNull(readEvent(channel), "the stream must emit the current state first")
 
@@ -129,7 +129,7 @@ class JobEventRoutesTest {
         val job = harness.context.jobs.enqueue(JobType.IMPORT)
 
         val firstId = withTimeout(STREAM_TIMEOUT_MILLIS) {
-            harness.client.prepareGet(harness.url + eventsPath(job)).execute { response ->
+            harness.client.prepareGet(harness.url + eventsPath(job)) { harness.signedIn(this) }.execute { response ->
                 assertNotNull(readEvent(response.bodyAsChannel()), "the stream must emit the current state first").id
             }
         }
@@ -139,6 +139,7 @@ class JobEventRoutesTest {
 
         withTimeout(STREAM_TIMEOUT_MILLIS) {
             harness.client.prepareGet(harness.url + eventsPath(job)) {
+                harness.signedIn(this)
                 header("Last-Event-ID", firstId.toString())
             }.execute { response ->
                 val resumed = assertNotNull(
@@ -157,6 +158,7 @@ class JobEventRoutesTest {
 
         listOf("not-a-number", "-1", "9223372036854775807", "9223372036854775808").forEach { lastEventId ->
             val response = harness.client.get(harness.url + eventsPath(job)) {
+                harness.signedIn(this)
                 header("Last-Event-ID", lastEventId)
             }
             assertEquals(HttpStatusCode.BadRequest, response.status, "Last-Event-ID='$lastEventId': ${response.bodyAsText()}")
@@ -171,7 +173,7 @@ class JobEventRoutesTest {
         harness.context.jobs.claim(job.id)
 
         val firstId = withTimeout(STREAM_TIMEOUT_MILLIS) {
-            harness.client.prepareGet(harness.url + eventsPath(job)).execute { response ->
+            harness.client.prepareGet(harness.url + eventsPath(job)) { harness.signedIn(this) }.execute { response ->
                 assertEquals(HttpStatusCode.OK, response.status)
                 val event = assertNotNull(readEvent(response.bodyAsChannel()), "the stream must send its opening snapshot")
                 assertEquals(1L, event.id)
@@ -180,6 +182,7 @@ class JobEventRoutesTest {
         }
         val idleResponse = withTimeout(STREAM_TIMEOUT_MILLIS) {
             harness.client.prepareGet(harness.url + eventsPath(job)) {
+                harness.signedIn(this)
                 header("Last-Event-ID", firstId.toString())
             }.execute { response ->
                 val channel = response.bodyAsChannel()
@@ -194,6 +197,7 @@ class JobEventRoutesTest {
         harness.context.jobs.progress(job.id, stage = "ocr", completed = 2)
         withTimeout(STREAM_TIMEOUT_MILLIS) {
             harness.client.prepareGet(harness.url + eventsPath(job)) {
+                harness.signedIn(this)
                 header("Last-Event-ID", idleResponse.toString())
             }.execute { response ->
                 val resumed = assertNotNull(
@@ -210,12 +214,12 @@ class JobEventRoutesTest {
     }
 
     @Test
-    fun `the job events stream is a read and needs no credential`() = runBlocking {
+    fun `the job events stream is a read and needs a session but no CSRF token`() = runBlocking {
         val job = harness.context.jobs.enqueue(JobType.IMPORT)
 
-        // No bearer and no CSRF token: reads are loopback-only and need no credential (Security.kt).
+        // A session cookie and no CSRF token: a read needs no proof of intent (Security.kt).
         withTimeout(STREAM_TIMEOUT_MILLIS) {
-            harness.client.prepareGet(harness.url + eventsPath(job)).execute { response ->
+            harness.client.prepareGet(harness.url + eventsPath(job)) { harness.signedIn(this) }.execute { response ->
                 assertEquals(HttpStatusCode.OK, response.status)
                 val first = assertNotNull(readEvent(response.bodyAsChannel()), "the stream must open without a credential")
                 assertEquals(1L, first.id, "the first event of a fresh stream has id 1")
@@ -232,7 +236,7 @@ class JobEventRoutesTest {
         harness.context.jobs.fail(job.id, code = "NEEDS_TESSERACT", message = "Tesseract is not installed at $failurePath")
 
         withTimeout(STREAM_TIMEOUT_MILLIS) {
-            harness.client.prepareGet(harness.url + eventsPath(job)).execute { response ->
+            harness.client.prepareGet(harness.url + eventsPath(job)) { harness.signedIn(this) }.execute { response ->
                 val channel = response.bodyAsChannel()
                 val event = assertNotNull(readEvent(channel), "the stream must emit the current state first")
                 val data = event.data

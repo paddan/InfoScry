@@ -32,7 +32,6 @@ class AppPathsTest {
         assertEquals(dataDir.toAbsolutePath().normalize(), paths.root)
         assertEquals(listOf("library", "logs", "models", "tmp"), childDirectoryNames(paths))
         assertEquals(paths.root.resolve("infoscry.lock"), paths.lockFile)
-        assertEquals(paths.root.resolve("runtime.json"), paths.runtimeFile)
     }
 
     @Test

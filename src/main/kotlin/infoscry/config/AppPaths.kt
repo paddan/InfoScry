@@ -56,7 +56,6 @@ internal object PrivatePermissions {
  *
  * ```
  * <root>/infoscry.lock    single-writer process lock
- * <root>/runtime.json     PID, port and bearer token, present only while the server runs
  * <root>/library/<collection>/<document>/original.<ext>   immutable imported copy
  * <root>/library/<collection>/<document>/artifacts/       generated artifacts for that document
  * <root>/models/          pinned embedding model files
@@ -67,7 +66,6 @@ internal object PrivatePermissions {
 class AppPaths private constructor(val root: Path) {
 
     val lockFile: Path = root.resolve("infoscry.lock")
-    val runtimeFile: Path = root.resolve("runtime.json")
     val libraryDir: Path = root.resolve(LIBRARY_DIRECTORY)
     val modelsDir: Path = root.resolve("models")
     val logsDir: Path = root.resolve(LOGS_DIRECTORY)

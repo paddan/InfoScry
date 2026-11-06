@@ -175,6 +175,12 @@ class AppContext private constructor(
             injectedIndexRemover
         }
 
+    /** Users, browser sessions and personal access tokens. */
+    val accounts: infoscry.account.AccountService = infoscry.account.AccountService(
+        infoscry.storage.AccountStore(database),
+        sessions = infoscry.account.SessionSettings.fromEnvironment(),
+    )
+
     /**
      * OCR profiles, kept apart from the Ask/Investigate profiles.
      *

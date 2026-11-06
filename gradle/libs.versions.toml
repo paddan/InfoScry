@@ -21,6 +21,8 @@ commonsCsv = "1.14.1"
 onnxruntime = "1.22.0"
 djlTokenizers = "0.33.0"
 logback = "1.5.18"
+# Argon2id password hashing (pure Java), for the accounts of the multi-user server.
+bouncycastle = "1.86"
 junit = "5.12.2"
 junitPlatform = "1.12.2"
 
@@ -47,6 +49,7 @@ jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
 commons-csv = { module = "org.apache.commons:commons-csv", version.ref = "commonsCsv" }
 onnxruntime = { module = "com.microsoft.onnxruntime:onnxruntime", version.ref = "onnxruntime" }
 djl-tokenizers = { module = "ai.djl.huggingface:tokenizers", version.ref = "djlTokenizers" }
+bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junitPlatform" }

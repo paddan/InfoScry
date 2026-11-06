@@ -251,8 +251,8 @@ class OcrRestoreRoutesTest {
         val none = restore(credential = Credential.NONE)
         val wrong = restore(credential = Credential.WRONG_CSRF)
 
-        assertEquals(HttpStatusCode.Unauthorized, none.status, none.bodyAsText())
-        assertEquals(HttpStatusCode.Unauthorized, wrong.status, wrong.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, none.status, none.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, wrong.status, wrong.bodyAsText())
         assertEquals(3, harness.context.revisions.revisions(fixture.documentId).size)
     }
 

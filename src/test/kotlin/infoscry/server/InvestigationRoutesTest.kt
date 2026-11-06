@@ -1447,13 +1447,13 @@ class InvestigationRoutesTest {
     @Test
     fun `the investigation endpoints require the bearer credential`() = runBlocking {
         val create = harness.request(HttpMethod.Post, "/api/investigations", body = createBody(), credential = Credential.NONE)
-        assertEquals(HttpStatusCode.Unauthorized, create.status, create.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, create.status, create.bodyAsText())
 
         val continueTry = harness.request(HttpMethod.Post, "/api/investigations/anything/continue", body = createBody(), credential = Credential.NONE)
-        assertEquals(HttpStatusCode.Unauthorized, continueTry.status, continueTry.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, continueTry.status, continueTry.bodyAsText())
 
         val cancelTry = harness.request(HttpMethod.Post, "/api/investigations/anything/cancel", body = null, credential = Credential.NONE)
-        assertEquals(HttpStatusCode.Unauthorized, cancelTry.status, cancelTry.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, cancelTry.status, cancelTry.bodyAsText())
     }
 
     // ---- Helpers ----

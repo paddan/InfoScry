@@ -2,7 +2,6 @@ package infoscry.cli
 
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.findObject
-import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.int
@@ -17,9 +16,9 @@ import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportPipeline
 import infoscry.logging.LoggingBootstrap
 import infoscry.server.ApiJson
-import infoscry.server.DEFAULT_PORT
 import infoscry.server.PRODUCT_NAME
-import infoscry.server.startLoopbackServer
+import infoscry.server.ServerSettings
+import infoscry.server.startServer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
@@ -32,9 +31,9 @@ data class ServeResponse(val url: String, val port: Int, val pid: Long)
 /**
  * `infoscry serve` — the local API and the web interface, in the foreground.
  *
- * The process stays in the foreground on purpose: it owns the data directory, so the operator's terminal
- * is the thing that ends it. Interrupting it stops the server and removes `runtime.json`, which is what
- * tells a later CLI that nobody is listening.
+ * The process stays in the foreground on purpose: it owns the database and the data directory, so the
+ * operator's terminal (or a launchd agent) is the thing that ends it. `INFOSCRY_BIND` and
+ * `INFOSCRY_PUBLIC_ORIGIN` decide where it listens and which origin browsers use.
  */
 class ServeCommand(
     private val pipeline: (AppContext) -> ImportPipeline = { context -> ImportPipeline.production(context) },
@@ -43,8 +42,8 @@ class ServeCommand(
 
     private val port by option(
         "--port",
-        help = "Loopback port to listen on; 0 asks the operating system for a free one",
-    ).int().default(DEFAULT_PORT)
+        help = "Port to listen on, overriding INFOSCRY_BIND's; 0 asks the operating system for a free one",
+    ).int()
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
@@ -76,7 +75,7 @@ class ServeCommand(
             // Search and imports share this embedder, so building its accelerator session now spares the
             // first semantic search the model load. A test's fake embedder is not warmable and is left alone.
             startEmbedderWarmUp { embedder() as? WarmableEmbedder }
-            opened to startLoopbackServer(opened, port)
+            opened to startServer(opened, ServerSettings.fromEnvironment(portOverride = port))
         }
         Runtime.getRuntime().addShutdownHook(
             Thread {
@@ -97,6 +96,9 @@ class ServeCommand(
             )
         } else {
             echo("$PRODUCT_NAME is listening on ${server.url}")
+        }
+        if (runCatching { context.accounts.listUsers().isEmpty() }.getOrDefault(false)) {
+            echo("No users exist yet; create the first administrator with `infoscry admin create-user --admin <username>`.", err = true)
         }
         echo("Press Ctrl-C to stop.", err = true)
 

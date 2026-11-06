@@ -129,7 +129,7 @@ class DocumentRetryRoutesTest {
             assertEquals(HttpStatusCode.BadRequest, response.status, "$label: ${response.bodyAsText()}")
             assertContains(response.bodyAsText(), "INVALID_REQUEST", message = "$label")
         }
-        assertEquals(HttpStatusCode.Unauthorized, uncredentialed.status)
+        assertEquals(HttpStatusCode.Forbidden, uncredentialed.status)
 
         // Nothing was admitted by any of the refused shapes, and the document is exactly as it was.
         assertTrue(jobsOfType(JobType.RETRY).isEmpty(), "a refused request may not queue an attempt")

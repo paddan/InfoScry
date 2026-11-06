@@ -408,7 +408,7 @@ describe('effort profile JSON', () => {
 describe('stale-session retry', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('clears the cached token and retries a mutation once on MUTATION_REQUIRES_CREDENTIALS', async () => {
+  it('clears the cached token and retries a mutation once on CSRF_TOKEN_INVALID', async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     let patchAttempts = 0;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -417,7 +417,7 @@ describe('stale-session retry', () => {
       if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-retry-mutate' }), { status: 200 });
       patchAttempts += 1;
       if (patchAttempts === 1) {
-        return new Response(JSON.stringify({ error: { code: 'MUTATION_REQUIRES_CREDENTIALS', message: 'stale' } }), { status: 401 });
+        return new Response(JSON.stringify({ error: { code: 'CSRF_TOKEN_INVALID', message: 'stale' } }), { status: 403 });
       }
       return new Response(JSON.stringify({
         collection: {
@@ -464,7 +464,7 @@ describe('stale-session retry', () => {
       calls.push({ init });
       postAttempts += 1;
       if (postAttempts === 1) {
-        return new Response(JSON.stringify({ error: { code: 'MUTATION_REQUIRES_CREDENTIALS', message: 'stale' } }), { status: 401 });
+        return new Response(JSON.stringify({ error: { code: 'CSRF_TOKEN_INVALID', message: 'stale' } }), { status: 403 });
       }
       return new Response('data:{"type":"done","text":"answer"}\n\n', { status: 200 });
     }));

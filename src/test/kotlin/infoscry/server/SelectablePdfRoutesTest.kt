@@ -224,8 +224,8 @@ class SelectablePdfRoutesTest {
         val before = footprint(fixture)
         http {
             val body = createBody(fixture.revisionId)
-            assertEquals(HttpStatusCode.Unauthorized, postCreate(fixture, body, Credential.NONE).status)
-            assertEquals(HttpStatusCode.Unauthorized, postCreate(fixture, body, Credential.WRONG_CSRF).status)
+            assertEquals(HttpStatusCode.Forbidden, postCreate(fixture, body, Credential.NONE).status)
+            assertEquals(HttpStatusCode.Forbidden, postCreate(fixture, body, Credential.WRONG_CSRF).status)
             assertEquals(HttpStatusCode.Unauthorized, postCreate(fixture, body, Credential.WRONG_BEARER).status)
         }
         assertEquals(before, footprint(fixture), "a refused create enqueues nothing")

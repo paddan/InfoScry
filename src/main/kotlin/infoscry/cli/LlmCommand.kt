@@ -10,29 +10,16 @@ import com.github.ajalt.clikt.parameters.options.required
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.types.double
 import com.github.ajalt.clikt.parameters.types.int
-import com.github.ajalt.clikt.parameters.types.path
-import infoscry.config.AppPaths
-import infoscry.llm.LlmCapabilityProbeService
-import infoscry.llm.LlmProbeRefusedException
-import infoscry.llm.LlmProbeUnavailableException
-import infoscry.llm.LlmProfile
 import infoscry.llm.LlmPromptRole
-import infoscry.llm.LlmPromptRole.ASK
-import infoscry.llm.LlmPromptRole.INVESTIGATE
 import infoscry.llm.LlmProvider
 import infoscry.server.ApiJson
-import java.nio.file.Path
-import java.util.UUID
+import infoscry.server.LlmProfileApiView
+import infoscry.server.LlmProfileRequest
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 
 /**
- * `infoscry llm` — configure the secret-free LLM profiles and the per-role defaults.
- *
- * Each subcommand opens the local data directory directly and holds its process lock, so it cannot
- * run alongside a running server. That is the Task 19 boundary: remote, server-backed profile
- * management (and a real capability call over the wire) belongs to Task 23's settings routes. Until
- * then `test` reports a typed "adapter not wired" result rather than throwing, per the plan.
+ * `infoscry llm` — configure the secret-free LLM profiles and the per-role defaults, through the server.
  */
 class LlmCommand : CliktCommand(name = "llm") {
 
@@ -56,7 +43,7 @@ class LlmCommand : CliktCommand(name = "llm") {
 data class LlmProfilesJson(
     val askDefault: String? = null,
     val investigateDefault: String? = null,
-    val profiles: List<LlmProfile> = emptyList(),
+    val profiles: List<LlmProfileApiView> = emptyList(),
 )
 
 /** The typed result of a profile probe: what the real two-request probe measured. */
@@ -67,34 +54,40 @@ data class LlmTestJson(
     val toolCallingSupported: Boolean?,
 )
 
+/** Runs [block] against the server, turning a refusal into the message it carried. */
+private fun <T> withServer(failure: String, block: suspend (ApiClient) -> T): T = try {
+    CliSession.connect().use { session -> runBlocking { block(session.api) } }
+} catch (refused: RemoteApiFailure) {
+    throw CliFailure(refused.message.ifEmpty { failure }, refused)
+}
+
+/** The profile named [name], or a failure that says there is none. */
+private suspend fun ApiClient.profileNamed(name: String): LlmProfileApiView =
+    listLlmProfiles().profiles.firstOrNull { it.name == name }
+        ?: throw CliFailure("no LLM profile named '$name' exists")
+
 /** `infoscry llm list [--json]`. */
 class ListLlmProfilesCommand : CliktCommand(name = "list") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, json = jsonFlag, dataDir = dataDirOption)
-        try {
-            infoscry.AppContext.open(AppPaths.of(options.dataDir)).use { context ->
-                val ask = context.llm.defaultProfileName(ASK)
-                val investigate = context.llm.defaultProfileName(INVESTIGATE)
-                val profiles = context.llm.list()
-                if (options.json) {
-                    echo(ApiJson.encodeToString(LlmProfilesJson(ask, investigate, profiles)))
-                } else if (profiles.isEmpty()) {
-                    echo("No LLM profiles configured.")
-                } else {
-                    profiles.forEach { echo(describe(it, ask, investigate)) }
-                }
-            }
-        } catch (failure: Exception) {
-            throw CliFailure(failure.message ?: "the LLM profiles could not be read", failure)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
+        val listed = withServer("the LLM profiles could not be read") { it.listLlmProfiles() }
+        val nameOf = { id: String? -> listed.profiles.firstOrNull { it.id == id }?.name }
+        val ask = nameOf(listed.defaults[LlmPromptRole.ASK])
+        val investigate = nameOf(listed.defaults[LlmPromptRole.INVESTIGATE])
+        if (options.json) {
+            echo(ApiJson.encodeToString(LlmProfilesJson(ask, investigate, listed.profiles)))
+        } else if (listed.profiles.isEmpty()) {
+            echo("No LLM profiles configured.")
+        } else {
+            listed.profiles.forEach { echo(describe(it, ask, investigate)) }
         }
     }
 
-    private fun describe(profile: LlmProfile, ask: String?, investigate: String?): String = buildString {
+    private fun describe(profile: LlmProfileApiView, ask: String?, investigate: String?): String = buildString {
         append(profile.name)
         append("  [").append(profile.provider.name.lowercase()).append("]  ")
         append(profile.model)
@@ -126,38 +119,29 @@ class AddLlmProfileCommand : CliktCommand(name = "add") {
     private val inputPrice by option("--input-price", help = "USD per 1M input tokens").double().default(0.0)
     private val outputPrice by option("--output-price", help = "USD per 1M output tokens").double().default(0.0)
     private val cacheReadPrice by option("--cache-read-price", help = "USD per 1M cache-read tokens").double().default(0.0)
-    private val toolCalling by option("--tool-calling", help = "Declares tool calling (a checkbox, not a measurement)").flag()
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
+    private val disabled by option("--disabled", help = "Add the profile switched off").flag()
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, json = jsonFlag, dataDir = dataDirOption)
-        val provider = parseProvider(providerText, name)
-        val profile = LlmProfile(
-            id = UUID.randomUUID().toString(),
+        val options = resolveOptions(parentOptions, jsonFlag, null)
+        val request = LlmProfileRequest(
             name = name,
-            provider = provider,
+            provider = parseProvider(providerText, name),
+            endpoint = endpoint ?: "",
             model = model,
             contextWindow = contextWindow,
             maxOutputTokens = maxOutputTokens,
             inputPricePerMillion = inputPrice,
             outputPricePerMillion = outputPrice,
             cacheReadPricePerMillion = cacheReadPrice,
-            enabled = true,
-            endpoint = endpoint ?: "",
+            enabled = !disabled,
             apiKeyEnvironmentVariable = apiKeyEnv,
         )
-        try {
-            infoscry.AppContext.open(AppPaths.of(options.dataDir)).use { context ->
-                val saved = context.llm.create(profile)
-                if (options.json) {
-                    echo(ApiJson.encodeToString(saved))
-                } else {
-                    echo("Added LLM profile '${saved.name}'.")
-                }
-            }
-        } catch (failure: Exception) {
-            throw CliFailure(failure.message ?: "the LLM profile could not be added", failure)
+        val saved = withServer("the LLM profile could not be added") { it.createLlmProfile(request) }
+        if (options.json) {
+            echo(ApiJson.encodeToString(saved))
+        } else {
+            echo("Added LLM profile '${saved.name}'.")
         }
     }
 
@@ -175,58 +159,30 @@ class SetDefaultLlmCommand : CliktCommand(name = "set-default") {
 
     private val ask by option("--ask", help = "Profile name to use for Ask by default")
     private val investigate by option("--investigate", help = "Profile name to use for Investigate by default")
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
-    private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, json = false, dataDir = dataDirOption)
         val target = when {
             ask != null && investigate != null -> throw CliFailure("choose only one of --ask or --investigate")
             ask != null -> LlmPromptRole.ASK to ask!!
             investigate != null -> LlmPromptRole.INVESTIGATE to investigate!!
             else -> throw CliFailure("choose --ask or --investigate")
         }
-        try {
-            infoscry.AppContext.open(AppPaths.of(options.dataDir)).use { context ->
-                val set = context.llm.setDefault(target.first, target.second)
-                if (!set) {
-                    throw CliFailure("no LLM profile named '${target.second}' exists")
-                }
-                echo("Default for ${target.first.name.lowercase()} is now '${target.second}'.")
-            }
-        } catch (failure: Exception) {
-            throw CliFailure(failure.message ?: "the LLM default could not be set", failure)
+        withServer("the LLM default could not be set") { api ->
+            api.setLlmDefault(target.first, api.profileNamed(target.second).id)
         }
+        echo("Default for ${target.first.name.lowercase()} is now '${target.second}'.")
     }
 }
 
-/** `infoscry llm test <name>` — the real two-request capability probe, persisted. */
+/** `infoscry llm test <name>` — the real two-request capability probe, recorded by the server. */
 class TestLlmProfileCommand : CliktCommand(name = "test") {
 
     private val profileArg by argument("name", help = "The profile to probe")
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
-    private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, json = false, dataDir = dataDirOption)
-        infoscry.AppContext.open(AppPaths.of(options.dataDir)).use { context ->
-            val profile = context.llm.findByName(profileArg)
-                ?: throw CliFailure("no LLM profile named '" + profileArg + "' exists")
-            // The same service the Admin route uses, so the CLI and the UI measure and record identically.
-            val service = LlmCapabilityProbeService(context.llm)
-            val measurement = try {
-                runBlocking { service.probe(profile) }
-            } catch (refused: LlmProbeRefusedException) {
-                throw CliFailure(refused.message.orEmpty())
-            } catch (unavailable: LlmProbeUnavailableException) {
-                throw CliFailure(unavailable.message.orEmpty())
-            }
-            service.record(profile.name, measurement)
-            echo(
-                ApiJson.encodeToString(
-                    LlmTestJson(profile.name, measurement.textRequestSupported, measurement.toolCallingSupported),
-                ),
-            )
+        val probe = withServer("the LLM profile could not be probed") { api ->
+            api.probeLlmProfile(api.profileNamed(profileArg).id)
         }
+        echo(ApiJson.encodeToString(LlmTestJson(probe.profile.name, probe.textRequestSupported, probe.toolCallingSupported)))
     }
 }

@@ -454,6 +454,7 @@ class OcrBrowserAcceptanceTest {
             .redirectOutput(outputFile.toFile())
             .apply {
                 environment()["BASE_URL"] = harness!!.url
+                environment()["INFOSCRY_SESSION_COOKIE"] = harness!!.sessionCookie
                 environment()["SCENARIO"] = name
                 environment()["OCR_FACTS"] = facts.toString()
                 environment()["OCR_PRESENT_KEY_VARIABLE"] = PRESENT_KEY_VARIABLE

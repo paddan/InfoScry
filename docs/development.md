@@ -46,7 +46,8 @@ a running server must be restarted to use the rebuilt application.
 
 Install the model separately with `./gradlew embeddingModel` when testing actual
 embeddings. For a disposable archive, use the same `-PdataDir` for model tasks
-and `--data-dir` for the app, as shown in [installation](installation.md#use-a-separate-archive).
+and `--data-dir` for the server, as shown in [installation](installation.md#use-a-separate-archive).
+Create a user with `infoscry admin create-user --admin <name>` before signing in.
 
 ## Normal verification
 

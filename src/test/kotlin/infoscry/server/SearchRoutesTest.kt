@@ -674,20 +674,29 @@ class SearchRoutesTest {
 
         val ranged = harness.client.get(
             harness.url + "/api/collections/$collectionId/documents/${documentId.value}/original",
-        ) { header(Range, "bytes=2-5") }
+        ) {
+            harness.signedIn(this)
+            header(Range, "bytes=2-5")
+        }
         assertEquals(HttpStatusCode.PartialContent, ranged.status, ranged.bodyAsText())
         assertEquals("igin", ranged.bodyAsText())
         assertEquals("bytes 2-5/14", ranged.headers[ContentRange])
 
         val outOfBounds = harness.client.get(
             harness.url + "/api/collections/$collectionId/documents/${documentId.value}/original",
-        ) { header(Range, "bytes=99-") }
+        ) {
+            harness.signedIn(this)
+            header(Range, "bytes=99-")
+        }
         assertEquals(HttpStatusCode.RequestedRangeNotSatisfiable, outOfBounds.status, outOfBounds.bodyAsText())
         assertEquals("bytes */14", outOfBounds.headers[ContentRange])
 
         val emptySuffix = harness.client.get(
             harness.url + "/api/collections/$collectionId/documents/${documentId.value}/original",
-        ) { header(Range, "bytes=-") }
+        ) {
+            harness.signedIn(this)
+            header(Range, "bytes=-")
+        }
         assertEquals(HttpStatusCode.RequestedRangeNotSatisfiable, emptySuffix.status, emptySuffix.bodyAsText())
     }
 

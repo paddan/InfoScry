@@ -8,8 +8,6 @@ import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.int
-import com.github.ajalt.clikt.parameters.types.path
-import infoscry.config.AppPaths
 import infoscry.domain.Job
 import infoscry.domain.JobId
 import infoscry.domain.JobState
@@ -45,12 +43,11 @@ class JobsCommand : CliktCommand(name = "jobs") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
         when (action) {
             null -> list(options)
             "cancel" -> cancel(options, jobId ?: throw CliFailure("`infoscry jobs cancel` needs a job id"))
@@ -64,14 +61,14 @@ class JobsCommand : CliktCommand(name = "jobs") {
         if (limit <= 0) throw CliFailure("--limit must be positive, was $limit")
 
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val jobs = runBlocking { session.listJobs(limit) }
                 if (options.json) {
                     echo(ApiJson.encodeToString(JobsResponse(jobs.map { it.toApiView() })))
                 } else if (jobs.isEmpty()) {
                     echo("No jobs.")
                 } else {
-                    jobs.forEach { echo(describe(it, redactDetails = session.isRemote)) }
+                    jobs.forEach { echo(describe(it)) }
                     if (jobs.size == limit) {
                         echo("Showing the $limit most recent jobs; pass --limit for more.", err = true)
                     }
@@ -84,7 +81,7 @@ class JobsCommand : CliktCommand(name = "jobs") {
 
     private fun cancel(options: CliOptions, id: String) {
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val job = runBlocking { session.cancelJob(JobId(id)) }
                 if (options.json) {
                     echo(ApiJson.encodeToString(JobResponse(job.toApiView())))
@@ -104,7 +101,7 @@ class JobsCommand : CliktCommand(name = "jobs") {
         else -> "Job ${job.id.value} is ${job.state}; there is nothing left to cancel."
     }
 
-    private fun describe(job: Job, redactDetails: Boolean = false): String = buildString {
+    private fun describe(job: Job): String = buildString {
         append(job.id.value)
         append("  ")
         append(job.type)
@@ -119,11 +116,7 @@ class JobsCommand : CliktCommand(name = "jobs") {
         job.errorCode?.let { code ->
             append("  ")
             append(code)
-            if (redactDetails) {
-                append("  Details are intentionally omitted from the local API; see the server log.")
-            } else {
-                job.errorMessage?.let { append(": ").append(it) }
-            }
+            append("  Details are omitted from the API; see the server log.")
         }
     }
 

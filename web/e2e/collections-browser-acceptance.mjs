@@ -14,6 +14,7 @@
 import { chromium } from 'playwright';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { signedInContext } from './session.mjs';
 
 const BASE_URL = process.env.BASE_URL;
 const SCENARIO = process.env.SCENARIO ?? 'collection-creation';
@@ -48,7 +49,7 @@ async function enterAdmin(page) {
 }
 
 async function openAdmin(browser) {
-  const context = await browser.newContext();
+  const context = await signedInContext(browser);
   const page = await context.newPage();
   const consoleErrors = [];
   const failedRequests = [];

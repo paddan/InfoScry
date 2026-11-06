@@ -216,7 +216,7 @@ class DeletionRoutesTest {
             credential = Credential.BEARER,
         )
 
-        assertEquals(HttpStatusCode.Unauthorized, uncredentialed.status)
+        assertEquals(HttpStatusCode.Forbidden, uncredentialed.status)
         assertEquals(HttpStatusCode.BadRequest, mismatched.status)
         assertContains(mismatched.bodyAsText(), "CONFIRMATION_MISMATCH")
         assertContains(harness.get("/api/collections").bodyAsText(), "Nightfall")

@@ -62,5 +62,5 @@ class ProcessLock private constructor(
 /** Raised when another InfoScry process already owns the data directory. */
 class ProcessLockUnavailable(val path: Path) : IllegalStateException(
     "Another InfoScry process is already running and holds $path. " +
-        "Stop that process before starting a second one, or use its loopback API through the CLI.",
+        "Stop that process before starting a second one; the CLI talks to the running server instead.",
 )
