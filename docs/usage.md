@@ -33,8 +33,8 @@ version. The first person to approve or reject a new reading decides.
 1. Open **Admin → Collections** and create a collection.
 2. Select the destination collection and choose **Add documents**.
 3. Use **Upload files…** to send files from your own computer, or **Server
-   folders…** to pick files and folders in the import folders an administrator
-   opened on the server. Enable **Include subfolders** to import a server folder
+   folders…** to pick files and folders in the folders an administrator opened
+   on the server under **Admin → Server folders**. Enable **Include subfolders** to import a server folder
    recursively. A file that is already in the collection is not uploaded again.
    Administrators also have **Choose files…** and **Choose folder…**, which open
    a dialog on the server's own screen.

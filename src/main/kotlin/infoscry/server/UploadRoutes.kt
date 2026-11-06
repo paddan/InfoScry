@@ -5,11 +5,14 @@ import infoscry.account.CollectionRole
 import infoscry.domain.CollectionId
 import infoscry.domain.ApiFaultException
 import infoscry.domain.ApiStatus
+import infoscry.jobs.ImportRootView
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.decodeURLPart
 import io.ktor.server.application.call
 import io.ktor.server.request.receiveChannel
 import io.ktor.server.routing.Routing
+import io.ktor.server.response.respond
+import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.utils.io.readAvailable
@@ -123,19 +126,45 @@ fun Routing.configureUploadRoutes(context: AppContext) {
     get("/api/import-roots") {
         call.handle {
             call.requireImportBrowsing(context)
-            call.respondJson(HttpStatusCode.OK, mapOf("roots" to context.importRoots.views()))
+            call.respondJson(HttpStatusCode.OK, ImportRootsResponse(context.importRoots.views()))
+        }
+    }
+
+    post("/api/import-roots") {
+        call.handle {
+            call.requireAdministrator()
+            val request = call.receiveJson<AddImportRootRequest>()
+            val (root, created) = context.importRoots.add(request.path)
+            call.respondJson(if (created) HttpStatusCode.Created else HttpStatusCode.OK, ImportRootResponse(root, created))
+        }
+    }
+
+    delete("/api/import-roots/{rootId}") {
+        call.handle {
+            call.requireAdministrator()
+            context.importRoots.remove(call.parameters["rootId"].orEmpty())
+            call.respond(HttpStatusCode.NoContent)
         }
     }
 
     get("/api/import-roots/browse") {
         call.handle {
             call.requireImportBrowsing(context)
-            val index = call.request.queryParameters["root"]?.toIntOrNull() ?: throw BadRequestException("root must be a number")
+            val root = call.request.queryParameters["root"]?.takeIf { it.isNotBlank() } ?: throw BadRequestException("root names an import folder")
             val path = call.request.queryParameters["path"].orEmpty()
-            call.respondJson(HttpStatusCode.OK, context.importRoots.browse(index, path))
+            call.respondJson(HttpStatusCode.OK, context.importRoots.browse(root, path))
         }
     }
 }
+
+@Serializable
+data class ImportRootsResponse(val roots: List<ImportRootView>)
+
+@Serializable
+data class AddImportRootRequest(val path: String)
+
+@Serializable
+data class ImportRootResponse(val root: ImportRootView, val created: Boolean)
 
 /** Browsing the server's import roots is for people who may import somewhere: an editor of any collection. */
 private fun io.ktor.server.application.ApplicationCall.requireImportBrowsing(context: AppContext) {

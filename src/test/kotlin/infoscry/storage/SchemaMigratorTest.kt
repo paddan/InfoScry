@@ -49,9 +49,33 @@ class SchemaMigratorTest {
 
             SchemaMigrator(database).migrate()
 
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
+            assertEquals(2, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, count(database, "schema_version"), "one row per applied step")
+        }
+    }
+
+    @Test
+    fun `a database at the baseline version gets the later steps and keeps its rows`() {
+        newDatabase().use { database ->
+            SchemaMigrator(database).migrate(upTo = 1)
             assertEquals(1, database.schemaVersion())
-            assertEquals(1, SchemaMigrator.SUPPORTED_VERSION)
-            assertEquals(1, count(database, "schema_version"))
+            assertFalse("import_roots" in tableNames(database))
+            database.transaction { connection ->
+                connection.createStatement().use {
+                    it.executeUpdate(
+                        "INSERT INTO collections (id, name, created_at, updated_at) " +
+                            "VALUES ('kept', 'Kept', '2026-11-06T00:00:00Z', '2026-11-06T00:00:00Z')",
+                    )
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+            SchemaMigrator(database).migrate()
+
+            assertEquals(2, database.schemaVersion())
+            assertTrue("import_roots" in tableNames(database))
+            assertEquals(1, count(database, "collections"), "a step keeps what the database already holds")
         }
     }
 
@@ -61,8 +85,8 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(1, database.schemaVersion())
-            assertEquals(1, count(database, "schema_version"), "the baseline must not be applied twice")
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, count(database, "schema_version"), "no step may be applied twice")
         }
     }
 
@@ -146,7 +170,7 @@ class SchemaMigratorTest {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate()
 
-            assertEquals(1, database.schemaVersion())
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
             val now = "2026-01-01T00:00:00Z"
             database.transaction { connection ->
                 connection.createStatement().use { statement ->

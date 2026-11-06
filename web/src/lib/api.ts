@@ -1275,17 +1275,37 @@ export async function uploadFile(collectionId: string, file: File): Promise<Uplo
   return (await readJson(await sendWithSessionRetry(send, 'CSRF_TOKEN_INVALID'))) as Upload;
 }
 
-/** A directory an administrator opened for import on the server. */
-export type ImportRoot = { index: number; name: string; path: string };
+/**
+ * A directory on the server that editors may import from: added under Admin, or listed in the server's
+ * INFOSCRY_IMPORT_ROOTS. An unavailable one (its folder is gone or unreadable) cannot be browsed.
+ */
+export type ImportRoot = {
+  id: string;
+  name: string;
+  path: string;
+  source: 'ADMIN' | 'ENVIRONMENT';
+  available: boolean;
+  addedAt?: string | null;
+  addedBy?: string | null;
+};
 export type ImportRootEntry = { name: string; path: string; directory: boolean; sizeBytes?: number | null };
 
 export async function listImportRoots(): Promise<ImportRoot[]> {
   return ((await readJson(await fetch('/api/import-roots'))) as { roots: ImportRoot[] }).roots;
 }
 
+/** Adds a server folder by its full path; a folder that is already one answers with `created: false`. */
+export async function addImportRoot(path: string): Promise<{ root: ImportRoot; created: boolean }> {
+  return (await mutate('/api/import-roots', 'POST', { path })) as { root: ImportRoot; created: boolean };
+}
+
+export async function removeImportRoot(id: string): Promise<void> {
+  await mutate(`/api/import-roots/${encodeURIComponent(id)}`, 'DELETE');
+}
+
 /** One folder of an import root: its folders first, then its files. */
-export async function browseImportRoot(root: number, path: string): Promise<{ root: ImportRoot; path: string; entries: ImportRootEntry[] }> {
-  const query = `root=${root}&path=${encodeURIComponent(path)}`;
+export async function browseImportRoot(root: string, path: string): Promise<{ root: ImportRoot; path: string; entries: ImportRootEntry[] }> {
+  const query = `root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`;
   return (await readJson(await fetch(`/api/import-roots/browse?${query}`))) as { root: ImportRoot; path: string; entries: ImportRootEntry[] };
 }
 

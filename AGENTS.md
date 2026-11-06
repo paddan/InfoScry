@@ -81,7 +81,8 @@ not real providers or GPU verification.
   `src/main/kotlin/infoscry/server/Authorization.kt`; a collection the caller is
   not a member of answers 404. Records people create and change carry
   attribution, stamped from the ambient actor. Imports read only from
-  `INFOSCRY_IMPORT_ROOTS` and the collection's uploads.
+  the import roots (Admin → Server folders, and `INFOSCRY_IMPORT_ROOTS`) and
+  the collection's uploads.
 - A stopped import or rescan (cancelled, failed, interrupted, process killed)
   must never block starting again, and starting again must never answer with
   "waiting for approval", "pending review" or "cannot start yet". Recover or

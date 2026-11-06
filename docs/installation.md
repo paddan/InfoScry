@@ -313,11 +313,13 @@ infoscry import --collection Notes --wait /absolute/path/to/document.pdf
 The CLI sends each request to the running server (`INFOSCRY_URL`, default
 <http://127.0.0.1:8080>) and uploads the files it imports.
 
-To let editors import from directories on the server itself, list them in
-`INFOSCRY_IMPORT_ROOTS` (separated by `:`) before starting the server; they can
-then browse and pick files there, and `infoscry import --server-path` names
-paths inside them. A path outside these directories, also through a symbolic
-link, is refused. Uploaded files wait in `<data directory>/uploads` and are
+To let editors import from directories on the server itself, add them under
+**Admin → Server folders** with each folder's full path on the server; editors
+can then browse and pick files there, and `infoscry import --server-path` names
+paths inside them. A path outside these folders, also through a symbolic link,
+is refused. Folders can also be listed in `INFOSCRY_IMPORT_ROOTS` (separated by
+`:`) before starting the server; those are shown under Admin but changed only
+there. Uploaded files wait in `<data directory>/uploads` and are
 removed a week later; an upload may be at most `INFOSCRY_UPLOAD_MAX_BYTES`
 (default 4 GiB). Back up both the Postgres database and the data directory's
 `library/`.
@@ -365,7 +367,6 @@ password with your own:
     <key>JAVA_HOME</key><string>/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home</string>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>
     <key>INFOSCRY_DATABASE_PASSWORD</key><string>change-me</string>
-    <key>INFOSCRY_IMPORT_ROOTS</key><string>/Users/Shared/Archive</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

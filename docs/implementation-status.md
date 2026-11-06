@@ -342,6 +342,16 @@ multipart.
   loopback; the installed server created an administrator and served against it,
   and the account survived `down` and `up`.
 
+### Server folders under Admin (2026-11-06)
+
+Administrators add and remove import roots under **Admin → Server folders**
+instead of only through `INFOSCRY_IMPORT_ROOTS`. Roots are rows of
+`import_roots`, added by schema version 2 (`002_import_roots.sql`); the
+migrator now applies numbered scripts in order, so an existing version-1
+database gains the table on the next start and keeps its data. Covered by
+`SchemaMigratorTest`, `ImportSourcesRoutesTest`, `ImportRootsPanel.test.ts` and
+the server-folder steps of `MultiUserBrowserAcceptanceTest`.
+
 ## Recorded verification
 
 The previous README recorded a local 2026-09-24 run of `check`, `externalTest`

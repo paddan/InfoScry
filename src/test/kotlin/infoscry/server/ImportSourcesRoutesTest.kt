@@ -35,7 +35,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
-/** Where imports read from: the configured import roots and the files uploaded to a collection. */
+/** Where imports read from: the import roots an administrator adds, the environment's, and a collection's uploads. */
 class ImportSourcesRoutesTest {
 
     private lateinit var directory: Path
@@ -43,6 +43,7 @@ class ImportSourcesRoutesTest {
     private lateinit var outside: Path
     private lateinit var harness: ApiTestServer
     private lateinit var collectionId: String
+    private lateinit var rootId: String
     private val tokens = mutableMapOf<String, String>()
 
     @BeforeTest
@@ -50,8 +51,13 @@ class ImportSourcesRoutesTest {
         directory = Files.createTempDirectory("infoscry-import-sources")
         root = Files.createDirectories(directory.resolve("root")).toRealPath()
         outside = Files.createDirectories(directory.resolve("outside")).toRealPath()
-        ImportRoots.configured = { listOf(root) }
+        ImportRoots.configured = { emptyList() }
         harness = ApiTestServer(directory.resolve("data"))
+        rootId = runBlocking {
+            val added = harness.request(HttpMethod.Post, "/api/import-roots", """{"path":"$root"}""", Credential.BEARER)
+            check(added.status == HttpStatusCode.Created) { added.bodyAsText() }
+            Json.parseToJsonElement(added.bodyAsText()).jsonObject["root"]!!.jsonObject["id"]!!.jsonPrimitive.content
+        }
         ImportJobHandler.attachTo(
             harness.context,
             ImportProcessHarness.harnessPipeline(harness.context),
@@ -127,13 +133,75 @@ class ImportSourcesRoutesTest {
 
         val roots = send("editor", HttpMethod.Get, "/api/import-roots").bodyAsText()
         assertContains(roots, "\"name\":\"root\"")
-        val top = send("editor", HttpMethod.Get, "/api/import-roots/browse?root=0&path=").bodyAsText()
+        val top = send("editor", HttpMethod.Get, "/api/import-roots/browse?root=$rootId&path=").bodyAsText()
         assertContains(top, "\"name\":\"letters\",")
         assertContains(top, "\"name\":\"notes.txt\"")
         assertFalse(top.contains("escape"), top)
-        assertContains(send("editor", HttpMethod.Get, "/api/import-roots/browse?root=0&path=letters").bodyAsText(), "a.txt")
-        assertEquals(HttpStatusCode.BadRequest, send("editor", HttpMethod.Get, "/api/import-roots/browse?root=0&path=..").status)
+        assertContains(send("editor", HttpMethod.Get, "/api/import-roots/browse?root=$rootId&path=letters").bodyAsText(), "a.txt")
+        assertEquals(HttpStatusCode.BadRequest, send("editor", HttpMethod.Get, "/api/import-roots/browse?root=$rootId&path=..").status)
         assertEquals(HttpStatusCode.Forbidden, send("reader", HttpMethod.Get, "/api/import-roots").status, "only people who may import browse")
+    }
+
+    @Test
+    fun `an administrator adds and removes import folders, and the change counts at once`() = runBlocking {
+        val inside = Files.writeString(root.resolve("inside.txt"), "Inside.\n")
+        val previewInside = """{"collection":"$collectionId","paths":["$inside"],"method":"none"}"""
+        val listed = json(send("editor", HttpMethod.Get, "/api/import-roots").bodyAsText())["roots"].toString()
+        assertContains(listed, "\"source\":\"ADMIN\"")
+        assertContains(listed, "\"available\":true")
+        assertContains(listed, "\"addedBy\":\"${harness.admin.displayName}\"")
+
+        // Adding the same folder again, also through a link to it, answers with the root that is there.
+        val link = Files.createSymbolicLink(directory.resolve("link-to-root"), root)
+        for (path in listOf(root, link)) {
+            val again = harness.request(HttpMethod.Post, "/api/import-roots", """{"path":"$path"}""", Credential.BEARER)
+            assertEquals(HttpStatusCode.OK, again.status, again.bodyAsText())
+            assertEquals(rootId, json(again.bodyAsText())["root"]!!.jsonObject["id"]!!.jsonPrimitive.content)
+        }
+
+        for (path in listOf("relative/folder", directory.resolve("missing").toString(), inside.toString(), "/", directory.resolve("data").toString())) {
+            val refused = harness.request(HttpMethod.Post, "/api/import-roots", """{"path":"$path"}""", Credential.BEARER)
+            assertEquals(HttpStatusCode.BadRequest, refused.status, "$path: ${refused.bodyAsText()}")
+        }
+        assertEquals(HttpStatusCode.Forbidden, send("editor", HttpMethod.Post, "/api/import-roots", """{"path":"$outside"}""").status)
+        assertEquals(HttpStatusCode.Forbidden, send("editor", HttpMethod.Delete, "/api/import-roots/$rootId").status)
+
+        assertEquals(HttpStatusCode.OK, preview("editor", previewInside).status)
+        assertEquals(HttpStatusCode.NoContent, harness.request(HttpMethod.Delete, "/api/import-roots/$rootId", null, Credential.BEARER).status)
+        assertEquals(HttpStatusCode.NoContent, harness.request(HttpMethod.Delete, "/api/import-roots/$rootId", null, Credential.BEARER).status, "removing twice is fine")
+        assertEquals(HttpStatusCode.Forbidden, preview("editor", previewInside).status, "a removed folder is no longer a source")
+        assertContains(send("editor", HttpMethod.Get, "/api/import-roots").bodyAsText(), "\"roots\":[]")
+    }
+
+    @Test
+    fun `a folder that has gone is shown as unavailable and nothing is read from it`() = runBlocking {
+        val gone = Files.createDirectories(directory.resolve("gone")).toRealPath()
+        val added = json(harness.request(HttpMethod.Post, "/api/import-roots", """{"path":"$gone"}""", Credential.BEARER).bodyAsText())
+        val goneId = added["root"]!!.jsonObject["id"]!!.jsonPrimitive.content
+        Files.delete(gone)
+
+        val listed = Json.parseToJsonElement(send("editor", HttpMethod.Get, "/api/import-roots").bodyAsText()).jsonObject["roots"]!!
+        val entry = listed.toString()
+        assertContains(entry, "\"id\":\"$goneId\",\"name\":\"gone\"")
+        assertContains(entry, "\"available\":false")
+        assertEquals(HttpStatusCode.NotFound, send("editor", HttpMethod.Get, "/api/import-roots/browse?root=$goneId&path=").status)
+        assertEquals(HttpStatusCode.NoContent, harness.request(HttpMethod.Delete, "/api/import-roots/$goneId", null, Credential.BEARER).status)
+    }
+
+    @Test
+    fun `a folder from INFOSCRY_IMPORT_ROOTS is listed but is removed where it was set`() = runBlocking {
+        val fromEnvironment = Files.createDirectories(directory.resolve("environment")).toRealPath()
+        ImportRoots.configured = { listOf(fromEnvironment) }
+        ApiTestServer(directory.resolve("data-environment")).use { server ->
+            val listed = server.request(HttpMethod.Get, "/api/import-roots", null, Credential.BEARER).bodyAsText()
+            assertContains(listed, "\"id\":\"environment-0\"")
+            assertContains(listed, "\"source\":\"ENVIRONMENT\"")
+            val refused = server.request(HttpMethod.Delete, "/api/import-roots/environment-0", null, Credential.BEARER)
+            assertEquals(HttpStatusCode.Conflict, refused.status)
+            assertContains(refused.bodyAsText(), "IMPORT_ROOT_FROM_ENVIRONMENT")
+            val again = server.request(HttpMethod.Post, "/api/import-roots", """{"path":"$fromEnvironment"}""", Credential.BEARER)
+            assertEquals(HttpStatusCode.OK, again.status, "a folder already listed is not stored twice")
+        }
     }
 
     @Test

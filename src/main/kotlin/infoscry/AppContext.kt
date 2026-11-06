@@ -230,9 +230,14 @@ class AppContext private constructor(
         )
     }
 
-    /** Where imports may read from: the configured import roots and each collection's upload area. */
+    /** Where imports may read from: the import roots (Admin's and the environment's) and each collection's upload area. */
     val importRoots: infoscry.jobs.ImportRoots by lazy {
-        infoscry.jobs.ImportRoots(infoscry.jobs.ImportRoots.configured(), paths.uploadsDir)
+        infoscry.jobs.ImportRoots(
+            infoscry.storage.ImportRootStore(database),
+            infoscry.jobs.ImportRoots.configured(),
+            paths.uploadsDir,
+            paths.root,
+        )
     }
 
     /** Shared method/hash/idempotency admission used by HTTP imports and the standalone CLI import. */

@@ -3,6 +3,7 @@ package infoscry.jobs
 import infoscry.domain.ApiFaultException
 import infoscry.domain.ApiStatus
 import infoscry.domain.CollectionId
+import infoscry.storage.ImportRootStore
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -19,9 +20,24 @@ class ImportPathNotAllowedException : ApiFaultException(
     "imports read only from the server's import roots and from files uploaded to the collection",
 )
 
-/** One import root as a client sees it: its position and its own name, never more of the server's layout. */
+/** Where an import root comes from: added under Admin, or listed in `INFOSCRY_IMPORT_ROOTS` when the server started. */
 @Serializable
-data class ImportRootView(val index: Int, val name: String, val path: String)
+enum class ImportRootSource { ADMIN, ENVIRONMENT }
+
+/**
+ * One import root as a client sees it. [available] is false when its folder is gone or unreadable; nothing is
+ * browsed or imported from it then. [addedBy] is the display name of whoever added it under Admin.
+ */
+@Serializable
+data class ImportRootView(
+    val id: String,
+    val name: String,
+    val path: String,
+    val source: ImportRootSource,
+    val available: Boolean,
+    val addedAt: String? = null,
+    val addedBy: String? = null,
+)
 
 /** One entry of a browsed directory. [path] is the absolute path an import names. */
 @Serializable
@@ -30,22 +46,52 @@ data class ImportRootEntry(val name: String, val path: String, val directory: Bo
 @Serializable
 data class ImportRootListing(val root: ImportRootView, val path: String, val entries: List<ImportRootEntry>)
 
+/** An environment root is the server's configuration, so it is changed where it was set rather than under Admin. */
+class ImportRootFromEnvironmentException : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "IMPORT_ROOT_FROM_ENVIRONMENT",
+    "this folder is listed in the server's INFOSCRY_IMPORT_ROOTS; remove it there and restart the server",
+)
+
 /**
- * Where on the server an import may read from: the directories an administrator lists in
- * `INFOSCRY_IMPORT_ROOTS`, and each collection's own upload area.
+ * Where on the server an import may read from: the directories an administrator adds under Admin (kept in
+ * [store]), any listed in `INFOSCRY_IMPORT_ROOTS`, and each collection's own upload area.
  *
  * A path is judged by its real path, with symbolic links resolved, so a link inside a root that leads out of it
- * is outside. Originals are only read, never modified.
+ * is outside. Roots are read for every decision, so one added or removed under Admin counts at once. Originals
+ * are only read, never modified.
  */
-class ImportRoots(configured: List<Path>, private val uploadsDir: Path) {
+class ImportRoots(
+    private val store: ImportRootStore,
+    configured: List<Path>,
+    private val uploadsDir: Path,
+    private val dataDir: Path,
+) {
 
-    /** The roots that exist, as real paths, in the order configured. */
-    val roots: List<Path> = configured.mapNotNull { root ->
-        runCatching { root.toAbsolutePath().toRealPath() }.getOrNull()?.takeIf { Files.isDirectory(it) }
-            ?: run {
-                LOGGER.atWarn().addKeyValue("import_root", root.toString()).log("an import root does not exist and is skipped")
-                null
-            }
+    private class Root(val view: ImportRootView, val real: Path?)
+
+    /** The environment's roots, as given; each is judged again whenever it is used, like a stored one. */
+    private val environmentRoots: List<Path> = configured.map { it.toAbsolutePath().normalize() }
+
+    init {
+        environmentRoots.filter { realDirectory(it) == null }.forEach { root ->
+            LOGGER.atWarn().addKeyValue("import_root", root.toString()).log("an import root does not exist and is skipped")
+        }
+    }
+
+    private fun current(): List<Root> {
+        val fromEnvironment = environmentRoots.mapIndexed { index, configured ->
+            val real = realDirectory(configured)
+            val path = (real ?: configured).toString()
+            Root(ImportRootView("environment-$index", nameOf(path), path, ImportRootSource.ENVIRONMENT, real != null), real)
+        }
+        val seen = fromEnvironment.map { it.view.path }.toMutableSet()
+        val stored = store.list().filter { seen.add(it.path) }.map { root ->
+            // A stored path is a real path; if it now resolves elsewhere (a folder replaced by a link), it is not used.
+            val real = realDirectory(Path.of(root.path))?.takeIf { it.toString() == root.path }
+            Root(ImportRootView(root.id, nameOf(root.path), root.path, ImportRootSource.ADMIN, real != null, root.addedAt, root.addedBy), real)
+        }
+        return fromEnvironment + stored
     }
 
     /** The upload area of [collectionId]: what its uploads are stored under, and an implicit root for its imports. */
@@ -53,18 +99,43 @@ class ImportRoots(configured: List<Path>, private val uploadsDir: Path) {
 
     /** Refuses unless every one of [paths] lies inside a root or [collectionId]'s upload area. */
     fun requireAllowed(collectionId: CollectionId, paths: List<String>) {
-        val allowed = roots + listOfNotNull(runCatching { uploadArea(collectionId).toRealPath() }.getOrNull())
+        val allowed = current().mapNotNull { it.real } + listOfNotNull(runCatching { uploadArea(collectionId).toRealPath() }.getOrNull())
         paths.forEach { raw ->
             val real = realPathOf(raw) ?: throw ImportPathNotAllowedException()
             if (allowed.none { real.startsWith(it) }) throw ImportPathNotAllowedException()
         }
     }
 
-    fun views(): List<ImportRootView> = roots.mapIndexed { index, root -> ImportRootView(index, root.fileName?.toString() ?: root.toString(), root.toString()) }
+    fun views(): List<ImportRootView> = current().map { it.view }
 
-    /** The folders and files of [relative] below root [index]; `..` and links that leave the root are refused or left out. */
-    fun browse(index: Int, relative: String): ImportRootListing {
-        val root = roots.getOrNull(index) ?: throw NoSuchElementException("no import root $index")
+    /**
+     * Adds the folder at [rawPath] as a root and answers it with whether this call added it; a folder that is
+     * already a root, by its real path, is answered as it is.
+     */
+    fun add(rawPath: String): Pair<ImportRootView, Boolean> {
+        val trimmed = rawPath.trim()
+        val given = runCatching { Path.of(trimmed) }.getOrNull()
+        require(trimmed.isNotEmpty() && given != null && given.isAbsolute) { "give the folder's full path on the server, starting with /" }
+        val real = realDirectory(given) ?: throw IllegalArgumentException("there is no folder at $trimmed on the server")
+        require(Files.isReadable(real)) { "the server may not read the folder $trimmed" }
+        require(real.parent != null) { "the whole file system cannot be an import folder; choose a folder inside it" }
+        val data = runCatching { dataDir.toRealPath() }.getOrElse { dataDir.toAbsolutePath().normalize() }
+        require(!real.startsWith(data)) { "the server's own data directory cannot be an import folder" }
+        current().firstOrNull { it.view.path == real.toString() }?.let { return it.view to false }
+        val (_, created) = store.add(real.toString())
+        return current().first { it.view.path == real.toString() }.view to created
+    }
+
+    /** Removes the root [id] added under Admin; removing one that is already gone changes nothing. */
+    fun remove(id: String) {
+        if (environmentRoots.indices.any { id == "environment-$it" }) throw ImportRootFromEnvironmentException()
+        store.remove(id)
+    }
+
+    /** The folders and files of [relative] below root [id]; `..` and links that leave the root are refused or left out. */
+    fun browse(id: String, relative: String): ImportRootListing {
+        val current = current().firstOrNull { it.view.id == id } ?: throw NoSuchElementException("no such import folder")
+        val root = current.real ?: throw NoSuchElementException("the import folder ${current.view.path} is not available on the server")
         val segments = relative.split('/').filter { it.isNotEmpty() && it != "." }
         require(segments.none { it == ".." }) { "a browsed path may not leave its root" }
         val directory = segments.fold(root) { path, segment -> path.resolve(segment) }
@@ -85,7 +156,7 @@ class ImportRoots(configured: List<Path>, private val uploadsDir: Path) {
                 )
             }
         }.sortedWith(compareBy({ !it.directory }, { it.name.lowercase() }))
-        return ImportRootListing(views()[index], segments.joinToString("/"), entries)
+        return ImportRootListing(current.view, segments.joinToString("/"), entries)
     }
 
     /** Removes upload areas older than [maxAge]; their imports have their managed copies by then. */
@@ -108,6 +179,11 @@ class ImportRoots(configured: List<Path>, private val uploadsDir: Path) {
         return removed
     }
 
+    private fun realDirectory(path: Path): Path? =
+        runCatching { path.toAbsolutePath().toRealPath() }.getOrNull()?.takeIf { Files.isDirectory(it) }
+
+    private fun nameOf(path: String): String = Path.of(path).fileName?.toString() ?: path
+
     /** The real path of [raw], or for a path that does not exist, its parent's real path with its own name. */
     private fun realPathOf(raw: String): Path? {
         val path = runCatching { Path.of(raw) }.getOrNull()?.takeIf { it.isAbsolute } ?: return null
@@ -120,7 +196,7 @@ class ImportRoots(configured: List<Path>, private val uploadsDir: Path) {
         val UPLOAD_RETENTION: Duration = Duration.ofDays(7)
         private val LOGGER = LoggerFactory.getLogger("infoscry.import")
 
-        /** Where the roots come from; tests replace it, as they replace the database. */
+        /** The roots from the environment; tests replace it, as they replace the database. */
         @Volatile
         var configured: () -> List<Path> = { fromEnvironment() }
 
