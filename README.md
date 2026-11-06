@@ -6,7 +6,11 @@ provides a web reader and a command-line interface that talks to the server.
 
 ## What you can do
 
-- Import files and folders into collections without changing the originals. Follow both
+- Share collections: each person signs in with their own account and is an owner,
+  editor or reader of the collections they work in, and the interface shows who
+  imported a document, approved a page or changed a setting.
+- Upload files, or import from folders the server opens, into collections without
+  changing the originals. Follow both
   file progress and the current document’s page progress during processing.
 - Extract text from PDFs, images, Office documents, text files and e-books,
   including OCR for scanned material.
@@ -23,14 +27,15 @@ provides a web reader and a command-line interface that talks to the server.
 
 ## Get started
 
-InfoScry is built and run locally on an Apple Silicon Mac. Start with the
+InfoScry is built from source and runs as a server on an Apple Silicon Mac, with
+PostgreSQL in Docker. Start with the
 [installation guide](docs/installation.md), then follow the
 [user guide](docs/usage.md) to import documents and search your archive.
 Commands for installing Java, Node.js, Tesseract and Calibre are under
 [local dependencies](docs/installation.md#install-local-dependencies).
 [asdf setup](docs/asdf.md) covers project-specific Java and Node.js versions.
 
-Documents and archive data stay on your machine. Ask and Investigate send
+Documents and archive data stay on the server. Ask and Investigate send
 questions and selected source passages to the LLM endpoint you configure,
 which may be an external service.
 
@@ -47,21 +52,21 @@ which may be an external service.
 
 ## Project status
 
-Implementation is in progress. The backend, CLI and web reader exist. The
-[multi-user server](docs/specs/2026-11-05-multi-user-server-design.md) is under
-way: state and search are in PostgreSQL, people sign in with local accounts, and
-the CLI is a client of the server with a personal access token, collections
-have members with owner, editor and reader roles, and records show who created
-and changed them, with edits checked against the version they were made from.
-Imports come from uploads or from import roots an administrator opens on the
-server;
+Implementation is in progress. The backend, CLI and web reader exist.
+InfoScry is a [multi-user server](docs/specs/2026-11-05-multi-user-server-design.md):
+state and search (BM25 and vectors) are in PostgreSQL, people sign in with local
+accounts, collections have owner, editor and reader members, records show who
+created and changed them, and edits are checked against the version they were
+made from. Imports come from uploads or from import roots on the server. The CLI
+is a client of the server with a personal access token. Earlier single-user
+archives are not migrated; collections are imported again.
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
 The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan (including No OCR, which uses the
 document's own text), reads selected pages and publishes
 a complete reading automatically while keeping previous text in history. Its browser
-gate passes against local test doubles. Remaining product choices are listed in
-[docs/tickets/follow-ups](docs/tickets/follow-ups/STATUS.md). Document paging, selective
+gate passes against local test doubles. Remaining product choices are listed under
+[open gates](docs/implementation-status.md#open-verification-and-product-gates). Document paging, selective
 rescanning and historical Ask citations have browser coverage; the format-specific
 source-viewer finish line remains open. See [implementation status](docs/implementation-status.md)
 for recorded checks.
@@ -97,7 +102,7 @@ confirmation is recorded separately from automated test results in
 [implementation status](docs/implementation-status.md).
 
 The [selectable-PDF design](docs/selectable-pdf.md) is
-implemented, with [remaining integration work](docs/tickets/selectable-pdf/STATUS.md):
+implemented, with [remaining integration work](docs/implementation-status.md#open-verification-and-product-gates):
 a revision-bound PDF copy places the published reading invisibly
 over its page image so it can be selected and copied in an ordinary PDF reader.
 Generation is durable, repeatable and recoverable; a selected-page rescan or

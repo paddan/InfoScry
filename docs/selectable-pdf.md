@@ -3,7 +3,7 @@
 Implemented feature reference. Patrik confirmed the remaining OCR/PDF checks
 complete on 2026-10-11; see [verification status](implementation-status.md#owner-confirmed-ocrpdf-checks-2026-10-11).
 [Interface contracts](selectable-pdf-contracts.md) describe revision/layout and
-HTTP boundaries. [First-import automatic generation](tickets/selectable-pdf/STATUS.md)
+HTTP boundaries. [First-import automatic generation](implementation-status.md#open-verification-and-product-gates)
 remains a separate integration decision.
 
 ## Intent and success
@@ -18,7 +18,7 @@ requires **Create PDF with selectable text**; automatic generation for that path
 remains a separate integration decision. Open/download actions appear beside
 Open original.
 
-Archive search remains in Lucene, using the existing extracted text and index.
+Archive search remains in PostgreSQL (BM25 and vectors), using the existing extracted text and index.
 PDF generation adds no search feature, alternate index or search dependency. A
 PDF reader may incidentally find text in its text layer; that is not an acceptance
 criterion. Correct spatial selection and clipboard text are the acceptance criteria.
@@ -98,7 +98,7 @@ misleading copy. The published reading and original remain available.
 
 Use an independent durable derived-artifact job in the existing application
 process. A failed export never changes import/rescan success, the active reading,
-embeddings or search. SQLite owns desired artifact identity and job status.
+embeddings or search. PostgreSQL owns desired artifact identity and job status.
 
 Cache identity includes collection/document, managed-original hash, revision ID,
 ordered page text/image/layout hashes and renderer/font versions. Store under

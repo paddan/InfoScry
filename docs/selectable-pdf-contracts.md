@@ -1,13 +1,13 @@
 # Selectable PDF interface contracts
 
 Current interface reference for the implemented PDF-copy feature. Read the
-[design](selectable-pdf.md) and [remaining integration work](tickets/selectable-pdf/STATUS.md).
+[design](selectable-pdf.md) and [remaining integration work](implementation-status.md#open-verification-and-product-gates).
 Update contracts and consumers together when a change is authorized.
 
 ## Product boundaries
 
 The purpose is selecting and copying the published reading over the page image.
-Archive search stays in Lucene. Do not add PDF search controls, another index,
+Archive search stays in PostgreSQL. Do not add PDF search controls, another index,
 embedding work or a new OCR fallback. Original and managed-original bytes remain
 immutable. The generated file is a separate revision-bound copy.
 

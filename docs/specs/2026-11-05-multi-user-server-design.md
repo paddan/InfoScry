@@ -1,6 +1,7 @@
 # Multi-user server
 
-Status: approved 2026-11-05. Nothing here is implemented yet; the search spike (ticket 1) comes first.
+Status: approved 2026-11-05; implemented 2026-11-06 (tickets 1–9). Verification, deviations and
+open gates are recorded in [implementation status](../implementation-status.md#multi-user-server-2026-11-06).
 
 ## Goal
 

@@ -13,7 +13,7 @@ application suites.
 
 | Area | Current behavior |
 |---|---|
-| Local runtime | Backend, CLI and static web reader; foreground loopback server |
+| Server | One process with backend, job lanes and static web reader; PostgreSQL in Docker; local accounts, collection members, attribution and optimistic edits; uploads and import roots; the CLI as an HTTP client with a personal access token |
 | Import | Managed copies, per-collection deduplication, extraction/OCR checkpoints and persistent jobs; separate file and current-document page progress bars backed by saved results; unsupported files are skipped and not shown; include/exclude extensions and per-collection ignore patterns |
 | Search | Keyword, semantic and hybrid retrieval, live as the reader types; advanced filters rerun the current query; validated retrieval refills stale or artifact-heavy results; inclusive import dates and safe excerpt highlighting; recoverable reindexing |
 | Collections | Creation, settings (including OCR defaults and ignore patterns), paged document browsing, progress, durable import history, retries (optionally with a chosen OCR method) and recoverable deletion |
@@ -31,7 +31,7 @@ automatically, preserving text history and Restore. Stopped and legacy paused wo
 Only pages that can need reading are read (see the spec's "Page selection"). The
 redesign's implementation tickets and follow-up plan are complete and were removed.
 Patrik confirmed the remaining OCR/PDF checks complete on 2026-10-11.
-[Remaining product choices](tickets/follow-ups/STATUS.md) are separate from those
+[Remaining product choices](#open-verification-and-product-gates) are separate from those
 checks. Automated fake tests alone do not establish OCR quality.
 
 ## Fixes from local testing
@@ -308,6 +308,29 @@ has not been measured. That is the pilot check for the Surya HTML path, not part
 the automated gate. Exact cell geometry for the selectable PDF is sub-project 2
 (Surya line detection); the text layer follows reading order until then.
 
+## Multi-user server (2026-11-06)
+
+The [multi-user server](specs/2026-11-05-multi-user-server-design.md) replaced
+the single-user archive in tickets 1–9 (removed once complete; see Git history up
+to the merge of `docs-multi-user`). Contracts are in the
+[technical reference](technical-reference.md#privacy-and-api-boundaries).
+Deviations from the spec: attribution columns are nullable (`NULL` means
+nobody acted in person, such as startup recovery), and an upload is one file per
+request as the raw body with the name in `X-InfoScry-Filename` rather than
+multipart.
+
+- **Full gate after ticket 8:** `./gradlew check` with Podman passed 2,248 JVM
+  and 588 Vitest tests, no failures.
+- **Manual, per ticket:** the installed distribution against a ParadeDB
+  container and the real CoreML model: sign-in and forced password change,
+  personal access tokens for the CLI, members and roles (404 for non-members),
+  attribution and a stale edit refused with `EDIT_CONFLICT` naming the other
+  person, uploads and `--server-path` imports with a link out of an import
+  root refused, and a browser session surviving a server restart.
+- **Not run since the move:** `externalTest` (Playwright and Tesseract) and
+  `gpuIntegrationTest`; `docker compose up` itself (the same image and settings
+  were run with Podman directly).
+
 ## Recorded verification
 
 The previous README recorded a local 2026-09-24 run of `check`, `externalTest`
@@ -444,10 +467,18 @@ owner's confirmation. Earlier test records above describe their own run scope.
 
 ## Open verification and product gates
 
+- Multi-user browser acceptance: the Playwright suites sign in, but have not run
+  since the move to the server, and the spec's scenario for user creation,
+  membership and attribution display is not written yet.
+- `docker compose up` with a Compose provider, and an explicit kill-and-restart
+  of a running import to watch its attribution survive.
+- The spec's open questions: whether `pg_search`'s AGPL licence is acceptable,
+  and whether Ask conversations should be shareable within a collection.
+
 - The format-specific source views and source-viewer finish line.
 - Real-provider browser acceptance outside the confirmed OCR/PDF scope, including
   the general model-catalog workflow and opt-in Investigate native reasoning.
-- A human-operated native macOS file/folder picker check.
+- A human-operated native macOS file/folder picker check (administrator-only since the multi-user server).
 - General keyboard/screen-reader checks outside the confirmed OCR/PDF scope.
 - A plain first import does not yet auto-queue selectable-PDF generation. Use
   **Create PDF with selectable text** until that integration decision is addressed.
