@@ -323,7 +323,7 @@ defaults for Ask and Investigate. Testing makes real requests to that endpoint.
 
 Ask and Investigate send questions and selected source evidence to the chosen
 endpoint, which may be external. See the
-[technical privacy boundaries](technical-reference.md#privacy-and-local-api-boundaries).
+[technical privacy boundaries](technical-reference.md#privacy-and-api-boundaries).
 
 ## Choose a prompt
 

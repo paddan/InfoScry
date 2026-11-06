@@ -318,6 +318,53 @@ export INFOSCRY_PUBLIC_ORIGIN=https://archive.example.org
 With an HTTPS origin the session cookie is `Secure`. Requests that name another
 host are refused.
 
+## Start the server at login
+
+A launchd agent can start the server when you sign in to the Mac and start it
+again if it exits. Postgres restarts on its own (`restart: unless-stopped`) once
+Docker or the Podman machine runs. Save this as
+`~/Library/LaunchAgents/org.infoscry.server.plist`, replacing the paths and the
+password with your own:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.infoscry.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/absolute/path/to/infoscry/build/install/infoscry/bin/infoscry</string>
+    <string>serve</string>
+    <string>--json</string>
+  </array>
+  <key>WorkingDirectory</key><string>/absolute/path/to/infoscry</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>JAVA_HOME</key><string>/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>INFOSCRY_DATABASE_PASSWORD</key><string>change-me</string>
+    <key>INFOSCRY_IMPORT_ROOTS</key><string>/Users/Shared/Archive</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/infoscry-server.out</string>
+  <key>StandardErrorPath</key><string>/tmp/infoscry-server.err</string>
+</dict>
+</plist>
+```
+
+`--json` keeps the server from opening a browser. `PATH` must reach `tesseract`,
+`ebook-convert` and `llama-server` if you use them, and the working directory
+is the checkout so Surya finds its worker script. The file holds the database
+password, so keep it readable only by you (`chmod 600`). Load it with:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.infoscry.server.plist
+```
+
+Stop it with `launchctl bootout gui/$(id -u)/org.infoscry.server`.
+
 ## Use a separate archive
 
 Use one data-directory path consistently for model installation and the server,
@@ -353,4 +400,6 @@ The CLI profile commands go through the running server, like Admin does.
 - **E-book converter unavailable:** check `command -v ebook-convert` and
   `ebook-convert --version` in the server's launch terminal. See
   [Calibre setup](#calibre-for-e-book-conversion), then restart the server and retry.
-- **No graphical session:** the web file picker offers manual path entry.
+- **No graphical session:** the server's own pick dialog, which only
+  administrators see, falls back to entering paths by hand. Everyone else uploads
+  files or picks them under **Server folders…**.

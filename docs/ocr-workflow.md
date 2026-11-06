@@ -2,7 +2,7 @@
 
 Current reading-method, start, recovery and page-selection contracts.
 See [implementation status](implementation-status.md) for recorded verification
-and [remaining product choices](tickets/follow-ups/STATUS.md). Patrik confirmed the
+and [remaining product choices](implementation-status.md#open-verification-and-product-gates). Patrik confirmed the
 remaining OCR/PDF checks complete on 2026-10-11.
 
 ## Reading workflow
@@ -45,8 +45,9 @@ remaining OCR/PDF checks complete on 2026-10-11.
    gone, machine restarted), the person can always start again. No message about
    an operation that "waits for approval", "has pages to review" or "cannot
    start yet" may be the answer to starting again. See "Always restartable".
-8. The application is single-user. Protection for other readers of a document
-   while it is being rescanned is not required.
+8. Other people reading a document while it is rescanned are not protected from
+   seeing the new text appear. A rescan started under someone else's running
+   operation answers with that operation (see "Concurrent use").
 9. For an external import with an unknown page count, approval covers every page
    in the exact unchanged files shown in the dialog. The confirmed source
    manifest (path, size and SHA-256) is the authority; no exact page allowance or
@@ -226,14 +227,20 @@ Removed: import mode, reviewer profile, external page allowance. The removed col
 idempotent startup cleanup withdraws stale work. a stored engine/profile pair that disagrees is
 resolved to the engine's local method.
 
-## Single-user behavior
+## Concurrent use
 
-The application has one user:
+Several people use one server, and none of them waits for another:
 
-- A rescan no longer refuses to start, or holds the document, because another
-  reader or operation might see intermediate state. Two writers to the same
-  document are still serialized by the shared mutation admission.
-- Publication no longer waits for readers to drain from the previous revision.
+- A rescan never refuses to start, or holds the document, because another
+  reader might see intermediate state. Two writers to the same document are
+  still serialized by the shared mutation admission.
+- A rescan of a document under another user's running OCR operation answers
+  with that operation instead of replacing it; the same user starting again
+  replaces their own run, as before.
+- Publication does not wait for readers to drain from the previous revision.
+- The first Approve or Reject of a published reading decides and is recorded
+  with who made it; a later decision answers with the recorded one, and a
+  Reject that comes second restores nothing.
 
 Unchanged, because they protect data rather than other users and `AGENTS.md`
 requires them: per-page durable checkpoints and resume, immutable originals and

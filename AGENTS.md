@@ -2,15 +2,18 @@
 
 ## Current repository
 
-The backend, CLI, and reader-focused web UI exist. The format-specific
-source-viewer finish line remains open. Ask, document paging and page selection
+InfoScry is a multi-user server: people sign in with local accounts, collections
+have owner, editor and reader members, and the CLI is a client of the server
+([design](docs/specs/2026-11-05-multi-user-server-design.md)). The backend, CLI
+and reader-focused web UI exist. The format-specific source-viewer finish line
+remains open. Ask, document paging and page selection
 have `externalTest` Playwright coverage (`DocumentBrowserAcceptanceTest`).
 Ask's per-collection prompt choice is covered there too.
 Investigate's browser flow is covered by `InvestigateBrowserAcceptanceTest`.
 Collection corrections are covered by `CorrectionsBrowserAcceptanceTest`.
 The collection glossary is covered by `GlossaryBrowserAcceptanceTest`.
-These browser tests use local fake providers and embeddings, not real providers
-or GPU verification.
+These browser tests sign in first and use local fake providers and embeddings,
+not real providers or GPU verification.
 
 - Read [README.md](README.md) for current status.
 - Design specs live in `docs/specs/` and implementation tickets in
@@ -67,10 +70,17 @@ or GPU verification.
   searchable rows commit in one transaction; never add a second search store.
 - The server owns every job. The CLI is an HTTP client authenticated with a
   personal access token; only `infoscry admin` opens the database directly.
-- InfoScry is a single-user application. Do not add protection, refusals or
-  waiting for other readers of a document during import or rescanning. Keep the
-  safeguards that protect data (checkpoints, immutable originals, atomic index
-  publication, recovery); those are not about concurrency.
+- Several people use one server at once. Edits to shared settings carry the
+  version they were made from (409 `EDIT_CONFLICT` when stale), and starting
+  work someone else already started answers with that job or operation. Do not
+  add locks, refusals or waiting for other readers of a document during import
+  or rescanning. Keep the safeguards that protect data (checkpoints, immutable
+  originals, atomic publication, recovery).
+- Every API route has an entry in the rule table in
+  `src/main/kotlin/infoscry/server/Authorization.kt`; a collection the caller is
+  not a member of answers 404. Records people create and change carry
+  attribution, stamped from the ambient actor. Imports read only from
+  `INFOSCRY_IMPORT_ROOTS` and the collection's uploads.
 - A stopped import or rescan (cancelled, failed, interrupted, process killed)
   must never block starting again, and starting again must never answer with
   "waiting for approval", "pending review" or "cannot start yet". Recover or

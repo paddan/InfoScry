@@ -40,6 +40,7 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 | `models/` | Installed embedding model and tokenizer |
 | `logs/` | Structured application logs |
 | `tmp/` | Temporary work and GPU profiling artifacts |
+| `uploads/` | Uploaded files waiting for import, removed after seven days |
 
 Authoritative state lives in PostgreSQL, not in the data directory. The process
 reads its connection from `INFOSCRY_DATABASE_URL`, `INFOSCRY_DATABASE_USER` and
@@ -389,7 +390,7 @@ The [design](specs/2026-10-23-collection-glossary-design.md) is implemented.
 ## Privacy and API boundaries
 
 Originals, extracted text, embeddings, indexes and saved conversations stay
-local. Ask and Investigate send prompts, questions, selected evidence and
+on the server and in its database. Ask and Investigate send prompts, questions, selected evidence and
 citation metadata to the configured OpenAI-compatible or Anthropic endpoint.
 That endpoint may be external; these features are not necessarily offline.
 
@@ -429,8 +430,7 @@ route has an entry in the rule table in
 [Authorization.kt](../src/main/kotlin/infoscry/server/Authorization.kt), which
 the request guard enforces and a test checks against the routing tree. Ask
 conversations and investigations belong to the user who started them and are
-private to that user. Until import roots exist, choosing server paths for an
-import is limited to administrators.
+private to that user.
 
 Attribution is part of the records: collections, correction rules, glossary
 groups, prompts and LLM and OCR profiles have `created_by` and `updated_by`;
