@@ -273,7 +273,8 @@ open class JobStore(private val database: Database) {
     fun claim(id: JobId): Job? = database.transaction { connection -> claimIn(connection, id) }
 
     /**
-     * Takes the oldest queued job in one transaction, so two workers cannot be handed the same one.
+     * Takes the oldest queued job that no other worker is claiming, in one transaction, so two workers cannot
+     * be handed the same one and neither waits for the other.
      *
      * Oldest first keeps the queue fair: an archive of thousands of documents is imported in the order
      * it was handed over, not in whatever order a poll happens to see.
@@ -288,7 +289,9 @@ open class JobStore(private val database: Database) {
         if (types != null && types.isEmpty()) return@transaction null
         val typeFilter = types?.joinToString(prefix = " AND type IN (", postfix = ")") { "?" } ?: ""
         val next = connection.prepareStatement(
-            "$SELECT_JOBS WHERE state = ?$typeFilter ORDER BY created_at, insert_order LIMIT 1",
+            // A row another worker is claiming is skipped rather than waited for, so concurrent workers each
+            // take a different job and none of them blocks on another's open claim.
+            "$SELECT_JOBS WHERE state = ?$typeFilter ORDER BY created_at, insert_order LIMIT 1 FOR UPDATE SKIP LOCKED",
         ).use { statement ->
             statement.setString(1, JobState.QUEUED.name)
             types?.forEachIndexed { index, type -> statement.setString(index + 2, type.name) }
