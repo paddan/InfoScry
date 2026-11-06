@@ -8,8 +8,6 @@ import com.github.ajalt.clikt.parameters.arguments.multiple
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.multiple
 import com.github.ajalt.clikt.parameters.options.option
-import com.github.ajalt.clikt.parameters.types.path
-import infoscry.config.AppPaths
 import infoscry.glossary.GlossaryRules
 import infoscry.server.ApiJson
 import infoscry.server.GlossaryGroupWire
@@ -41,14 +39,13 @@ class ListGlossaryCommand : CliktCommand(name = "list") {
 
     private val jsonFlag by option("--json", help = JSON_HELP).flag()
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, jsonFlag, dataDirOption)
+        val options = resolveOptions(parentOptions, jsonFlag, null)
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val list = runBlocking { session.listGlossary(collection) }
                 if (options.json) {
                     echo(ApiJson.encodeToString(list))
@@ -80,12 +77,11 @@ class AddGlossaryCommand : CliktCommand(name = "add") {
 
     private val group by option("--group", help = "The id of the group to replace; by default a new group")
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, false, dataDirOption)
+        val options = resolveOptions(parentOptions, false, null)
         val cleaned = terms.map(GlossaryRules::clean)
         val prefixed = prefixes.map(GlossaryRules::clean).toSet()
         prefixed.firstOrNull { it !in cleaned }?.let {
@@ -93,7 +89,7 @@ class AddGlossaryCommand : CliktCommand(name = "add") {
         }
         val wire = cleaned.map { GlossaryTermWire(it, it in prefixed) }
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 val existing = if (group == null) {
                     runBlocking { session.listGlossary(collection) }.groups.firstOrNull { it.sameTermsAs(wire) }
                 } else {
@@ -120,14 +116,13 @@ class RemoveGlossaryCommand : CliktCommand(name = "remove") {
 
     private val group by argument("group", help = "The group's id, as `list` prints it")
 
-    private val dataDirOption by option("--data-dir", help = DATA_DIR_HELP).path()
 
     private val parentOptions by findObject<CliOptions>()
 
     override fun run() {
-        val options = resolveOptions(parentOptions, false, dataDirOption)
+        val options = resolveOptions(parentOptions, false, null)
         try {
-            CliSession.connect(AppPaths.of(options.dataDir)).use { session ->
+            CliSession.connect().use { session ->
                 runBlocking { session.deleteGlossaryGroup(collection, group) }
                 echo("Removed glossary group $group.")
             }

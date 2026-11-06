@@ -82,11 +82,12 @@ class RootCommand(
             ServeCommand(pipeline, importEmbedder),
             CollectionCommand(),
             JobsCommand(),
-            ImportCommand(pipeline, importEmbedder),
+            ImportCommand(),
             SearchCommand(),
             ReindexCommand(),
             LlmCommand(),
             AskCommand(),
+            AdminCommand(),
         )
     }
 

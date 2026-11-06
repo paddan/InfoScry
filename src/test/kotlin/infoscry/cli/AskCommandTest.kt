@@ -1,7 +1,5 @@
 package infoscry.cli
 
-import infoscry.AppContext
-import infoscry.config.AppPaths
 import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -13,24 +11,27 @@ import kotlin.test.assertNotEquals
 
 class AskCommandTest {
     private lateinit var directory: java.nio.file.Path
+    private lateinit var cli: CliTestServer
 
     @BeforeTest
     fun createDataDirectory() {
         directory = Files.createTempDirectory("infoscry-ask-cli")
+        cli = CliTestServer(directory)
         // A new archive has no automatic Default, and this class asks about a missing profile rather
         // than a missing collection, so the collection the request names is created explicitly.
-        CliProcess.run("--data-dir", directory.toString(), "collection", "create", "Default")
+        cli.run("collection", "create", "Default")
     }
 
     @AfterTest
     fun removeDataDirectory() {
+        cli.close()
         directory.toFile().deleteRecursively()
     }
 
     @Test
-    fun `ask accepts shared json and data directory options`() {
-        val result = CliProcess.run(
-            "ask", "--data-dir", directory.toString(), "--json",
+    fun `ask accepts the shared json option`() {
+        val result = cli.run(
+            "ask", "--json",
             "--collection", "Default", "--profile", "missing", "question",
         )
 
@@ -41,21 +42,21 @@ class AskCommandTest {
 
     @Test
     fun `ask refuses a profile that is switched off`() {
-        val added = CliProcess.run(
-            "llm", "add", "--data-dir", directory.toString(),
+        val added = cli.run(
+            "llm", "add",
             "--name", "retired", "--provider", "openai-compatible", "--model", "test-model",
             "--endpoint", "http://127.0.0.1:1",
         )
         assertEquals(0, added.exitCode, "adding the retired profile failed: stderr=${added.stderr}")
         // Switched off the way the profile screen does it: the CLI has no command that retires a profile,
         // and a repaired profile is left in this same state by the migration.
-        AppContext.open(AppPaths.of(directory)).use { context ->
+        cli.context.let { context ->
             val profile = context.llm.findByName("retired")!!
             context.llm.update(profile.id, profile.copy(enabled = false))
         }
 
-        val result = CliProcess.run(
-            "ask", "--data-dir", directory.toString(),
+        val result = cli.run(
+            "ask",
             "--collection", "Default", "--profile", "retired", "question",
         )
 
@@ -71,16 +72,16 @@ class AskCommandTest {
     }
 
     @Test
-    fun `ask --prompt Unknown fails with a message naming the prompt`() {
+    fun `ask --prompt Unknown fails with a message saying the prompt does not exist`() {
         addProfile("asker", endpoint = "http://127.0.0.1:1")
 
-        val result = CliProcess.run(
-            "ask", "--data-dir", directory.toString(),
+        val result = cli.run(
+            "ask",
             "--collection", "Default", "--profile", "asker", "--prompt", "Unknown", "question",
         )
 
         assertNotEquals(0, result.exitCode)
-        assertContains(result.stdout + result.stderr, "Unknown")
+        assertContains(result.stdout + result.stderr, "no prompt with that name or id")
         assertFalse(result.stderr.contains("Exception in thread"), "a refusal is a message, not a stack trace")
     }
 
@@ -91,15 +92,15 @@ class AskCommandTest {
         // Ask service tests.
         val short = directory.resolve("short.txt")
         Files.writeString(short, "Answer in one sentence.")
-        val created = CliProcess.run(
-            "collection", "prompt", "create", "Default", "--data-dir", directory.toString(),
+        val created = cli.run(
+            "collection", "prompt", "create", "Default",
             "--role", "ask", "--name", "Short", "--file", short.toString(),
         )
         assertEquals(0, created.exitCode, created.stderr)
         addProfile("asker", endpoint = "http://127.0.0.1:1")
 
-        val result = CliProcess.run(
-            "ask", "--data-dir", directory.toString(),
+        val result = cli.run(
+            "ask",
             "--collection", "Default", "--profile", "asker", "--prompt", "Short", "question",
         )
 
@@ -110,8 +111,8 @@ class AskCommandTest {
     }
 
     private fun addProfile(name: String, endpoint: String) {
-        val added = CliProcess.run(
-            "llm", "add", "--data-dir", directory.toString(),
+        val added = cli.run(
+            "llm", "add",
             "--name", name, "--provider", "openai-compatible", "--model", "test-model",
             "--endpoint", endpoint,
         )

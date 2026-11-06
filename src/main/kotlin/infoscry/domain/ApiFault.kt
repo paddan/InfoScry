@@ -7,8 +7,12 @@ package infoscry.domain
  */
 enum class ApiStatus {
     BAD_REQUEST,
+    UNAUTHORIZED,
+    FORBIDDEN,
+    NOT_FOUND,
     CONFLICT,
     LOCKED,
+    TOO_MANY_REQUESTS,
     SERVICE_UNAVAILABLE,
 }
 

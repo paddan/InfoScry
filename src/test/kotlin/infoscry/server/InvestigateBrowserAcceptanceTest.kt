@@ -318,6 +318,7 @@ class InvestigateBrowserAcceptanceTest {
             .redirectOutput(outputFile.toFile())
             .apply {
                 environment()["BASE_URL"] = harness.url
+                environment()["INFOSCRY_SESSION_COOKIE"] = harness.sessionCookie
                 environment()["SCENARIO"] = name
                 if (catalogEndpoint != null) environment()["CATALOG_ENDPOINT"] = catalogEndpoint
                 extraEnvironment.forEach { (key, value) -> environment()[key] = value }

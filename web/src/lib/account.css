@@ -1,0 +1,46 @@
+/* Shared look of the sign-in, account and user forms: the same fields and buttons the admin panels use. */
+.account-form { display: grid; gap: 0.9rem; max-inline-size: 26rem; }
+.account-form .field { display: grid; gap: 0.35rem; min-inline-size: 0; }
+.account-form label, .account-section label { color: #b8bcbb; font-size: 0.82rem; }
+.account-form input, .account-form select, .account-section input, .account-section select {
+  inline-size: 100%;
+  box-sizing: border-box;
+  border: 1px solid #383d3e;
+  border-radius: 0.48rem;
+  background: #202324;
+  padding: 0.62rem 0.72rem;
+  color: #e8e9e7;
+  font: inherit;
+}
+.account-form button, .account-section button {
+  border: 1px solid #3d4243;
+  border-radius: 0.48rem;
+  background: #1b1e1f;
+  padding: 0.55rem 0.9rem;
+  color: #e8e9e7;
+  font: inherit;
+  cursor: pointer;
+}
+.account-form button.primary, .account-section button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
+.account-form button:disabled, .account-section button:disabled { opacity: 0.6; cursor: default; }
+.account-section button.danger { border-color: #6e3a37; color: #f0a4a0; }
+.account-section { display: grid; gap: 0.9rem; margin-block-end: 2rem; max-inline-size: 48rem; }
+.account-section h2 { margin: 0; font-size: 1.05rem; font-weight: 600; color: #f0efec; }
+.account-hint { margin: 0; color: #929997; font-size: 0.82rem; }
+.account-secret {
+  display: block;
+  overflow-wrap: anywhere;
+  border: 1px solid #c4a77d55;
+  border-radius: 0.48rem;
+  background: #1d1a14;
+  padding: 0.6rem 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: all;
+}
+.account-table { inline-size: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.account-table th, .account-table td { text-align: start; padding: 0.45rem 0.5rem; border-block-end: 1px solid #2a2d2d; vertical-align: middle; }
+.account-table th { color: #929997; font-weight: 500; }
+.account-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+.account-error { color: #f0a4a0; margin: 0; }
+.account-flash { color: #a9c7a6; margin: 0; }
+@media (max-width: 36rem) { .account-table thead { display: none; } .account-table td { display: block; border: 0; padding: 0.2rem 0; } .account-table tr { display: block; border-block-end: 1px solid #2a2d2d; padding-block: 0.5rem; } }

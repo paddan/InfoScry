@@ -15,7 +15,6 @@ import infoscry.jobs.ImportJobHandler
 import infoscry.jobs.ImportPreviewRequest as ServiceImportPreviewRequest
 import infoscry.jobs.ImportStartRequest
 import infoscry.ocr.ReadingMethod
-import infoscry.jobs.DocumentIngest
 import infoscry.storage.ImportItem
 import infoscry.storage.ImportItemOutcome
 import infoscry.extract.ExternalProcess
@@ -40,7 +39,6 @@ import java.nio.file.Path
 import java.time.Duration
 import kotlinx.coroutines.sync.Mutex
 import org.slf4j.LoggerFactory
-import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -53,9 +51,6 @@ data class ApiError(val code: String, val message: String, val details: Map<Stri
 
 @Serializable
 data class ApiErrorResponse(val error: ApiError)
-
-@Serializable
-data class SessionResponse(val product: String, val csrfToken: String)
 
 @Serializable
 data class CollectionsResponse(val collections: List<Collection>)
@@ -243,20 +238,18 @@ val ApiJsonRejectingUnknownFields = Json(ApiJson) {
  */
 fun Application.configureRoutes(
     context: AppContext,
-    credentials: ApiCredentials,
+    settings: ServerSettings,
     jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
     picker: suspend (Boolean) -> List<String> = ::pickWithOsascript,
 ) {
-    installRequestGuard(credentials)
+    installRequestGuard(context.accounts, settings)
 
     // One pick dialog at a time for the whole process: a second concurrent pick would open another
     // dialog on top of the first, which a user cannot even see, let alone answer.
     val pickMutex = Mutex()
 
     routing {
-        get("/api/session") {
-            call.respondJson(HttpStatusCode.OK, SessionResponse(product = PRODUCT_NAME, csrfToken = credentials.csrfToken))
-        }
+        configureAccountRoutes(context.accounts, settings)
 
         route("/api/collections") {
             get {
@@ -547,7 +540,7 @@ fun Application.configureRoutes(
         configureReadingMethodRoutes(context)
         configureOcrLlmCandidateRoutes(context)
         configureOcrRescanRoutes(context)
-        configureLlmCatalogRoutes(credentials)
+        configureLlmCatalogRoutes()
         configureAskRoutes(context)
         configureInvestigationRoutes(context)
         configureConversationRoutes(context)
@@ -876,6 +869,10 @@ private const val ERROR_DETAIL_FIELD = "error_detail"
 /** The one place an [ApiStatus] becomes the `HttpStatusCode` the client sees. */
 private fun ApiStatus.toHttpStatusCode(): HttpStatusCode = when (this) {
     ApiStatus.BAD_REQUEST -> HttpStatusCode.BadRequest
+    ApiStatus.UNAUTHORIZED -> HttpStatusCode.Unauthorized
+    ApiStatus.FORBIDDEN -> HttpStatusCode.Forbidden
+    ApiStatus.NOT_FOUND -> HttpStatusCode.NotFound
+    ApiStatus.TOO_MANY_REQUESTS -> HttpStatusCode.TooManyRequests
     ApiStatus.CONFLICT -> HttpStatusCode.Conflict
     ApiStatus.LOCKED -> HttpStatusCode.Locked
     ApiStatus.SERVICE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable

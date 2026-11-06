@@ -3,8 +3,6 @@ package infoscry.cli
 import infoscry.llm.FakeOpenAiResponse
 import infoscry.llm.FakeOpenAiServer
 import infoscry.server.ApiJson
-import infoscry.AppContext
-import infoscry.config.AppPaths
 import infoscry.llm.LlmCapabilityProbe
 import infoscry.storage.Instants
 import java.nio.file.Files
@@ -38,15 +36,18 @@ class LlmCommandTest {
 
     private lateinit var directory: Path
     private lateinit var dataDir: Path
+    private lateinit var cli: CliTestServer
 
     @BeforeTest
     fun createTemporaryDataDirectory() {
         directory = Files.createTempDirectory("infoscry-llm-cli")
         dataDir = Files.createDirectories(directory.resolve("data"))
+        cli = CliTestServer(dataDir)
     }
 
     @AfterTest
     fun removeTemporaryDataDirectory() {
+        cli.close()
         directory.toFile().deleteRecursively()
     }
 
@@ -102,7 +103,7 @@ class LlmCommandTest {
 
     @Test
     fun `a nonexistent profile name is an error and persists nothing`() {
-        val result = CliProcess.run("llm", "test", "nobody", "--data-dir", dataDir.toString())
+        val result = cli.run("llm", "test", "nobody")
 
         assertNotEquals(0, result.exitCode, "a nonexistent profile reported success")
         assertTrue(
@@ -118,12 +119,12 @@ class LlmCommandTest {
         addNamedProfile("unknown")
         addNamedProfile("unsupported")
         addNamedProfile("supported")
-        AppContext.open(AppPaths.of(dataDir)).use { context ->
+        cli.context.let { context ->
             context.llm.recordCapability("unsupported", LlmCapabilityProbe(false, Instants.now()))
             context.llm.recordCapability("supported", LlmCapabilityProbe(true, Instants.now()))
         }
 
-        val result = CliProcess.run("llm", "list", "--data-dir", dataDir.toString())
+        val result = cli.run("llm", "list")
         assertEquals(0, result.exitCode, "llm list failed: ${result.stderr}")
         assertTrue(result.stdout.contains("unknown  [openai_compatible]"))
         assertTrue(result.stdout.contains("unsupported  [openai_compatible]"))
@@ -138,12 +139,12 @@ class LlmCommandTest {
         val server = FakeOpenAiServer(emptyList())
         try {
             addProfile(server.url)
-            AppContext.open(AppPaths.of(dataDir)).use { context ->
+            cli.context.let { context ->
                 val profile = context.llm.findByName("probe")!!
                 context.llm.update(profile.id, profile.copy(enabled = false))
             }
 
-            val result = CliProcess.run("llm", "test", "probe", "--data-dir", dataDir.toString())
+            val result = cli.run("llm", "test", "probe")
 
             assertNotEquals(0, result.exitCode, "a switched-off profile was probed")
             assertTrue(server.requestBodies.isEmpty(), "no request reached the provider")
@@ -157,37 +158,35 @@ class LlmCommandTest {
     // ---- helpers ----
 
     private fun addProfile(endpoint: String) {
-        val added = CliProcess.run(
+        val added = cli.run(
             "llm", "add",
             "--name", "probe",
             "--provider", "openai-compatible",
             "--model", "test-model",
             "--endpoint", endpoint,
-            "--data-dir", dataDir.toString(),
         )
         assertEquals(0, added.exitCode, "adding the probe failed: stderr=${added.stderr}")
     }
 
     private fun addNamedProfile(name: String) {
-        val added = CliProcess.run(
+        val added = cli.run(
             "llm", "add",
             "--name", name,
             "--provider", "openai-compatible",
             "--model", "test-model",
             "--endpoint", "http://127.0.0.1:1",
-            "--data-dir", dataDir.toString(),
         )
         assertEquals(0, added.exitCode, "adding $name failed: stderr=${added.stderr}")
     }
 
     private fun runTest(profile: String): LlmTestJson {
-        val result = CliProcess.run("llm", "test", profile, "--data-dir", dataDir.toString())
+        val result = cli.run("llm", "test", profile)
         assertEquals(0, result.exitCode, "llm test failed: stderr=${result.stderr}")
         return ApiJson.decodeFromString<LlmTestJson>(result.stdout.trim())
     }
 
     private fun runList(): String {
-        val list = CliProcess.run("llm", "list", "--json", "--data-dir", dataDir.toString())
+        val list = cli.run("llm", "list", "--json")
         assertEquals(0, list.exitCode, "llm list --json failed: stderr=${list.stderr}")
         return list.stdout.trim()
     }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
+import { signedInContext } from './session.mjs';
 
 const base = process.env.BASE_URL;
 assert(base, 'BASE_URL is required');
@@ -9,7 +10,7 @@ const browser = await chromium.launch({
   executablePath: process.env.INFOSCRY_CHROMIUM || undefined,
 });
 try {
-  const page = await browser.newPage();
+  const page = await (await signedInContext(browser)).newPage();
   await page.setViewportSize({ width: 1600, height: 900 });
   const errors = [];
   page.on('pageerror', (error) => errors.push(String(error)));

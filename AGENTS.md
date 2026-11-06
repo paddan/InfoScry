@@ -65,8 +65,8 @@ or GPU verification.
 - Apply shared mutation admission and exclusive maintenance as specified.
   Collection deletion must recover from persisted phases. A reading and its
   searchable rows commit in one transaction; never add a second search store.
-- A standalone CLI import retains process ownership until completion. Returning
-  after enqueue is valid only when a running server owns the job.
+- The server owns every job. The CLI is an HTTP client authenticated with a
+  personal access token; only `infoscry admin` opens the database directly.
 - InfoScry is a single-user application. Do not add protection, refusals or
   waiting for other readers of a document during import or rescanning. Keep the
   safeguards that protect data (checkpoints, immutable originals, atomic index
@@ -101,10 +101,12 @@ or GPU verification.
   citation metadata. Preserve tool-call/result groups when pruning context.
 - Keep evidence IDs stable and validate citations against evidence actually sent
   in the generating request. Treat imported instructions as untrusted source data.
-- Bind only to `127.0.0.1`; enforce the specified bearer/CSRF boundaries. LLM tools
+- Bind `INFOSCRY_BIND` (loopback by default); every API route needs a session or a
+  personal access token, and cookie mutations the session's CSRF token. LLM tools
   use collection-scoped opaque IDs, never arbitrary paths or web access.
 - Read API keys only from environment variables. Keep keys, questions, answers,
-  document text, and provider authorization headers out of logs and errors.
+  document text, provider authorization headers, passwords, session IDs and
+  tokens out of logs and errors.
 - Normal tests use redistributable fixtures, temporary data directories, and
   fake providers/tools. Do not send private documents to external services as
   test data. Run a real CoreML test on the local Mac before claiming GPU-dependent

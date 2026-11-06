@@ -1,10 +1,10 @@
 /**
- * The typed client for InfoScry's local API.
+ * The typed client for InfoScry's API.
  *
- * Same-origin only: the server answers loopback callers with a loopback `Host` header and offers no
- * cross-origin access, so this client never builds a URL and never needs CORS. Mutations carry the
- * session's CSRF token, which the server issues from `/api/session`. The runtime bearer token is the
- * CLI's credential and never reaches a browser.
+ * Same-origin only: the server offers no cross-origin access, so this client never builds a URL and never
+ * needs CORS. The browser is signed in with an HttpOnly session cookie the page cannot read; mutations also
+ * carry the session's CSRF token, which `/api/session` and sign-in hand out. Personal access tokens are the
+ * CLI's credential and are shown here only once, when they are created.
  */
 
 
@@ -793,7 +793,7 @@ export async function startAsk(
     body: JSON.stringify({ collection, question, profile, ...(prompt === undefined ? {} : { prompt }) }),
     signal,
   });
-  return sendWithSessionRetry(send, 'MUTATION_REQUIRES_CREDENTIALS', signal);
+  return sendWithSessionRetry(send, 'CSRF_TOKEN_INVALID', signal);
 }
 
 /** Decode the API's newline-delimited SSE data frames, including frames split across network chunks. */
@@ -912,7 +912,7 @@ async function investigateRequest(path: string, body: unknown, signal?: AbortSig
     body: JSON.stringify(body),
     signal,
   });
-  return sendWithSessionRetry(send, 'MUTATION_REQUIRES_CREDENTIALS', signal);
+  return sendWithSessionRetry(send, 'CSRF_TOKEN_INVALID', signal);
 }
 
 export async function* readInvestigationEvents(response: Response, signal?: AbortSignal): AsyncGenerator<InvestigateEvent> {
@@ -1672,7 +1672,7 @@ async function mutate(path: string, method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
       : { 'Content-Type': 'application/json', [CSRF_HEADER]: await csrfToken() },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  return readJson(await sendWithSessionRetry(send, 'MUTATION_REQUIRES_CREDENTIALS'));
+  return readJson(await sendWithSessionRetry(send, 'CSRF_TOKEN_INVALID'));
 }
 
 /**
@@ -1697,7 +1697,8 @@ async function sendWithSessionRetry(send: () => Promise<Response>, staleCode: st
 /**
  * The session's CSRF token, fetched once.
  *
- * The server generates it per launch, so it is not persisted anywhere: a reload asks again.
+ * It belongs to the browser's session, so it is not persisted anywhere: a reload asks again, and signing in
+ * replaces it.
  */
 async function csrfToken(): Promise<string> {
   if (sessionToken !== null) {
@@ -1709,6 +1710,100 @@ async function csrfToken(): Promise<string> {
   }
   sessionToken = body.csrfToken;
   return sessionToken;
+}
+
+// ---- Accounts ----
+
+export type UserRole = 'ADMIN' | 'USER';
+
+export type User = {
+  id: string;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  active: boolean;
+  mustChangePassword: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastSignInAt?: string | null;
+};
+
+export type AccessToken = {
+  id: string;
+  name: string;
+  createdAt: string;
+  expiresAt?: string | null;
+  lastUsedAt?: string | null;
+  revokedAt?: string | null;
+};
+
+/** Called when the server says the browser is no longer signed in, so the page can show the sign-in form. */
+let signedOutListener: (() => void) | null = null;
+
+export function onSignedOut(listener: (() => void) | null): void {
+  signedOutListener = listener;
+}
+
+/** The signed-in user, or null when this browser has no valid session. */
+export async function readSession(): Promise<User | null> {
+  const body = (await readJson(await fetch('/api/session'))) as { user?: User | null; csrfToken?: string | null };
+  sessionToken = body.csrfToken ?? null;
+  return body.user ?? null;
+}
+
+/** Signs in; the server sets the session cookie, and the CSRF token it answers with is kept for mutations. */
+export async function signIn(username: string, password: string): Promise<User> {
+  const response = await fetch('/api/auth/sign-in', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const body = (await readJson(response)) as { user: User; csrfToken: string };
+  sessionToken = body.csrfToken;
+  return body.user;
+}
+
+export async function signOut(): Promise<void> {
+  await readJson(await fetch('/api/auth/sign-out', { method: 'POST', headers: sessionToken ? { [CSRF_HEADER]: sessionToken } : {} }));
+  sessionToken = null;
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await mutate('/api/me/password', 'POST', { currentPassword, newPassword });
+}
+
+export async function updateDisplayName(displayName: string): Promise<User> {
+  return ((await mutate('/api/me', 'PATCH', { displayName })) as { user: User }).user;
+}
+
+export async function listAccessTokens(): Promise<AccessToken[]> {
+  return ((await readJson(await fetch('/api/me/tokens'))) as { tokens: AccessToken[] }).tokens;
+}
+
+/** Creates a personal access token; [value] is the only time the token itself is shown. */
+export async function createAccessToken(name: string, expiresInDays: number | null): Promise<{ token: AccessToken; value: string }> {
+  return (await mutate('/api/me/tokens', 'POST', { name, expiresInDays })) as { token: AccessToken; value: string };
+}
+
+export async function revokeAccessToken(id: string): Promise<void> {
+  await mutate(`/api/me/tokens/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+export async function listUsers(): Promise<User[]> {
+  return ((await readJson(await fetch('/api/users'))) as { users: User[] }).users;
+}
+
+/** Creates a user, or answers the existing one unchanged (`created: false`, no password) when the name is taken. */
+export async function createUser(username: string, displayName: string | null, role: UserRole): Promise<{ user: User; created: boolean; oneTimePassword?: string | null }> {
+  return (await mutate('/api/users', 'POST', { username, displayName, role })) as { user: User; created: boolean; oneTimePassword?: string | null };
+}
+
+export async function updateUser(id: string, change: { displayName?: string; role?: UserRole; active?: boolean }): Promise<User> {
+  return ((await mutate(`/api/users/${encodeURIComponent(id)}`, 'PATCH', change)) as { user: User }).user;
+}
+
+export async function resetUserPassword(id: string): Promise<string> {
+  return ((await mutate(`/api/users/${encodeURIComponent(id)}/password-reset`, 'POST')) as { oneTimePassword: string }).oneTimePassword;
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -1723,6 +1818,7 @@ async function readJson(response: Response): Promise<unknown> {
   }
   if (!response.ok) {
     const error = (body as { error?: { code?: string; message?: string; details?: Record<string, string> } } | null)?.error;
+    if (response.status === 401 && error?.code === 'AUTHENTICATION_REQUIRED') signedOutListener?.();
     throw new ApiError(error?.code ?? `HTTP_${response.status}`, error?.message ?? response.statusText, response.status, error?.details ?? null);
   }
   return body;

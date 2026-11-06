@@ -1,14 +1,7 @@
 package infoscry.cli
 
-import infoscry.storage.withTestDatabase
-
-import infoscry.config.AppPaths
-import infoscry.config.BearerToken
-import infoscry.config.RuntimeInfo
-import infoscry.AppContext
 import infoscry.domain.JobState
 import infoscry.server.ApiJson
-import infoscry.server.ApiTestServer
 import infoscry.server.JobsResponse
 import java.nio.file.Files
 import java.nio.file.Path
@@ -28,44 +21,49 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 /**
- * `infoscry import` as a real process, on both sides of the ownership question.
+ * `infoscry import` as a real process asking a running server.
  *
- * Who runs an import is the whole design of this command: with a server running, the command must hand
- * the request over and return; with nobody owning the data directory, the command must take the lock and
- * stay alive until the work is done, because a job that outlives its only owner is a job nobody reports on
- * and nobody can stop. Both halves are invisible to a test that calls the command as a function, so both
- * are tested here by starting the real thing and, where it matters, holding its work open with a gate so
- * the states in between can be observed.
+ * The server owns every job: the command previews, confirms what the reading method sends, and answers with
+ * the accepted job, or with `--wait` follows it and reports every document. The server here runs in the
+ * test's JVM with the process harness's extractor, which can be held at a gate so the states in between can
+ * be observed.
  */
 class ImportCommandProcessTest {
 
     private lateinit var directory: Path
     private lateinit var dataDir: Path
     private lateinit var gate: Path
+    private lateinit var cli: CliTestServer
 
     @BeforeTest
     fun createTemporaryDirectories() {
         directory = Files.createTempDirectory("infoscry-import-cli")
         dataDir = Files.createDirectories(directory.resolve("data"))
         gate = directory.resolve("gate")
+        ImportProcessHarness.gate = null
+        cli = CliTestServer(dataDir)
         // Every import in this class targets Default, and a new archive no longer holds one.
-        CliProcess.run("--data-dir", dataDir.toString(), "collection", "create", "Default")
+        cli.run("collection", "create", "Default")
     }
 
     @AfterTest
     fun removeTemporaryDirectories() {
+        // Released before the server stops, so a held attempt does not keep the shutdown waiting.
+        runCatching { Files.writeString(gate, "go") }
+        cli.close()
+        ImportProcessHarness.gate = null
         directory.toFile().deleteRecursively()
     }
 
     @Test
     fun `method selection prints the preview and an identical command returns the same job`() {
         val source = writeSource("repeat.txt", "Read once.\n")
-        val args = arrayOf("import", "--data-dir", dataDir.toString(), "--collection", "Default",
-            "--method", "tesseract", "--yes", "--json", source.toString())
-        val first = runHarness(*args)
+        val args = arrayOf("import", "--collection", "Default",
+            "--method", "tesseract", "--yes", "--json", "--wait", source.toString())
+        val first = cli.run(*args)
         assertEquals(0, first.exitCode, first.stderr)
         assertContains(first.stderr, "this machine")
-        val again = runHarness(*args)
+        val again = cli.run(*args)
         assertEquals(0, again.exitCode, again.stderr)
         val one = ApiJson.decodeFromString<ImportResult>(first.stdout.lines().last { it.isNotBlank() })
         val two = ApiJson.decodeFromString<ImportResult>(again.stdout.lines().last { it.isNotBlank() })
@@ -77,8 +75,8 @@ class ImportCommandProcessTest {
     fun `No OCR says that each page keeps the document's own text`() {
         val source = writeSource("own-text.txt", "Kept as it is.\n")
 
-        val result = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default",
+        val result = cli.run(
+            "import", "--collection", "Default",
             "--method", "none", "--json", source.toString(),
         )
 
@@ -87,39 +85,15 @@ class ImportCommandProcessTest {
     }
 
     @Test
-    fun `a foreground import stays alive while the work is blocked and releases the directory when it ends`() {
-        val source = writeSource("minutes.txt", "Ett protokoll.\n")
-        val process = startHarness(gated = true, "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", source.toString())
-
-        awaitManagedCopy(process)
-        assertTrue(process.isAlive, "the import command exited while its work was still running")
-
-        Files.writeString(gate, "go")
-        val exit = process.waitFor(WAIT_SECONDS)
-
-        assertTrue(exit, "the import command did not finish after its work was released")
-        assertEquals(0, process.exitCode(), "stderr=${process.stderr()}")
-        val result = ApiJson.decodeFromString<ImportResult>(lastJsonLine(process))
-        assertEquals("COMPLETE", result.state)
-        assertEquals(1, result.imported)
-        assertEquals(0, result.failed)
-
-        // The lock is released, which is what a later command needs: importing and then not being able to
-        // read the archive would be a strange kind of success.
-        val list = CliProcess.run("--data-dir", dataDir.toString(), "collection", "list", "--json")
-        assertEquals(0, list.exitCode, "a later command could not open the data directory: ${list.stderr}")
-    }
-
-    @Test
-    fun `a foreground import reports every document and exits nonzero when one could not be read`() {
+    fun `--wait reports every document and exits nonzero when one could not be read`() {
         val good = writeSource("good.txt", "Readable.\n")
         // A supported file whose extraction fails: it is an item and a failure, as it always was.
         val broken = writeSource("broken.txt", "${HarnessExtractor.FAILING_CONTENT}\n")
         // Unsupported content is skipped: it is not a document, not a failure and not one of the import's files.
         val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
 
-        val result = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json",
+        val result = cli.run(
+            "import", "--collection", "Default", "--json", "--wait",
             good.toString(), broken.toString(), blob.toString(),
         )
 
@@ -127,8 +101,8 @@ class ImportCommandProcessTest {
         val report = ApiJson.decodeFromString<ImportResult>(result.stdout.lines().last { it.isNotBlank() })
         assertEquals(1, report.imported)
         assertEquals(1, report.failed)
-        assertEquals(listOf("broken.txt", "good.txt"), report.items.map { Path.of(it.sourcePath!!).fileName.toString() }.sorted())
-        assertTrue(report.items.any { it.sourcePath?.endsWith("broken.txt") == true && it.errorCode == "EXTRACTION_FAILED" })
+        assertEquals(listOf("broken.txt", "good.txt"), report.items.map { it.sourceName!! }.sorted())
+        assertTrue(report.items.any { it.sourceName == "broken.txt" && it.errorCode == "EXTRACTION_FAILED" })
         assertContains(result.stderr, "1 of 2 document(s) could not be imported")
     }
 
@@ -136,8 +110,8 @@ class ImportCommandProcessTest {
     fun `an import whose every file is unsupported exits zero with no documents`() {
         val blob = writeSource("blob.bin", ByteArray(256) { (it and 0xFF).toByte() })
 
-        val result = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", blob.toString(),
+        val result = cli.run(
+            "import", "--collection", "Default", "--json", "--wait", blob.toString(),
         )
 
         assertEquals(0, result.exitCode, result.stderr)
@@ -149,46 +123,31 @@ class ImportCommandProcessTest {
     }
 
     @Test
-    fun `standalone text import keeps its local per-file diagnostic`() {
-        val broken = writeSource("broken.txt", "${HarnessExtractor.FAILING_CONTENT}\n")
-
-        val result = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", broken.toString(),
-        )
-        val output = result.stdout + result.stderr
-
-        assertNotEquals(0, result.exitCode)
-        assertContains(output, "EXTRACTION_FAILED")
-        assertFalse(output.contains("omitted by the local API"), output)
-        assertFalse(output.contains("server log"), output)
-    }
-
-    @Test
     fun `--recursive descends into a directory while the default reads only its top level`() {
         val inbox = Files.createDirectories(directory.resolve("inbox"))
         Files.writeString(inbox.resolve("top.txt"), "Top.\n")
         Files.writeString(Files.createDirectories(inbox.resolve("nested")).resolve("deep.txt"), "Deep.\n")
 
-        val plain = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json",
+        val plain = cli.run(
+            "import", "--collection", "Default", "--json", "--wait",
             inbox.toString(),
         )
         assertEquals(0, plain.exitCode, plain.stderr)
         val plainReport = ApiJson.decodeFromString<ImportResult>(plain.stdout.lines().last { it.isNotBlank() })
         assertEquals(
             listOf("top.txt"),
-            plainReport.items.map { Path.of(it.sourcePath!!).fileName.toString() }.sorted(),
+            plainReport.items.map { it.sourceName!! }.sorted(),
         )
 
-        val recursive = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "--recursive",
+        val recursive = cli.run(
+            "import", "--collection", "Default", "--json", "--wait", "--recursive",
             inbox.toString(),
         )
         assertEquals(0, recursive.exitCode, recursive.stderr)
         val recursiveReport = ApiJson.decodeFromString<ImportResult>(recursive.stdout.lines().last { it.isNotBlank() })
         assertEquals(
             listOf("deep.txt", "top.txt"),
-            recursiveReport.items.map { Path.of(it.sourcePath!!).fileName.toString() }.sorted(),
+            recursiveReport.items.map { it.sourceName!! }.sorted(),
         )
     }
 
@@ -197,29 +156,29 @@ class ImportCommandProcessTest {
         val notes = writeSource("notes.txt", "Readable.\n")
         val log = writeSource("run.log", "Logged.\n")
 
-        val included = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json",
+        val included = cli.run(
+            "import", "--collection", "Default", "--json", "--wait",
             "--include=.TXT", notes.toString(), log.toString(),
         )
         assertEquals(0, included.exitCode, included.stderr)
         val includedReport = ApiJson.decodeFromString<ImportResult>(included.stdout.lines().last { it.isNotBlank() })
         assertEquals(
             listOf("notes.txt"),
-            includedReport.items.map { Path.of(it.sourcePath!!).fileName.toString() },
+            includedReport.items.map { it.sourceName!! },
         )
 
         // Fresh files for the exclude run: the include run above already holds notes.txt.
         val other = writeSource("other.txt", "Other.\n")
         val trace = writeSource("trace.log", "Traced.\n")
-        val excluded = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json",
+        val excluded = cli.run(
+            "import", "--collection", "Default", "--json", "--wait",
             "--exclude=log", other.toString(), trace.toString(),
         )
         assertEquals(0, excluded.exitCode, excluded.stderr)
         val excludedReport = ApiJson.decodeFromString<ImportResult>(excluded.stdout.lines().last { it.isNotBlank() })
         assertEquals(
             listOf("other.txt"),
-            excludedReport.items.map { Path.of(it.sourcePath!!).fileName.toString() },
+            excludedReport.items.map { it.sourceName!! },
         )
     }
 
@@ -227,84 +186,60 @@ class ImportCommandProcessTest {
     fun `--include and --exclude together exit nonzero and create no job`() {
         val notes = writeSource("notes.txt", "Readable.\n")
 
-        val result = runHarness(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default",
+        val result = cli.run(
+            "import", "--collection", "Default",
             "--include=txt", "--exclude=log", notes.toString(),
         )
 
         assertNotEquals(0, result.exitCode, "both lists were accepted: ${result.stdout}")
         assertContains(result.stderr, "--include and --exclude cannot be used together")
-        AppContext.open(dataDir).use { context ->
-            assertEquals(0, context.jobs.list(100, 0).size, "a refused import must not create a job")
-        }
+        assertEquals(0, cli.context.jobs.list(100, 0).size, "a refused import must not create a job")
     }
 
     @Test
-    fun `a server accepts an import and keeps working after the command has returned`() {
+    fun `the server accepts an import and keeps working after the command has returned`() {
         val source = writeSource("report.txt", "En rapport.\n")
-        val server = startHarness(gated = true, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
-        try {
-            server.awaitStdoutLine("{")
+        ImportProcessHarness.gate = gate
 
-            val accepted = CliProcess.run(
-                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", source.toString(),
-            )
+        val accepted = cli.run("import", "--collection", "Default", "--json", source.toString())
 
-            assertEquals(0, accepted.exitCode, accepted.stderr)
-            val report = ApiJson.decodeFromString<ImportAccepted>(accepted.stdout.lines().last { it.isNotBlank() })
-            assertTrue(report.accepted)
-            assertFalse(report.executedHere, "the import ran locally while a server owned the directory")
-            // Accepted is not finished: the server still has the work, which is what the answer has to say.
-            assertTrue(
-                report.state == JobState.QUEUED.name || report.state == JobState.RUNNING.name,
-                "the command reported ${report.state} for an import it only handed over",
-            )
-            assertTrue(server.isAlive, "the server exited when the import command returned")
+        assertEquals(0, accepted.exitCode, accepted.stderr)
+        val report = ApiJson.decodeFromString<ImportAccepted>(accepted.stdout.lines().last { it.isNotBlank() })
+        assertTrue(report.accepted)
+        // Accepted is not finished: the server still has the work, which is what the answer has to say.
+        assertTrue(
+            report.state == JobState.QUEUED.name || report.state == JobState.RUNNING.name,
+            "the command reported ${report.state} for an import it only handed over",
+        )
 
-            Files.writeString(gate, "go")
-            val finished = awaitJobState(JobState.COMPLETE)
-            assertEquals(JobState.COMPLETE, finished)
-            assertTrue(managedOriginals(dataDir).size == 1)
-        } finally {
-            server.terminate()
-        }
+        Files.writeString(gate, "go")
+        assertEquals(JobState.COMPLETE, awaitJobState(JobState.COMPLETE))
+        assertTrue(managedOriginals(dataDir).size == 1)
     }
 
     @Test
     fun `--wait waits for the server's work instead of returning when it is accepted`() {
         val source = writeSource("waited.txt", "Väntar.\n")
-        val server = startHarness(gated = true, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
-        try {
-            server.awaitStdoutLine("{")
-            val waiting = startHarness(
-                gated = true,
-                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "--wait", source.toString(),
-            )
+        ImportProcessHarness.gate = gate
+        val waiting = startCli("import", "--collection", "Default", "--json", "--wait", source.toString())
 
-            // The work is blocked, so a command that waited has to still be running.
-            awaitManagedCopy(waiting)
-            assertTrue(waiting.isAlive, "--wait returned before the import finished")
+        // The work is blocked, so a command that waited has to still be running.
+        awaitManagedCopy(waiting)
+        assertTrue(waiting.isAlive, "--wait returned before the import finished")
 
-            Files.writeString(gate, "go")
-            assertTrue(waiting.waitFor(WAIT_SECONDS), "--wait never finished")
-            assertEquals(0, waiting.exitCode())
-            val report = ApiJson.decodeFromString<ImportResult>(lastJsonLine(waiting))
-            assertEquals(1, report.imported)
-            assertEquals("COMPLETE", report.state)
-        } finally {
-            server.terminate()
-        }
+        Files.writeString(gate, "go")
+        assertTrue(waiting.waitFor(WAIT_SECONDS), "--wait never finished")
+        assertEquals(0, waiting.exitCode())
+        val report = ApiJson.decodeFromString<ImportResult>(lastJsonLine(waiting))
+        assertEquals(1, report.imported)
+        assertEquals("COMPLETE", report.state)
     }
 
     @Test
-    fun `server-attached wait reports the failure sentence the API derived, not the stored one`() {
+    fun `--wait reports the failure sentence the API derived, not the stored one`() {
         val broken = writeSource("broken.txt", "${HarnessExtractor.FAILING_CONTENT}\n")
-        val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
-        try {
-            server.awaitStdoutLine("{")
-
-            val result = runHarness(
-                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "--wait", broken.toString(),
+            val result = cli.run(
+                "import", "--collection", "Default", "--json", "--wait", broken.toString(),
             )
 
             assertNotEquals(0, result.exitCode, "a failed server-owned item must still make --wait fail")
@@ -315,20 +250,13 @@ class ImportCommandProcessTest {
             // server's diagnostic rather than the API's answer: only the derived sentence crosses.
             assertTrue(!result.stdout.contains("application/octet-stream"), result.stdout)
             assertTrue(!result.stdout.contains(dataDir.toString()), result.stdout)
-        } finally {
-            server.terminate()
-        }
     }
 
     @Test
-    fun `server-attached text wait reports the per-file failure the API derived`() {
+    fun `--wait in text reports the per-file failure the API derived`() {
         val broken = writeSource("broken.txt", "${HarnessExtractor.FAILING_CONTENT}\n")
-        val server = startHarness(gated = false, "serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
-        try {
-            server.awaitStdoutLine("{")
-
-            val result = runHarness(
-                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--wait", broken.toString(),
+            val result = cli.run(
+                "import", "--collection", "Default", "--wait", broken.toString(),
             )
             val output = result.stdout + result.stderr
 
@@ -337,87 +265,36 @@ class ImportCommandProcessTest {
             assertContains(output, "the extractor stopped before it delivered every unit of this document")
             assertFalse(output.contains("application/octet-stream"), output)
             assertFalse(output.contains(dataDir.toString()), output)
-        } finally {
-            server.terminate()
-        }
     }
 
     @Test
-    fun `a runtime file from a dead process does not send the command to a dead server`() {
-        val source = writeSource("orphan.txt", "Ingen server.\n")
-        // A killed process leaves this file behind; being sent to its port would be a confusing way to
-        // learn that nobody is listening.
-        RuntimeInfo(pid = 999_999L, port = 1, bearerToken = BearerToken.new())
-            .writeTo(AppPaths.of(dataDir).runtimeFile)
-
-        val result = CliProcess.run(
-            "import", "--data-dir", dataDir.toString(), "--collection", "Default", source.toString(),
-        )
-
-        // The dead runtime file must not send the command to a dead server: the import runs in this
-        // process. Without an installed embedding model the document's outcome is the model remedy rather
-        // than a finished import, so the assertion here is about where the import went, not that it
-        // completed — the bytes land locally, never on the dead process's port.
-        assertEquals(1, managedOriginals(dataDir).size)
-        assertContains(result.stderr, "importing in this process")
-        assertContains(result.stdout + result.stderr, "MODEL_NOT_INSTALLED")
-    }
-
-    @Test
-    fun `a second foreground import refuses the directory the first one holds`() {
-        val first = writeSource("first.txt", "Först.\n")
-        val second = writeSource("second.txt", "Sedan.\n")
-        val holder = startHarness(gated = true, "import", "--data-dir", dataDir.toString(), "--collection", "Default", first.toString())
-        try {
-            awaitManagedCopy(holder)
-
-            val refused = CliProcess.run(
-                "import", "--data-dir", dataDir.toString(), "--collection", "Default", second.toString(),
-            )
-
-            assertNotEquals(0, refused.exitCode, "a second import ran while another process owned the directory")
-            assertTrue(
-                refused.stderr.contains(dataDir.toString()) || refused.stderr.contains("already"),
-                "the refusal did not say what it was about: ${refused.stderr}",
-            )
-        } finally {
-            Files.writeString(gate, "go")
-            holder.waitFor(WAIT_SECONDS)
-        }
-    }
-
-    @Test
-    fun `a server-owned import refuses maintenance before the CLI creates a job`() = runBlocking {
+    fun `an import refused by maintenance creates no job`() = runBlocking {
         val source = writeSource("maintenance.txt", "Under maintenance.\n")
-        ApiTestServer(dataDir).use { server ->
-            val started = CompletableDeferred<Unit>()
-            val release = CompletableDeferred<Unit>()
-            val maintenance = async(Dispatchers.Default) {
-                server.context.mutations.withExclusiveMaintenance("reindex") {
-                    started.complete(Unit)
-                    release.await()
-                }
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val maintenance = async(Dispatchers.Default) {
+            cli.context.mutations.withExclusiveMaintenance("reindex") {
+                started.complete(Unit)
+                release.await()
             }
-            withTimeout(WAIT_SECONDS) { started.await() }
-
-            val refused = CliProcess.run(
-                "import", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", source.toString(),
-            )
-
-            assertNotEquals(0, refused.exitCode, "stdout=${refused.stdout} stderr=${refused.stderr}")
-            assertContains(refused.stderr, "MAINTENANCE_IN_PROGRESS")
-            assertEquals(0, server.context.jobs.list(100, 0).size, "refused CLI import must not create a job row")
-
-            release.complete(Unit)
-            withTimeout(WAIT_SECONDS) { maintenance.await() }
         }
+        withTimeout(WAIT_SECONDS * 1000) { started.await() }
+
+        val refused = cli.run("import", "--collection", "Default", "--json", source.toString())
+
+        assertNotEquals(0, refused.exitCode, "stdout=${refused.stdout} stderr=${refused.stderr}")
+        assertContains(refused.stderr, "MAINTENANCE_IN_PROGRESS")
+        assertEquals(0, cli.context.jobs.list(100, 0).size, "refused CLI import must not create a job row")
+
+        release.complete(Unit)
+        withTimeout(WAIT_SECONDS * 1000) { maintenance.await() }
     }
 
     @Test
     fun `an external default prompts before enqueue and no answer aborts`() {
         val source = writeSource("scan.txt", "Scanned text.\n")
         externalSelection()
-        val result = runHarness("import", "--data-dir", dataDir.toString(), "--collection", "Default",
+        val result = cli.run("import", "--collection", "Default",
             "--json", source.toString())
         assertNotEquals(0, result.exitCode)
         assertContains(result.stderr, "example.invalid")
@@ -425,26 +302,24 @@ class ImportCommandProcessTest {
         assertContains(result.stderr, "All pages in these files")
         assertContains(result.stderr, source.toRealPath().toString())
         assertFalse(result.stderr.contains("Estimated cost: USD"), result.stderr)
-        AppContext.open(AppPaths.of(dataDir)).use { context ->
-            assertTrue(context.jobs.list(100).isEmpty(), "declining confirmation must create no job")
-        }
+        assertTrue(cli.context.jobs.list(100).isEmpty(), "declining confirmation must create no job")
     }
 
     @Test
     fun `an unavailable method is a readable CLI refusal without a stack trace or job`() {
         val source = writeSource("unavailable.txt", "Text.\n")
         externalSelection(apiKeyEnvironmentVariable = null)
-        val result = runHarness("import", "--data-dir", dataDir.toString(), "--collection", "Default", source.toString())
+        val result = cli.run("import", "--collection", "Default", source.toString())
         assertNotEquals(0, result.exitCode)
         assertContains(result.stderr, "METHOD_UNAVAILABLE:")
         assertFalse(result.stderr.contains("Exception in thread"), result.stderr)
-        AppContext.open(AppPaths.of(dataDir)).use { context -> assertTrue(context.jobs.list(100).isEmpty()) }
+        assertTrue(cli.context.jobs.list(100).isEmpty())
     }
 
     private fun awaitJobState(expected: JobState): JobState {
         var latest = JobState.QUEUED
         awaitUntil("the job to reach $expected") {
-            val jobs = CliProcess.run("--data-dir", dataDir.toString(), "jobs", "--json")
+            val jobs = cli.run("jobs", "--json")
             if (jobs.exitCode != 0) return@awaitUntil false
             val parsed = ApiJson.decodeFromString<JobsResponse>(jobs.stdout.lines().last { it.isNotBlank() })
             latest = parsed.jobs.firstOrNull()?.state ?: return@awaitUntil false
@@ -475,7 +350,7 @@ class ImportCommandProcessTest {
      * enqueueing side resolves into the job's snapshot.
      */
     private fun externalSelection(apiKeyEnvironmentVariable: String? = "PATH") {
-        AppContext.open(AppPaths.of(dataDir)).use { context ->
+        cli.context.let { context ->
             val profile = context.ocrProfiles.create(
                 name = "Vision transcriber",
                 draft = infoscry.ocr.OcrProfileRevisionDraft(
@@ -506,16 +381,8 @@ class ImportCommandProcessTest {
     private fun lastJsonLine(process: HarnessCli): String =
         process.stdout().last { it.trim().startsWith("{") }
 
-    /** Starts the CLI harness, optionally with the extractor held at its gate. */
-    private fun startHarness(gated: Boolean, vararg args: String): HarnessCli {
-        val builder = ProcessBuilder(harnessArgs(*args).toList()).withTestDatabase()
-        if (gated) {
-            builder.environment()["INFOSCRY_TEST_GATE"] = gate.toString()
-        } else {
-            builder.environment().remove("INFOSCRY_TEST_GATE")
-        }
-        return HarnessCli(builder.start())
-    }
+    /** Starts the CLI against the test server without waiting for it. */
+    private fun startCli(vararg args: String): HarnessCli = HarnessCli(CliProcess.start(*args, environment = cli.environment))
 
     /**
      * One harness process, with its output pumped as it arrives.
@@ -565,28 +432,6 @@ class ImportCommandProcessTest {
             thread.isDaemon = true
             thread.start()
         }
-    }
-
-    /** The command line a script would use: this JDK, the test classpath, and the CLI's main class. */
-    private fun harnessArgs(vararg args: String): Array<String> = arrayOf(
-        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-        "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
-        "-cp",
-        System.getProperty("java.class.path"),
-        "infoscry.cli.ImportProcessHarness",
-        *args,
-    )
-
-    /** Runs the harness CLI to completion and returns what it produced, the way a script reads it. */
-    private fun runHarness(vararg args: String): CliResult {
-        val child = ProcessBuilder(harnessArgs(*args).toList()).withTestDatabase().start()
-        child.outputStream.close()
-        val harness = HarnessCli(child)
-        if (!harness.waitFor(WAIT_SECONDS)) {
-            harness.terminate()
-            throw AssertionError("the harness did not finish: stdout=${harness.stdout()} stderr=${harness.stderr()}")
-        }
-        return CliResult(harness.exitCode(), harness.stdout().joinToString("\n"), harness.stderr())
     }
 
     /** Waits for the managed copy, and reports what the child said when it never comes. */

@@ -71,7 +71,8 @@ class SearchBrowserAcceptanceTest {
                         .directory(script.parent.toFile())
                         .redirectErrorStream(true)
                         .redirectOutput(outputFile.toFile())
-                        .apply { environment()["BASE_URL"] = harness.url }
+                        .apply { environment()["BASE_URL"] = harness.url
+                environment()["INFOSCRY_SESSION_COOKIE"] = harness.sessionCookie }
                         .start()
                     if (!process.waitFor(90, TimeUnit.SECONDS)) {
                         process.destroyForcibly().waitFor(5, TimeUnit.SECONDS)

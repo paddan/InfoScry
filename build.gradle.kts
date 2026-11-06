@@ -52,6 +52,7 @@ dependencies {
     // Authoritative state lives in PostgreSQL: the JDBC driver and the connection pool.
     implementation(libs.postgresql)
     implementation(libs.hikari)
+    implementation(libs.bcprov)
     // Content-based media type detection. Only Tika's core is wired here: the format *parsers* arrive
     // with the tasks that own those formats, which use PDFBox, POI, jsoup, and Commons CSV directly.
     implementation(libs.tika.core)

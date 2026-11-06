@@ -1,11 +1,9 @@
 package infoscry.cli
 
-import infoscry.AppContext
 import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.domain.JobType
 import infoscry.server.ApiJson
-import infoscry.server.ApiTestServer
 import infoscry.server.JobResponse
 import infoscry.server.JobsResponse
 import infoscry.storage.JobStore
@@ -33,20 +31,24 @@ import kotlinx.coroutines.runBlocking
 class JobsCommandTest {
 
     private lateinit var dataDir: Path
+    private lateinit var server: CliTestServer
 
     @BeforeTest
     fun createTemporaryDataDirectory() {
         dataDir = Files.createTempDirectory("infoscry-jobs-cli")
+        // No worker: these tests put jobs into states themselves and read them back.
+        server = CliTestServer(dataDir, worker = false)
     }
 
     @AfterTest
     fun removeTemporaryDataDirectory() {
+        server.close()
         dataDir.toFile().deleteRecursively()
     }
 
     @Test
     fun `an empty queue is reported as an empty list, not as an error`() {
-        val result = CliProcess.run(*args("jobs", "--json"))
+        val result = server.run(*args("jobs", "--json"))
 
         assertEquals(0, result.exitCode, result.stderr)
         val listed = ApiJson.decodeFromString<JobsResponse>(result.stdout.trim())
@@ -54,20 +56,14 @@ class JobsCommandTest {
         assertEquals(1, result.stdout.trim().lines().size, "machine-readable output is one line")
     }
 
-    /**
-     * A running job can only be observed through the process that owns it: this CLI takes the data
-     * directory lock only when no server has it, and a lock-taking open repairs any attempt it finds
-     * looking running. So the RUNNING/stage/counter shape is asserted against a live server, which is
-     * also the only test of the queue's HTTP surface.
-     */
     @Test
     fun `a running job is reported with its stage and counters through the server`() {
-        ApiTestServer(dataDir).use { server ->
+        run {
             val job = server.context.jobs.enqueue(JobType.IMPORT, total = 5)
             server.context.jobs.claim(job.id)
             server.context.jobs.progress(job.id, stage = "ocr", completed = 2)
 
-            val listed = CliProcess.run(*args("jobs", "--json"))
+            val listed = server.run(*args("jobs", "--json"))
             assertEquals(0, listed.exitCode, listed.stderr)
             val reported = ApiJson.decodeFromString<JobsResponse>(listed.stdout.trim()).jobs.single()
 
@@ -77,7 +73,7 @@ class JobsCommandTest {
             assertEquals(2, reported.completed)
             assertEquals(5, reported.total)
 
-            val text = CliProcess.run(*args("jobs"))
+            val text = server.run(*args("jobs"))
             assertEquals(0, text.exitCode, text.stderr)
             assertContains(text.stdout, job.id.value)
             assertContains(text.stdout, "RUNNING")
@@ -89,10 +85,10 @@ class JobsCommandTest {
     @Test
     fun `a job payload never leaves the server`() {
         val marker = "PRIVATE-SOURCE-PATH-MARKER"
-        ApiTestServer(dataDir).use { server ->
+        run {
             server.context.jobs.enqueue(JobType.IMPORT, payload = marker, total = 1)
 
-            val body = runBlocking { server.get("/api/jobs").bodyAsText() }
+            val body = runBlocking { server.api.get("/api/jobs").bodyAsText() }
 
             assertContains(body, "\"jobs\"", message = "the queue is still the answer: $body")
             assertFalse(
@@ -100,7 +96,7 @@ class JobsCommandTest {
                 "the payload holds the paths the user selected and is worker-internal: $body",
             )
 
-            val listed = CliProcess.run(*args("jobs", "--json"))
+            val listed = server.run(*args("jobs", "--json"))
             assertEquals(0, listed.exitCode, listed.stderr)
             assertFalse(listed.stdout.contains(marker), "the CLI's shape follows the wire: ${listed.stdout}")
         }
@@ -108,12 +104,12 @@ class JobsCommandTest {
 
     @Test
     fun `cancelling through the server records the request where the attempt will see it`() {
-        ApiTestServer(dataDir).use { server ->
+        run {
             val job = server.context.jobs.enqueue(JobType.IMPORT, total = 5)
             server.context.jobs.claim(job.id)
             server.context.jobs.progress(job.id, stage = "ocr", completed = 2)
 
-            val cancelled = CliProcess.run(*args("jobs", "cancel", job.id.value))
+            val cancelled = server.run(*args("jobs", "cancel", job.id.value))
 
             assertEquals(0, cancelled.exitCode, cancelled.stderr)
             assertEquals(1, server.context.jobs.list(limit = 10).size, "the same job is still the only one")
@@ -136,26 +132,26 @@ class JobsCommandTest {
             jobs.fail(job.id, code = "NEEDS_TESSERACT", message = "Tesseract is not installed")
         }
 
-        val listed = CliProcess.run(*args("jobs"))
+        val listed = server.run(*args("jobs"))
 
         assertEquals(0, listed.exitCode, listed.stderr)
         assertContains(listed.stdout, "FAILED")
         assertContains(listed.stdout, "NEEDS_TESSERACT")
-        assertContains(listed.stdout, "Tesseract is not installed")
+        assertFalse(listed.stdout.contains("Tesseract is not installed"), "the detail stays in the server log")
     }
 
     @Test
     fun `the server-attached CLI reports safe error codes and points to logs`() {
-        ApiTestServer(dataDir).use { server ->
+        run {
             val job = server.context.jobs.enqueue(JobType.IMPORT)
             server.context.jobs.claim(job.id)
             server.context.jobs.fail(job.id, "JOB_FAILED", "Tesseract is missing from /private/tools/tesseract")
 
-            val listed = CliProcess.run(*args("jobs"))
+            val listed = server.run(*args("jobs"))
 
             assertEquals(0, listed.exitCode, listed.stderr)
             assertContains(listed.stdout, "JOB_FAILED")
-            assertContains(listed.stdout, "Details are intentionally omitted")
+            assertContains(listed.stdout, "Details are omitted")
             assertFalse(listed.stdout.contains("/private/tools/tesseract"))
         }
     }
@@ -164,7 +160,7 @@ class JobsCommandTest {
     fun `cancelling a queued job persists before the command returns`() {
         val jobId = withJobs { jobs -> jobs.enqueue(JobType.IMPORT).id }
 
-        val cancelled = CliProcess.run(*args("jobs", "cancel", jobId.value, "--json"))
+        val cancelled = server.run(*args("jobs", "cancel", jobId.value, "--json"))
 
         assertEquals(0, cancelled.exitCode, cancelled.stderr)
         val response = ApiJson.decodeFromString<JobResponse>(cancelled.stdout.trim())
@@ -186,7 +182,7 @@ class JobsCommandTest {
             job.id
         }
 
-        val result = CliProcess.run(*args("jobs", "cancel", jobId.value))
+        val result = server.run(*args("jobs", "cancel", jobId.value))
 
         assertEquals(0, result.exitCode, result.stderr)
         assertContains(result.stdout, "nothing left to cancel")
@@ -194,7 +190,7 @@ class JobsCommandTest {
 
     @Test
     fun `an unknown job id fails with an explanation instead of a stack trace`() {
-        val result = CliProcess.run(*args("jobs", "cancel", JobId.new().value))
+        val result = server.run(*args("jobs", "cancel", JobId.new().value))
 
         assertNotEquals(0, result.exitCode)
         assertContains(result.stderr, "no job with id")
@@ -210,24 +206,21 @@ class JobsCommandTest {
             repeat(3) { jobs.enqueue(JobType.IMPORT) }
         }
 
-        val limited = CliProcess.run(*args("jobs", "--limit", "2", "--json"))
+        val limited = server.run(*args("jobs", "--limit", "2", "--json"))
 
         assertEquals(0, limited.exitCode, limited.stderr)
         assertEquals(2, ApiJson.decodeFromString<JobsResponse>(limited.stdout.trim()).jobs.size)
 
-        val text = CliProcess.run(*args("jobs", "--limit", "2"))
+        val text = server.run(*args("jobs", "--limit", "2"))
         assertContains(text.stderr, "pass --limit for more")
 
-        val rejected = CliProcess.run(*args("jobs", "--limit", "0"))
+        val rejected = server.run(*args("jobs", "--limit", "0"))
         assertNotEquals(0, rejected.exitCode)
         assertContains(rejected.stderr, "--limit must be positive")
     }
 
-    /** Runs [block] against the data directory and closes it, so the CLI can open it next. */
-    private fun <T> withJobs(block: (JobStore) -> T): T = AppContext.open(dataDir).use { context ->
-        block(context.jobs)
-    }
+    /** Runs [block] against the server's job store. */
+    private fun <T> withJobs(block: (JobStore) -> T): T = block(server.context.jobs)
 
-    private fun args(vararg extra: String): Array<String> =
-        (listOf("--data-dir", dataDir.toString()) + extra).toTypedArray()
+    private fun args(vararg extra: String): Array<String> = arrayOf(*extra)
 }

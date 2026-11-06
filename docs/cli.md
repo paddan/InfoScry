@@ -3,16 +3,30 @@
 [Project overview](../README.md) · [Installation](installation.md) · [User guide](usage.md)
 
 
-Commands expose `--json` where supported for machine-readable output and
-`--data-dir /path` to work against a specific data directory (default
-`~/.infoscry`). Both options work before or after the subcommand name, so
-`infoscry --json collection list` and `infoscry collection list --json` are
-equivalent. `infoscry --help` and `infoscry <command> --help` print usage.
+The CLI is a client of the running server: every command except `serve`,
+`logs` and `admin` sends its request to the server at `INFOSCRY_URL` (default
+`http://127.0.0.1:8080`) with the personal access token in `INFOSCRY_TOKEN`.
+Create a token in the web interface under Admin → Account and export it:
+
+```bash
+export INFOSCRY_TOKEN=isc_...
+```
+
+Commands expose `--json` where supported for machine-readable output; it works
+before or after the subcommand name, so `infoscry --json collection list` and
+`infoscry collection list --json` are equivalent. `serve`, `logs` and `admin`
+also take `--data-dir /path` (default `~/.infoscry`), the directory for
+managed files, models and logs. `infoscry --help` and `infoscry <command>
+--help` print usage. Import paths are paths on the server's machine.
 
 ## serve
 
-Start the local API and web UI in the foreground (Ctrl-C stops it). `--serve`
-is accepted as a top-level alias for `serve`.
+Start the API and web UI in the foreground (Ctrl-C stops it). `--serve`
+is accepted as a top-level alias for `serve`. It listens on `INFOSCRY_BIND`
+(`host:port`, default `127.0.0.1:8080`); set `INFOSCRY_PUBLIC_ORIGIN` (for
+example `https://archive.example.org`) when browsers reach it through a reverse
+proxy. Sessions last `INFOSCRY_SESSION_IDLE_HOURS` idle (default 12) and
+`INFOSCRY_SESSION_MAX_DAYS` in all (default 14).
 
 ```bash
 infoscry serve
@@ -21,8 +35,27 @@ infoscry serve --json            # print the URL/port/pid as JSON, no browser
 infoscry serve --data-dir /path/to/test-data
 ```
 
-Options: `--port` (default `8080`; `0` asks the OS for a free port),
-`--json`, `--data-dir`.
+Options: `--port` (overrides the port in `INFOSCRY_BIND`; `0` asks the OS for
+a free port), `--json`, `--data-dir`.
+
+## admin
+
+Account administration on the server's machine. These commands connect to the
+database directly with the `INFOSCRY_DATABASE_*` variables, so they work before
+the server has ever started and beside a running one.
+
+```bash
+infoscry admin create-user --admin anna            # prints a one-time password
+infoscry admin create-user --display-name "Erik Lund" erik
+infoscry admin reset-password anna                 # new one-time password, ends anna's sessions
+infoscry admin list-users
+```
+
+A one-time password must be replaced at the first sign-in. Creating a user
+that exists changes nothing and says so. Users are otherwise managed in the web
+interface under Admin → Users.
+
+Options: `--admin`, `--display-name` (create-user), `--json`, `--data-dir`.
 
 ## collection
 
@@ -34,7 +67,7 @@ infoscry collection create Notes --json
 
 Subcommands: `list` (shows name, id, OCR languages, description),
 `create <name>` with `--description`, `ignore <collection> list|set`, and `prompt` (below).
-Options: `--json`, `--data-dir`.
+Options: `--json`.
 
 ### collection ignore
 
@@ -101,7 +134,7 @@ infoscry collection prompt delete Notes --role ask --prompt Short
   for the role. `Default` resets it.
 
 Options: `--role` (`ask` or `investigate`; required except for `list`), `--prompt`,
-`--name`, `--file`, `--json`, `--data-dir`.
+`--name`, `--file`, `--json`.
 
 ### collection corrections
 
@@ -133,7 +166,7 @@ infoscry collection corrections remove Notes spinners
   read. A rule already gone is reported as nothing to remove, not as an error.
 
 Use `--` before a word that starts with `-`. Options: `--exact-case`, `--id`,
-`--json`, `--data-dir`.
+`--json`.
 
 ### collection glossary
 
@@ -158,7 +191,7 @@ infoscry collection glossary remove Notes 0b6f2c1e-8d4a-4f3b-9a51-2c7e5d9f1a03
 - `remove <collection> <group-id>` removes a group; a group already gone succeeds.
 - A term another group of the collection has is refused with a non-zero exit.
 
-Options: `--prefix`, `--group`, `--json`, `--data-dir`.
+Options: `--prefix`, `--group`, `--json`.
 
 ## import
 
@@ -199,7 +232,7 @@ infoscry import --collection Notes --recursive --include=pdf,docx /path/to/dir
 infoscry import --collection Notes --recursive --exclude=tmp,log /path/to/dir
 ```
 
-Options: `--collection`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`, `--data-dir`.
+Options: `--collection`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`.
 
 ## search
 
@@ -226,8 +259,7 @@ Options: `--collection`, `--mode` (`keyword`, `semantic`, `hybrid`),
 `--media-type` (repeatable), `--path`, `--text`, `--from`, `--until`,
 `--status` (repeatable; `QUEUED`, `COPYING`, `EXTRACTING`, `OCR`, `CHUNKING`,
 `EMBEDDING`, `INDEXING`, `COMPLETE`, `COMPLETE_WITH_WARNINGS`, `FAILED`,
-`CANCELLED`, `NEEDS_TOOL`), `--ocr-only`, `--limit` (default `30`), `--json`,
-`--data-dir`.
+`CANCELLED`, `NEEDS_TOOL`), `--ocr-only`, `--limit` (default `30`), `--json`.
 
 ## ask
 
@@ -240,7 +272,7 @@ infoscry ask --collection Notes --profile my-profile --json "Summarize this docu
 ```
 
 Options: `--collection`, `--profile`, `--prompt` (the Ask prompt's name or id;
-default: the collection default), `--json`, `--data-dir`.
+default: the collection default), `--json`.
 
 ## jobs
 
@@ -253,7 +285,7 @@ infoscry jobs cancel <job-id>
 infoscry jobs --json
 ```
 
-Options: `--limit` (default `100`), `--json`, `--data-dir`.
+Options: `--limit` (default `100`), `--json`.
 
 ## reindex
 
@@ -266,7 +298,7 @@ infoscry reindex --collection Notes
 infoscry reindex --wait --json
 ```
 
-Options: `--collection`, `--wait`, `--json`, `--data-dir`.
+Options: `--collection`, `--wait`, `--json`.
 
 ## llm
 
@@ -293,17 +325,14 @@ Subcommands: `list`, `add`, `set-default`, `test <name>`. `add` options:
 `--name`, `--provider` (`openai-compatible` or `anthropic`), `--model`,
 `--endpoint`, `--api-key-env`, `--context-window` (default `128000`),
 `--max-output-tokens` (default `4096`), `--input-price`,
-`--output-price`, `--cache-read-price`, `--tool-calling`, `--json`,
-`--data-dir`. `set-default` takes exactly one of `--ask <name>` or
+`--output-price`, `--cache-read-price`, `--disabled`, `--json`. `set-default` takes exactly one of `--ask <name>` or
 `--investigate <name>`.
-
-Note: profile-management commands cannot run while a server owns the same
-data directory.
 
 ## logs
 
-Read the structured log stream, filtered and rendered for a terminal. Never
-takes the process lock, so it works while the server is running.
+Read the server's structured log stream from the data directory, filtered and
+rendered for a terminal. It reads the files directly, so it runs on the
+server's machine, also while the server is running.
 
 ```bash
 infoscry logs

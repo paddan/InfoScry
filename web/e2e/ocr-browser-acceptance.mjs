@@ -14,6 +14,7 @@
  * Nothing here proves OCR quality, a real engine, or the GPU: the readings are whatever the test dictates.
  */
 import { chromium } from 'playwright';
+import { signedInContext } from './session.mjs';
 
 const BASE_URL = process.env.BASE_URL;
 const SCENARIO = process.env.SCENARIO;
@@ -71,7 +72,7 @@ async function openPage(context, tab) {
 }
 
 async function openAdmin(browser, tab = 'collections') {
-  const context = await browser.newContext();
+  const context = await signedInContext(browser);
   const page = await openPage(context, tab);
   return { context, page };
 }

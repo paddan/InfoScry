@@ -14,34 +14,36 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * `infoscry search` as a real process, on both sides of the ownership question.
+ * `infoscry search` as a real process asking a running server.
  *
- * Search is a read: with a server owning the data directory it asks the server, and without one it opens
- * the archive itself. Either way the command's contract with a script is one line of valid JSON even
- * when nothing matched, and the collection is mandatory because a search reads one collection at a time.
+ * The command's contract with a script is one line of valid JSON even when nothing matched, and the
+ * collection is mandatory because a search reads one collection at a time.
  */
 class SearchCommandTest {
 
     private lateinit var directory: Path
     private lateinit var dataDir: Path
+    private lateinit var cli: CliTestServer
 
     @BeforeTest
     fun createTemporaryDirectories() {
         directory = Files.createTempDirectory("infoscry-search-cli")
         dataDir = Files.createDirectories(directory.resolve("data"))
+        cli = CliTestServer(dataDir)
         // Every search in this class names Default, and a new archive no longer holds one.
-        CliProcess.run("--data-dir", dataDir.toString(), "collection", "create", "Default")
+        cli.run("collection", "create", "Default")
     }
 
     @AfterTest
     fun removeTemporaryDirectories() {
+        cli.close()
         directory.toFile().deleteRecursively()
     }
 
     @Test
-    fun `a foreground search without matches prints one valid json line and exits zero`() {
-        val result = CliProcess.run(
-            "search", "--data-dir", dataDir.toString(),
+    fun `a search without matches prints one valid json line and exits zero`() {
+        val result = cli.run(
+            "search",
             "--collection", "Default", "--mode", "keyword", "--json", "zzzz",
         )
 
@@ -54,8 +56,8 @@ class SearchCommandTest {
 
     @Test
     fun `a search refuses without a collection`() {
-        val result = CliProcess.run(
-            "search", "--data-dir", dataDir.toString(), "--mode", "keyword", "--json", "zzzz",
+        val result = cli.run(
+            "search", "--mode", "keyword", "--json", "zzzz",
         )
 
         assertNotEquals(0, result.exitCode, "search without a collection reported success")
@@ -66,8 +68,8 @@ class SearchCommandTest {
     fun `a hybrid search for a query with no foothold is an empty result, not a refusal`() {
         // The default mode is hybrid. The archive holds no word of "zzzz", so the semantic half never
         // runs and the absent model never gets to refuse: the honest answer is that nothing matched.
-        val result = CliProcess.run(
-            "search", "--data-dir", dataDir.toString(), "--collection", "Default", "--json", "zzzz",
+        val result = cli.run(
+            "search", "--collection", "Default", "--json", "zzzz",
         )
 
         assertEquals(0, result.exitCode, "stderr=${result.stderr}")
@@ -81,8 +83,8 @@ class SearchCommandTest {
         // Semantic mode embeds every query by design, so a temporary data directory with no model still
         // fails with the remedy that fixes it, in the terminal's own voice — rather than with a
         // nearest-neighbour imitation of a result.
-        val result = CliProcess.run(
-            "search", "--data-dir", dataDir.toString(), "--collection", "Default", "--mode", "semantic", "--json", "zzzz",
+        val result = cli.run(
+            "search", "--collection", "Default", "--mode", "semantic", "--json", "zzzz",
         )
 
         assertNotEquals(0, result.exitCode, "a semantic search without a model reported success")
@@ -92,9 +94,9 @@ class SearchCommandTest {
     }
 
     @Test
-    fun `a local search refuses invalid dates without echoing their value`() {
-        val result = CliProcess.run(
-            "search", "--data-dir", dataDir.toString(), "--collection", "Default",
+    fun `a search refuses invalid dates without echoing their value`() {
+        val result = cli.run(
+            "search", "--collection", "Default",
             "--from", "private-date-value", "--json", "report",
         )
 
@@ -105,43 +107,23 @@ class SearchCommandTest {
     }
 
     @Test
-    fun `a server answers a search and keeps running after the command returns`() {
-        val server = CliProcess.startRunning("serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
-        try {
-            server.awaitStdoutLine("{")
+    fun `a search accepts inclusive date-only bounds`() {
+        val result = cli.run(
+            "search", "--collection", "Default",
+            "--from", "2026-03-01", "--until", "2026-03-01", "--mode", "keyword", "--json", "report",
+        )
 
-            val result = CliProcess.run(
-                "search", "--data-dir", dataDir.toString(),
-                "--collection", "Default", "--mode", "keyword", "--json", "zzzz",
-            )
-
-            assertEquals(0, result.exitCode, "stderr=${result.stderr}")
-            val body = result.stdout.lines().last { it.trim().startsWith("{") }
-            val response = ApiJson.decodeFromString<SearchResponse>(body)
-            assertTrue(response.hits.isEmpty(), "an empty archive produced hits")
-            // The server is still serving: a later read that needs it succeeds.
-            val probe = CliProcess.run("--data-dir", dataDir.toString(), "jobs", "--json")
-            assertEquals(0, probe.exitCode, "the server no longer answers: ${probe.stderr}")
-        } finally {
-            server.terminate()
-        }
+        assertEquals(0, result.exitCode, "stderr=${result.stderr}")
+        val response = ApiJson.decodeFromString<SearchResponse>(result.stdout.lines().last { it.trim().startsWith("{") })
+        assertTrue(response.hits.isEmpty())
     }
 
     @Test
-    fun `a server-owned search accepts inclusive date-only bounds`() {
-        val server = CliProcess.startRunning("serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
-        try {
-            server.awaitStdoutLine("{")
-            val result = CliProcess.run(
-                "search", "--data-dir", dataDir.toString(), "--collection", "Default",
-                "--from", "2026-03-01", "--until", "2026-03-01", "--mode", "keyword", "--json", "report",
-            )
+    fun `a search without a token fails before sending anything and says how to get one`() {
+        val result = CliProcess.run("search", "--collection", "Default", "--json", "report")
 
-            assertEquals(0, result.exitCode, "stderr=${result.stderr}")
-            val response = ApiJson.decodeFromString<SearchResponse>(result.stdout.lines().last { it.trim().startsWith("{") })
-            assertTrue(response.hits.isEmpty())
-        } finally {
-            server.terminate()
-        }
+        assertNotEquals(0, result.exitCode)
+        assertContains(result.stderr, "INFOSCRY_TOKEN")
+        assertContains(result.stderr, "personal access token")
     }
 }

@@ -75,8 +75,12 @@ object ImportProcessHarness {
         sink = StoredUnitsSink(context.paths, context.documents, context.content),
     )
 
-    /** The gate path the child waits for, if the test asked for one. */
-    fun gatePath(): Path? = System.getenv("INFOSCRY_TEST_GATE")?.takeIf { it.isNotBlank() }?.let(Path::of)
+    /** The gate a server in the test's own JVM waits for; a child process reads `INFOSCRY_TEST_GATE` instead. */
+    @Volatile
+    var gate: Path? = null
+
+    /** The gate path the extractor waits for, if the test asked for one. */
+    fun gatePath(): Path? = gate ?: System.getenv("INFOSCRY_TEST_GATE")?.takeIf { it.isNotBlank() }?.let(Path::of)
 
 }
 

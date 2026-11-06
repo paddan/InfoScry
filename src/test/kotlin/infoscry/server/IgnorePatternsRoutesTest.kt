@@ -127,9 +127,9 @@ class IgnorePatternsRoutesTest {
     }
 
     @Test
-    fun `the CLI's loopback client reads and replaces the list through the running server`() = runBlocking {
+    fun `the CLI's client reads and replaces the list through the running server`() = runBlocking {
         harness.createCollection("Notes", Credential.BEARER)
-        infoscry.cli.LoopbackApi(infoscry.config.RuntimeInfo.read(harness.context.paths.runtimeFile)!!).use { api ->
+        infoscry.cli.ApiClient(infoscry.cli.ServerAddress(harness.url, harness.bearer)).use { api ->
             assertEquals(8, api.ignorePatterns("notes").size, "a collection is found by name, case-insensitively")
 
             assertEquals(listOf("*.bak"), api.setIgnorePatterns("Notes", listOf(" *.bak ", "")))

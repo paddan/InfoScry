@@ -17,17 +17,19 @@ import kotlinx.coroutines.runBlocking
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.http.HttpHeaders
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.HttpResponse
 import io.ktor.http.HttpStatusCode
 
 /**
- * `infoscry serve` as a real process: it publishes how to reach it, it refuses to start twice, and what
- * it leaves behind when it stops or is killed.
+ * `infoscry serve` as a real process: it publishes how to reach it, it refuses to start twice, and a killed
+ * server can be started again at once.
  *
- * The second server is the case worth pinning. Two processes writing one data directory is the failure
- * the whole single-writer design exists to prevent, and the operator has to be told that clearly instead
- * of seeing a crash or, worse, a second process that seems to work.
+ * The second server is the case worth pinning. Two processes writing one database is the failure the
+ * single-writer design exists to prevent, and the operator has to be told that clearly instead of seeing a
+ * crash or, worse, a second process that seems to work.
  */
 class ServeCommandTest {
 
@@ -51,7 +53,7 @@ class ServeCommandTest {
 
             assertEquals(cli.pid, published.pid)
             assertTrue(published.url.startsWith("http://127.0.0.1:"))
-            assertEquals(HttpStatusCode.OK, runBlocking { get("${published.url}/api/collections").status })
+            assertEquals(HttpStatusCode.OK, runBlocking { get("${published.url}/api/session").status })
             assertEquals(
                 1,
                 cli.stdout().count { it.startsWith("{") },
@@ -67,7 +69,7 @@ class ServeCommandTest {
         val cli = CliProcess.startRunning("--serve", "--data-dir", dataDir.toString(), "--port", "0", "--json")
         try {
             val published = ApiJson.decodeFromString<ServeResponse>(cli.awaitStdoutLine("{"))
-            assertEquals(HttpStatusCode.OK, runBlocking { get("${published.url}/api/collections").status })
+            assertEquals(HttpStatusCode.OK, runBlocking { get("${published.url}/api/session").status })
         } finally {
             cli.kill()
         }
@@ -92,7 +94,7 @@ class ServeCommandTest {
             while (!Files.exists(browserRecord) && System.nanoTime() < deadline) Thread.sleep(10)
             assertTrue(Files.exists(browserRecord), "the server did not ask the OS to open a browser")
             assertEquals(url, Files.readString(browserRecord))
-            assertEquals(HttpStatusCode.OK, runBlocking { get("$url/api/collections").status })
+            assertEquals(HttpStatusCode.OK, runBlocking { get("$url/api/session").status })
         } finally {
             cli.kill()
         }
@@ -113,7 +115,7 @@ class ServeCommandTest {
                 Thread.sleep(10)
             }
             assertTrue(cli.stderr().any { it.contains("Could not open the browser; use $url instead.") })
-            assertEquals(HttpStatusCode.OK, runBlocking { get("$url/api/collections").status })
+            assertEquals(HttpStatusCode.OK, runBlocking { get("$url/api/session").status })
         } finally {
             cli.kill()
         }
@@ -141,7 +143,7 @@ class ServeCommandTest {
 
             assertNotEquals(0, second.exitCode, "a second server must not report success")
             assertContains(second.stderr, "already running")
-            assertContains(second.stderr, "loopback API", ignoreCase = true)
+            assertContains(second.stderr, "the CLI talks to the running server")
             assertTrue(
                 !second.stderr.contains("Exception in thread"),
                 "the operator gets an explanation, not a stack trace: ${second.stderr}",
@@ -156,55 +158,64 @@ class ServeCommandTest {
         val cli = CliProcess.startRunning(*serveArgs("--json", "serve", "--port", "0"))
         try {
             val published = ApiJson.decodeFromString<ServeResponse>(cli.awaitStdoutLine("{"))
+            val token = adminToken()
 
-            val created = CliProcess.run(*serveArgs("collection", "create", "Nightfall", "--json"))
+            val created = CliProcess.run(
+                "collection", "create", "Nightfall", "--json",
+                environment = mapOf("INFOSCRY_URL" to published.url, "INFOSCRY_TOKEN" to token),
+            )
 
             assertEquals(0, created.exitCode, created.stderr)
             val listed = runBlocking {
-                ApiJson.decodeFromString<CollectionsResponse>(
-                    get("${published.url}/api/collections").bodyAsText(),
-                )
+                HttpClient(CIO).use { client ->
+                    ApiJson.decodeFromString<CollectionsResponse>(
+                        client.get("${published.url}/api/collections") { header(HttpHeaders.Authorization, "Bearer $token") }.bodyAsText(),
+                    )
+                }
             }
-            assertTrue(
-                listed.collections.any { it.name == "Nightfall" },
-                "the CLI cannot open the database while the server owns it, so it has to go through it",
-            )
+            assertTrue(listed.collections.any { it.name == "Nightfall" })
         } finally {
             cli.kill()
         }
     }
 
     @Test
-    fun `a clean stop removes the runtime file`() {
+    fun `serve without any user says how to create the first administrator`() {
         val cli = CliProcess.startRunning(*serveArgs("--json", "serve", "--port", "0"))
-        cli.awaitStdoutLine("{")
-        assertTrue(Files.exists(dataDir.resolve("runtime.json")))
-
-        cli.terminate()
-
-        assertTrue(
-            !Files.exists(dataDir.resolve("runtime.json")),
-            "a runtime file left behind would point a CLI at a port nobody listens on",
-        )
+        try {
+            cli.awaitStdoutLine("{")
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while (cli.stderr().none { it.contains("admin create-user --admin") } && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue(cli.stderr().any { it.contains("infoscry admin create-user --admin") }, cli.stderr().joinToString("\n"))
+        } finally {
+            cli.kill()
+        }
     }
 
     @Test
-    fun `a killed server leaves a runtime file that the next server ignores`() {
+    fun `a killed server can be started again at once`() {
         val cli = CliProcess.startRunning(*serveArgs("--json", "serve", "--port", "0"))
         cli.awaitStdoutLine("{")
-        val runtimeFile = dataDir.resolve("runtime.json")
 
         cli.kill()
-
-        assertTrue(Files.exists(runtimeFile), "a killed process cannot clean up after itself")
 
         val restarted = CliProcess.startRunning(*serveArgs("--json", "serve", "--port", "0"))
         try {
             val published = ApiJson.decodeFromString<ServeResponse>(restarted.awaitStdoutLine("{"))
-            assertEquals(HttpStatusCode.OK, runBlocking { get("${published.url}/api/collections").status })
+            assertEquals(HttpStatusCode.OK, runBlocking { get("${published.url}/api/session").status })
         } finally {
             restarted.kill()
         }
+    }
+
+    /** An administrator's personal access token, made in the database the server uses. */
+    private fun adminToken(): String = infoscry.storage.Database(dataDir).use { database ->
+        val store = infoscry.storage.AccountStore(database)
+        val accounts = infoscry.account.AccountService(store)
+        val admin = accounts.createUser("operator", null, infoscry.account.UserRole.ADMIN, actor = null).user
+        // As after the first sign-in: a user who still has to choose a password can do nothing else.
+        store.updatePassword(admin.id, infoscry.account.Passwords().hash("operator's own password"), false, infoscry.storage.Instants.now(), null)
+        accounts.createToken(admin.id, "cli", null).value
     }
 
     private fun serveArgs(vararg extra: String): Array<String> =

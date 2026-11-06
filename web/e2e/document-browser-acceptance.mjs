@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import { mkdir, appendFile } from 'node:fs/promises';
+import { signedInContext } from './session.mjs';
 
 const BASE_URL = process.env.BASE_URL;
 const SCENARIO = process.env.SCENARIO;
@@ -1007,7 +1008,7 @@ async function scenarioScannedTable(page) {
 
 const browser = await chromium.launch({ headless: true });
 try {
-  const context = await browser.newContext();
+  const context = await signedInContext(browser);
   const page = await context.newPage();
   page.on('pageerror', (error) => { throw error; });
   await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });

@@ -145,7 +145,7 @@ class DocumentDeletionRoutesTest {
         )
 
         assertEquals(HttpStatusCode.BadRequest, unconfirmed.status, unconfirmed.bodyAsText())
-        assertEquals(HttpStatusCode.Unauthorized, uncredentialed.status, uncredentialed.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, uncredentialed.status, uncredentialed.bodyAsText())
         assertEquals(HttpStatusCode.BadRequest, empty.status, empty.bodyAsText())
         assertEquals(HttpStatusCode.NotFound, unknown.status, unknown.bodyAsText())
         assertContains(unknown.bodyAsText(), "NOT_FOUND")

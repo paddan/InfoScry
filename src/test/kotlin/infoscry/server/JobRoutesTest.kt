@@ -76,7 +76,7 @@ class JobRoutesTest {
         assertEquals("1", currentProgress("/api/jobs/${job.id.value}")["processedUnits"].toString())
         assertEquals("40", currentProgress("/api/collections/${collection.id.value}/imports", true)["totalUnits"].toString())
         kotlinx.coroutines.withTimeout(5_000) {
-            harness.client.prepareGet(harness.url + "/api/jobs/${job.id.value}/events").execute { response ->
+            harness.client.prepareGet(harness.url + "/api/jobs/${job.id.value}/events") { harness.signedIn(this) }.execute { response ->
                 val channel = response.bodyAsChannel()
                 suspend fun nextProgress(): String {
                     channel.readUTF8Line() // id

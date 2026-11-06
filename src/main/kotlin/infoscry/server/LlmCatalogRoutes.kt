@@ -6,7 +6,6 @@ import infoscry.llm.ProviderCatalog
 import infoscry.llm.ProviderCatalogData
 import infoscry.llm.ValidEnvironmentVariableName
 import infoscry.llm.endpointCarriesUserInfo
-import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.routing.Routing
@@ -36,11 +35,10 @@ data class LlmPresetsResponse(val presets: List<LlmPresetApiView>)
  * Presets resolve no secret, so they stay uncredentialed like every other read route. The live catalog
  * does the opposite: it resolves this server's environment API key and sends it to a caller-chosen
  * endpoint, so an attacker-controlled page could use the loopback call as a relay to exfiltrate the
- * key. That route therefore demands the same two credentials the global guard takes, checked here
- * before the key is looked up or any outbound call is made.
+ * key. That route therefore demands what a mutation does — a personal access token, or the session's
+ * CSRF token beside its cookie — checked before the key is looked up or any outbound call is made.
  */
 fun Routing.configureLlmCatalogRoutes(
-    credentials: ApiCredentials,
     catalog: LlmModelCatalog = LlmModelCatalog(),
     providerCatalog: ProviderCatalogData = ProviderCatalog.load(),
 ) {
@@ -66,11 +64,7 @@ fun Routing.configureLlmCatalogRoutes(
     route("/api/llm/catalog") {
         get {
             call.handle {
-                val bearer = call.request.headers[HttpHeaders.Authorization]
-                    ?.removePrefix(BEARER_PREFIX)
-                    ?.trim()
-                val csrf = call.request.headers[CSRF_HEADER]
-                if (!credentials.acceptsBearer(bearer) && !credentials.acceptsCsrf(csrf)) {
+                if (!call.provesIntent()) {
                     call.respondJson(
                         HttpStatusCode.Unauthorized,
                         ApiErrorResponse(
@@ -78,7 +72,7 @@ fun Routing.configureLlmCatalogRoutes(
                                 code = "CATALOG_REQUIRES_CREDENTIALS",
                                 message = "loading a live model catalog sends this server's API key " +
                                     "to the provider endpoint, so it needs the session CSRF token " +
-                                    "(browser) or the runtime bearer token (CLI)",
+                                    "(browser) or a personal access token (CLI)",
                             ),
                         ),
                     )

@@ -520,6 +520,7 @@ class CollectionsBrowserAcceptanceTest {
             .redirectOutput(outputFile.toFile())
             .apply {
                 environment()["BASE_URL"] = harness!!.url
+                environment()["INFOSCRY_SESSION_COOKIE"] = harness!!.sessionCookie
                 environment()["SCENARIO"] = name
                 environment()["FIXTURES"] = sourcesDir.toString()
                 environment()["SCREENSHOT_DIR"] = Paths.get(System.getProperty("user.dir"), "build", "c04-browser-evidence").toString()

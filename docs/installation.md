@@ -260,43 +260,66 @@ Alternatively, run `build/install/infoscry/bin/infoscry` directly. To keep the
 short command in future sessions, add the absolute build `bin` directory to
 your shell's `PATH`. There is no separate installer or system-wide installation.
 
-## Import a first document and start
+## Create the first administrator and start
 
-A new archive has no collections. Create one, import a document and start the
-server:
+Every installation has accounts. With Postgres running (`docker compose up -d`),
+create the first administrator; the command prints a one-time password:
 
 ```bash
-infoscry collection create Notes
-infoscry import --collection Notes --wait /absolute/path/to/document.pdf
+infoscry admin create-user --admin anna
 infoscry serve
 ```
 
-Replace the document path with your own. For a disposable sample, use
-`src/test/resources/fixtures/sample.txt` from the repository root; it still adds
-a document to the chosen archive. Import keeps an immutable managed copy and
-leaves the original unchanged.
-
 `serve` and `--serve` start the same foreground server and open the web UI in
 your default browser. If opening the browser fails, use the URL printed in the
-terminal, normally <http://127.0.0.1:8080>. Press Ctrl-C to stop the server.
-`serve --json` prints connection information without opening a browser.
+terminal, normally <http://127.0.0.1:8080>. Sign in with the username and the
+one-time password, then choose your own password (at least 12 characters).
+Press Ctrl-C to stop the server. `serve --json` prints connection information
+without opening a browser. Add other people under **Admin → Users**.
 
-You can also start the server first and create a collection and import files
-from **Admin → Collections**. See the [user guide](usage.md).
+## Import a first document
+
+Create a collection and import files from **Admin → Collections**; see the
+[user guide](usage.md). To use the command line, create a personal access token
+under **Admin → Account** and export it in the shell, then:
+
+```bash
+export INFOSCRY_TOKEN=isc_...
+infoscry collection create Notes
+infoscry import --collection Notes --wait /absolute/path/to/document.pdf
+```
+
+The CLI sends each request to the running server (`INFOSCRY_URL`, default
+<http://127.0.0.1:8080>). Import paths are paths on the server's machine.
+For a disposable sample, use `src/test/resources/fixtures/sample.txt` from the
+repository root. Import keeps an immutable managed copy and leaves the original
+unchanged.
+
+## Serve other machines
+
+By default the server listens on `127.0.0.1:8080`. To serve other machines, put
+it behind a reverse proxy that terminates TLS, and set where it listens and the
+origin browsers use:
+
+```bash
+export INFOSCRY_BIND=127.0.0.1:8080
+export INFOSCRY_PUBLIC_ORIGIN=https://archive.example.org
+```
+
+With an HTTPS origin the session cookie is `Secure`. Requests that name another
+host are refused.
 
 ## Use a separate archive
 
-Use one data-directory path consistently for model installation, collections,
-imports and the server:
+Use one data-directory path consistently for model installation and the server,
+and a database of its own (`INFOSCRY_DATABASE_URL`):
 
 ```bash
 ./gradlew embeddingModel -PdataDir=/absolute/path/to/test-data
-infoscry collection create Notes --data-dir /absolute/path/to/test-data
-infoscry import --collection Notes --wait --data-dir /absolute/path/to/test-data /absolute/path/to/document.pdf
 infoscry serve --data-dir /absolute/path/to/test-data
 ```
 
-This installs a separate model copy. The normal archive remains `~/.infoscry`.
+This installs a separate model copy. The normal data directory remains `~/.infoscry`.
 
 ## Configure answers
 
@@ -307,8 +330,7 @@ it does not start or host an LLM.
 
 Supply any required API key through an environment variable in the server's
 launch environment. Profiles store the variable's name, never its value.
-Profile-management CLI commands require the server for that archive to be
-stopped; use Admin while the server is running.
+The CLI profile commands go through the running server, like Admin does.
 
 ## Common startup issues
 

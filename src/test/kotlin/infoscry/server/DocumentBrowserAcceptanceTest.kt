@@ -548,6 +548,7 @@ class DocumentBrowserAcceptanceTest {
             .redirectErrorStream(true).redirectOutput(outputFile.toFile())
             .apply {
                 environment()["BASE_URL"] = checkNotNull(harness).url
+                environment()["INFOSCRY_SESSION_COOKIE"] = checkNotNull(harness).sessionCookie
                 environment()["SCENARIO"] = name
                 environment()["DOCUMENT_ID"] = seeded.documentId.value
                 environment()["SCREENSHOT_DIR"] = Paths.get(System.getProperty("user.dir"), "build", "w07-browser-evidence").toString()

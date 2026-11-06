@@ -25,8 +25,9 @@ internal object CliProcess {
         vararg args: String,
         timeout: Long = DEFAULT_TIMEOUT_MILLIS,
         stdin: ByteArray? = null,
+        environment: Map<String, String> = emptyMap(),
     ): CliResult {
-        val process = start(*args)
+        val process = start(*args, environment = environment)
         // Always closed, so a command that reads standard input sees its end instead of waiting forever.
         process.outputStream.use { input -> stdin?.let { input.write(it) } }
         val stdout = Collections.synchronizedList(mutableListOf<String>())
@@ -45,15 +46,18 @@ internal object CliProcess {
         RunningCli(start(*args, environment = environment))
 
     /** Starts the CLI without waiting. */
-    fun start(vararg args: String, environment: Map<String, String> = emptyMap()): Process {
+    fun start(vararg args: String, environment: Map<String, String> = emptyMap(), mainClass: String = "infoscry.MainKt"): Process {
         val builder = ProcessBuilder(
             javaExecutable(),
             "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
             "-cp",
             System.getProperty("java.class.path"),
-            "infoscry.MainKt",
+            mainClass,
             *args,
         ).withTestDatabase()
+        // A child never inherits a server address or token from the shell that runs the suite.
+        builder.environment().remove("INFOSCRY_URL")
+        builder.environment().remove("INFOSCRY_TOKEN")
         builder.environment().putAll(environment)
         return builder.start()
     }

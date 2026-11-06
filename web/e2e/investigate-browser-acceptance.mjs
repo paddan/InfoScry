@@ -11,6 +11,7 @@
  */
 import { chromium } from 'playwright';
 import { mkdir } from 'node:fs/promises';
+import { signedInContext } from './session.mjs';
 const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR;
 
 const BASE_URL = process.env.BASE_URL;
@@ -34,7 +35,7 @@ function assert(condition, message) {
 }
 
 async function openReader(browser) {
-  const context = await browser.newContext();
+  const context = await signedInContext(browser);
   const page = await context.newPage();
   const consoleErrors = [];
   const failedRequests = [];

@@ -119,7 +119,7 @@ class CorrectionRoutesTest {
 
         val refused = put(id, "r1", "spinners", "Spinnars", credential = Credential.WRONG_CSRF)
 
-        assertEquals(HttpStatusCode.Unauthorized, refused.status)
+        assertEquals(HttpStatusCode.Forbidden, refused.status)
         assertEquals(0, list(id).getValue("rules").jsonArray.size)
     }
 

@@ -2,7 +2,6 @@ package infoscry.server
 
 import infoscry.AppContext
 import infoscry.collection.CollectionIndexRemover
-import infoscry.config.RuntimeInfo
 import infoscry.document.DocumentIndexRemover
 import infoscry.document.RetryPrerequisites
 import infoscry.domain.Collection
@@ -31,10 +30,14 @@ import kotlinx.coroutines.withTimeout
 /**
  * Which credential a request carries.
  *
- * `WRONG_BEARER` and `WRONG_CSRF` are well-formed credentials that are not this server's: the point is
- * that presenting *a* token is not enough, only the right one is.
+ * Every credential except [ANONYMOUS] belongs to the signed-in test administrator. [NONE] is a signed-in
+ * browser that sends only its session cookie, which is all a read needs and what a forged cross-site
+ * request would carry; [CSRF] adds the session's CSRF token; [BEARER] is a personal access token, as the
+ * CLI sends. `WRONG_BEARER` and `WRONG_CSRF` are well-formed credentials that are not this server's: the
+ * point is that presenting *a* token is not enough, only the right one is.
  */
 internal enum class Credential {
+    ANONYMOUS,
     NONE,
     BEARER,
     CSRF,
@@ -84,9 +87,9 @@ internal class ApiTestServer(
     // Port 0 lets the operating system choose, so a test never collides with another server — including
     // a second server started inside the same test to observe how maintenance excludes it.
     val server: RunningServer = runBlocking {
-        startLoopbackServer(
+        startServer(
             context,
-            port = 0,
+            ServerSettings(port = 0),
             jobEventIdleDeadlineMillis = jobEventIdleDeadlineMillis,
             picker = picker,
         )
@@ -95,12 +98,21 @@ internal class ApiTestServer(
 
     val url: String get() = server.url
 
-    val bearer: String = RuntimeInfo.read(context.paths.runtimeFile)!!.bearerToken.value
+    /** The administrator every credential but [Credential.ANONYMOUS] belongs to. */
+    val admin: infoscry.account.User = TestAccounts.ensureUser(context, ADMIN_USERNAME, infoscry.account.UserRole.ADMIN)
 
-    val csrfToken: String = runBlocking {
-        val body = client.get(url + SESSION_PATH).bodyAsText()
-        body.substringAfter("\"csrfToken\":\"").substringBefore('"')
+    /** The admin's browser session: its cookie value and its CSRF token, as a real sign-in returns them. */
+    val sessionCookie: String
+    val csrfToken: String
+
+    init {
+        val (cookie, csrf) = runBlocking { TestAccounts.signIn(client, url, ADMIN_USERNAME) }
+        sessionCookie = cookie
+        csrfToken = csrf
     }
+
+    /** A personal access token of the admin, as the CLI presents it. */
+    val bearer: String = context.accounts.createToken(admin.id, "tests", null).value
 
     suspend fun get(path: String): HttpResponse = request(HttpMethod.Get, path, body = null, Credential.NONE)
 
@@ -138,13 +150,25 @@ internal class ApiTestServer(
         setBody(body)
     }
 
-    private fun HttpRequestBuilder.applyCredential(credential: Credential) {
+    /** Adds the signed-in admin's session cookie to a request a test builds itself. */
+    fun signedIn(builder: HttpRequestBuilder) {
+        builder.header(HttpHeaders.Cookie, "$SESSION_COOKIE=$sessionCookie")
+    }
+
+    internal fun HttpRequestBuilder.applyCredential(credential: Credential) {
         when (credential) {
-            Credential.NONE -> Unit
+            Credential.ANONYMOUS -> Unit
+            Credential.NONE -> header(HttpHeaders.Cookie, "$SESSION_COOKIE=$sessionCookie")
             Credential.BEARER -> header(HttpHeaders.Authorization, "Bearer $bearer")
-            Credential.CSRF -> header(CSRF_HEADER, csrfToken)
-            Credential.WRONG_BEARER -> header(HttpHeaders.Authorization, "Bearer $WRONG_CREDENTIAL_VALUE")
-            Credential.WRONG_CSRF -> header(CSRF_HEADER, WRONG_CREDENTIAL_VALUE)
+            Credential.CSRF -> {
+                header(HttpHeaders.Cookie, "$SESSION_COOKIE=$sessionCookie")
+                header(CSRF_HEADER, csrfToken)
+            }
+            Credential.WRONG_BEARER -> header(HttpHeaders.Authorization, "Bearer isc_$WRONG_CREDENTIAL_VALUE")
+            Credential.WRONG_CSRF -> {
+                header(HttpHeaders.Cookie, "$SESSION_COOKIE=$sessionCookie")
+                header(CSRF_HEADER, WRONG_CREDENTIAL_VALUE)
+            }
         }
     }
 
@@ -250,7 +274,7 @@ internal class ApiTestServer(
     }
 
     private companion object {
-        const val SESSION_PATH = "/api/session"
+        const val ADMIN_USERNAME = "test-admin"
         const val COLLECTIONS_PATH = "/api/collections"
 
         /** Generous: the poll is what a real deletion's own phases take, not a fixed wait. */

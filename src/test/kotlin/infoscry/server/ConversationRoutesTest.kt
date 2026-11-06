@@ -212,8 +212,8 @@ class ConversationRoutesTest {
                     credential = Credential.NONE,
                 )
 
-                assertEquals(HttpStatusCode.Unauthorized, response.status, response.bodyAsText())
-                assertTrue(response.bodyAsText().contains("MUTATION_REQUIRES_CREDENTIALS"), response.bodyAsText())
+                assertEquals(HttpStatusCode.Forbidden, response.status, response.bodyAsText())
+                assertTrue(response.bodyAsText().contains("CSRF_TOKEN_INVALID"), response.bodyAsText())
                 assertEquals(0, harness.context.database.read { connection -> conversationCount(connection) })
             }
         } finally {
