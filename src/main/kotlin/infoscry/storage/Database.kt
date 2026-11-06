@@ -81,6 +81,7 @@ class Database(val config: DatabaseConfig, maximumPoolSize: Int = DEFAULT_POOL_S
     fun <T> read(block: (Connection) -> T): T {
         bound.get()?.let { return block(it) }
         return pool.connection.use { connection ->
+            applyActor(connection)
             bound.set(connection)
             try {
                 block(connection)
@@ -108,7 +109,7 @@ class Database(val config: DatabaseConfig, maximumPoolSize: Int = DEFAULT_POOL_S
 
     private fun <T> outermostTransaction(block: (Connection) -> T): T {
         val outer = bound.get()
-        val connection = outer ?: pool.connection
+        val connection = outer ?: pool.connection.also(::applyActor)
         val previousAutoCommit = connection.autoCommit
         connection.autoCommit = false
         bound.set(connection)
@@ -153,6 +154,27 @@ class Database(val config: DatabaseConfig, maximumPoolSize: Int = DEFAULT_POOL_S
         } finally {
             transactionDepth.set(depth)
         }
+    }
+
+    /**
+     * The actor each physical connection was last told about, so the setting is sent only when it changes.
+     * Keyed by the driver's connection, which outlives the pool's per-checkout proxies.
+     */
+    private val actorOfConnection = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, String>())
+
+    /**
+     * Tells [connection] who is acting ([Actor]), as the session setting `infoscry.actor` that the schema's
+     * attribution triggers read. An empty value means nobody in person.
+     */
+    private fun applyActor(connection: Connection) {
+        val actor = Actor.current()?.value.orEmpty()
+        val key: Any = runCatching { connection.unwrap(org.postgresql.PGConnection::class.java) }.getOrDefault(connection)
+        if (actorOfConnection[key] == actor) return
+        connection.prepareStatement("SELECT set_config('infoscry.actor', ?, false)").use { statement ->
+            statement.setString(1, actor)
+            statement.executeQuery().close()
+        }
+        actorOfConnection[key] = actor
     }
 
     /** The highest applied schema version, or 0 for a database without the schema. */

@@ -142,7 +142,7 @@ class JobRoutesTest {
             assertFalse(body.contains("errorMessage"), "raw failure details must not cross the API boundary: $body")
             val jobWire = findJob(body).jsonObject
             assertTrue(
-                jobWire.keys.all { it in setOf("id", "type", "state", "createdAt", "updatedAt", "collectionId", "stage", "currentItem", "completed", "total", "errorCode", "cancelRequested") },
+                jobWire.keys.all { it in setOf("id", "type", "state", "createdAt", "updatedAt", "collectionId", "stage", "currentItem", "completed", "total", "errorCode", "cancelRequested", "startedBy", "cancelledBy") },
                 "job wire fields must stay within the documented allowlist: ${jobWire.keys}",
             )
             assertEquals("JOB_FAILED", jobWire["errorCode"]?.toString()?.trim('"'))
@@ -248,7 +248,7 @@ class JobRoutesTest {
         assertFalse(body.contains("errorMessage"), "raw failure details must not cross the API boundary: $body")
         val jobWire = Json.parseToJsonElement(body).jsonObject["job"]!!.jsonObject
         assertTrue(
-            jobWire.keys.all { it in setOf("id", "type", "state", "createdAt", "updatedAt", "collectionId", "stage", "currentItem", "completed", "total", "errorCode", "cancelRequested") },
+            jobWire.keys.all { it in setOf("id", "type", "state", "createdAt", "updatedAt", "collectionId", "stage", "currentItem", "completed", "total", "errorCode", "cancelRequested", "startedBy", "cancelledBy") },
             "accepted job fields must stay within the documented allowlist: ${jobWire.keys}",
         )
     }

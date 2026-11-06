@@ -37,3 +37,30 @@ abstract class ApiFaultException(
     /** Structured facts a client may act on beside [code] (an index, an id); never user content. */
     open fun details(): Map<String, String>? = null
 }
+
+/** A person, as attribution shows them: their id and the name colleagues see. */
+@kotlinx.serialization.Serializable
+data class UserRef(val id: String, val displayName: String)
+
+/**
+ * An edit was made against a version someone else has since replaced (`If-Match` named an older version).
+ * Nothing was written; the caller reads the record again and decides.
+ */
+class EditConflictException(val currentVersion: Long, val changedBy: UserRef?) : ApiFaultException(
+    ApiStatus.CONFLICT,
+    "EDIT_CONFLICT",
+    if (changedBy != null) "${changedBy.displayName} changed this in the meantime" else "this was changed in the meantime",
+) {
+    override fun details(): Map<String, String> = buildMap {
+        put("version", currentVersion.toString())
+        changedBy?.let {
+            put("changedBy", it.displayName)
+            put("changedById", it.id)
+        }
+    }
+}
+
+/** Refuses an edit made against [expected] when the record is now at [current]; `null` [expected] means "no check". */
+fun requireVersion(expected: Long?, current: Long, changedBy: UserRef?) {
+    if (expected != null && expected != current) throw EditConflictException(current, changedBy)
+}

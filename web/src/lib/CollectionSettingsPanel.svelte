@@ -19,6 +19,8 @@
   export let onOpenLlmProfiles: (() => void) | undefined = undefined;
   export let onOpenDeleteDialog: () => void;
   export let isAdmin = false;
+  /** Name, ignored files, OCR settings and deletion are the owners'. */
+  $: canOwn = isAdmin || (collection.callerRole ?? 'OWNER') === 'OWNER';
   /**
    * Manage prompts names the collection whose Prompts section must open. The section is revealed once
    * this panel shows that collection, and the page then clears the request so a later remount does not
@@ -104,8 +106,10 @@
     ignoreError = null;
     ignoreSaved = false;
     try {
-      const saved = await updateCollectionIgnorePatterns(collection.id, ignoreText.split('\n'));
+      const saved = await updateCollectionIgnorePatterns(collection.id, ignoreText.split('\n'), collection.version);
       if (generation !== settingsGeneration) return;
+      // The saved patterns moved the collection's version; read it again so the next edit names it.
+      await onCollectionsChanged();
       ignoreText = saved.join('\n');
       ignoreSaved = true;
     } catch (failure) {
@@ -129,7 +133,7 @@
     renameError = null;
     renameSaved = false;
     try {
-      const updated = await renameCollection(collection.id, renameName.trim());
+      const updated = await renameCollection(collection.id, renameName.trim(), collection.version);
       // A save of another collection's name is not this form's news: the draft the reader is looking at
       // has been restarted since, so neither its field nor its status may take the answer.
       if (generation !== settingsGeneration) return;
@@ -159,6 +163,7 @@
   <section class="collection-settings" aria-label={`Settings for ${collection.name}`}>
     <span class="eyebrow">SETTINGS</span>
 
+{#if canOwn}
     <form class="settings-form" onsubmit={saveName}>
       <div class="field">
         <label for="collection-settings-name">Collection name</label>
@@ -209,6 +214,9 @@
     </form>
 
     <CollectionOcrSettings {collection} onChanged={() => onCollectionsChanged()} {onOpenLlmProfiles} />
+    {:else}
+      <p class="hint">Only the collection's owners change its name, ignored files and reading settings.</p>
+    {/if}
 
     <CollectionPromptSettings bind:this={promptSettings} {collection} />
     <CollectionCorrectionSettings {collection} />
@@ -216,7 +224,8 @@
     <CollectionMemberSettings {collection} {isAdmin} />
   </section>
 
-  <section class="collection-deletion" aria-label={`Delete ${collection.name}`}>
+{#if canOwn}
+    <section class="collection-deletion" aria-label={`Delete ${collection.name}`}>
     <span class="eyebrow">DELETE COLLECTION</span>
     <p class="hint">
       Deleting a collection removes every document InfoScry holds for it. Files outside InfoScry are
@@ -226,6 +235,7 @@
       <button type="button" onclick={onOpenDeleteDialog}>Delete collection</button>
     </div>
   </section>
+  {/if}
 </details>
 
 <style>

@@ -291,6 +291,12 @@ data class Collection(
      * `0` for a collection that was not counted (for example one read back by id).
      */
     val documentCount: Int = 0,
+    /** Counts every change to the collection's settings, for optimistic edits (`If-Match`). */
+    val version: Long = 1,
+    /** Who last changed the collection's settings. */
+    val updatedBy: UserRef? = null,
+    /** The caller's role here (`OWNER`, `EDITOR`, `READER`), filled in for a listing; never persisted. */
+    val callerRole: String? = null,
 ) {
     init {
         require(name.isNotBlank()) { "Collection.name must not be blank" }
@@ -479,6 +485,10 @@ data class Job(
     val errorCode: String? = null,
     val errorMessage: String? = null,
     val cancelRequested: Boolean = false,
+    /** Who started the job; its work is done in their name. `null` when nobody did in person. */
+    @Transient val startedBy: infoscry.account.UserId? = null,
+    /** Who asked to cancel it. */
+    @Transient val cancelledBy: infoscry.account.UserId? = null,
 ) {
     init {
         require(completed >= 0) { "Job.completed must not be negative, was $completed" }

@@ -70,7 +70,7 @@
     error = null;
     holdDialogFocus(dialog);
     try {
-      const stored = await putCorrection(collectionId, ruleId, input);
+      const stored = await putCorrection(collectionId, ruleId, input, rule?.version);
       onSaved(stored);
     } catch (failure) {
       error = failure instanceof ApiError && failure.code === 'CORRECTION_FIND_TAKEN'

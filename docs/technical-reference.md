@@ -432,6 +432,26 @@ conversations and investigations belong to the user who started them and are
 private to that user. Until import roots exist, choosing server paths for an
 import is limited to administrators.
 
+Attribution is part of the records: collections, correction rules, glossary
+groups, prompts and LLM and OCR profiles have `created_by` and `updated_by`;
+documents `imported_by`; jobs `started_by` and `cancelled_by`; document
+revisions `created_by`; page decisions `decided_by`. The request guard runs each
+request as its caller and the job runner each attempt as the job's starter
+([Actor](../src/main/kotlin/infoscry/storage/Actor.kt)); `Database` hands the
+actor to each connection as the setting `infoscry.actor`, and triggers in the
+baseline stamp it, so work a job does is attributed to whoever started it, also
+after a restart. `NULL` means nobody acted in person (startup recovery).
+
+Collections, correction rules, glossary groups and prompts carry a `version`.
+An edit may send it in `If-Match`; a stale version answers 409 `EDIT_CONFLICT`
+naming who changed the record, and an edit equal to the current content changes
+nothing whatever version it names. An edit without `If-Match` (the CLI) applies
+to what is current. Starting an import of files an active import job of the
+collection already holds answers with that job; a rescan under another user's
+running OCR operation answers with that operation. The first approve or reject
+of a published reading decides; a later one answers with the recorded decision
+and starts no restore.
+
 API keys are read only from environment variables. Profiles and browser requests
 carry the variable's name, never its value. Keys, questions, answers, document
 text, provider authorization headers, passwords, session IDs, CSRF tokens and

@@ -175,6 +175,9 @@ class AppContext private constructor(
             injectedIndexRemover
         }
 
+    /** Names for attribution (who imported, started, changed). */
+    val attribution: infoscry.storage.AttributionReader = infoscry.storage.AttributionReader(database)
+
     /** Who may use which collection, and how. */
     val memberships: infoscry.collection.MembershipService = infoscry.collection.MembershipService(
         infoscry.storage.MembershipStore(database),

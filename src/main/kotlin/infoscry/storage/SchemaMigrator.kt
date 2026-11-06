@@ -64,7 +64,7 @@ class SchemaMigrator(private val database: Database) {
 
 /**
  * Splits a SQL script into single statements, so a failure names the statement that failed: a semicolon
- * inside a string literal or a `--` comment must not end a statement.
+ * inside a string literal, a `$$`-quoted function body or a `--` comment must not end a statement.
  */
 internal fun splitSqlStatements(script: String): List<String> {
     val statements = mutableListOf<String>()
@@ -74,6 +74,12 @@ internal fun splitSqlStatements(script: String): List<String> {
     while (index < script.length) {
         val character = script[index]
         when {
+            !inStringLiteral && character == '$' && script.getOrNull(index + 1) == '$' -> {
+                val end = script.indexOf("$$", index + 2)
+                require(end >= 0) { "an unterminated $$ body in the schema script" }
+                current.append(script, index, end + 2)
+                index = end + 2
+            }
             !inStringLiteral && character == '-' && script.getOrNull(index + 1) == '-' -> {
                 while (index < script.length && script[index] != '\n') index++
             }

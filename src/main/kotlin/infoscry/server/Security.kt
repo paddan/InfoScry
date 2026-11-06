@@ -223,6 +223,8 @@ fun Application.installRequestGuard(accounts: AccountService, settings: ServerSe
             finish()
             return@intercept
         }
+        // Everything the route writes, and every coroutine it launches, is done in the caller's name.
+        kotlinx.coroutines.withContext(infoscry.storage.Actor.element(principal.user.id)) { proceed() }
     }
 }
 

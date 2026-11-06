@@ -21,6 +21,13 @@ A collection always keeps at least one owner. People who are not members do not
 see the collection at all. Administrators reach every collection and manage users
 and LLM profiles. Your Ask and Investigate conversations are visible only to you.
 
+InfoScry shows who did what: document details say who imported a document, the
+document history who produced each reading and who approved or rejected it, the
+Jobs tab who started each job, and the corrections, glossary and prompt settings
+who changed them last. If someone else saved a change while you were editing the
+same thing, your save is refused with their name; reopen it to see their
+version. The first person to approve or reject a new reading decides.
+
 ## Create a collection and import files
 
 1. Open **Admin → Collections** and create a collection.

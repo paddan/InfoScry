@@ -33,7 +33,7 @@ class GlossaryStore(private val database: Database) {
      * @throws GlossaryTermTakenException when another group of the collection already has one of the terms.
      * @throws GlossaryIdTakenException when another collection's group has the id.
      */
-    fun put(collectionId: CollectionId, id: String, terms: List<GlossaryTermInput>): GlossaryGroup {
+    fun put(collectionId: CollectionId, id: String, terms: List<GlossaryTermInput>, expectedVersion: Long? = null): GlossaryGroup {
         require(id.isNotBlank()) { "a glossary group needs an id" }
         val normalized = GlossaryRules.normalize(terms)
         val submittedKeys = terms.map { term -> GlossaryRules.key(term.text) }
@@ -55,6 +55,7 @@ class GlossaryStore(private val database: Database) {
             }
             val existing = connection.selectGroups(collectionId, id).singleOrNull()
             if (existing != null && existing.terms == normalized) return@transaction existing
+            existing?.let { infoscry.domain.requireVersion(expectedVersion, it.version, it.updatedBy) }
             val now = Instants.now()
             connection.prepareStatement(
                 "INSERT INTO collection_glossary_groups (id, collection_id, created_at, updated_at) VALUES (?, ?, ?, ?) " +
@@ -99,7 +100,8 @@ class GlossaryStore(private val database: Database) {
     }
 
     private fun Connection.selectGroups(collectionId: CollectionId, id: String?): List<GlossaryGroup> {
-        val sql = "SELECT g.id, g.created_at, g.updated_at, t.text, t.match_key, t.prefix " +
+        val sql = "SELECT g.id, g.created_at, g.updated_at, t.text, t.match_key, t.prefix, g.version, g.updated_by, " +
+            "(SELECT display_name FROM users WHERE id = g.updated_by) AS updated_by_name " +
             "FROM collection_glossary_groups g JOIN collection_glossary_terms t ON t.group_id = g.id " +
             "WHERE g.collection_id = ?" + (if (id != null) " AND g.id = ?" else "") +
             " ORDER BY g.created_at, g.id, t.ordinal"
@@ -113,7 +115,11 @@ class GlossaryStore(private val database: Database) {
                     val term = GlossaryTerm(rows.getString(4), rows.getString(5), rows.getInt(6) == 1)
                     val group = groups[groupId]
                     groups[groupId] = group?.copy(terms = group.terms + term)
-                        ?: GlossaryGroup(groupId, collectionId, listOf(term), rows.getString(2), rows.getString(3))
+                        ?: GlossaryGroup(
+                            groupId, collectionId, listOf(term), rows.getString(2), rows.getString(3),
+                            version = rows.getLong(7),
+                            updatedBy = rows.getString(8)?.let { infoscry.domain.UserRef(it, rows.getString(9) ?: it) },
+                        )
                 }
                 groups.values.toList()
             }

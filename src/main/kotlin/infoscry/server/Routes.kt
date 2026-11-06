@@ -119,6 +119,10 @@ data class JobApiView(
     val total: Int = 0,
     val errorCode: String? = null,
     val cancelRequested: Boolean = false,
+    /** Who started the job. */
+    val startedBy: infoscry.domain.UserRef? = null,
+    /** Who asked to cancel it. */
+    val cancelledBy: infoscry.domain.UserRef? = null,
 )
 
 @Serializable
@@ -258,6 +262,7 @@ fun Application.configureRoutes(
                     // A caller sees the collections they are a member of; an administrator sees every one.
                     val visible = call.visibleCollections()
                     val listed = context.collectionService.list().filter { visible == null || it.id in visible }
+                        .map { it.copy(callerRole = call.collectionRole(it.id)?.name) }
                     call.respondJson(HttpStatusCode.OK, CollectionsResponse(listed))
                 }
             }
@@ -283,7 +288,7 @@ fun Application.configureRoutes(
                     val request = call.receiveJson<RenameCollectionRequest>()
                     call.respondJson(
                         HttpStatusCode.OK,
-                        CollectionResponse(context.collectionService.rename(id, request.name)),
+                        CollectionResponse(context.collectionService.rename(id, request.name, call.ifMatchVersion())),
                     )
                 }
             }
@@ -325,7 +330,7 @@ fun Application.configureRoutes(
                     val request = call.receiveJson<IgnorePatternsBody>()
                     call.respondJson(
                         HttpStatusCode.OK,
-                        IgnorePatternsBody(context.collectionService.updateIgnorePatterns(id, request.patterns).patterns),
+                        IgnorePatternsBody(context.collectionService.updateIgnorePatterns(id, request.patterns, call.ifMatchVersion()).patterns),
                     )
                 }
             }
@@ -342,7 +347,7 @@ fun Application.configureRoutes(
                     val request = call.receiveJson<UpdateOcrLanguagesRequest>()
                     call.respondJson(
                         HttpStatusCode.OK,
-                        CollectionResponse(context.collectionService.updateOcrSettings(id, request.toUpdate())),
+                        CollectionResponse(context.collectionService.updateOcrSettings(id, request.toUpdate(), call.ifMatchVersion())),
                     )
                 }
             }
@@ -764,6 +769,17 @@ fun ApplicationCall.jobId(): JobId {
     return JobId(raw)
 }
 
+/**
+ * The record version an edit was made against, from `If-Match` (`"3"`, `W/"3"` or `3`); `null` when the
+ * caller sent none, in which case the edit applies to whatever is current.
+ */
+fun ApplicationCall.ifMatchVersion(): Long? {
+    val raw = request.headers[io.ktor.http.HttpHeaders.IfMatch]?.trim() ?: return null
+    if (raw == "*") return null
+    return raw.removePrefix("W/").trim('"').toLongOrNull()
+        ?: throw BadRequestException("If-Match must name a record version")
+}
+
 fun ApplicationCall.collectionId(): CollectionId {
     val raw = parameters["id"]?.takeIf { it.isNotBlank() }
         ?: throw BadRequestException("a collection id is required in the path")
@@ -784,6 +800,8 @@ internal fun Job.toApiView(context: AppContext) = JobApiView(
     total = total,
     errorCode = errorCode,
     cancelRequested = cancelRequested,
+    startedBy = context.attribution.userRef(startedBy),
+    cancelledBy = context.attribution.userRef(cancelledBy),
 )
 
 private fun ImportItem.toApiView() = ImportItemApiView(

@@ -17,7 +17,18 @@ import kotlinx.serialization.Serializable
 
 /** One correction rule as the client sees it, with how many places it changed in published text. */
 @Serializable
-data class CorrectionRuleWire(val id: String, val find: String, val replace: String, val exactCase: Boolean, val matches: Int = 0)
+data class CorrectionRuleWire(
+    val id: String,
+    val find: String,
+    val replace: String,
+    val exactCase: Boolean,
+    val matches: Int = 0,
+    /** The rule's version, to send back in `If-Match` with an edit. */
+    val version: Long = 1,
+    /** Who last changed the rule. */
+    val updatedBy: infoscry.domain.UserRef? = null,
+    val updatedAt: String? = null,
+)
 
 /** A collection's rules and its correction job (running, or the last one; `null` when none ever ran). */
 @Serializable
@@ -57,7 +68,7 @@ fun Route.correctionRoutes(context: AppContext) {
         call.handle {
             val id = call.collectionId()
             val request = call.receiveJson<PutCorrectionRequest>()
-            val rule = context.correctionService.put(id, call.ruleId(), CorrectionRuleInput(request.find, request.replace, request.exactCase))
+            val rule = context.correctionService.put(id, call.ruleId(), CorrectionRuleInput(request.find, request.replace, request.exactCase), call.ifMatchVersion())
             call.respondJson(HttpStatusCode.OK, rule.toWire())
         }
     }
@@ -94,7 +105,7 @@ fun Route.correctionRoutes(context: AppContext) {
 private fun ApplicationCall.ruleId(): String =
     parameters["ruleId"]?.takeIf { it.isNotBlank() } ?: throw BadRequestException("a correction id is required in the path")
 
-private fun CorrectionRule.toWire(matches: Int = 0) = CorrectionRuleWire(id, find, replace, exactCase, matches)
+private fun CorrectionRule.toWire(matches: Int = 0) = CorrectionRuleWire(id, find, replace, exactCase, matches, version, updatedBy, updatedAt)
 
 private fun CorrectionListView.toWire(context: AppContext) =
     CorrectionListWire(rules.map { it.rule.toWire(it.matches) }, job?.toApiView(context))

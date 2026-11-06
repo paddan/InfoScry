@@ -52,7 +52,7 @@
     termError = null;
     holdDialogFocus(dialog);
     try {
-      const stored = await putGlossaryGroup(collectionId, groupId, sent.map(({ term }) => term));
+      const stored = await putGlossaryGroup(collectionId, groupId, sent.map(({ term }) => term), group?.version ?? undefined);
       onSaved(stored);
     } catch (failure) {
       saving = false;

@@ -24,6 +24,15 @@ describe('CollectionGlossarySettings', () => {
   });
   afterEach(cleanup);
 
+  it('shows a reader the groups and who changed them, without controls to change them', async () => {
+    vi.mocked(api.listGlossary).mockResolvedValue([{ ...stockholm, updatedBy: { id: 'u2', displayName: 'Erik' }, updatedAt: '2026-11-04T10:00:00.000Z' }]);
+    render(CollectionGlossarySettings, { collection: { ...collection, callerRole: 'READER' } });
+
+    expect(await screen.findByText(/Changed by Erik on 4 Nov 2026/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Add group' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit Stockholm' })).toBeNull();
+  });
+
   it('lists each group as its terms with prefix terms marked', async () => {
     render(CollectionGlossarySettings, { collection });
 

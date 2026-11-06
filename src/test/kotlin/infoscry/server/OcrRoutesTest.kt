@@ -3,6 +3,9 @@ package infoscry.server
 import infoscry.jobs.RescanHarness
 import infoscry.domain.DocumentStatus
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.request.request
+import io.ktor.client.request.header
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -184,6 +187,30 @@ class OcrRoutesTest {
         assertEquals(secondId, harness.context.ocrOperations.activeOperation(picture.documentId)?.operationId)
         assertContains(replacement.bodyAsText(), "\"selection\":{\"mode\":\"explicit\",\"ordinals\":[0]}")
         assertEquals(originalRevision, harness.context.revisions.activeRevisionId(picture.documentId))
+    }
+
+    @Test
+    fun `a rescan under someone else's running operation answers with that operation`() = runBlocking {
+        val first = admit(previewId(), "admin-request")
+        assertEquals(HttpStatusCode.Accepted, first.status, first.bodyAsText())
+        val firstId = operationId(first)
+        val erik = TestAccounts.ensureUser(harness.context, "erik")
+        harness.context.memberships.put(infoscry.domain.CollectionId("default"), erik.id, infoscry.account.CollectionRole.EDITOR, harness.admin.id)
+        val token = harness.context.accounts.createToken(erik.id, "tests", null).value
+        suspend fun asErik(path: String, body: String) = harness.client.request(harness.url + path) {
+            method = HttpMethod.Post
+            header(io.ktor.http.HttpHeaders.Authorization, "Bearer $token")
+            header(io.ktor.http.HttpHeaders.ContentType, "application/json")
+            setBody(body)
+        }
+
+        val erikPreview = asErik("$prefix/preview", """{"method":"tesseract"}""")
+        val erikPreviewId = Regex(""""previewId":"([^"]+)"""").find(erikPreview.bodyAsText())!!.groupValues[1]
+        val answered = asErik("$prefix/rescan", """{"previewId":"$erikPreviewId","requestId":"erik-request"}""")
+
+        assertEquals(HttpStatusCode.Accepted, answered.status, answered.bodyAsText())
+        assertEquals(firstId, operationId(answered), "the running operation is the answer, not replaced")
+        assertEquals(firstId, harness.context.ocrOperations.activeOperation(picture.documentId)?.operationId)
     }
 
     @Test

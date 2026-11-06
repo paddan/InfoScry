@@ -125,7 +125,7 @@ describe('CollectionPromptSettings', () => {
 
     expect(await screen.findByText('Prompt saved.')).toBeTruthy();
     expect(await screen.findByText(/Saved, but the list could not be refreshed/)).toBeTruthy();
-    expect(api.updateCollectionPrompt).toHaveBeenCalledWith('c1', 'p1', 'Board tone', 'Changed.');
+    expect(api.updateCollectionPrompt).toHaveBeenCalledWith('c1', 'p1', 'Board tone', 'Changed.', 2);
   });
 
   it('pre-fills New prompt from Default and Duplicate copies the selected prompt', async () => {
@@ -150,7 +150,7 @@ describe('CollectionPromptSettings', () => {
     await fireEvent.input(screen.getByLabelText('Prompt text'), { target: { value: 'Plain language, short.' } });
     expect(save.disabled).toBe(false);
     await fireEvent.click(save);
-    await waitFor(() => expect(api.updateCollectionPrompt).toHaveBeenCalledWith('c1', 'p1', 'Board tone', 'Plain language, short.'));
+    await waitFor(() => expect(api.updateCollectionPrompt).toHaveBeenCalledWith('c1', 'p1', 'Board tone', 'Plain language, short.', 2));
   });
 
   it('shows a name conflict next to Save', async () => {

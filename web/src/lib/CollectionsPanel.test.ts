@@ -1997,7 +1997,7 @@ describe('collections panel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
 
     // The trimmed name goes to the existing rename route, and the button says the save is in flight.
-    expect(api.renameCollection).toHaveBeenCalledWith('nightfall', 'Nightfall archive');
+    expect(api.renameCollection).toHaveBeenCalledWith('nightfall', 'Nightfall archive', undefined);
     expect(screen.getByRole('button', { name: 'Saving name…' })).toBeTruthy();
 
     await act(async () => { finish(collection('Nightfall archive', 2)); });
@@ -2040,7 +2040,7 @@ describe('collections panel', () => {
     await fireEvent.input(await screen.findByLabelText('Collection name'), { target: { value: '   ' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
 
-    expect(api.renameCollection).toHaveBeenCalledWith('nightfall', '');
+    expect(api.renameCollection).toHaveBeenCalledWith('nightfall', '', undefined);
     expect((await screen.findByRole('alert')).textContent).toContain('must not be blank');
     expect(screen.queryByText('Name saved.')).toBeNull();
   });
@@ -2075,7 +2075,7 @@ describe('collections panel', () => {
 
     await fireEvent.input(await screen.findByLabelText('Collection name'), { target: { value: 'Renamed Default' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
-    expect(api.renameCollection).toHaveBeenCalledWith('default', 'Renamed Default');
+    expect(api.renameCollection).toHaveBeenCalledWith('default', 'Renamed Default', undefined);
 
     // The reader manages another collection while the first save is still on its way.
     await rerender({ selectedId: 'nightfall' });
@@ -2111,7 +2111,7 @@ describe('collections panel', () => {
     await fireEvent.input(field, { target: { value: '*.bak\n\n!keep.bak' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save ignored files' }));
 
-    expect(api.updateCollectionIgnorePatterns).toHaveBeenCalledWith('nightfall', ['*.bak', '', '!keep.bak']);
+    expect(api.updateCollectionIgnorePatterns).toHaveBeenCalledWith('nightfall', ['*.bak', '', '!keep.bak'], undefined);
     expect(await screen.findByText('Ignored files saved.')).toBeTruthy();
     expect((screen.getByLabelText('Ignored files') as HTMLTextAreaElement).value).toBe('*.bak\n!keep.bak');
   });

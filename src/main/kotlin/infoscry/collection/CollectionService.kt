@@ -250,10 +250,10 @@ class CollectionService(
         }
     }
 
-    suspend fun rename(id: CollectionId, newName: String): Collection = coordinator.withMutation {
+    suspend fun rename(id: CollectionId, newName: String, expectedVersion: Long? = null): Collection = coordinator.withMutation {
         requireMutationsAllowed()
         requireActive(id)
-        collections.rename(id, newName)
+        collections.rename(id, newName, expectedVersion)
     }
 
     /** Updates the settings future import jobs snapshot; already queued payloads remain unchanged. */
@@ -271,7 +271,7 @@ class CollectionService(
      * edit to that collection. Whether the effective settings are still usable is decided when work is
      * admitted, where the profiles are resolved again into a snapshot.
      */
-    suspend fun updateOcrSettings(id: CollectionId, update: OcrSettingsUpdate): Collection =
+    suspend fun updateOcrSettings(id: CollectionId, update: OcrSettingsUpdate, expectedVersion: Long? = null): Collection =
         coordinator.withMutation {
             requireMutationsAllowed()
             val existing = requireActive(id)
@@ -281,7 +281,7 @@ class CollectionService(
                     ocrProfiles.requireSelectable(method.profileId, OcrProfileRole.TRANSCRIPTION)
                 }
             }
-            collections.updateOcrSettings(id, settings)
+            collections.updateOcrSettings(id, settings, expectedVersion)
         }
 
     /**
@@ -300,12 +300,12 @@ class CollectionService(
      * and is never first met by an import. It changes future imports only: a queued import carries the list it was
      * admitted with.
      */
-    suspend fun updateIgnorePatterns(id: CollectionId, lines: List<String>): IgnorePatterns =
+    suspend fun updateIgnorePatterns(id: CollectionId, lines: List<String>, expectedVersion: Long? = null): IgnorePatterns =
         coordinator.withMutation {
             requireMutationsAllowed()
             requireActive(id)
             val validated = IgnorePatterns.of(lines)
-            collections.replaceIgnorePatterns(id, validated.patterns)
+            collections.replaceIgnorePatterns(id, validated.patterns, expectedVersion)
             validated
         }
 

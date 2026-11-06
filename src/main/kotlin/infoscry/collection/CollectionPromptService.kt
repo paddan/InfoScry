@@ -76,6 +76,7 @@ class CollectionPromptService(
         promptId: String,
         name: String,
         body: String,
+        expectedVersion: Long? = null,
     ): CollectionPrompt = mutations.withMutation {
         collections.requireMutationsAllowed()
         collections.requireActive(collectionId)
@@ -86,11 +87,12 @@ class CollectionPromptService(
         val cleanName = validName(name)
         validBody(body)
         if (cleanName == current.name && body == current.body) return@withMutation current
+        infoscry.domain.requireVersion(expectedVersion, current.version.toLong(), current.updatedBy)
         val clash = store.list(collectionId, current.role).firstOrNull {
             it.id != promptId && sameName(it.name, cleanName)
         }
         if (clash != null) throw PromptNameTaken()
-        withNameConflictTranslated { store.update(promptId, cleanName, body) }
+        withNameConflictTranslated { store.update(promptId, cleanName, body, expectedVersion) }
     }
 
     /** Deletes a stored prompt. A prompt that is already gone is not an error. */

@@ -61,11 +61,11 @@ class CorrectionService(
     }
 
     /** Stores rule [id] and starts the collection's correction job. */
-    suspend fun put(collectionId: CollectionId, id: String, input: CorrectionRuleInput): CorrectionRule {
+    suspend fun put(collectionId: CollectionId, id: String, input: CorrectionRuleInput, expectedVersion: Long? = null): CorrectionRule {
         val rule = mutations.withMutation {
             collections.requireMutationsAllowed()
             collections.requireActive(collectionId)
-            store.put(collectionId, id, input)
+            store.put(collectionId, id, input, expectedVersion)
         }
         apply(collectionId)
         return rule

@@ -34,7 +34,7 @@ class CorrectionStore(private val database: Database) {
      * @throws infoscry.correction.InvalidCorrectionException when the rule cannot be stored as written.
      * @throws CorrectionFindTakenException when another rule of the collection already finds the same word.
      */
-    fun put(collectionId: CollectionId, id: String, input: CorrectionRuleInput): CorrectionRule {
+    fun put(collectionId: CollectionId, id: String, input: CorrectionRuleInput, expectedVersion: Long? = null): CorrectionRule {
         require(id.isNotBlank()) { "a correction needs an id" }
         val rule = CorrectionRules.normalize(input)
         val key = CorrectionRules.findKey(rule)
@@ -59,6 +59,7 @@ class CorrectionStore(private val database: Database) {
             ) {
                 return@transaction existing
             }
+            existing?.let { infoscry.domain.requireVersion(expectedVersion, it.version, it.updatedBy) }
             val now = Instants.now()
             connection.prepareStatement(
                 "INSERT INTO collection_corrections (id, collection_id, find, find_key, replace, exact_case, " +
@@ -106,10 +107,14 @@ class CorrectionStore(private val database: Database) {
         exactCase = getInt("exact_case") == 1,
         createdAt = getString("created_at"),
         updatedAt = getString("updated_at"),
+        version = getLong("version"),
+        updatedBy = getString("updated_by")?.let { infoscry.domain.UserRef(it, getString("updated_by_name") ?: it) },
     )
 
     private companion object {
         const val SELECT =
-            "SELECT id, collection_id, find, replace, exact_case, created_at, updated_at FROM collection_corrections"
+            "SELECT id, collection_id, find, replace, exact_case, created_at, updated_at, version, updated_by, " +
+                "(SELECT display_name FROM users WHERE id = collection_corrections.updated_by) AS updated_by_name " +
+                "FROM collection_corrections"
     }
 }

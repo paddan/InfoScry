@@ -579,6 +579,8 @@ open class JobStore(private val database: Database) {
             cancelRequested = getInt("cancel_requested") == 1,
             createdAt = getString("created_at"),
             updatedAt = getString("updated_at"),
+            startedBy = getString("started_by")?.let { infoscry.account.UserId(it) },
+            cancelledBy = getString("cancelled_by")?.let { infoscry.account.UserId(it) },
         )
     }
 
@@ -617,7 +619,7 @@ open class JobStore(private val database: Database) {
 
         private const val SELECT_JOBS =
             "SELECT id, collection_id, type, state, stage, current_item, completed, total, payload, " +
-                "error_code, error_message, cancel_requested, created_at, updated_at FROM jobs"
+                "error_code, error_message, cancel_requested, created_at, updated_at, started_by, cancelled_by FROM jobs"
 
         private const val INSERT_JOB =
             "INSERT INTO jobs (id, collection_id, type, state, stage, current_item, completed, total, " +

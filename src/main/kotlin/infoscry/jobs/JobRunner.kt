@@ -228,7 +228,11 @@ class JobRunner(
         }
 
         try {
-            handler.handle(current, JobStage(claimed.id, store, collections, mutations))
+            // The attempt's work (documents, revisions, a restore) is done in the name of whoever started the
+            // job, also when a restart resumes it.
+            kotlinx.coroutines.withContext(infoscry.storage.Actor.element(current.startedBy)) {
+                handler.handle(current, JobStage(claimed.id, store, collections, mutations))
+            }
             endAttempt(claimed.id) { store.complete(it) }
         } catch (cancelled: CancellationException) {
             if (store.get(claimed.id)?.cancelRequested == true) {

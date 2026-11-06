@@ -114,6 +114,8 @@ data class DocumentSummaryResponse(
 data class DocumentDetail(
     val document: DocumentListItem,
     val errorMessage: String? = null,
+    /** Who imported the document: whoever started the import that read it in. */
+    val importedBy: infoscry.domain.UserRef? = null,
     /** The lowest-ordinal content unit, or null when the document has no readable content yet. */
     val sourceId: String? = null,
     /** The same counts the row shows, read for one document rather than for a page of them. */
@@ -250,6 +252,7 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                     DocumentDetail(
                         document = document.toListItem(currentProgress, qualityScore, reading),
                         errorMessage = errorMessage,
+                        importedBy = context.attribution.importedBy(document.id),
                         qualityScore = qualityScore,
                         sourceId = context.content.listUnits(document.id, afterOrdinal = -1, limit = 1)
                             .firstOrNull()?.id?.value,
