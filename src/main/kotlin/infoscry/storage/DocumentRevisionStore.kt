@@ -265,7 +265,7 @@ data class PublicationIntent(
  * - **Nothing here decides when a publication is allowed.** The deletion, lifecycle and maintenance
  *   rechecks belong to the publication boundary; this class only records what the boundary decided.
  *
- * Every write composes with the caller's transaction (SQLite savepoints), so the boundary's authority
+ * Every write composes with the caller's transaction (savepoints), so the boundary's authority
  * commit is one transaction covering the published text, its chunks and the marker that says which side
  * of the handoff a crash landed on.
  */
@@ -278,7 +278,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
     /** One document's revisions, oldest first, so a reader can walk the history of its text. */
     fun revisions(documentId: DocumentId): List<DocumentRevision> = database.read { connection ->
-        connection.prepareStatement("$SELECT_REVISIONS WHERE document_id = ? ORDER BY created_at, rowid").use { statement ->
+        connection.prepareStatement("$SELECT_REVISIONS WHERE document_id = ? ORDER BY created_at, insert_order").use { statement ->
             statement.setString(1, documentId.value)
             statement.executeQuery().use { rows ->
                 buildList { while (rows.next()) add(rows.toRevision()) }
@@ -452,7 +452,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
         } catch (e: java.sql.SQLException) {
             // A unique constraint violation when attemptFingerprint is not null means a candidate with
             // the same document+fingerprint already exists. Adopt it instead of failing.
-            if (e.message?.contains("UNIQUE constraint failed") == true && attemptFingerprint != null) {
+            if (Database.isUniqueViolation(e) && attemptFingerprint != null) {
                 val existing = resumableCandidate(documentId, attemptFingerprint)
                     ?: throw IllegalStateException(
                         "a unique constraint violation suggests an existing candidate, but resumableCandidate found none",
@@ -894,7 +894,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
     /** Every restore request of one document, oldest first. */
     fun restores(documentId: DocumentId): List<RevisionRestoreRecord> = database.read { connection ->
-        connection.prepareStatement("$SELECT_RESTORES WHERE document_id = ? ORDER BY created_at, rowid").use { statement ->
+        connection.prepareStatement("$SELECT_RESTORES WHERE document_id = ? ORDER BY created_at, insert_order").use { statement ->
             statement.setString(1, documentId.value)
             statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRestore()) } }
         }
@@ -911,7 +911,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
 
     /** Every restore request that has not finished, oldest first: what a startup has to resolve. */
     fun unfinishedRestores(): List<RevisionRestoreRecord> = database.read { connection ->
-        connection.prepareStatement("$SELECT_RESTORES WHERE phase = ? ORDER BY created_at, rowid").use { statement ->
+        connection.prepareStatement("$SELECT_RESTORES WHERE phase = ? ORDER BY created_at, insert_order").use { statement ->
             statement.setString(1, RestorePhase.STAGED.name)
             statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRestore()) } }
         }
@@ -922,7 +922,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
     /**
      * When each revision of [documentId] became its published text, by revision id.
      *
-     * The instant is the one the SQLite authority moved, which is the only moment a revision *became* the
+     * The instant is the one the Postgres authority moved, which is the only moment a revision *became* the
      * document's text. A revision that never went through a publication — an import's, or the backfill's —
      * has no entry, and is not given one.
      */
@@ -1423,7 +1423,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 statement.setInt(8, chunk.tokenStart)
                 statement.setInt(9, chunk.tokenEnd)
                 if (chunk.embedding == null) {
-                    statement.setNull(10, Types.BLOB)
+                    statement.setNull(10, Types.BINARY)
                     statement.setNull(11, Types.INTEGER)
                 } else {
                     statement.setBytes(10, encodeEmbedding(chunk.embedding))

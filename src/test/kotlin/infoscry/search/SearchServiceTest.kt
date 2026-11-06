@@ -65,7 +65,7 @@ class SearchServiceTest {
     fun openStack() {
         dataDir = Files.createTempDirectory("infoscry-search")
         paths = AppPaths.of(dataDir)
-        database = Database(paths.databaseFile)
+        database = Database(paths.root)
         SchemaMigrator(database).migrate()
         collections = CollectionStore(database)
         documents = DocumentStore(database)

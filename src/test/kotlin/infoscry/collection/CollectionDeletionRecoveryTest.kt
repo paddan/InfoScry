@@ -1,5 +1,7 @@
 package infoscry.collection
 
+import infoscry.storage.withTestDatabase
+
 import infoscry.AppContext
 import infoscry.config.AppPaths
 import infoscry.domain.Chunk
@@ -311,7 +313,7 @@ class CollectionDeletionRecoveryTest {
         // "deleting". Task 8's import path is the real producer of this call; the publish boundary it
         // must go through is what is asserted here.
         val paths = AppPaths.from(dataDir)
-        Database(paths.databaseFile).use { database ->
+        Database(paths.root).use { database ->
             val documents = DocumentStore(database)
             val collections = CollectionStore(database)
             val library = ManagedLibrary(paths, documents)
@@ -563,7 +565,7 @@ class CollectionDeletionRecoveryTest {
             COLLECTION_NAME,
             "--stop-after",
             stopAfter.name,
-        ).redirectErrorStream(true).start()
+        ).withTestDatabase().redirectErrorStream(true).start()
 
         val output = Collections.synchronizedList(mutableListOf<String>())
         val pump = Thread {
@@ -614,7 +616,7 @@ class CollectionDeletionRecoveryTest {
      */
     private fun assertInterruptedState(stopAfter: StopAfter, collectionId: CollectionId) {
         val paths = AppPaths.from(dataDir)
-        val operation = Database(paths.databaseFile).use { database ->
+        val operation = Database(paths.root).use { database ->
             DeletionStore(database).unfinishedFor(collectionId).singleOrNull()
                 ?: error("no unfinished deletion record for collection ${collectionId.value}")
         }

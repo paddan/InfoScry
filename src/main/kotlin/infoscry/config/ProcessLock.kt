@@ -10,7 +10,7 @@ import java.nio.file.StandardOpenOption
 /**
  * The single-writer lock on one data directory.
  *
- * InfoScry has one authoritative SQLite database, one Lucene index, and one set of running jobs, so a
+ * InfoScry has one authoritative Postgres database, one Lucene index, and one set of running jobs, so a
  * second process writing to the same directory would corrupt the state the product is built on. The
  * lock is a real file lock rather than a PID file: the operating system releases it even when a
  * process is killed, so a crash cannot leave the archive permanently locked.

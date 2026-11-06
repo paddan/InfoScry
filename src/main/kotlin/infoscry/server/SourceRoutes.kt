@@ -87,7 +87,7 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                 val unitId = ContentUnitId(sourceId)
                 // A citation that names its revision is read from that revision, so a saved excerpt keeps
                 // showing the text it was taken from after the document has published another reading.
-                // Reading it costs nothing from the index: the revision's text is SQLite's, which is what
+                // Reading it costs nothing from the index: the revision's text is Postgres's, which is what
                 // keeps source access working when the embedding runtime does not initialize. The named
                 // revision is resolved before the live unit is required, because the replacement that
                 // superseded it may have removed the unit it names — and a named revision that holds no
@@ -109,7 +109,7 @@ fun Routing.configureSourceRoutes(context: AppContext) {
                         )
                 }
                 // While a publication whose authority is durable cannot switch its snapshot, the live
-                // reading SQLite holds and the rows the index still serves disagree, so the live source
+                // reading Postgres holds and the rows the index still serves disagree, so the live source
                 // read is refused with the same 503 a search gets (the seal the publication service
                 // raises for that state). A request that named a revision is already answered above from
                 // that revision's own immutable text, which is coherent whatever the index is doing.

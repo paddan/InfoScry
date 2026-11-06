@@ -221,7 +221,7 @@ class PageReviewService(
             if (!attributes.isRegularFile) return null
             OriginalIdentity(attributes.size(), attributes.lastModifiedTime(), attributes.fileKey())
         } catch (_: IOException) { return null }
-        // Failed source validation must not turn every bounded SQLite text slice into a full-file read.
+        // Failed source validation must not turn every bounded Postgres text slice into a full-file read.
         // This is only an unavailable-count hint: original image generation always verifies its source anew.
         if (unavailableCounts[path] == identity) return null
         val count = try {
@@ -240,7 +240,7 @@ class PageReviewService(
         verifiedCounts[document.sha256] = count
         val directory = cacheDirectory(document)
         if (!confined(directory)) return
-        // The cache is rebuildable. Failure to persist it must not make intact SQLite text unavailable.
+        // The cache is rebuildable. Failure to persist it must not make intact Postgres text unavailable.
         try {
             Files.createDirectories(directory)
             val temporary = Files.createTempFile(directory, ".count-", ".part")

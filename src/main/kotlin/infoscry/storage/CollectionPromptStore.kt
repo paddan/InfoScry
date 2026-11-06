@@ -17,7 +17,7 @@ open class CollectionPromptStore(private val database: Database) {
     open fun list(collectionId: CollectionId, role: LlmPromptRole): List<CollectionPrompt> = database.read { connection ->
         connection.prepareStatement(
             "SELECT id, collection_id, role, name, body, version FROM collection_prompts " +
-                "WHERE collection_id = ? AND role = ? ORDER BY name COLLATE NOCASE",
+                "WHERE collection_id = ? AND role = ? ORDER BY name COLLATE infoscry_nocase",
         ).use { statement ->
             statement.setString(1, collectionId.value)
             statement.setString(2, role.name)

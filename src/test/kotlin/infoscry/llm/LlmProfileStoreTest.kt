@@ -125,7 +125,7 @@ class LlmProfileStoreTest {
             connection.createStatement().use { statement ->
                 statement.executeQuery(
                     "SELECT api_key_environment_variable FROM llm_profiles WHERE name = 'key-holder'",
-                ).use { it.getString(1) }
+                ).use { it.next(); it.getString(1) }
             }
         }
         assertEquals("ANTHROPIC_API_KEY", row)

@@ -1,5 +1,7 @@
 package infoscry.document
 
+import infoscry.storage.withTestDatabase
+
 import infoscry.AppContext
 import infoscry.domain.CollectionId
 import infoscry.domain.DocumentId
@@ -147,7 +149,7 @@ class RevisionRestoreRecoveryTest {
             fixture.revisionIds.first(),
             "--stop-after",
             step.name,
-        ).redirectErrorStream(true).start()
+        ).withTestDatabase().redirectErrorStream(true).start()
 
         val output = Collections.synchronizedList(mutableListOf<String>())
         val pump = Thread {

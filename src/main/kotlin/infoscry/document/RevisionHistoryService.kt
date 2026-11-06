@@ -81,7 +81,7 @@ data class RevisionHistoryEntry(
 /**
  * The published text history of one document, for the history view and its restore action.
  *
- * It is a read-only view over SQLite's own records. It invents nothing: where the archive recorded no engine,
+ * It is a read-only view over Postgres's own records. It invents nothing: where the archive recorded no engine,
  * no instant or no decision, the entry says so by leaving it out or by counting the page as unknown, and it
  * never exposes a filesystem path, an artifact reference or an endpoint.
  */

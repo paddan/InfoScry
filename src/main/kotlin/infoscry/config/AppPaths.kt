@@ -49,12 +49,12 @@ internal object PrivatePermissions {
 /**
  * The layout of one InfoScry data directory.
  *
- * Everything the product writes lives below [root]; the only exception is the source files a user
- * selects for import, which InfoScry reads and never modifies. The layout is deliberately shallow
+ * Everything the product writes lives below [root], except the database (Postgres, see
+ * [infoscry.storage.DatabaseConfig]) and the source files a user selects for import, which InfoScry
+ * reads and never modifies. The layout is deliberately shallow
  * and named, because `doctor`, backup instructions, and deletion recovery all refer to these paths:
  *
  * ```
- * <root>/infoscry.db      authoritative SQLite database
  * <root>/infoscry.lock    single-writer process lock
  * <root>/runtime.json     PID, port and bearer token, present only while the server runs
  * <root>/library/<collection>/<document>/original.<ext>   immutable imported copy
@@ -67,7 +67,6 @@ internal object PrivatePermissions {
  */
 class AppPaths private constructor(val root: Path) {
 
-    val databaseFile: Path = root.resolve("infoscry.db")
     val lockFile: Path = root.resolve("infoscry.lock")
     val runtimeFile: Path = root.resolve("runtime.json")
     val libraryDir: Path = root.resolve(LIBRARY_DIRECTORY)

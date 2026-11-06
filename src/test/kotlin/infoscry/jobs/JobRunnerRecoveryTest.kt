@@ -1,5 +1,7 @@
 package infoscry.jobs
 
+import infoscry.storage.withTestDatabase
+
 import infoscry.domain.JobId
 import infoscry.domain.JobState
 import infoscry.storage.CollectionStore
@@ -153,7 +155,6 @@ class JobRunnerRecoveryTest {
     ): JobId {
         val command = mutableListOf(
             javaExecutable(),
-            // The SQLite driver loads a native library; without this the JDK warns on every run.
             "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true",
             "-cp",
             System.getProperty("java.class.path"),
@@ -169,7 +170,7 @@ class JobRunnerRecoveryTest {
         )
         jobId?.let { command += listOf("--job-id", it.value) }
 
-        val process = ProcessBuilder(command).redirectErrorStream(true).start()
+        val process = ProcessBuilder(command).withTestDatabase().redirectErrorStream(true).start()
         val output = Collections.synchronizedList(mutableListOf<String>())
         val pump = Thread {
             process.inputReader().useLines { lines -> lines.forEach { output += it } }

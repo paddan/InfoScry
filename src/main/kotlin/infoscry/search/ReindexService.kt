@@ -73,7 +73,7 @@ enum class ReindexStep {
  * Rebuilds the search index from the persisted text, in a successor generation, under exclusive
  * maintenance.
  *
- * SQLite is authoritative and the index is derived, so a rebuild is not a repair of lost work — it is
+ * Postgres is authoritative and the index is derived, so a rebuild is not a repair of lost work — it is
  * the way the index and the database agree again after a model change, a schema change, or an import
  * whose index half never landed. The rebuild is one exclusive maintenance scope for its whole duration:
  * every other writer drains to its durable checkpoint before the snapshot is taken, and nothing may

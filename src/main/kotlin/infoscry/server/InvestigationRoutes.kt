@@ -210,7 +210,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             }
             val activity = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT tool_name, result_code, duration_ms FROM tool_calls WHERE conversation_id = ? ORDER BY rowid LIMIT 200",
+                    "SELECT tool_name, result_code, duration_ms FROM tool_calls WHERE conversation_id = ? ORDER BY insert_order LIMIT 200",
                 ).use { statement ->
                     statement.setString(1, conversationId)
                     statement.executeQuery().use { rows ->

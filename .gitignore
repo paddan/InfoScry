@@ -11,3 +11,6 @@ web/.vitest/
 test documents/
 __pycache__/
 *.pyc
+
+# Local database settings for compose.yaml; .env.example is the committed template.
+.env

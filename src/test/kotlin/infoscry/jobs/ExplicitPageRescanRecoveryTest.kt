@@ -1,5 +1,7 @@
 package infoscry.jobs
 
+import infoscry.storage.TestDatabases
+
 import infoscry.AppContext
 import infoscry.domain.CollectionId
 import infoscry.domain.DocumentId
@@ -89,7 +91,8 @@ class ExplicitPageRescanRecoveryTest {
                     javaExecutable(), "--enable-native-access=ALL-UNNAMED", "-Djava.awt.headless=true", "-cp",
                     System.getProperty("java.class.path"), ExplicitPageRescanRecoveryHarness::class.java.name,
                     root.toString(), picture.documentId.value, ready.toString(), stopAt,
-                ).redirectErrorStream(true).redirectOutput(log.toFile()).start()
+                ).also { it.environment().putAll(TestDatabases.environmentFor(harness.archiveDir)) }
+                    .redirectErrorStream(true).redirectOutput(log.toFile()).start()
                 val marker = try {
                     awaitFile(ready, process, log)
                     val value = Files.readString(ready)

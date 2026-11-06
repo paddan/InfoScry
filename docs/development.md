@@ -55,7 +55,16 @@ and `--data-dir` for the app, as shown in [installation](installation.md#use-a-s
 ```
 
 The normal suite builds the frontend and runs JVM and Vitest tests with fake
-providers, redistributable fixtures and temporary data directories. It excludes
+providers, redistributable fixtures and temporary data directories. Backend tests
+start a `paradedb/paradedb` container through Testcontainers, one per test JVM,
+and give every data directory a test opens its own database, so Docker or Podman
+must be running. With Podman, point Testcontainers at its socket first:
+
+```bash
+export DOCKER_HOST="unix://$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
+export TESTCONTAINERS_RYUK_DISABLED=true
+```
+ It excludes
 tests tagged `external`, `model` or `gpu`. Initial dependency installation can
 require network access; tests do not need a real LLM provider.
 

@@ -31,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap
  * How many attempts the process runs at once.
  *
  * The three limits exist because the stages have different bottlenecks: copying and parsing are
- * I/O-bound and two at a time keep a local disk and a SQLite writer busy without thrashing them, OCR
+ * I/O-bound and two at a time keep a local disk and a Postgres writer busy without thrashing them, OCR
  * spends most of its time in a child process so it gets one worker per couple of cores up to four, and
  * embeddings share one accelerator session, where a second concurrent session competes for the same
  * device memory rather than finishing sooner.

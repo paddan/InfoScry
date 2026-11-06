@@ -8,6 +8,7 @@
 |---|---|
 | macOS arm64 with an Apple GPU | Supported local runtime; CoreML embeddings |
 | JDK 25 | Build and run the application |
+| Docker Desktop or Podman | Runs PostgreSQL from `compose.yaml`; the test suite starts its own container |
 | Node.js 24 and npm | Build and test the web interface; the setup below uses Node 24 |
 | Tesseract and the OCR languages you use | OCR runtime dependency |
 | Surya and llama.cpp (optional) | Local page reading with the Surya model instead of Tesseract |
@@ -49,8 +50,36 @@ future interactive sessions. If using asdf, follow the
 [asdf guide](asdf.md) instead of these Homebrew runtime exports.
 
 Gradle itself is provided by `./gradlew`. Java libraries and frontend packages
-are installed by the build; SQLite, Lucene and ONNX Runtime do not need separate
-system installations. CoreML is supplied by macOS.
+are installed by the build; Lucene and ONNX Runtime do not need separate system
+installations. CoreML is supplied by macOS.
+
+### PostgreSQL
+
+InfoScry keeps its state in PostgreSQL, which `compose.yaml` runs in a container;
+InfoScry itself runs on the Mac so it can use the GPU. Install
+[Docker Desktop](https://www.docker.com/products/docker-desktop/) or Podman with a
+Compose provider (`brew install podman podman-compose`), then from the checkout:
+
+```bash
+cp .env.example .env
+```
+
+Set `INFOSCRY_DATABASE_PASSWORD` in `.env`, then start the database:
+
+```bash
+docker compose up -d
+```
+
+With Podman, run `podman machine start` once and use `podman compose up -d`.
+InfoScry reads the same variables from its environment, so export them in the
+shell that starts it:
+
+```bash
+set -a; source .env; set +a
+```
+
+The database survives restarts in the `pgdata` volume. Archives created by
+earlier SQLite-based builds are not read; import the collections again.
 
 ### Tesseract and OCR language data
 

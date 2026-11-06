@@ -88,7 +88,7 @@ class CollectionStore(private val database: Database) {
      */
     fun list(): List<Collection> = database.read { connection ->
         connection.createStatement().use { statement ->
-            statement.executeQuery("$SELECT_COLLECTIONS ORDER BY name COLLATE NOCASE").use { rows ->
+            statement.executeQuery("$SELECT_COLLECTIONS ORDER BY name COLLATE infoscry_nocase").use { rows ->
                 buildList { while (rows.next()) add(rows.toCollection()) }
             }
         }
@@ -102,7 +102,7 @@ class CollectionStore(private val database: Database) {
     fun listWithDocumentCounts(): List<Collection> = database.read { connection ->
         connection.createStatement().use { statement ->
             statement
-                .executeQuery("$SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT ORDER BY c.name COLLATE NOCASE")
+                .executeQuery("$SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT ORDER BY c.name COLLATE infoscry_nocase")
                 .use { rows ->
                     buildList {
                         while (rows.next()) {
@@ -264,11 +264,11 @@ class CollectionStore(private val database: Database) {
     }
 
     /**
-     * The schema's unique index on `name COLLATE NOCASE` is the authority on duplicate names, so the
+     * The schema's unique index on `name COLLATE infoscry_nocase` is the authority on duplicate names, so the
      * store translates its violation instead of racing a `SELECT` before every insert.
      */
     private fun SQLException.rethrowAsNameConflict(name: String): Nothing =
-        if (message?.contains("UNIQUE", ignoreCase = true) == true) {
+        if (Database.isUniqueViolation(this)) {
             throw DuplicateCollectionNameException(name)
         } else {
             throw this

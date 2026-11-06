@@ -200,11 +200,16 @@ class SourceImageProvenanceTest {
     fun `a row with only part of a provenance fails loudly instead of reading back as no image`() {
         val (database, revisions) = archive()
         database.use {
-            // Only a connection that has switched the constraints off can write such a row; the read still may
-            // not take it for an absent one, because that would hide an artifact nobody can reopen.
+            // Only a database whose constraints were dropped can hold such a row; the read still may not take it
+            // for an absent one, because that would hide an artifact nobody can reopen. This test's database
+            // is its own, so dropping the table's CHECK constraints here touches nothing else.
             database.transaction { connection ->
                 connection.createStatement().use { statement ->
-                    statement.execute("PRAGMA ignore_check_constraints = ON")
+                    val checks = statement.executeQuery(
+                        "SELECT conname FROM pg_constraint WHERE conrelid = 'page_text_revisions'::regclass " +
+                            "AND contype = 'c'",
+                    ).use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+                    checks.forEach { statement.execute("ALTER TABLE page_text_revisions DROP CONSTRAINT \"$it\"") }
                     statement.execute(
                         "INSERT INTO page_text_revisions (revision_id, ordinal, unit_id, locator, " +
                             "extracted_text, search_text, approval, created_at, source_image_sha256, " +
@@ -226,7 +231,6 @@ class SourceImageProvenanceTest {
                             "VALUES ('r1', 2, 'unit-2', '{\"type\":\"pdf_page\",\"page\":3}', 'text', 'text', " +
                             "'PENDING', '$now', 'ARTIFACTS', '/etc/passwd', '${"a".repeat(64)}', 1)",
                     )
-                    statement.execute("PRAGMA ignore_check_constraints = OFF")
                 }
             }
 

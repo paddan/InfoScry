@@ -37,7 +37,7 @@ class ManagedLibraryTest {
         dataDir = Files.createTempDirectory("infoscry-library")
         sourceDir = Files.createTempDirectory("infoscry-sources")
         paths = AppPaths.from(dataDir)
-        database = Database(paths.databaseFile)
+        database = Database(paths.root)
         SchemaMigrator(database).migrate()
         documents = DocumentStore(database)
         library = ManagedLibrary(paths, documents)

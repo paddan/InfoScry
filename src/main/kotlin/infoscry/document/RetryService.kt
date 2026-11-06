@@ -289,7 +289,7 @@ class RetryService(
     private fun lastSnapshot(document: Document): OcrSettingsSnapshot? {
         val candidates = mutableListOf<Pair<String, OcrSettingsSnapshot>>()
         database.read { c ->
-            c.prepareStatement("SELECT snapshot, created_at FROM ocr_operations WHERE document_id = ? ORDER BY rowid DESC").use { q ->
+            c.prepareStatement("SELECT snapshot, created_at FROM ocr_operations WHERE document_id = ? ORDER BY insert_order DESC").use { q ->
                 q.setString(1, document.id.value)
                 q.executeQuery().use { r ->
                     while (r.next()) candidates += r.getString(2) to

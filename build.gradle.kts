@@ -49,7 +49,9 @@ dependencies {
     implementation(libs.clikt)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.sqlite.jdbc)
+    // Authoritative state lives in PostgreSQL: the JDBC driver and the connection pool.
+    implementation(libs.postgresql)
+    implementation(libs.hikari)
     // Content-based media type detection. Only Tika's core is wired here: the format *parsers* arrive
     // with the tasks that own those formats, which use PDFBox, POI, jsoup, and Commons CSV directly.
     implementation(libs.tika.core)
@@ -94,6 +96,8 @@ dependencies {
     testImplementation(kotlin("test-junit5"))
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlinx.coroutines.core)
+    // Tests run against a real Postgres (the pinned ParadeDB image) started by Testcontainers.
+    testImplementation(libs.testcontainers.postgresql)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 

@@ -19,7 +19,7 @@ class OcrReviewStore(private val database: Database) {
         database.read { connection ->
             connection.prepareStatement(
                 "SELECT baseline_revision_id, candidate_hash, disposition FROM page_reviews " +
-                    "WHERE document_id = ? AND unit_id = ? AND ordinal = ? ORDER BY created_at, rowid",
+                    "WHERE document_id = ? AND unit_id = ? AND ordinal = ? ORDER BY created_at, insert_order",
             ).use { statement ->
                 statement.setString(1, documentId.value)
                 statement.setString(2, unitId)

@@ -1,15 +1,18 @@
--- The InfoScry baseline schema. There is exactly one version and no upgrade path: when the schema
--- changes, this file is edited in place (see SchemaMigrator).
+-- The InfoScry baseline schema for PostgreSQL. There is exactly one version and no upgrade path: when the
+-- schema changes, this file is edited in place (see SchemaMigrator).
 --
 -- Naming: every identifier and column is English and lower_snake_case. Instants are ISO-8601 UTC
--- strings written by the persistence boundary. Enum columns carry a CHECK that mirrors the Kotlin
--- enum of the same name, so an unknown value cannot reach the database. A new archive starts with no
--- collection: every import names a collection a person chose, so nothing is seeded.
+-- strings written by the persistence boundary. Flags are 0/1 integers. Enum columns carry a CHECK that
+-- mirrors the Kotlin enum of the same name, so an unknown value cannot reach the database. A new archive
+-- starts with no collection: every import names a collection a person chose, so nothing is seeded.
 
--- One row per applied schema version. `PRAGMA user_version` carries the same number; this table is
--- the durable audit trail of when it was applied.
+-- Names that must be unique regardless of case ("Default" and "default") compare with this collation:
+-- ICU at secondary strength, so case is ignored and accents still count.
+CREATE COLLATION infoscry_nocase (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+
+-- One row per applied schema version; the highest row is the database's version.
 CREATE TABLE schema_version (
-    version INTEGER NOT NULL PRIMARY KEY,
+    version BIGINT NOT NULL PRIMARY KEY,
     applied_at TEXT NOT NULL
 );
 
@@ -36,16 +39,16 @@ CREATE TABLE collections (
         CHECK (ocr_engine IN ('TESSERACT', 'SURYA', 'LLM', 'NONE')),
     ocr_import_mode TEXT NOT NULL DEFAULT 'FILL_MISSING'
         CHECK (ocr_import_mode IN ('FILL_MISSING', 'CHECK_AND_IMPROVE')),
-    ocr_transcription_profile_id TEXT REFERENCES ocr_profiles (id),
-    ocr_review_profile_id TEXT REFERENCES ocr_profiles (id),
-    ocr_external_page_limit INTEGER NOT NULL DEFAULT 0 CHECK (ocr_external_page_limit >= 0),
-    ask_prompt_id TEXT REFERENCES collection_prompts (id) ON DELETE SET NULL,
-    investigate_prompt_id TEXT REFERENCES collection_prompts (id) ON DELETE SET NULL
+    ocr_transcription_profile_id TEXT,
+    ocr_review_profile_id TEXT,
+    ocr_external_page_limit BIGINT NOT NULL DEFAULT 0 CHECK (ocr_external_page_limit >= 0),
+    ask_prompt_id TEXT,
+    investigate_prompt_id TEXT
 );
 
 -- Collection names are unique case-insensitively, so "Default" and "default" cannot coexist. The
 -- index is the authority; the store translates its violation into a typed error.
-CREATE UNIQUE INDEX collections_name_unique ON collections (name COLLATE NOCASE);
+CREATE UNIQUE INDEX collections_name_unique ON collections (name COLLATE infoscry_nocase);
 
 -- A collection's named Ask and Investigate prompts. The shipped Default is not a row; a NULL
 -- collections.ask_prompt_id / investigate_prompt_id means Default. Deleting the collection deletes its prompts.
@@ -55,13 +58,13 @@ CREATE TABLE collection_prompts (
     role           TEXT    NOT NULL CHECK (role IN ('ASK', 'INVESTIGATE')),
     name           TEXT    NOT NULL CHECK (length(trim(name)) > 0),
     body           TEXT    NOT NULL CHECK (length(trim(body)) > 0),
-    version        INTEGER NOT NULL CHECK (version > 0),
+    version        BIGINT NOT NULL CHECK (version > 0),
     created_at     TEXT    NOT NULL,
     updated_at     TEXT    NOT NULL,
     FOREIGN KEY (collection_id) REFERENCES collections (id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX collection_prompts_name_unique
-    ON collection_prompts (collection_id, role, name COLLATE NOCASE);
+    ON collection_prompts (collection_id, role, name COLLATE infoscry_nocase);
 
 -- A collection's ignore patterns (ticket 07 of the local-testing feedback): one row per line of the list, in order.
 -- `position` is the line's place, because the last matching pattern wins. The rows belong to the collection and
@@ -69,12 +72,11 @@ CREATE UNIQUE INDEX collection_prompts_name_unique
 -- rows too, so a saved list reads back as written. An import copies the list into its job payload at admission.
 CREATE TABLE collection_ignore_patterns (
     collection_id TEXT NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
-    position INTEGER NOT NULL CHECK (position >= 0),
+    position BIGINT NOT NULL CHECK (position >= 0),
     pattern TEXT NOT NULL CHECK (length(pattern) > 0),
     PRIMARY KEY (collection_id, position)
-) WITHOUT ROWID;
+);
 
--- schema 3 begin
 -- One standing correction of a collection: every whole-word occurrence of `find` in its documents' text reads
 -- `replace`. `find_key` is the identity a second rule may not share: the case-folded `find`, or the exact one for
 -- an exact-case rule.
@@ -84,14 +86,12 @@ CREATE TABLE collection_corrections (
     find          TEXT    NOT NULL CHECK (length(find) > 0),
     find_key      TEXT    NOT NULL CHECK (length(find_key) > 0),
     replace       TEXT    NOT NULL CHECK (length(replace) > 0),
-    exact_case    INTEGER NOT NULL CHECK (exact_case IN (0, 1)),
+    exact_case    BIGINT NOT NULL CHECK (exact_case IN (0, 1)),
     created_at    TEXT    NOT NULL,
     updated_at    TEXT    NOT NULL,
     UNIQUE (collection_id, find_key)
 );
--- schema 3 end
 
--- schema 4 begin
 -- A group of names with the same meaning in a collection: searching one finds the others. Nothing in the text is
 -- changed by it.
 CREATE TABLE collection_glossary_groups (
@@ -106,14 +106,13 @@ CREATE TABLE collection_glossary_groups (
 CREATE TABLE collection_glossary_terms (
     group_id      TEXT    NOT NULL REFERENCES collection_glossary_groups (id) ON DELETE CASCADE,
     collection_id TEXT    NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
-    ordinal       INTEGER NOT NULL CHECK (ordinal >= 0),
+    ordinal       BIGINT NOT NULL CHECK (ordinal >= 0),
     text          TEXT    NOT NULL CHECK (length(text) > 0),
     match_key     TEXT    NOT NULL CHECK (length(match_key) > 0),
-    prefix        INTEGER NOT NULL CHECK (prefix IN (0, 1)),
+    prefix        BIGINT NOT NULL CHECK (prefix IN (0, 1)),
     PRIMARY KEY (group_id, ordinal),
     UNIQUE (collection_id, match_key)
 );
--- schema 4 end
 
 -- One immutable imported original. sha256 identifies the bytes; the unique constraint is per
 -- collection, so the same bytes may exist in two collections as two documents.
@@ -128,7 +127,7 @@ CREATE TABLE documents (
     media_type TEXT NOT NULL CHECK (length(media_type) > 0),
     original_filename TEXT NOT NULL CHECK (length(original_filename) > 0),
     original_path TEXT NOT NULL CHECK (length(original_path) > 0),
-    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
     status TEXT NOT NULL CHECK (
         status IN (
             'QUEUED', 'COPYING', 'EXTRACTING', 'OCR', 'CHUNKING', 'EMBEDDING', 'INDEXING',
@@ -160,17 +159,19 @@ CREATE INDEX documents_collection_status ON documents (collection_id, status);
 -- never by the path it was selected from: the source paths a user picked do not cross the API
 -- boundary. A job that is not reading a file leaves it NULL.
 CREATE TABLE jobs (
+    -- Insertion order: rows that share a timestamp are read back in the order they were written.
+    insert_order BIGINT GENERATED ALWAYS AS IDENTITY,
     id TEXT NOT NULL PRIMARY KEY,
     collection_id TEXT REFERENCES collections (id) ON DELETE CASCADE,
     type TEXT NOT NULL CHECK (type IN ('IMPORT', 'REINDEX', 'RETRY', 'RESCAN', 'SELECTABLE_PDF', 'CORRECTIONS')),
     state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETE', 'FAILED', 'CANCELLED')),
     stage TEXT,
-    completed INTEGER NOT NULL DEFAULT 0 CHECK (completed >= 0),
-    total INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0),
+    completed BIGINT NOT NULL DEFAULT 0 CHECK (completed >= 0),
+    total BIGINT NOT NULL DEFAULT 0 CHECK (total >= 0),
     payload TEXT,
     error_code TEXT,
     error_message TEXT,
-    cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+    cancel_requested BIGINT NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     current_item TEXT
@@ -191,6 +192,8 @@ CREATE INDEX jobs_collection_state ON jobs (collection_id, state);
 -- them apart; the deletion sweep may only remove documents a cancelled file created, never one it
 -- merely found.
 CREATE TABLE import_items (
+    -- Insertion order: rows that share a timestamp are read back in the order they were written.
+    insert_order BIGINT GENERATED ALWAYS AS IDENTITY,
     id TEXT NOT NULL PRIMARY KEY,
     job_id TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
     item_key TEXT NOT NULL CHECK (length(item_key) > 0),
@@ -201,7 +204,7 @@ CREATE TABLE import_items (
     error_message TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    created_document INTEGER NOT NULL DEFAULT 0 CHECK (created_document IN (0, 1)),
+    created_document BIGINT NOT NULL DEFAULT 0 CHECK (created_document IN (0, 1)),
     UNIQUE (job_id, item_key)
 );
 
@@ -219,7 +222,7 @@ CREATE TABLE deletion_operations (
     collection_id TEXT NOT NULL CHECK (length(collection_id) > 0),
     collection_name TEXT NOT NULL CHECK (length(collection_name) > 0),
     trash_basename TEXT NOT NULL CHECK (length(trash_basename) > 0),
-    managed_originals_existed INTEGER NOT NULL CHECK (managed_originals_existed IN (0, 1)),
+    managed_originals_existed BIGINT NOT NULL CHECK (managed_originals_existed IN (0, 1)),
     phase TEXT NOT NULL CHECK (
         phase IN ('PREPARED', 'FILES_MOVED', 'DB_DELETED', 'INDEX_DELETED', 'DONE')
     ),
@@ -247,7 +250,7 @@ CREATE INDEX deletion_operations_phase ON deletion_operations (phase);
 CREATE TABLE document_deletion_targets (
     operation_id TEXT NOT NULL REFERENCES deletion_operations (id) ON DELETE CASCADE,
     document_id TEXT NOT NULL CHECK (length(document_id) > 0),
-    managed_existed INTEGER NOT NULL CHECK (managed_existed IN (0, 1)),
+    managed_existed BIGINT NOT NULL CHECK (managed_existed IN (0, 1)),
     source_path TEXT,
     PRIMARY KEY (operation_id, document_id)
 );
@@ -280,14 +283,14 @@ CREATE INDEX document_deletion_targets_document ON document_deletion_targets (do
 CREATE TABLE content_units (
     id TEXT NOT NULL PRIMARY KEY,
     document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    ordinal BIGINT NOT NULL CHECK (ordinal >= 0),
     locator_type TEXT NOT NULL CHECK (length(locator_type) > 0),
     locator TEXT NOT NULL CHECK (length(locator) > 0),
     extracted_text TEXT NOT NULL,
     search_text TEXT NOT NULL,
     artifact_relative_path TEXT,
     artifact_sha256 TEXT,
-    mean_confidence REAL,
+    mean_confidence DOUBLE PRECISION,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     extraction_method TEXT CHECK (extraction_method IS NULL OR extraction_method IN ('DIRECT_TEXT', 'OCR')),
@@ -299,7 +302,7 @@ CREATE TABLE content_units (
         structure_relative_path IS NULL OR (
             length(trim(structure_relative_path)) > 0
             AND substr(structure_relative_path, 1, 1) NOT IN ('/', '\')
-            AND structure_relative_path NOT GLOB '[A-Za-z]:*'
+            AND structure_relative_path !~ '^[A-Za-z]:'
             AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%/../%'
             AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%/./%'
             AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%//%'
@@ -308,11 +311,11 @@ CREATE TABLE content_units (
     structure_sha256         TEXT    CHECK (structure_sha256 IS NULL OR length(structure_sha256) = 64),
     -- The page's reading before the collection's corrections rewrote it, present only when they changed it;
     -- the two texts are present together or absent together.
-    reading_extracted_text   TEXT, -- schema 3
-    reading_search_text      TEXT    CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL)), -- schema 3
+    reading_extracted_text   TEXT,
+    reading_search_text      TEXT    CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL)),
     -- The reading's own structure and layout references (JSON), which describe the reading rather than the
     -- corrected text; read only through the artifact stores, which confine every path to the artifact root.
-    reading_references       TEXT    CHECK (reading_references IS NULL OR reading_extracted_text IS NOT NULL), -- schema 3
+    reading_references       TEXT    CHECK (reading_references IS NULL OR reading_extracted_text IS NOT NULL),
     UNIQUE (document_id, ordinal),
     -- An artifact reference is complete or absent: a path without a checksum could not be verified,
     -- and a checksum without a path names nothing to check.
@@ -326,16 +329,16 @@ CREATE TABLE content_units (
 CREATE TABLE chunks (
     id TEXT NOT NULL PRIMARY KEY,
     content_unit_id TEXT NOT NULL REFERENCES content_units (id) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    ordinal BIGINT NOT NULL CHECK (ordinal >= 0),
     text TEXT NOT NULL CHECK (length(text) > 0),
-    start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
-    end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
+    start_offset BIGINT NOT NULL CHECK (start_offset >= 0),
+    end_offset BIGINT NOT NULL CHECK (end_offset > start_offset),
     -- The bounds match the domain's own requires rather than tightening them: `Chunk` already
     -- refuses a passage with no room for a token, so a zero-length payload fails there with a
     -- message about the passage instead of here with a driver-level constraint error.
-    token_count INTEGER NOT NULL CHECK (token_count >= 0),
-    token_start INTEGER NOT NULL CHECK (token_start >= 0),
-    token_end INTEGER NOT NULL CHECK (token_end >= token_start),
+    token_count BIGINT NOT NULL CHECK (token_count >= 0),
+    token_start BIGINT NOT NULL CHECK (token_start >= 0),
+    token_end BIGINT NOT NULL CHECK (token_end >= token_start),
     created_at TEXT NOT NULL,
     UNIQUE (content_unit_id, ordinal)
 );
@@ -349,7 +352,7 @@ CREATE TABLE extraction_checkpoints (
     document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
     fingerprint TEXT NOT NULL CHECK (length(fingerprint) > 0),
     unit_key TEXT NOT NULL CHECK (length(unit_key) > 0),
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    ordinal BIGINT NOT NULL CHECK (ordinal >= 0),
     outcome TEXT NOT NULL CHECK (outcome IN ('EXTRACTED', 'FAILED')),
     error_code TEXT,
     artifact_relative_path TEXT,
@@ -367,8 +370,8 @@ CREATE INDEX extraction_checkpoints_document ON extraction_checkpoints (document
 CREATE TABLE document_extractions (
     document_id TEXT NOT NULL PRIMARY KEY REFERENCES documents (id) ON DELETE CASCADE,
     fingerprint TEXT NOT NULL CHECK (length(fingerprint) > 0),
-    total_units INTEGER NOT NULL CHECK (total_units >= 0),
-    failed_units INTEGER NOT NULL CHECK (failed_units >= 0),
+    total_units BIGINT NOT NULL CHECK (total_units >= 0),
+    failed_units BIGINT NOT NULL CHECK (failed_units >= 0),
     metadata TEXT NOT NULL,
     completed_at TEXT NOT NULL
 );
@@ -384,7 +387,7 @@ CREATE TABLE document_extraction_progress (
     document_id TEXT NOT NULL PRIMARY KEY REFERENCES documents (id) ON DELETE CASCADE,
     fingerprint TEXT NOT NULL CHECK (length(fingerprint) > 0),
     unit_kind TEXT CHECK (unit_kind IS NULL OR unit_kind IN ('PAGE', 'SECTION', 'SLIDE', 'SHEET', 'LINE', 'IMAGE')),
-    total_units INTEGER CHECK (total_units IS NULL OR total_units >= 0),
+    total_units BIGINT CHECK (total_units IS NULL OR total_units >= 0),
     started_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     -- A total belongs to something: a count with no unit kind to count is a number nobody can read.
@@ -397,12 +400,12 @@ CREATE TABLE document_chunking (
     document_id TEXT NOT NULL PRIMARY KEY REFERENCES documents (id) ON DELETE CASCADE,
     chunker_version TEXT NOT NULL CHECK (length(chunker_version) > 0),
     tokenizer_id TEXT NOT NULL CHECK (length(tokenizer_id) > 0),
-    max_sequence_tokens INTEGER NOT NULL CHECK (max_sequence_tokens > 0),
-    overlap_tokens INTEGER NOT NULL CHECK (overlap_tokens >= 0),
-    chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
+    max_sequence_tokens BIGINT NOT NULL CHECK (max_sequence_tokens > 0),
+    overlap_tokens BIGINT NOT NULL CHECK (overlap_tokens >= 0),
+    chunk_count BIGINT NOT NULL CHECK (chunk_count >= 0),
     -- How many units the pass that wrote this row walked. A pass that stopped halfway has chunks for
     -- a prefix of the document, and without this count the prefix would pass for the whole.
-    unit_count INTEGER NOT NULL CHECK (unit_count >= 0),
+    unit_count BIGINT NOT NULL CHECK (unit_count >= 0),
     chunked_at TEXT NOT NULL
 );
 
@@ -416,20 +419,20 @@ CREATE TABLE document_chunking (
 
 CREATE TABLE llm_profiles (
     id                               TEXT    NOT NULL PRIMARY KEY,
-    name                             TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    name                             TEXT    NOT NULL UNIQUE COLLATE infoscry_nocase,
     provider                         TEXT    NOT NULL CHECK (provider IN ('OPENAI_COMPATIBLE', 'ANTHROPIC')),
     endpoint                         TEXT,
     model                            TEXT    NOT NULL,
     api_key_environment_variable     TEXT,
-    context_window                   INTEGER NOT NULL CHECK (context_window > 0),
-    max_output_tokens                INTEGER NOT NULL CHECK (max_output_tokens > 0),
-    supports_tool_calling            INTEGER NOT NULL CHECK (supports_tool_calling IN (0, 1)),
-    input_price_per_million          REAL    NOT NULL CHECK (input_price_per_million >= 0),
-    output_price_per_million         REAL    NOT NULL CHECK (output_price_per_million >= 0),
-    cache_read_price_per_million     REAL    NOT NULL CHECK (cache_read_price_per_million >= 0),
-    enabled                          INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    context_window                   BIGINT NOT NULL CHECK (context_window > 0),
+    max_output_tokens                BIGINT NOT NULL CHECK (max_output_tokens > 0),
+    supports_tool_calling            BIGINT NOT NULL CHECK (supports_tool_calling IN (0, 1)),
+    input_price_per_million          DOUBLE PRECISION    NOT NULL CHECK (input_price_per_million >= 0),
+    output_price_per_million         DOUBLE PRECISION    NOT NULL CHECK (output_price_per_million >= 0),
+    cache_read_price_per_million     DOUBLE PRECISION    NOT NULL CHECK (cache_read_price_per_million >= 0),
+    enabled                          BIGINT NOT NULL CHECK (enabled IN (0, 1)),
     -- The measured result of the last capability test.
-    tool_calling_measured            INTEGER,
+    tool_calling_measured            BIGINT,
     capability_checked_at            TEXT,
     effort_overrides_json             TEXT,
     created_at                       TEXT    NOT NULL,
@@ -456,7 +459,7 @@ CREATE TABLE conversations (
     profile_endpoint            TEXT,
     profile_model               TEXT    NOT NULL,
     profile_name                TEXT    NOT NULL,
-    prompt_version              INTEGER NOT NULL,
+    prompt_version              BIGINT NOT NULL,
     prompt_id                   TEXT,
     prompt_name                 TEXT    NOT NULL,
     prompt_body                 TEXT    NOT NULL,
@@ -473,13 +476,13 @@ CREATE TABLE conversations (
 CREATE TABLE messages (
     id                TEXT    NOT NULL PRIMARY KEY,
     conversation_id   TEXT    NOT NULL,
-    seq               INTEGER NOT NULL,
+    seq               BIGINT NOT NULL,
     role              TEXT    NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'system')),
     content           TEXT    NOT NULL,
     created_at        TEXT    NOT NULL,
     tool_calls_json   TEXT,
     tool_call_id      TEXT,
-    superseded        INTEGER NOT NULL DEFAULT 0 CHECK (superseded IN (0, 1)),
+    superseded        BIGINT NOT NULL DEFAULT 0 CHECK (superseded IN (0, 1)),
     FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
 );
 
@@ -490,14 +493,14 @@ CREATE TABLE model_calls (
     endpoint           TEXT,
     model              TEXT    NOT NULL,
     profile_name       TEXT    NOT NULL,
-    prompt_version     INTEGER NOT NULL,
+    prompt_version     BIGINT NOT NULL,
     requested_at       TEXT    NOT NULL,
     response_at        TEXT    NOT NULL,
     status             TEXT    NOT NULL CHECK (status IN ('SUCCEEDED', 'FAILED', 'CANCELLED')),
-    input_tokens       INTEGER,
-    output_tokens      INTEGER,
-    cache_read_tokens  INTEGER,
-    cost_usd           REAL    NOT NULL DEFAULT 0,
+    input_tokens       BIGINT,
+    output_tokens      BIGINT,
+    cache_read_tokens  BIGINT,
+    cost_usd           DOUBLE PRECISION    NOT NULL DEFAULT 0,
     error_code         TEXT,
     correction_of      TEXT,
     FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
@@ -514,11 +517,11 @@ CREATE TABLE citations (
     source_unit_id   TEXT    NOT NULL,
     locator_json     TEXT    NOT NULL,
     snippet          TEXT    NOT NULL,
-    validated        INTEGER NOT NULL CHECK (validated IN (0, 1)),
+    validated        BIGINT NOT NULL CHECK (validated IN (0, 1)),
     evidence_id      TEXT,
     returned_id      TEXT,
-    supplied         INTEGER NOT NULL DEFAULT 1 CHECK (supplied IN (0, 1)),
-    invalid_marker   INTEGER NOT NULL DEFAULT 0 CHECK (invalid_marker IN (0, 1)),
+    supplied         BIGINT NOT NULL DEFAULT 1 CHECK (supplied IN (0, 1)),
+    invalid_marker   BIGINT NOT NULL DEFAULT 0 CHECK (invalid_marker IN (0, 1)),
     revision_id      TEXT,
     FOREIGN KEY (model_call_id) REFERENCES model_calls (id) ON DELETE CASCADE,
     FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
@@ -527,11 +530,11 @@ CREATE TABLE citations (
 -- Accumulated usage per profile, so the cost/usage counters have one home.
 CREATE TABLE usage_totals (
     profile_id          TEXT    NOT NULL PRIMARY KEY,
-    calls               INTEGER NOT NULL DEFAULT 0,
-    input_tokens        INTEGER NOT NULL DEFAULT 0,
-    output_tokens       INTEGER NOT NULL DEFAULT 0,
-    cache_read_tokens   INTEGER NOT NULL DEFAULT 0,
-    cost_usd            REAL    NOT NULL DEFAULT 0,
+    calls               BIGINT NOT NULL DEFAULT 0,
+    input_tokens        BIGINT NOT NULL DEFAULT 0,
+    output_tokens       BIGINT NOT NULL DEFAULT 0,
+    cache_read_tokens   BIGINT NOT NULL DEFAULT 0,
+    cost_usd            DOUBLE PRECISION    NOT NULL DEFAULT 0,
     FOREIGN KEY (profile_id) REFERENCES llm_profiles (id) ON DELETE CASCADE
 );
 
@@ -547,13 +550,15 @@ CREATE INDEX idx_model_calls_conversation ON model_calls (conversation_id);
 -- One tool call the service executed on the model's behalf: which conversation and which assistant
 -- model call requested it, the tool name and arguments, the typed result code, and its duration.
 CREATE TABLE tool_calls (
+    -- Insertion order: rows that share a timestamp are read back in the order they were written.
+    insert_order BIGINT GENERATED ALWAYS AS IDENTITY,
     id                TEXT    NOT NULL PRIMARY KEY,
     conversation_id   TEXT    NOT NULL,
     model_call_id     TEXT    NOT NULL,
     tool_name         TEXT    NOT NULL,
     arguments_json    TEXT    NOT NULL,
     result_code       TEXT    NOT NULL,
-    duration_ms       INTEGER NOT NULL,
+    duration_ms       BIGINT NOT NULL,
     FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE,
     FOREIGN KEY (model_call_id) REFERENCES model_calls (id) ON DELETE CASCADE
 );
@@ -578,7 +583,7 @@ CREATE TABLE evidence_ledger (
     source_unit_id   TEXT NOT NULL,
     locator_json     TEXT NOT NULL,
     excerpt          TEXT NOT NULL,
-    message_seq      INTEGER,
+    message_seq      BIGINT,
     revision_id      TEXT,
     PRIMARY KEY (conversation_id, evidence_id),
     FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
@@ -636,7 +641,7 @@ CREATE INDEX idx_limit_events_conversation ON limit_events (conversation_id);
 CREATE TABLE ocr_profile_revisions (
     revision_id                  TEXT    NOT NULL PRIMARY KEY,
     profile_id                   TEXT    NOT NULL,
-    sequence                     INTEGER NOT NULL CHECK (sequence > 0),
+    sequence                     BIGINT NOT NULL CHECK (sequence > 0),
     provider                     TEXT    NOT NULL CHECK (provider IN ('OPENAI_COMPATIBLE', 'ANTHROPIC')),
     endpoint                     TEXT,
     model                        TEXT    NOT NULL CHECK (length(trim(model)) > 0),
@@ -645,17 +650,17 @@ CREATE TABLE ocr_profile_revisions (
     -- `^[A-Za-z_][A-Za-z0-9_]*$` rule.
     api_key_environment_variable TEXT    CHECK (
         api_key_environment_variable IS NULL OR (
-            api_key_environment_variable GLOB '[A-Za-z_]*'
-            AND NOT api_key_environment_variable GLOB '*[^A-Za-z0-9_]*'
+            api_key_environment_variable ~ '^[A-Za-z_]'
+            AND api_key_environment_variable !~ '[^A-Za-z0-9_]'
         )
     ),
-    context_window               INTEGER NOT NULL CHECK (context_window > 0),
-    max_output_tokens            INTEGER NOT NULL CHECK (max_output_tokens > 0),
-    input_price_per_million      REAL    NOT NULL CHECK (input_price_per_million >= 0),
-    output_price_per_million     REAL    NOT NULL CHECK (output_price_per_million >= 0),
+    context_window               BIGINT NOT NULL CHECK (context_window > 0),
+    max_output_tokens            BIGINT NOT NULL CHECK (max_output_tokens > 0),
+    input_price_per_million      DOUBLE PRECISION    NOT NULL CHECK (input_price_per_million >= 0),
+    output_price_per_million     DOUBLE PRECISION    NOT NULL CHECK (output_price_per_million >= 0),
     -- The measured result of a synthetic-image capability check. A declared switch is never stored
     -- here, so a claim can never masquerade as a measurement.
-    image_capability_measured    INTEGER CHECK (image_capability_measured IN (0, 1)),
+    image_capability_measured    BIGINT CHECK (image_capability_measured IN (0, 1)),
     image_capability_checked_at  TEXT,
     created_at                   TEXT    NOT NULL,
     UNIQUE (profile_id, sequence)
@@ -663,8 +668,8 @@ CREATE TABLE ocr_profile_revisions (
 
 CREATE TABLE ocr_profiles (
     id                  TEXT    NOT NULL PRIMARY KEY,
-    name                TEXT    NOT NULL UNIQUE COLLATE NOCASE CHECK (length(trim(name)) > 0),
-    enabled             INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    name                TEXT    NOT NULL UNIQUE COLLATE infoscry_nocase CHECK (length(trim(name)) > 0),
+    enabled             BIGINT NOT NULL CHECK (enabled IN (0, 1)),
     current_revision_id TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
     updated_at          TEXT    NOT NULL,
@@ -698,6 +703,8 @@ CREATE UNIQUE INDEX ocr_profiles_source_llm ON ocr_profiles (source_llm_profile_
 --     database without either side guessing which the other settled on.
 
 CREATE TABLE document_revisions (
+    -- Insertion order: rows that share a timestamp are read back in the order they were written.
+    insert_order BIGINT GENERATED ALWAYS AS IDENTITY,
     id                 TEXT    NOT NULL PRIMARY KEY,
     document_id        TEXT    NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
     parent_revision_id TEXT    REFERENCES document_revisions (id),
@@ -716,8 +723,8 @@ CREATE TABLE document_revisions (
     reading_snapshot   TEXT
     -- The correction list this revision's text was corrected with, and what each rule changed (JSON). Null for
     -- a revision no correction pass touched. Leading commas keep each version 3 line removable on its own.
-    , corrections_fingerprint TEXT -- schema 3
-    , corrections_applied     TEXT -- schema 3
+    , corrections_fingerprint TEXT
+    , corrections_applied     TEXT
 );
 
 -- At most one resumable candidate per document and attempt: two racing resumes adopt the same row.
@@ -759,14 +766,14 @@ CREATE INDEX document_revisions_document ON document_revisions (document_id, cre
 CREATE TABLE page_text_revisions (
     producer_revision_id        TEXT REFERENCES document_revisions (id),
     revision_id                 TEXT    NOT NULL REFERENCES document_revisions (id) ON DELETE CASCADE,
-    ordinal                     INTEGER NOT NULL CHECK (ordinal >= 0),
+    ordinal                     BIGINT NOT NULL CHECK (ordinal >= 0),
     unit_id                     TEXT    NOT NULL CHECK (length(unit_id) > 0),
     locator                     TEXT    NOT NULL CHECK (length(locator) > 0),
     extracted_text              TEXT    NOT NULL,
     search_text                 TEXT    NOT NULL,
     text_sha256                 TEXT    CHECK (text_sha256 IS NULL OR length(text_sha256) = 64),
     extraction_method           TEXT    CHECK (extraction_method IS NULL OR extraction_method IN ('DIRECT_TEXT', 'OCR')),
-    mean_confidence             REAL,
+    mean_confidence             DOUBLE PRECISION,
     artifact_relative_path      TEXT,
     artifact_sha256             TEXT,
     approval                    TEXT    NOT NULL CHECK (approval IN ('APPROVED', 'PENDING', 'REJECTED')),
@@ -776,16 +783,16 @@ CREATE TABLE page_text_revisions (
         source_image_relative_path IS NULL OR (
             length(trim(source_image_relative_path)) > 0
             AND substr(source_image_relative_path, 1, 1) NOT IN ('/', '\')
-            AND source_image_relative_path NOT GLOB '[A-Za-z]:*'
+            AND source_image_relative_path !~ '^[A-Za-z]:'
             AND ('/' || replace(source_image_relative_path, '\', '/') || '/') NOT LIKE '%/../%'
             AND ('/' || replace(source_image_relative_path, '\', '/') || '/') NOT LIKE '%/./%'
             AND ('/' || replace(source_image_relative_path, '\', '/') || '/') NOT LIKE '%//%'
         )
     ),
     source_image_sha256         TEXT    CHECK (source_image_sha256 IS NULL OR length(source_image_sha256) = 64),
-    source_image_width          INTEGER CHECK (source_image_width IS NULL OR source_image_width > 0),
-    source_image_height         INTEGER CHECK (source_image_height IS NULL OR source_image_height > 0),
-    source_image_render_version INTEGER CHECK (source_image_render_version IS NULL OR source_image_render_version > 0),
+    source_image_width          BIGINT CHECK (source_image_width IS NULL OR source_image_width > 0),
+    source_image_height         BIGINT CHECK (source_image_height IS NULL OR source_image_height > 0),
+    source_image_render_version BIGINT CHECK (source_image_render_version IS NULL OR source_image_render_version > 0),
     -- The extractor key this page was read for, so a resumed attempt skips a page it already staged.
     -- Null for pages that no resumable attempt staged.
     unit_key                    TEXT,
@@ -801,7 +808,7 @@ CREATE TABLE page_text_revisions (
         layout_relative_path IS NULL OR (
             length(trim(layout_relative_path)) > 0
             AND substr(layout_relative_path, 1, 1) NOT IN ('/', '\')
-            AND layout_relative_path NOT GLOB '[A-Za-z]:*'
+            AND layout_relative_path !~ '^[A-Za-z]:'
             AND ('/' || replace(layout_relative_path, '\', '/') || '/') NOT LIKE '%/../%'
             AND ('/' || replace(layout_relative_path, '\', '/') || '/') NOT LIKE '%/./%'
             AND ('/' || replace(layout_relative_path, '\', '/') || '/') NOT LIKE '%//%'
@@ -815,7 +822,7 @@ CREATE TABLE page_text_revisions (
         structure_relative_path IS NULL OR (
             length(trim(structure_relative_path)) > 0
             AND substr(structure_relative_path, 1, 1) NOT IN ('/', '\')
-            AND structure_relative_path NOT GLOB '[A-Za-z]:*'
+            AND structure_relative_path !~ '^[A-Za-z]:'
             AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%/../%'
             AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%/./%'
             AND ('/' || replace(structure_relative_path, '\', '/') || '/') NOT LIKE '%//%'
@@ -823,11 +830,11 @@ CREATE TABLE page_text_revisions (
     ),
     structure_sha256         TEXT    CHECK (structure_sha256 IS NULL OR length(structure_sha256) = 64),
     -- The page's reading before corrections, as on `content_units`.
-    reading_extracted_text   TEXT, -- schema 3
-    reading_search_text      TEXT    CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL)), -- schema 3
+    reading_extracted_text   TEXT,
+    reading_search_text      TEXT    CHECK ((reading_extracted_text IS NULL) = (reading_search_text IS NULL)),
     -- The reading's own structure and layout references (JSON), which describe the reading rather than the
     -- corrected text; read only through the artifact stores, which confine every path to the artifact root.
-    reading_references       TEXT    CHECK (reading_references IS NULL OR reading_extracted_text IS NOT NULL), -- schema 3
+    reading_references       TEXT    CHECK (reading_references IS NULL OR reading_extracted_text IS NOT NULL),
     PRIMARY KEY (revision_id, ordinal),
     CHECK ((artifact_relative_path IS NULL) = (artifact_sha256 IS NULL)),
     CHECK ((layout_relative_path IS NULL) = (layout_sha256 IS NULL)),
@@ -861,16 +868,16 @@ CREATE INDEX page_text_revisions_unit ON page_text_revisions (unit_id);
 -- silently produce different vectors. `embedding` is nullable for a chunk that has no vector.
 CREATE TABLE revision_chunks (
     revision_id         TEXT    NOT NULL REFERENCES document_revisions (id) ON DELETE CASCADE,
-    unit_ordinal        INTEGER NOT NULL CHECK (unit_ordinal >= 0),
-    ordinal             INTEGER NOT NULL CHECK (ordinal >= 0),
+    unit_ordinal        BIGINT NOT NULL CHECK (unit_ordinal >= 0),
+    ordinal             BIGINT NOT NULL CHECK (ordinal >= 0),
     text                TEXT    NOT NULL CHECK (length(text) > 0),
-    start_offset        INTEGER NOT NULL CHECK (start_offset >= 0),
-    end_offset          INTEGER NOT NULL CHECK (end_offset > start_offset),
-    token_count         INTEGER NOT NULL CHECK (token_count >= 0),
-    token_start         INTEGER NOT NULL CHECK (token_start >= 0),
-    token_end           INTEGER NOT NULL CHECK (token_end >= token_start),
-    embedding           BLOB,
-    embedding_dimension INTEGER CHECK (embedding_dimension IS NULL OR embedding_dimension > 0),
+    start_offset        BIGINT NOT NULL CHECK (start_offset >= 0),
+    end_offset          BIGINT NOT NULL CHECK (end_offset > start_offset),
+    token_count         BIGINT NOT NULL CHECK (token_count >= 0),
+    token_start         BIGINT NOT NULL CHECK (token_start >= 0),
+    token_end           BIGINT NOT NULL CHECK (token_end >= token_start),
+    embedding           BYTEA,
+    embedding_dimension BIGINT CHECK (embedding_dimension IS NULL OR embedding_dimension > 0),
     created_at          TEXT    NOT NULL,
     PRIMARY KEY (revision_id, unit_ordinal, ordinal),
     CHECK ((embedding IS NULL) = (embedding_dimension IS NULL))
@@ -886,7 +893,7 @@ CREATE TABLE document_active_revisions (
 
 -- One recoverable publication attempt. `phase` says what the attempt promised; `authoritative_at` is
 -- the marker recovery reads to decide which side of the handoff it died on, and it is written by the
--- same SQLite transaction that makes the target revision authoritative. A row with an
+-- same transaction that makes the target revision authoritative. A row with an
 -- `authoritative_at` and no `published_at` is therefore never a failure: it is a publication that has
 -- to be finished.
 CREATE TABLE revision_publications (
@@ -929,6 +936,8 @@ CREATE INDEX revision_publications_unfinished
 -- A restore belongs to its document: deleting the document or its collection removes the row with the
 -- revisions it names.
 CREATE TABLE revision_restores (
+    -- Insertion order: rows that share a timestamp are read back in the order they were written.
+    insert_order BIGINT GENERATED ALWAYS AS IDENTITY,
     restore_id                TEXT    NOT NULL PRIMARY KEY,
     collection_id             TEXT    NOT NULL,
     document_id               TEXT    NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
@@ -983,13 +992,13 @@ CREATE TABLE selectable_pdf_artifacts (
     manifest_sha256         TEXT    CHECK (manifest_sha256 IS NULL OR length(manifest_sha256) = 64),
     pdf_relative_path       TEXT,
     pdf_sha256              TEXT    CHECK (pdf_sha256 IS NULL OR length(pdf_sha256) = 64),
-    pdf_bytes               INTEGER CHECK (pdf_bytes IS NULL OR pdf_bytes > 0),
-    total_pages             INTEGER CHECK (total_pages IS NULL OR total_pages >= 0),
-    selectable_pages        INTEGER NOT NULL DEFAULT 0 CHECK (selectable_pages >= 0),
-    blank_pages             INTEGER NOT NULL DEFAULT 0 CHECK (blank_pages >= 0),
+    pdf_bytes               BIGINT CHECK (pdf_bytes IS NULL OR pdf_bytes > 0),
+    total_pages             BIGINT CHECK (total_pages IS NULL OR total_pages >= 0),
+    selectable_pages        BIGINT NOT NULL DEFAULT 0 CHECK (selectable_pages >= 0),
+    blank_pages             BIGINT NOT NULL DEFAULT 0 CHECK (blank_pages >= 0),
     unavailable_pages       TEXT,
     reason_code             TEXT,
-    attempt              INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+    attempt              BIGINT NOT NULL DEFAULT 0 CHECK (attempt >= 0),
     created_at           TEXT    NOT NULL,
     updated_at           TEXT    NOT NULL,
     PRIMARY KEY (document_id, revision_id),
@@ -1026,11 +1035,13 @@ CREATE INDEX selectable_pdf_artifacts_pending ON selectable_pdf_artifacts (state
 -- answered. `confidence` is the reviewer's own number, never an input to a decision. `searchable` is
 -- written down rather than derived, because it is the answer a retrieval path asks.
 CREATE TABLE page_reviews (
+    -- Insertion order: rows that share a timestamp are read back in the order they were written.
+    insert_order BIGINT GENERATED ALWAYS AS IDENTITY,
     review_fingerprint     TEXT    NOT NULL CHECK (length(review_fingerprint) = 64),
     image_sha256           TEXT    NOT NULL CHECK (length(image_sha256) = 64),
     document_id            TEXT    NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
     unit_id                TEXT    NOT NULL CHECK (length(trim(unit_id)) > 0),
-    ordinal                INTEGER NOT NULL CHECK (ordinal >= 0),
+    ordinal                BIGINT NOT NULL CHECK (ordinal >= 0),
     baseline_revision_id   TEXT,
     baseline_text_hash     TEXT    CHECK (baseline_text_hash IS NULL OR length(baseline_text_hash) = 64),
     candidate_hash         TEXT    NOT NULL CHECK (length(candidate_hash) = 64),
@@ -1038,13 +1049,13 @@ CREATE TABLE page_reviews (
         recommendation IN ('EXISTING_BETTER', 'NEW_BETTER', 'UNCERTAIN')
     ),
     disposition            TEXT    NOT NULL CHECK (disposition IN ('KEEP', 'PROPOSE', 'APPROVE')),
-    confidence             REAL    CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+    confidence             DOUBLE PRECISION    CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
     reviewer_revision_id   TEXT    NOT NULL CHECK (length(trim(reviewer_revision_id)) > 0),
     reviewer_model_version TEXT,
-    review_prompt_version  INTEGER NOT NULL CHECK (review_prompt_version > 0),
-    policy_version         INTEGER NOT NULL CHECK (policy_version > 0),
+    review_prompt_version  BIGINT NOT NULL CHECK (review_prompt_version > 0),
+    policy_version         BIGINT NOT NULL CHECK (policy_version > 0),
     outcome_code           TEXT    CHECK (outcome_code IS NULL OR length(trim(outcome_code)) > 0),
-    searchable             INTEGER NOT NULL CHECK (searchable IN (0, 1)),
+    searchable             BIGINT NOT NULL CHECK (searchable IN (0, 1)),
     -- The bounded reasons, as JSON: a code, its origin, the spans it is about and, for a reviewer's own
     -- reason, its bounded explanation.
     reasons                TEXT    NOT NULL,
@@ -1072,9 +1083,9 @@ CREATE INDEX page_reviews_page ON page_reviews (document_id, unit_id, ordinal);
 -- approves nothing. There is deliberately no document, collection, unit or page column: acceptance is
 -- about the combination, never about one page's text.
 CREATE TABLE ocr_validation_records (
-    policy_version            INTEGER NOT NULL CHECK (policy_version > 0),
+    policy_version            BIGINT NOT NULL CHECK (policy_version > 0),
     review_profile_revision_id TEXT   NOT NULL CHECK (length(trim(review_profile_revision_id)) > 0),
-    review_prompt_version     INTEGER NOT NULL CHECK (review_prompt_version > 0),
+    review_prompt_version     BIGINT NOT NULL CHECK (review_prompt_version > 0),
     validation_id             TEXT    NOT NULL CHECK (length(trim(validation_id)) > 0),
     accepted_at               TEXT    NOT NULL,
     PRIMARY KEY (policy_version, review_profile_revision_id, review_prompt_version)
@@ -1098,10 +1109,10 @@ CREATE TABLE ocr_rescan_previews (
     snapshot                  TEXT    NOT NULL,
     selection                 TEXT    NOT NULL,
     snapshot_hash             TEXT    NOT NULL CHECK (length(snapshot_hash) = 64),
-    page_total                INTEGER CHECK (page_total IS NULL OR page_total >= 0),
-    document_pages            INTEGER CHECK (document_pages IS NULL OR document_pages > 0),
-    external_page_upper_bound INTEGER CHECK (external_page_upper_bound IS NULL OR external_page_upper_bound >= 0),
-    approval_required         INTEGER NOT NULL CHECK (approval_required IN (0, 1)),
+    page_total                BIGINT CHECK (page_total IS NULL OR page_total >= 0),
+    document_pages            BIGINT CHECK (document_pages IS NULL OR document_pages > 0),
+    external_page_upper_bound BIGINT CHECK (external_page_upper_bound IS NULL OR external_page_upper_bound >= 0),
+    approval_required         BIGINT NOT NULL CHECK (approval_required IN (0, 1)),
     cost_estimate             TEXT,
     created_at                TEXT    NOT NULL,
     expires_at                TEXT    NOT NULL,
@@ -1123,6 +1134,8 @@ CREATE INDEX ocr_rescan_previews_document ON ocr_rescan_previews (document_id, c
 -- same id with a different body is a conflict, because "admit this again" must never mean two attempts
 -- racing one document.
 CREATE TABLE ocr_operations (
+    -- Insertion order: rows that share a timestamp are read back in the order they were written.
+    insert_order BIGINT GENERATED ALWAYS AS IDENTITY,
     operation_id        TEXT    NOT NULL PRIMARY KEY,
     collection_id       TEXT    NOT NULL,
     document_id         TEXT    NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
@@ -1137,10 +1150,10 @@ CREATE TABLE ocr_operations (
         stage IN ('PREFLIGHT', 'AWAITING_APPROVAL', 'OCR', 'REVIEW', 'CHUNKING', 'EMBEDDING', 'INDEXING',
                   'COMPLETE', 'FAILED', 'CANCELLED', 'NEEDS_TOOL')
     ),
-    page_total          INTEGER CHECK (page_total IS NULL OR page_total > 0),
-    pages_committed     INTEGER NOT NULL DEFAULT 0 CHECK (pages_committed >= 0),
-    pages_failed        INTEGER NOT NULL DEFAULT 0 CHECK (pages_failed >= 0),
-    pending_review_count INTEGER NOT NULL DEFAULT 0 CHECK (pending_review_count >= 0),
+    page_total          BIGINT CHECK (page_total IS NULL OR page_total > 0),
+    pages_committed     BIGINT NOT NULL DEFAULT 0 CHECK (pages_committed >= 0),
+    pages_failed        BIGINT NOT NULL DEFAULT 0 CHECK (pages_failed >= 0),
+    pending_review_count BIGINT NOT NULL DEFAULT 0 CHECK (pending_review_count >= 0),
     error_code          TEXT,
     error_message       TEXT,
     request_id          TEXT    NOT NULL CHECK (length(trim(request_id)) > 0),
@@ -1171,7 +1184,7 @@ CREATE TABLE ocr_external_pages (
     owner_id      TEXT    NOT NULL,
     document_id   TEXT    NOT NULL,
     unit_id       TEXT    NOT NULL CHECK (length(trim(unit_id)) > 0),
-    ordinal       INTEGER NOT NULL CHECK (ordinal >= 0),
+    ordinal       BIGINT NOT NULL CHECK (ordinal >= 0),
     first_sent_at TEXT    NOT NULL,
     PRIMARY KEY (owner_kind, owner_id, document_id, unit_id)
 );
@@ -1185,9 +1198,9 @@ CREATE TABLE ocr_external_calls (
     owner_id    TEXT    NOT NULL,
     document_id TEXT    NOT NULL,
     unit_id     TEXT    NOT NULL CHECK (length(trim(unit_id)) > 0),
-    ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+    ordinal     BIGINT NOT NULL CHECK (ordinal >= 0),
     stage       TEXT    NOT NULL CHECK (stage IN ('TRANSCRIPTION', 'REVIEW')),
-    calls       INTEGER NOT NULL CHECK (calls >= 1),
+    calls       BIGINT NOT NULL CHECK (calls >= 1),
     updated_at  TEXT    NOT NULL,
     PRIMARY KEY (owner_kind, owner_id, document_id, unit_id, stage)
 );
@@ -1202,9 +1215,17 @@ CREATE TABLE ocr_external_approvals (
     owner_kind               TEXT    NOT NULL CHECK (owner_kind IN ('OPERATION', 'JOB')),
     owner_id                 TEXT    NOT NULL,
     snapshot_hash            TEXT    NOT NULL CHECK (length(snapshot_hash) = 64),
-    authorized_distinct_pages INTEGER NOT NULL CHECK (authorized_distinct_pages >= 0),
+    authorized_distinct_pages BIGINT NOT NULL CHECK (authorized_distinct_pages >= 0),
     created_at               TEXT    NOT NULL
 );
 
 CREATE INDEX ocr_external_approvals_owner
     ON ocr_external_approvals (owner_kind, owner_id, created_at);
+
+-- collections names OCR profiles and prompts that are declared after it; Postgres needs a referenced table to
+-- exist, so these references are added once every table is there.
+ALTER TABLE collections
+    ADD FOREIGN KEY (ocr_transcription_profile_id) REFERENCES ocr_profiles (id),
+    ADD FOREIGN KEY (ocr_review_profile_id) REFERENCES ocr_profiles (id),
+    ADD FOREIGN KEY (ask_prompt_id) REFERENCES collection_prompts (id) ON DELETE SET NULL,
+    ADD FOREIGN KEY (investigate_prompt_id) REFERENCES collection_prompts (id) ON DELETE SET NULL;

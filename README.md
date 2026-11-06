@@ -47,7 +47,9 @@ which may be an external service.
 
 ## Project status
 
-Implementation is in progress. The backend, CLI and web reader exist;
+Implementation is in progress. The backend, CLI and web reader exist; state is
+stored in PostgreSQL as the first step of the
+[multi-user server](docs/specs/2026-11-05-multi-user-server-design.md);
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
 The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan (including No OCR, which uses the

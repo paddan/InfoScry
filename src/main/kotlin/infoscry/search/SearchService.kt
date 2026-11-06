@@ -29,7 +29,7 @@ import org.slf4j.LoggerFactory
  * Retrieval over one index: keyword, semantic, or hybrid, restricted before Lucene by the document
  * criteria and validated against the live database after fusion.
  *
- * The ordering principle that matters: criteria are applied by pre-selecting document ids from SQLite
+ * The ordering principle that matters: criteria are applied by pre-selecting document ids from Postgres
  * and narrowing the Lucene query to them, never by filtering results after ranking. Then the fused hits
  * are re-checked against the database, because an index can hold rows whose document or collection the
  * database no longer wants searchable (a deleted document, a tombstoned collection) — those rows are

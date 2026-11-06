@@ -51,7 +51,7 @@ fun interface DocumentIndexRemover {
  *
  * This is the document half of the deletion machine the collection service owns. It is the same shape —
  * park files, delete rows, remove index entries, purge — because the failure modes are the same: the
- * work spans files on disk, rows in SQLite and entries in the search index, and no two of them can be
+ * work spans files on disk, rows in Postgres and entries in the search index, and no two of them can be
  * changed together. What differs is the scope:
  *
  * - **Only the chosen documents are removed.** An import job may hold other files, so nothing here

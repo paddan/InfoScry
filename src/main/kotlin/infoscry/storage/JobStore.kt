@@ -80,7 +80,7 @@ open class JobStore(private val database: Database) {
      * Jobs newest first, one page at a time. [limit] has no default on purpose: a caller that silently
      * saw the first hundred jobs of a long queue would report the queue as shorter than it is.
      *
-     * Ordering ties are broken by insertion order (`rowid`), because two jobs enqueued inside the same
+     * Ordering ties are broken by insertion order (`insert_order`), because two jobs enqueued inside the same
      * millisecond must still page deterministically.
      */
     fun list(limit: Int, offset: Int = 0): List<Job> {
@@ -88,7 +88,7 @@ open class JobStore(private val database: Database) {
         require(offset >= 0) { "offset must not be negative, was $offset" }
         return database.read { connection ->
             connection.prepareStatement(
-                "$SELECT_JOBS ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+                "$SELECT_JOBS ORDER BY created_at DESC, insert_order DESC LIMIT ? OFFSET ?",
             ).use { statement ->
                 statement.setInt(1, limit)
                 statement.setInt(2, offset)
@@ -100,7 +100,7 @@ open class JobStore(private val database: Database) {
     /** Legacy jobs that ended only because an external-page approval was requested. */
     fun legacyAwaitingApprovalJobs(): List<Job> = database.read { connection ->
         connection.prepareStatement(
-            "$SELECT_JOBS WHERE state = ? AND stage = ? ORDER BY created_at, rowid",
+            "$SELECT_JOBS WHERE state = ? AND stage = ? ORDER BY created_at, insert_order",
         ).use { statement ->
             statement.setString(1, JobState.COMPLETE.name)
             statement.setString(2, "awaiting-approval")
@@ -194,7 +194,7 @@ open class JobStore(private val database: Database) {
         require(offset >= 0) { "offset must not be negative, was $offset" }
         return database.read { connection ->
             connection.prepareStatement(
-                "$SELECT_JOBS WHERE state IN (?, ?) ORDER BY created_at ASC, rowid ASC LIMIT ? OFFSET ?",
+                "$SELECT_JOBS WHERE state IN (?, ?) ORDER BY created_at ASC, insert_order ASC LIMIT ? OFFSET ?",
             ).use { statement ->
                 statement.setString(1, JobState.QUEUED.name)
                 statement.setString(2, JobState.RUNNING.name)
@@ -210,7 +210,7 @@ open class JobStore(private val database: Database) {
      *
      * Import history is a collection-scoped read: another collection's import is never selected, so a page
      * can only describe the collection the caller named. Ordering ties are broken by insertion order
-     * (`rowid`) for the same reason [list] does it: two imports enqueued in the same millisecond must still
+     * (`insert_order`) for the same reason [list] does it: two imports enqueued in the same millisecond must still
      * page deterministically. Reindex jobs are not imports and are not part of this history.
      */
     fun listImports(collectionId: CollectionId, limit: Int, offset: Int = 0): List<Job> {
@@ -218,7 +218,7 @@ open class JobStore(private val database: Database) {
         require(offset >= 0) { "offset must not be negative, was $offset" }
         return database.read { connection ->
             connection.prepareStatement(
-                "$SELECT_JOBS WHERE collection_id = ? AND type = ? ORDER BY created_at DESC, rowid DESC " +
+                "$SELECT_JOBS WHERE collection_id = ? AND type = ? ORDER BY created_at DESC, insert_order DESC " +
                     "LIMIT ? OFFSET ?",
             ).use { statement ->
                 statement.setString(1, collectionId.value)
@@ -233,7 +233,7 @@ open class JobStore(private val database: Database) {
     /** The queued or running job of [type] for [collectionId], or `null`. */
     fun activeJob(type: JobType, collectionId: CollectionId): Job? = database.read { connection ->
         connection.prepareStatement(
-            "$SELECT_JOBS WHERE collection_id = ? AND type = ? AND state IN (?, ?) ORDER BY created_at ASC, rowid ASC LIMIT 1",
+            "$SELECT_JOBS WHERE collection_id = ? AND type = ? AND state IN (?, ?) ORDER BY created_at ASC, insert_order ASC LIMIT 1",
         ).use { statement ->
             statement.setString(1, collectionId.value)
             statement.setString(2, type.name)
@@ -246,7 +246,7 @@ open class JobStore(private val database: Database) {
     /** The most recent job of [type] for [collectionId] in any state, or `null`. */
     fun latestJob(type: JobType, collectionId: CollectionId): Job? = database.read { connection ->
         connection.prepareStatement(
-            "$SELECT_JOBS WHERE collection_id = ? AND type = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            "$SELECT_JOBS WHERE collection_id = ? AND type = ? ORDER BY created_at DESC, insert_order DESC LIMIT 1",
         ).use { statement ->
             statement.setString(1, collectionId.value)
             statement.setString(2, type.name)
@@ -288,7 +288,7 @@ open class JobStore(private val database: Database) {
         if (types != null && types.isEmpty()) return@transaction null
         val typeFilter = types?.joinToString(prefix = " AND type IN (", postfix = ")") { "?" } ?: ""
         val next = connection.prepareStatement(
-            "$SELECT_JOBS WHERE state = ?$typeFilter ORDER BY created_at, rowid LIMIT 1",
+            "$SELECT_JOBS WHERE state = ?$typeFilter ORDER BY created_at, insert_order LIMIT 1",
         ).use { statement ->
             statement.setString(1, JobState.QUEUED.name)
             types?.forEachIndexed { index, type -> statement.setString(index + 2, type.name) }

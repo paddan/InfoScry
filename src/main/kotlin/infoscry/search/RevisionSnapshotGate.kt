@@ -86,8 +86,8 @@ class RevisionSnapshotGate {
     /**
      * Refuses a read that would serve the live reading without taking a lease, while the seal is raised.
      *
-     * The source route reads SQLite rather than the index, so a lease protects nothing there — but the
-     * same refusal is owed: while an authoritative publication has not switched its snapshot, SQLite
+     * The source route reads Postgres rather than the index, so a lease protects nothing there — but the
+     * same refusal is owed: while an authoritative publication has not switched its snapshot, Postgres
      * already serves the target's text and the index still holds the text it replaced, so a served live
      * read is the exact mixture [acquire] refuses on the search side. A request that names a revision is
      * not checked here: its text is the immutable text of the revision the caller named, which is
