@@ -40,6 +40,10 @@ export JAVA_HOME="$(asdf where java)"
 build/install/infoscry/bin/infoscry serve
 ```
 
+`./server.sh start --build` rebuilds and starts the database and server in the
+background, and `./server.sh stop` stops both; see
+[installation](installation.md#start-and-stop-everything-with-one-command).
+
 `installDist` installs frontend dependencies with `npm ci`, builds static assets
 and packages them with the backend. Rebuild after changing the backend or UI;
 a running server must be restarted to use the rebuilt application.

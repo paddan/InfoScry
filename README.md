@@ -34,6 +34,8 @@ PostgreSQL in Docker. Start with the
 Commands for installing Java, Node.js, Tesseract and Calibre are under
 [local dependencies](docs/installation.md#install-local-dependencies).
 [asdf setup](docs/asdf.md) covers project-specific Java and Node.js versions.
+Once installed, `./server.sh start` starts the database and the server and
+`./server.sh stop` stops both.
 
 Documents and archive data stay on the server. Ask and Investigate send
 questions and selected source passages to the LLM endpoint you configure,

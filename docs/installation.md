@@ -277,6 +277,27 @@ one-time password, then choose your own password (at least 12 characters).
 Press Ctrl-C to stop the server. `serve --json` prints connection information
 without opening a browser. Add other people under **Admin → Users**.
 
+### Start and stop everything with one command
+
+`server.sh` in the repository root does the steps above in the background: it
+loads `.env` (creating it from `.env.example` on first use), starts Postgres
+with Docker or Podman and waits until it is ready, builds the app if no build
+exists, and starts `infoscry serve`. Its output goes to `.run/server.log`.
+
+```bash
+./server.sh start
+```
+
+```bash
+./server.sh stop
+```
+
+`stop` stops the server and then the database; the data is kept in the
+Compose volume. `status`, `restart`, `logs` and `admin <command>` (for example
+`./server.sh admin create-user --admin anna`, with the database settings from
+`.env`) are also available. `start --build` rebuilds first, and options after
+`start`, such as `--port 9000` or `--data-dir <path>`, go to `infoscry serve`.
+
 ## Import a first document
 
 Create a collection and import files from **Admin → Collections**; see the
