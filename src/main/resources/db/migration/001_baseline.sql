@@ -1,5 +1,5 @@
--- The InfoScry baseline schema for PostgreSQL. There is exactly one version and no upgrade path: when the
--- schema changes, this file is edited in place (see SchemaMigrator).
+-- The InfoScry baseline schema for PostgreSQL: version 1. Later changes are numbered scripts beside this
+-- one that change a database at the version before them (see SchemaMigrator).
 --
 -- Naming: every identifier and column is English and lower_snake_case. Instants are ISO-8601 UTC
 -- strings written by the persistence boundary. Flags are 0/1 integers. Enum columns carry a CHECK that

@@ -202,7 +202,7 @@ machine: each file is uploaded to the server (a folder's files, its whole tree
 with `--recursive`; hidden files are left out), and a file whose bytes are
 already a document of the collection is reported as a duplicate without being
 sent. With `--server-path` the paths are instead on the server, inside one of
-its import roots (`INFOSCRY_IMPORT_ROOTS`); a directory is read at its top level
+its import roots (**Admin → Server folders**); a directory is read at its top level
 unless `--recursive` is given. With `--wait`, the command blocks until the
 import finishes and reports every document (and exits nonzero if any failed).
 

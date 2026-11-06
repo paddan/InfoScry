@@ -1,7 +1,8 @@
 /**
  * The real-browser acceptance boundary for several people on one server: an administrator adds a user and
  * makes them an editor of a collection, the user signs in with the one-time password and chooses their own,
- * edits the collection's glossary, and the administrator sees the edit attributed to them.
+ * edits the collection's glossary, and the administrator sees the edit attributed to them. The administrator
+ * also adds a server folder under Admin, and the editor finds its files when importing.
  */
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
@@ -9,6 +10,9 @@ import { signedInContext } from './session.mjs';
 
 const base = process.env.BASE_URL;
 assert(base, 'BASE_URL is required');
+const serverFolder = process.env.INFOSCRY_SERVER_FOLDER;
+assert(serverFolder, 'INFOSCRY_SERVER_FOLDER is required');
+const serverFolderName = serverFolder.split('/').pop();
 const browser = await chromium.launch({ headless: true, executablePath: process.env.INFOSCRY_CHROMIUM || undefined });
 
 /** Opens the Default collection's settings and returns the settings section. */
@@ -51,6 +55,14 @@ try {
   assert.equal(await members.getByLabel('Role of Erik').inputValue(), 'EDITOR');
   console.log('PASS member-added');
 
+  // ... and opens a folder on the server for import.
+  await admin.click('#admin-tab-folders');
+  const addFolder = admin.getByRole('form', { name: 'Add a server folder' });
+  await addFolder.getByLabel('Folder path on the server').fill(serverFolder);
+  await addFolder.getByRole('button', { name: 'Add folder' }).click();
+  await admin.getByText(`${serverFolder} was added.`).waitFor({ timeout: 20_000 });
+  console.log('PASS server-folder-added');
+
   // Erik signs in in a browser of his own and has to choose a password first.
   const erikContext = await browser.newContext();
   const erik = await erikContext.newPage();
@@ -75,6 +87,18 @@ try {
 
   // Erik adds a glossary group to the collection he edits.
   const erikSettings = await openSettings(erik);
+
+  // Importing, he finds the files of the folder the administrator opened.
+  await erik.getByRole('button', { name: 'Add documents' }).click();
+  await erik.getByRole('button', { name: 'Server folders…' }).click();
+  const folders = erik.getByRole('region', { name: 'Server import folders' });
+  // With more than one folder the browser asks which; with one it opens it directly.
+  const folderButton = folders.getByRole('button', { name: serverFolderName, exact: true });
+  await folderButton.or(folders.getByRole('button', { name: 'Add this folder' })).first().waitFor({ timeout: 20_000 });
+  if (await folderButton.count()) await folderButton.click();
+  await folders.getByRole('button', { name: 'Add brev.txt' }).waitFor({ timeout: 20_000 });
+  console.log('PASS editor-sees-server-folder');
+
   const glossary = erikSettings.getByRole('region', { name: 'Glossary' });
   await glossary.getByRole('button', { name: 'Add group' }).waitFor({ timeout: 20_000 });
   await glossary.getByRole('button', { name: 'Add group' }).click();

@@ -52,11 +52,14 @@ nests through savepoints, and transactions still run one at a time in the proces
 Unique and foreign-key violations are recognized by SQLSTATE. Case-insensitive
 names use the ICU collation `infoscry_nocase`.
 
-The schema is one baseline,
-[001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql), applied
-to an empty database by [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
-in one transaction and recorded in `schema_version` as version 1. The baseline
-always describes the current schema and has no upgrade path. Values keep their
+The schema starts with the baseline
+[001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql)
+(version 1). Each later change is a numbered script beside it that changes a
+database at the version before it and keeps its rows, such as `002_import_roots.sql`
+(version 2). [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
+applies every script above the database's version in one transaction, recording
+each version in `schema_version`, so a crash leaves the version it started from
+and starting again resumes. Values keep their
 earlier representations: instants are ISO-8601 text, flags 0/1 integers.
 A database whose version is newer than the build is refused rather than written
 to. SQLite archives from earlier builds are not read or migrated; collections are
@@ -453,12 +456,21 @@ of a published reading decides; a later one answers with the recorded decision
 and starts no restore.
 
 Imports read from two places ([ImportRoots](../src/main/kotlin/infoscry/jobs/ImportRoots.kt)):
-the directories in `INFOSCRY_IMPORT_ROOTS` and the collection's upload area
+the import roots and the collection's upload area
 `<data>/uploads/<collection>/<upload>/<file>`. The import preview, which the
 start also runs, refuses any path whose real path (links resolved) is outside
 them with 403 `IMPORT_PATH_NOT_ALLOWED`, for administrators too. Editors browse
 the roots through `GET /api/import-roots/browse`, where links out of a root are
-not listed. An upload is one file per request as the raw body
+not listed. An administrator adds and removes roots under **Admin → Server
+folders** (`POST /api/import-roots` with the folder's absolute path,
+`DELETE /api/import-roots/{rootId}`); they are rows of `import_roots`, stored by
+real path and attributed to who added them, and each decision reads them, so a
+change counts at once. Adding a folder that is already a root, also through a
+link, answers with that root; a relative path, a missing folder, `/` and the
+data directory are refused. A root whose folder has gone is listed as
+unavailable and cannot be browsed. Directories in `INFOSCRY_IMPORT_ROOTS` are
+roots too, listed as set by the environment and removed there (409
+`IMPORT_ROOT_FROM_ENVIRONMENT`). An upload is one file per request as the raw body
 (`POST /api/collections/{id}/uploads`, file name in `X-InfoScry-Filename`),
 streamed and hashed; bytes that are already a document of the collection answer
 with that document and are not kept. Preview and start take upload ids in

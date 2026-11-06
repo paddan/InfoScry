@@ -142,7 +142,8 @@ Users no longer import from paths on their own machine. Two sources:
 - **Upload.** The browser uploads files (multipart, one request per file, streamed to a temporary blob and
   hashed). A repeated upload of the same bytes to the same collection answers with the existing document.
   The import start dialog follows the upload, as today.
-- **Import roots.** An administrator lists host directories in `INFOSCRY_IMPORT_ROOTS`. Users with
+- **Import roots.** An administrator adds host directories under Admin → Server folders (amended
+  2026-11-06; `INFOSCRY_IMPORT_ROOTS` still adds roots that are changed only there). Users with
   `EDITOR` on a collection may browse those roots and pick files or folders; a path outside a root,
   including through a symbolic link, is refused. Originals are never modified, as today.
 

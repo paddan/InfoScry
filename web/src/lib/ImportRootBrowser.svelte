@@ -14,7 +14,7 @@
 
   onMount(async () => {
     try {
-      roots = await listImportRoots();
+      roots = (await listImportRoots()).filter((candidate) => candidate.available);
       if (roots.length === 1) await open(roots[0], '');
     } catch (failure) {
       error = failure instanceof Error ? failure.message : 'The import folders could not be read.';
@@ -25,7 +25,7 @@
     loading = true;
     error = null;
     try {
-      const listing = await browseImportRoot(target.index, relative);
+      const listing = await browseImportRoot(target.id, relative);
       root = target;
       path = listing.path;
       entries = listing.entries;
@@ -49,12 +49,12 @@
 <section class="root-browser" aria-label="Server import folders">
   {#if error !== null}<p role="alert">{error}</p>{/if}
   {#if roots !== null && roots.length === 0}
-    <p class="hint">No import folders are set up on the server. An administrator lists them in INFOSCRY_IMPORT_ROOTS.</p>
+    <p class="hint">No import folders are set up on the server. An administrator adds them under Admin → Server folders.</p>
   {:else if roots !== null}
     {#if roots.length > 1}
       <div class="roots">
-        {#each roots as candidate (candidate.index)}
-          <button type="button" aria-pressed={root?.index === candidate.index} onclick={() => open(candidate, '')}>{candidate.name}</button>
+        {#each roots as candidate (candidate.id)}
+          <button type="button" aria-pressed={root?.id === candidate.id} onclick={() => open(candidate, '')}>{candidate.name}</button>
         {/each}
       </div>
     {/if}
