@@ -18,7 +18,7 @@ class GlossaryQueryRewriterTest {
     private val collection = CollectionId("c")
     private val rewriter = GlossaryQueryRewriter()
 
-    private fun parse(text: String): Query = QueryParser(LuceneSchema.FIELD_TEXT, LuceneIndex.newAnalyzer()).parse(text)
+    private fun parse(text: String): Query = QueryParser(PgSearchQuery.TEXT_FIELD, SearchIndex.newAnalyzer()).parse(text)
 
     private fun t(text: String, prefix: Boolean = false) = GlossaryTermInput(text, prefix)
 

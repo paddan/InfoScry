@@ -27,7 +27,7 @@ import infoscry.ocr.CandidateRevisionPhases
 import infoscry.ocr.ExternalPageAllowanceExceededException
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.search.DocumentRow
-import infoscry.search.LuceneIndex
+import infoscry.search.SearchIndex
 import infoscry.storage.CollectionNotActiveException
 import infoscry.storage.CollectionStore
 import infoscry.storage.ContentStore
@@ -85,7 +85,7 @@ internal class DocumentIngest(
     private val pipeline: ImportPipeline,
     private val content: ContentStore,
     private val chunker: Chunker,
-    private val index: () -> LuceneIndex,
+    private val index: () -> SearchIndex,
     private val documentEmbedder: () -> DocumentEmbedder?,
     private val maxChunksPerDocument: Int,
     /**
@@ -490,11 +490,16 @@ internal class DocumentIngest(
                 if (live.lifecycle != CollectionLifecycle.ACTIVE) {
                     throw CollectionNotActiveException(collection.id)
                 }
-                index().replaceDocument(rows)
-                revisions.recordPublishedContent(document.id, PROVENANCE_IMPORT, reading)
-                    ?.let { revisionId ->
-                        if (corrector?.recordApplied(collection.id, revisionId) == true) requestCorrections(collection.id)
-                    }
+                // The revision and the rows that make it searchable commit together, so search never serves a
+                // reading the document does not publish.
+                val revisionId = revisions.transaction {
+                    val revisionId = revisions.recordPublishedContent(document.id, PROVENANCE_IMPORT, reading)
+                    index().replaceDocument(rows.map { it.copy(revisionId = revisionId) })
+                    revisionId
+                }
+                revisionId?.let {
+                    if (corrector?.recordApplied(collection.id, it) == true) requestCorrections(collection.id)
+                }
             }
             stage.run(STAGE_RECORD) {
                 val failedUnits = content.extractionMarker(document.id)?.failedUnits ?: 0

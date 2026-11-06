@@ -53,8 +53,8 @@ or GPU verification.
 - Use Kotlin/JVM 25 for application services and TypeScript/SvelteKit for the
   static frontend. Keep HTTP routes and CLI commands thin over shared services.
 - Use one application process and one Gradle backend module. PostgreSQL (run by
-  `compose.yaml`) owns authoritative state; Lucene and generated artifacts are
-  rebuildable. Tests run against a Testcontainers Postgres and need Docker or Podman.
+  `compose.yaml`) owns authoritative state, including search: BM25 (`pg_search`)
+  and vectors (`pgvector`) over `search_chunks`. Generated artifacts are rebuildable. Tests run against a Testcontainers Postgres and need Docker or Podman.
 - Keep product copy in English and the UI restrained, accessible, and based on
   normal HTML/CSS. Follow the design's v1 scope.
 - Never modify or delete external original source files. Managed copies are
@@ -63,8 +63,8 @@ or GPU verification.
   per unit, with durable artifact references, and resume without repeating
   committed OCR. Re-embedding must not invalidate extraction checkpoints.
 - Apply shared mutation admission and exclusive maintenance as specified.
-  Collection deletion must recover from persisted phases; an index swap must
-  preserve all collections and publish its writer, reader, and embedder together.
+  Collection deletion must recover from persisted phases. A reading and its
+  searchable rows commit in one transaction; never add a second search store.
 - A standalone CLI import retains process ownership until completion. Returning
   after enqueue is valid only when a running server owns the job.
 - InfoScry is a single-user application. Do not add protection, refusals or

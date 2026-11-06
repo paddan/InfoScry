@@ -7,16 +7,13 @@ import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.DocumentId
 import infoscry.search.DocumentRow
-import infoscry.search.LuceneIndex
-import infoscry.search.RevisionLease
-import infoscry.search.RevisionSnapshotGate
-import infoscry.search.RevisionScope
+import infoscry.search.SearchIndex
 import infoscry.storage.CollectionNotActiveException
+import infoscry.storage.CollectionStore
+import infoscry.storage.Database
 import infoscry.storage.DocumentBeingDeletedException
 import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.DocumentStore
-import infoscry.storage.MaintenanceInProgressException
-import infoscry.storage.CollectionStore
 import infoscry.storage.MutationCoordinator
 import infoscry.storage.PageApproval
 import infoscry.storage.PublicationIntent
@@ -25,47 +22,21 @@ import infoscry.storage.RevisionChunk
 import infoscry.storage.RevisionPage
 import infoscry.storage.RevisionPageText
 import infoscry.storage.RevisionState
-import kotlinx.coroutines.delay
 import org.slf4j.LoggerFactory
 
-/**
- * One instant a publication can be parked at, in the order they happen.
- *
- * These are the instants the fault-injection tests stop at, and they are the service's own protocol
- * rather than a second copy of it. Each handoff the contract names has an instant on either side of it:
- *
- * - the staged index rows exist but are not durable — [ROWS_STAGED]; they are durable and the Postgres
- *   authority has not moved — [STAGED_COMMITTED],
- * - the authority has moved and readers still lease the previous snapshot — [AUTHORITATIVE]; the
- *   snapshot that names the target is published — [SNAPSHOT_PUBLISHED],
- * - the attempt is durably complete — [PUBLISHED] — and the rows of the reading it replaced are gone —
- *   [CLEANED].
- */
-enum class PublicationStep {
-    INTENT_PERSISTED,
-    ROWS_STAGED,
-    STAGED_COMMITTED,
-    AUTHORITATIVE,
-    SNAPSHOT_PUBLISHED,
-    PUBLISHED,
-    CLEANED,
-}
-
-/** What a startup's roll-forward of unfinished publications found, in the order the intents were read. */
+/** What a startup's resolution of unfinished publication records found, in the order they were read. */
 data class PublicationRecoveryReport(
     val completed: List<String>,
     val discarded: List<String>,
 )
 
 /**
- * What [RevisionPublicationService] calls once a revision's publication is durably recorded: the one
- * seam the selectable-PDF feature (ticket 06 of its plan) hooks to queue a derived artifact, without
- * this file depending on that package.
+ * What [RevisionPublicationService] calls once a revision's publication is committed: the one seam the
+ * selectable-PDF feature hooks to queue a derived artifact, without this file depending on that package.
  *
- * Every implementation must be safe to call more than once for the same revision (a crash-recovery path
- * calls it again) and must never throw: a failure here must never be mistaken for a failure of the
- * publication it follows. [RevisionPublicationService] does not catch exceptions from it as a safety
- * net — a hook that throws is a bug in the hook, not a reason to fail the publication silently.
+ * Every implementation must be safe to call more than once for the same revision (a startup calls it again
+ * for a publication whose process died before the hook ran) and must never throw: a failure here must never
+ * be mistaken for a failure of the publication it follows.
  */
 fun interface RevisionPublishedHook {
     fun onPublished(documentId: DocumentId, collectionId: CollectionId, revisionId: String)
@@ -76,62 +47,43 @@ fun interface RevisionPublishedHook {
 }
 
 /**
- * Publishes a staged candidate revision of one document, and finishes the publications a previous
- * process left behind.
+ * Publishes a staged candidate revision of one document.
  *
- * There is no transaction spanning Postgres and Lucene, and this class does not pretend there is one. What
- * it has instead is a protocol whose every intermediate state is one recovery can read:
+ * The candidate's pages, chunks and vectors are already stored with it, so publishing is one database
+ * transaction: recheck that the document and its collection are still live and that the base is still the
+ * published reading, record the publication, replace the document's searchable rows with the candidate's,
+ * make the candidate the document's text, and mark the publication done. Search reads the same database, so
+ * a reader sees either the whole previous reading or the whole new one, and a failure anywhere leaves the
+ * previous reading in place with nothing to repair.
  *
- * 1. The intent is persisted PREPARED. Its durable artifacts are the candidate revision's own pages,
- *    chunks and vectors, so the attempt is complete on its own and the index has not been touched: the
- *    candidate's rows do not exist anywhere a reader could find them.
- * 2. Inside one short shared boundary — a mutation permit, then the snapshot gate's write lock — the
- *    document's deletion state, its collection's lifecycle and the revision the caller named as the base
- *    are rechecked, the candidate's rows are written and committed, and the Postgres transaction that makes
- *    the target authoritative also records that authority moved. Writing the rows only here is what keeps
- *    a candidate unexposable: no reader can acquire a snapshot while the gate is held, and a reader that
- *    already held one is inside the searcher it leased, which the new rows are not in yet.
- * 3. The snapshot that hides the reading being replaced is published, so new readers see the new text and
- *    readers already inside a lease keep seeing the old one. Then the attempt is marked PUBLISHED — which
- *    is why a failure after the authority commit is never reported as a failure: recovery completes it.
- * 4. The rows of the reading that was replaced are removed only after the readers that could still be
- *    reading them have drained. Postgres keeps the text of every revision either way.
- *
- * Every step is idempotent, so recovery is the same code path as publication rather than a second one.
+ * What happens after the commit — the published hook — is recorded by `cleaned_at`: a publication whose
+ * hook may not have run is finished by [recoverUnfinished] at the next start.
  */
 class RevisionPublicationService(
+    private val database: Database,
     private val revisions: DocumentRevisionStore,
     private val documents: DocumentStore,
     private val collections: CollectionStore,
     private val mutations: MutationCoordinator,
-    private val index: () -> LuceneIndex,
-    private val gate: RevisionSnapshotGate = RevisionSnapshotGate(),
-    private val cleanupDrainMillis: Long = CLEANUP_DRAIN_MILLIS,
+    private val index: () -> SearchIndex,
     /**
-     * Called once a revision's publication is durably recorded as PUBLISHED, for import, rescan and
-     * restore alike — see [RevisionPublishedHook]. The default does nothing; production wires the
-     * selectable-PDF service's queueing here.
+     * Called once a revision's publication is committed, for import, rescan and restore alike — see
+     * [RevisionPublishedHook]. The default does nothing; production wires the selectable-PDF service's
+     * queueing here.
      */
     private val onPublished: RevisionPublishedHook = RevisionPublishedHook.NONE,
 ) {
 
-    /** The revision scope a reader that starts now must search under. */
-    fun revisionScope(): RevisionScope = gate.current()
-
-    /** Takes a reader's lease on the snapshot that is current now. */
-    fun acquire(): RevisionLease = gate.acquire()
-
     /**
-     * Admits a publication of `candidateRevisionId` over `baseRevisionId` and drives it to completion.
+     * Publishes `candidateRevisionId` over `baseRevisionId`.
      *
-     * @return the opaque identifier of the durable operation, whose phase, error code and message are
-     *   read back from `revision_publications` rather than from this call's lifetime.
+     * @return the identifier of the durable publication record, whose phase, error code and message are
+     *   read back from `revision_publications`.
      */
     suspend fun publish(
         documentId: DocumentId,
         baseRevisionId: String?,
         candidateRevisionId: String,
-        observe: (PublicationStep) -> Unit = {},
     ): String {
         val target = revisions.revision(candidateRevisionId)
             ?: throw IllegalArgumentException("no revision with id $candidateRevisionId exists")
@@ -153,8 +105,8 @@ class RevisionPublicationService(
                 "not ${baseRevisionId ?: "none"}; the candidate was staged against another reading"
         }
 
-        // 1a. A target that cannot become a published reading is refused durably, in the words of what it
-        //     is waiting for. Nothing is staged, nothing is hidden, and the baseline is untouched.
+        // A target that cannot become a published reading is refused durably, in the words of what it is
+        // waiting for. Nothing changes and the baseline is untouched.
         val refusal = refusalFor(candidateRevisionId, baseRevisionId)
         if (refusal != null) {
             val refused = revisions.prepare(
@@ -169,283 +121,88 @@ class RevisionPublicationService(
 
         // The pages this attempt publishes are the target's approved ones. For a replacement that is every
         // page of the target, because a single unapproved page refused it above; for an initial import it is
-        // the pages nobody owes a decision about, and the pages that still owe one are left out of the
-        // reading rather than published as though their text had been accepted.
+        // the pages nobody owes a decision about.
         val pages = publishablePages(candidateRevisionId)
         val chunks = revisions.chunks(candidateRevisionId)
 
-        // 1b. Persist the intent. Its durable artifacts are already the revision's own pages, chunks and
-        //     vectors, so the PREPARED attempt is complete on its own: nothing has to be reconstructed and
-        //     the index has not been touched, which is what lets recovery either finish or discard it
-        //     without guessing.
-        val intent = revisions.prepare(
-            documentId = documentId,
-            collectionId = document.collectionId,
-            baseRevisionId = baseRevisionId,
-            targetRevisionId = candidateRevisionId,
-        )
-        observe(PublicationStep.INTENT_PERSISTED)
-        // The candidate is hidden before a row of it exists. Hiding it here rather than at the switch below is
-        // what keeps a failure in the middle of the boundary from exposing rows nothing owns: a staged commit
-        // that never becomes authoritative leaves rows in the index, and a scope that had not hidden them would
-        // hand those rows to the next reader. The switch then only has to reveal what it publishes.
-        gate.handoff { gate.current().hiding(candidateRevisionId) }
-        // Whether this attempt has written index rows that only its own tag keeps track of. It is set before
-        // the write rather than after it: a staging step that fails halfway leaves buffered changes in the
-        // writer, and removing them by the same tag in the same writer is what keeps them from surfacing later.
-        var candidateRowsMayExist = false
-        try {
-            // 2. The shared publication boundary. It is the only place the candidate's rows are written,
-            //    which is what makes them unexposable by construction rather than by a filter: no reader
-            //    can acquire a snapshot while the boundary holds the gate, and a reader that already held
-            //    one is reading the searcher it leased, which the new rows are not in yet.
+        val intent = try {
             mutations.withMutation {
-                gate.handoff {
-                    // Rechecked under the handoff rather than merely under the shared permit: two publications
-                    // can hold that permit at once, and the reading named as the base can only be trusted once
-                    // no other handoff is moving it.
+                database.transaction {
                     recheck(documentId, document.collectionId, baseRevisionId)
-                    // The boundary is entered before the rows exist, so a rebuild cannot have swapped the
-                    // generation underneath them: exclusive maintenance and this permit exclude each other.
-                    candidateRowsMayExist = true
-                    stage(intent, pages, chunks)
-                    observe(PublicationStep.ROWS_STAGED)
-                    index().commit()
-                    observe(PublicationStep.STAGED_COMMITTED)
+                    val intent = revisions.prepare(
+                        documentId = documentId,
+                        collectionId = document.collectionId,
+                        baseRevisionId = baseRevisionId,
+                        targetRevisionId = candidateRevisionId,
+                    )
+                    index().replaceDocument(stagedRows(intent, pages, chunks))
                     revisions.makeAuthoritative(intent, revisionPages(pages, chunks))
-                    observe(PublicationStep.AUTHORITATIVE)
-                    // The replaced reading's rows go before the switch, while no reader can be inside: a
-                    // reading that carries no revision tag — an import's rows, or an archive the migration
-                    // backfilled — cannot be hidden by id, so removing it is the only way to keep it from
-                    // being served beside the reading that replaced it.
-                    if (baseRevisionId != null) {
-                        index().deleteSupersededRows(documentId, candidateRevisionId)
-                    }
-                    gate.current().revealing(candidateRevisionId).hiding(baseRevisionId)
+                    revisions.markPublished(intent.id)
+                    intent
                 }
             }
-
-            // 3. New readers see the target from here on; readers inside a lease keep the old snapshot.
-            observe(PublicationStep.SNAPSHOT_PUBLISHED)
-            revisions.markPublished(intent.id)
-            observe(PublicationStep.PUBLISHED)
-            // A derived-artifact feature (selectable PDF) queues its own work from here; a failure in it
-            // must never be mistaken for a failure of this publication, which has already succeeded.
-            onPublished.onPublished(documentId, document.collectionId, candidateRevisionId)
-
-            // 4. The replaced reading's rows wait for the readers that may still be inside them.
-            cleanup(intent)
-            observe(PublicationStep.CLEANED)
-            return intent.id
         } catch (failure: Throwable) {
-            if (authorityMoved(intent.id)) {
-                // The database already says the target revision is published, so the reading this document
-                // serves has already changed. Reporting a failure would tell the caller the old reading still
-                // wins, which is no longer true. The honest answer is the operation's own identifier, and the
-                // publication is finished here if it still can be: every step is idempotent, so running the
-                // recovery path now is the same work a later startup would do, only sooner.
-                LOGGER.atWarn()
-                    .addKeyValue(PUBLICATION_FIELD, intent.id)
-                    .addKeyValue(DOCUMENT_FIELD, documentId.value)
-                    .setCause(failure)
-                    .log("publication authority is durable; finishing it rather than reporting a failure")
-                // Whether the archive is already coherent is one question, and the scope answers it in one word:
-                // is the target revision revealed? The boundary reveals it only after the rows are committed,
-                // the authority has moved and the replaced reading's rows are removed, all in the same handoff —
-                // so a revealed target means the index, the snapshot and the database already agree and the
-                // failure was bookkeeping afterwards; refusing readers then would punish a coherent archive.
-                // A hidden target means the switch never happened: Postgres already serves the new reading while
-                // search still serves the old one, which is the one state that must refuse. It refuses *before*
-                // the roll-forward below rather than after it, because the roll-forward stages and commits rows
-                // outside a handoff, and a reader admitted in that window would see the old reading beside the
-                // new source text. Completing the publication unseals the gate once its switch has happened.
-                val coherent = gate.current().reveals(intent.targetRevisionId)
-                if (!coherent) {
-                    gate.seal("an authoritative publication could not be finished; restart to complete it")
-                }
-                try {
-                    // Finishing it is index work like any other, so it goes through the same permit: exclusive
-                    // maintenance must not have a roll-forward committed underneath it.
-                    mutations.withMutation { complete(intent, observe) }
-                } catch (finishing: Throwable) {
-                    LOGGER.atWarn()
-                        .addKeyValue(PUBLICATION_FIELD, intent.id)
-                        .addKeyValue(DOCUMENT_FIELD, documentId.value)
-                        .setCause(finishing)
-                        .log(
-                            if (coherent) {
-                                "a publication's bookkeeping failed after the reading it publishes was switched " +
-                                    "in; readers keep being served"
-                            } else {
-                                "a publication whose authority is durable could not be finished in this process; " +
-                                    "reads are refused until recovery completes it"
-                            },
-                        )
-                }
-                return intent.id
+            // The transaction left nothing behind; the failed attempt is still recorded, so the document's
+            // history and the caller's status read say why the reading did not change.
+            runCatching {
+                val failed = revisions.prepare(
+                    documentId = documentId,
+                    collectionId = document.collectionId,
+                    baseRevisionId = baseRevisionId,
+                    targetRevisionId = candidateRevisionId,
+                )
+                revisions.abandon(failed.id, PublicationPhase.ABANDONED, PUBLICATION_FAILED, messageOf(failure))
             }
-            discard(intent, PUBLICATION_FAILED, messageOf(failure), removeRows = candidateRowsMayExist)
             throw failure
         }
+
+        afterCommit(intent)
+        return intent.id
     }
 
     /**
-     * Resolves every publication attempt a previous process left unfinished.
+     * Resolves every publication record a previous process left unfinished.
      *
-     * This runs before the context is handed out, so no reader and no worker can observe the state it
-     * repairs. The decision is one read: an intent that never recorded authority did not move it, so the
-     * reading the document already published wins and the staged rows go away; an intent that recorded
-     * authority is completed, because the database and the index must agree and the database is the one
-     * that says so.
+     * A publication commits as a whole, so the only unfinished states are a record of a refusal or failure
+     * whose final write never happened, which is abandoned, and a committed publication whose hook may not
+     * have run, which is finished now.
      */
-    suspend fun recoverUnfinished(observe: (PublicationStep) -> Unit = {}): PublicationRecoveryReport {
+    suspend fun recoverUnfinished(): PublicationRecoveryReport {
         val completed = mutableListOf<String>()
         val discarded = mutableListOf<String>()
-        // An attempt whose authority moved and whose cleanup never ran is not unfinished — it is
-        // published — but its replaced reading's rows are still in the index and no in-process snapshot
-        // survives to keep them hidden. Removing them is what makes the index say exactly what the
-        // database says before the first reader is served.
         for (intent in revisions.intentsAwaitingCleanup()) {
-            // An attempt that never reached PUBLISHED is still resolved below, from its own intent; only a
-            // published one is a cleanup that is owed and nothing else will do.
             if (intent.publishedAt == null) continue
-            // Idempotent, and the only place this startup repairs a publish whose own onPublished call
-            // never ran because the process died between markPublished and it (never between it and the
-            // index write below, which only ever runs for an intent this loop already knows is published).
-            onPublished.onPublished(intent.documentId, intent.collectionId, intent.targetRevisionId)
-            if (intent.baseRevisionId != null) {
-                index().deleteSupersededRows(intent.documentId, intent.targetRevisionId)
-            }
-            revisions.markCleaned(intent.id)
+            afterCommit(intent)
+            completed += intent.id
         }
         for (intent in revisions.unfinishedIntents()) {
-            if (intent.authoritativeAt == null) {
-                LOGGER.atInfo()
-                    .addKeyValue(PUBLICATION_FIELD, intent.id)
-                    .addKeyValue(DOCUMENT_FIELD, intent.documentId.value)
-                    .log("discarding a publication intent that never moved authority; the old revision wins")
-                discard(
-                    intent,
-                    PUBLICATION_NOT_AUTHORITATIVE,
-                    PUBLICATION_NOT_AUTHORITATIVE_MESSAGE,
-                    removeRows = true,
-                )
-                discarded += intent.id
+            if (intent.authoritativeAt != null) {
+                revisions.markPublished(intent.id)
+                afterCommit(intent)
+                completed += intent.id
             } else {
                 LOGGER.atInfo()
                     .addKeyValue(PUBLICATION_FIELD, intent.id)
                     .addKeyValue(DOCUMENT_FIELD, intent.documentId.value)
-                    .log("completing a publication whose authority is already durable")
-                complete(intent, observe)
-                completed += intent.id
+                    .log("discarding a publication record that never took effect; the old revision wins")
+                revisions.abandon(
+                    intent.id,
+                    PublicationPhase.ABANDONED,
+                    PUBLICATION_NOT_AUTHORITATIVE,
+                    PUBLICATION_NOT_AUTHORITATIVE_MESSAGE,
+                )
+                discarded += intent.id
             }
         }
         return PublicationRecoveryReport(completed = completed, discarded = discarded)
     }
 
-    /** Finishes a publication whose authority is already durable, from its own staged artifacts. */
-    private suspend fun complete(intent: PublicationIntent, observe: (PublicationStep) -> Unit) {
-        // The same set the authority was committed with: finishing a publication must not stage a row for a
-        // page whose text this attempt did not publish.
-        val pages = publishablePages(intent.targetRevisionId)
-        val chunks = revisions.chunks(intent.targetRevisionId)
-        if (pages.isEmpty() || chunks.any { !it.isStaged }) {
-            // The intent was admitted only with a complete set of artifacts, so this is a damaged archive
-            // rather than a state to interpret: finishing it would publish a document with missing text.
-            throw IllegalStateException(
-                "publication ${intent.id} recorded authority but its revision " +
-                    "${intent.targetRevisionId} no longer holds complete artifacts",
-            )
-        }
-        stage(intent, pages, chunks)
-        observe(PublicationStep.ROWS_STAGED)
-        index().commit()
-        observe(PublicationStep.STAGED_COMMITTED)
-        gate.handoff {
-            // The same order as a live publication, for the same reason: the replaced reading is removed
-            // before the snapshot stops hiding it, so a reading that carries no revision tag cannot be
-            // served beside the one that replaced it.
-            if (intent.baseRevisionId != null) {
-                index().deleteSupersededRows(intent.documentId, intent.targetRevisionId)
-            }
-            gate.current().revealing(intent.targetRevisionId).hiding(intent.baseRevisionId)
-        }
-        // The snapshot now names the reading the database already serves, so a refusal raised by an earlier
-        // attempt at this publication is over and readers may be served again.
-        gate.unseal()
-        observe(PublicationStep.SNAPSHOT_PUBLISHED)
-        revisions.markPublished(intent.id)
-        observe(PublicationStep.PUBLISHED)
+    /** The work owed after a committed publication: the published hook, then the record that it ran. */
+    private fun afterCommit(intent: PublicationIntent) {
+        // A derived-artifact feature (selectable PDF) queues its own work from here; a failure in it must
+        // never be mistaken for a failure of this publication, which has already succeeded.
         onPublished.onPublished(intent.documentId, intent.collectionId, intent.targetRevisionId)
-        cleanup(intent)
-        observe(PublicationStep.CLEANED)
-    }
-
-    /**
-     * Gives up on an intent that never moved authority, leaving the reading it was replacing in place.
-     *
-     * The staged rows are removed by their own revision tag, so a publication that reached the boundary
-     * and was killed after its staged commit leaves the document exactly as it was; an attempt that never
-     * wrote a row has nothing to remove and the call is a no-op.
-     */
-    /**
-     * Gives up on an intent that never moved authority, leaving the reading it was replacing in place.
-     *
-     * [removeRows] says whether this attempt can have written index rows of its own: an attempt that never
-     * reached its staging step has none, and an attempt that did is cleaned by its own revision tag. Removing
-     * rows writes to the index, so that half needs the staging permit — under exclusive maintenance the
-     * attempt is left PREPARED instead, because the candidate is hidden by the scope and the next startup
-     * removes its rows before anyone is served. An attempt with nothing to remove is abandoned immediately,
-     * which is what the maintenance case gets: a publication that never wrote a row has nothing to clean up.
-     */
-    private suspend fun discard(
-        intent: PublicationIntent,
-        code: String,
-        message: String,
-        removeRows: Boolean,
-    ): Boolean {
-        if (!removeRows) {
-            gate.handoff { gate.current().revealing(intent.targetRevisionId) }
-            revisions.abandon(intent.id, PublicationPhase.ABANDONED, code, message)
-            return true
-        }
-        try {
-            mutations.withMutation {
-                index().deleteStagedRevision(intent.documentId, intent.targetRevisionId)
-            }
-        } catch (maintenance: MaintenanceInProgressException) {
-            LOGGER.atWarn()
-                .addKeyValue(PUBLICATION_FIELD, intent.id)
-                .addKeyValue(DOCUMENT_FIELD, intent.documentId.value)
-                .setCause(maintenance)
-                .log("maintenance holds the index; leaving a discarded publication's rows for recovery")
-            return false
-        }
-        gate.handoff { gate.current().revealing(intent.targetRevisionId) }
-        revisions.abandon(intent.id, PublicationPhase.ABANDONED, code, message)
-        return true
-    }
-
-    /** Removes the rows of the reading the target replaced, once no reader can still be inside them. */
-    private suspend fun cleanup(intent: PublicationIntent) {
-        if (intent.baseRevisionId == null) {
-            // Nothing was replaced, so there is nothing whose rows could be a second reading.
-            revisions.markCleaned(intent.id)
-            gate.handoff { gate.current().revealing(intent.targetRevisionId) }
-            return
-        }
-        if (!gate.drainReaders(cleanupDrainMillis)) {
-            LOGGER.atWarn()
-                .addKeyValue(PUBLICATION_FIELD, intent.id)
-                .log(
-                    "readers were still inside the previous revision after $cleanupDrainMillis ms; " +
-                        "its rows are left in place for a rebuild or the next startup to remove",
-                )
-            return
-        }
-        index().deleteSupersededRows(intent.documentId, intent.targetRevisionId)
         revisions.markCleaned(intent.id)
-        gate.handoff { gate.current().revealing(intent.baseRevisionId).revealing(intent.targetRevisionId) }
     }
 
     /**
@@ -525,11 +282,6 @@ class RevisionPublicationService(
         }
     }
 
-    /** Writes the candidate's rows into the index. Uncommitted: the boundary commits them. */
-    private suspend fun stage(intent: PublicationIntent, pages: List<RevisionPageText>, chunks: List<RevisionChunk>) {
-        index().stageDocument(stagedRows(intent, pages, chunks))
-    }
-
     private fun stagedRows(
         intent: PublicationIntent,
         pages: List<RevisionPageText>,
@@ -601,9 +353,6 @@ class RevisionPublicationService(
         }
     }
 
-    private fun authorityMoved(intentId: String): Boolean =
-        revisions.intent(intentId)?.authoritativeAt != null
-
     private fun messageOf(failure: Throwable): String =
         failure.message ?: failure::class.simpleName ?: "the publication could not be completed"
 
@@ -624,14 +373,6 @@ class RevisionPublicationService(
 
         const val PUBLICATION_NOT_AUTHORITATIVE_MESSAGE: String =
             "the publication did not take effect; the document still shows the text it published before"
-
-        /**
-         * How long the rows of a replaced reading wait for the readers that may still be inside them.
-         *
-         * A reader is one search, so this is generous; running out is not an error, because the rows are
-         * hidden by the scope either way and both a rebuild and the next startup remove them.
-         */
-        const val CLEANUP_DRAIN_MILLIS: Long = 5_000
     }
 }
 

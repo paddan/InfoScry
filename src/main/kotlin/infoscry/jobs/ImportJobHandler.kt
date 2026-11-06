@@ -7,7 +7,6 @@ import infoscry.embedding.E5Embedder
 import infoscry.embedding.GpuRuntime
 import infoscry.embedding.ModelManager
 import infoscry.embedding.GpuUnavailableException
-import infoscry.search.LuceneIndex
 import infoscry.search.ReindexService
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
@@ -919,9 +918,8 @@ class ImportJobHandler internal constructor(
         }
 
         /**
-         * The rebuild the process runs with: the pinned model's identity, the tokenizer the import
-         * stage measures with, and the index accessor and publication hook that make the swap land in
-         * this process.
+         * The rebuild the process runs with: the tokenizer the import stage measures with and this
+         * process's index.
          */
         private fun productionReindexService(context: AppContext): ReindexService = ReindexService(
             mutations = context.mutations,
@@ -935,10 +933,8 @@ class ImportJobHandler internal constructor(
                 ),
             ),
             paths = context.paths,
-            identity = AppContext.identityForCurrentModel(),
             documentEmbedder = context.pinnedEmbedder,
-            current = { context.index() },
-            publish = { next, previous -> context.publishGeneration(next, previous) },
+            index = { context.index() },
             revisions = context.revisions,
         )
     }

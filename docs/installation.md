@@ -50,7 +50,7 @@ future interactive sessions. If using asdf, follow the
 [asdf guide](asdf.md) instead of these Homebrew runtime exports.
 
 Gradle itself is provided by `./gradlew`. Java libraries and frontend packages
-are installed by the build; Lucene and ONNX Runtime do not need separate system
+are installed by the build; ONNX Runtime does not need a separate system
 installations. CoreML is supplied by macOS.
 
 ### PostgreSQL

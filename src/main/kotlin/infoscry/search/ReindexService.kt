@@ -1,12 +1,9 @@
 package infoscry.search
 
-import infoscry.config.AppPaths
-import infoscry.domain.ChunkId
-import infoscry.domain.CollectionId
-import infoscry.domain.ContentUnitId
-import infoscry.domain.DocumentId
-import infoscry.domain.SourceLocation
 import infoscry.chunk.Chunker
+import infoscry.config.AppPaths
+import infoscry.domain.CollectionId
+import infoscry.domain.DocumentId
 import infoscry.embedding.DocumentEmbedder
 import infoscry.embedding.EmbeddingException
 import infoscry.embedding.ModelManager
@@ -15,23 +12,14 @@ import infoscry.storage.ContentStore
 import infoscry.storage.DocumentRevisionStore
 import infoscry.storage.DocumentStore
 import infoscry.storage.MutationCoordinator
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.StandardCopyOption
-import java.util.UUID
-import kotlin.io.path.extension
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlin.io.path.name
-import kotlinx.coroutines.delay
 import org.slf4j.LoggerFactory
 
 /**
  * What one rebuild was asked to rebuild.
  *
- * [collectionId] is the single collection a caller narrowed the rebuild to; `null` means every live
- * collection. Either way the result is one complete generation covering the whole archive, because a
- * search that spans collections has to read one index.
+ * [collectionId] is the single collection a caller narrowed the rebuild to; `null` means every collection.
  */
 data class ReindexRequest(val collectionId: CollectionId? = null)
 
@@ -40,270 +28,105 @@ data class ReindexProgress(val stage: String, val completed: Int, val total: Int
 
 /** What one rebuild produced, in the words `infoscry reindex --json` reports. */
 data class ReindexResult(
-    val generation: String,
     val documents: Int,
     val chunks: Int,
     val documentsRebuilt: Int,
-    val staleDocuments: Int = 0,
+    val shedRows: Int = 0,
 )
 
-/**
- * One instant a rebuild can be interrupted at, in the order they happen.
- *
- * The recovery test starts a real child JVM and stops it through this seam, so the state a kill leaves
- * behind is exactly the state production would leave — the instants are the service's, not a second
- * copy of its protocol.
- */
+/** One instant a rebuild can be interrupted at, in the order they happen. */
 enum class ReindexStep {
 
-    /** Every row has been written and the new generation's writer has not been committed yet. */
-    GENERATION_BUILT,
+    /** Every document in scope has rows that agree with its text; a full rebuild has not recorded its model yet. */
+    DOCUMENTS_REBUILT,
 
-    /** The new generation is committed, closed, reopened and validated; the marker still names the old one. */
-    BEFORE_MARKER_SWAP,
-
-    /** The marker names the new generation; this process has not started serving it yet. */
-    AFTER_MARKER_SWAP,
-
-    /** The swap is complete and the generation the process served before has been retired. */
+    /** The rebuild is complete. */
     DONE,
 }
 
 /**
- * Rebuilds the search index from the persisted text, in a successor generation, under exclusive
- * maintenance.
+ * Rebuilds the searchable rows from the persisted text, under exclusive maintenance.
  *
- * Postgres is authoritative and the index is derived, so a rebuild is not a repair of lost work — it is
- * the way the index and the database agree again after a model change, a schema change, or an import
- * whose index half never landed. The rebuild is one exclusive maintenance scope for its whole duration:
- * every other writer drains to its durable checkpoint before the snapshot is taken, and nothing may
- * publish into either generation while the successor is being built.
- *
- * The generation swap is the part the product's promises rest on:
- *
- * - **The marker is the truth.** A successor is built to completion, committed, closed, reopened and
- *   validated, and only then does the `current` marker name it — atomically, the way every open
- *   resolves it. A crash before the swap leaves the old generation serving; a crash after it leaves
- *   the successor as the one the next open selects.
- * - **Readers are never broken.** This process starts serving the successor only after the marker is
- *   durable, and the generation it replaced is retired only after the searches that leased it have
- *   drained.
+ * The rows live in the same database as the text, and each document is rebuilt in a transaction of its own,
+ * so a rebuild never has a half-swapped state: an interrupted rebuild leaves every document either with its
+ * old rows or its new ones, and running it again continues where it stopped. A document whose rows already
+ * agree with its chunks, under the model this build embeds with, keeps them and its vectors. A full rebuild
+ * records the model as the last step, which is what makes semantic search compare against the new vectors.
  */
 class ReindexService(
     private val mutations: MutationCoordinator,
     private val collections: CollectionStore,
     private val documents: DocumentStore,
     private val content: ContentStore,
-    /**
-     * Where each document's published revision is read from.
-     *
-     * A rebuild writes the rows of the revision the database says is published, so the index and
-     * `document_active_revisions` say the same thing and a row tagged with a revision nobody publishes is
-     * one the rebuild can shed.
-     */
+    /** Where each document's published revision is read from, so its rows name the revision they belong to. */
     private val revisions: DocumentRevisionStore,
     private val chunker: Chunker,
     private val paths: AppPaths,
-    private val identity: IndexIdentity,
     private val documentEmbedder: () -> DocumentEmbedder?,
-    private val current: () -> LuceneIndex,
-    private val publish: suspend (LuceneIndex, LuceneIndex) -> Unit,
+    private val index: () -> SearchIndex,
     private val maxChunksPerDocument: Int = MAX_CHUNKS_PER_DOCUMENT,
 ) {
 
-    /**
-     * Runs one rebuild.
-     *
-     * [onProgress] is called between documents with how many are durable; the reindex job passes its
-     * maintenance-owner reporter there, which is also where it notices that the job was cancelled.
-     * [observe] is the interruption seam the recovery test drives.
-     */
     suspend fun reindex(
         request: ReindexRequest,
         onProgress: suspend (ReindexProgress) -> Unit = {},
         observe: (ReindexStep) -> Unit = {},
     ): ReindexResult = mutations.withExclusiveMaintenance("reindex the search index") {
-        val previous = current()
-        val nextName = GENERATION_PREFIX + "next-" + UUID.randomUUID()
-
-        // A narrowed rebuild carries every other collection's rows forward unchanged, which is only
-        // correct while the generation it copies from was built by the same mathematics. A changed
-        // model, export, tokenizer or schema invalidates every vector in the archive, and the caller
-        // is told so rather than handed a half-stale index.
-        if (request.collectionId != null) {
-            val status = previous.schemaStatus
-            if (status !is SchemaStatus.Ready) {
-                throw IllegalArgumentException(
-                    "a rebuild of one collection cannot reuse vectors an unchanged model produced; " +
-                        "the index reports: ${status.reasons().joinToString("; ")}. " +
-                        "Run `infoscry reindex` without --collection to rebuild every collection.",
-                )
-            }
+        val index = index()
+        val vectorsAreCurrent = index.schemaStatus is SchemaStatus.Ready
+        if (request.collectionId != null && !vectorsAreCurrent) {
+            throw IllegalArgumentException(
+                "a rebuild of one collection cannot reuse vectors an unchanged model produced; " +
+                    "the index reports: ${index.schemaStatus.reasons().joinToString("; ")}. " +
+                    "Run `infoscry reindex` without --collection to rebuild every collection.",
+            )
         }
         val requested = request.collectionId?.let { collectionId ->
-            collections.get(collectionId) ?: throw IllegalArgumentException(
-                "no collection with id ${collectionId.value} exists",
-            )
+            collections.get(collectionId)
+                ?: throw IllegalArgumentException("no collection with id ${collectionId.value} exists")
         }
         if (requested != null && requested.lifecycle != infoscry.domain.CollectionLifecycle.ACTIVE) {
-            throw IllegalArgumentException(
-                "collection ${requested.name} is not active, so its index cannot be rebuilt",
-            )
+            throw IllegalArgumentException("collection ${requested.name} is not active, so its index cannot be rebuilt")
         }
+        val scope = if (requested == null) collections.list() else listOf(requested)
 
-        val result = try {
-            buildGeneration(previous, nextName, request, requested, onProgress, observe)
-        } catch (failure: Throwable) {
-            discardUnpublished(nextName, previous.name, failure)
-            throw failure
-        }
-        observe(ReindexStep.DONE)
-        result
-    }
+        // Rows of a reading a document no longer publishes are not searchable text, wherever they came from.
+        val shed = index.deleteRowsOfUnpublishedRevisions()
+        if (shed > 0) LOGGER.atInfo().addKeyValue(SHED_ROWS_FIELD, shed).log("removed rows of revisions no document publishes")
 
-    /**
-     * Builds the successor generation and publishes it, or leaves the current one serving.
-     *
-     * The copy is what keeps a narrowed rebuild cheap: the successor starts as a copy of the committed
-     * current generation, so every collection the caller did not name keeps its rows and vectors
-     * without being rewritten, and the named collection's rows are deleted from the copy and built
-     * again from the persisted text. The copy is also where rows outlive the database — a document
-     * whose deletion never reached the index, or a collection whose deletion crashed before its index
-     * phase — so the copy is purged against the database's live identities before anything is built:
-     * the successor must hold exactly the live document set, whatever the rebuild's scope was.
-     */
-    private suspend fun buildGeneration(
-        previous: LuceneIndex,
-        nextName: String,
-        request: ReindexRequest,
-        requested: infoscry.domain.Collection?,
-        onProgress: suspend (ReindexProgress) -> Unit,
-        observe: (ReindexStep) -> Unit,
-    ): ReindexResult {
-        val scope = if (requested == null) {
-            collections.list()
-        } else {
-            listOf(requested)
-        }
-
-        // The snapshot has to be the committed state, not the writer's memory: a segment file that
-        // exists only in the writer's hands is not on disk for the copy to pick up.
-        previous.commit()
-        val previousDirectory = paths.indexDir.resolve(previous.name)
-        val nextDirectory = paths.indexDir.resolve(nextName)
-        Files.createDirectories(nextDirectory)
-        copyGenerationFiles(previousDirectory, nextDirectory)
-
-        val next = LuceneIndex.openGeneration(paths.indexDir, nextName, identity)
-        try {
-            // Purge the rows the copy inherited for documents the database no longer has, by identity
-            // rather than by count: a count can agree while a deleted document still holds rows. The
-            // purge covers every collection, not only the rebuild's scope, because the successor is
-            // the one index every collection reads. A document's collection never changes and a
-            // re-import mints a new identity, so an identity present in the copy but absent from the
-            // database is stale, however it got there.
-            val liveIds = liveDocumentIds()
-            val staleIds = next.storedDocumentIds() - liveIds
-            for (id in staleIds) {
-                next.deleteDocument(DocumentId(id))
-            }
-
-            // The copied generation carries rows the previous reading wrote. A document keeps them
-            // when the chunking marker still agrees with this tokenizer and the copy holds exactly
-            // as many rows as the database holds chunks, because that is the state where the index
-            // and the database already agree; anything else is rebuilt from the persisted text.
-            // A row tagged with a revision no document publishes is a left-over: a publication whose
-            // cleanup never drained its readers, or a candidate whose intent was abandoned. The rebuild
-            // is the one moment the whole index is rewritten from the database's authority, so it is
-            // where those rows go. Untagged rows are not touched — they are the reading of a document
-            // that has never published a replacement.
-            val shed = next.deleteStaleRevisions(revisions.allActiveRevisionIds())
-            if (shed.isNotEmpty()) {
-                LOGGER.atInfo()
-                    .addKeyValue(SHED_REVISIONS_FIELD, shed.size)
-                    .log("removed index rows of revisions no document publishes")
-            }
-
-            val vectorsAreCurrent = previous.schemaStatus is SchemaStatus.Ready
-            val totals = scope.sumOf { collection -> documents.countByCollection(collection.id) }
-            var completed = 0
-            var chunks = 0
-            var rebuilt = 0
-
-            for (collection in scope) {
-                var offset = 0
-                while (true) {
-                    val page = documents.listByCollection(collection.id, DOCUMENT_PAGE, offset)
-                    if (page.isEmpty()) break
-                    for (document in page) {
-                        coroutineContext.ensureActive()
-                        val agrees = vectorsAreCurrent &&
-                            copiedRowsAgree(previous, document.id, chunker)
-                        if (!agrees) {
-                            next.deleteDocument(document.id)
-                            val built = indexDocument(next, collection.id, document.id)
-                            chunks += built.chunks
-                            rebuilt++
-                        }
-                        completed++
-                        onProgress(ReindexProgress(STAGE_REBUILD, completed, totals))
+        val total = scope.sumOf { collection -> documents.countByCollection(collection.id) }
+        var completed = 0
+        var chunks = 0
+        var rebuilt = 0
+        for (collection in scope) {
+            var offset = 0
+            while (true) {
+                val page = documents.listByCollection(collection.id, DOCUMENT_PAGE, offset)
+                if (page.isEmpty()) break
+                for (document in page) {
+                    coroutineContext.ensureActive()
+                    if (!(vectorsAreCurrent && rowsAgree(index, document.id))) {
+                        chunks += rebuildDocument(index, collection.id, document.id)
+                        rebuilt++
                     }
-                    offset += page.size
+                    completed++
+                    onProgress(ReindexProgress(STAGE_REBUILD, completed, total))
                 }
+                offset += page.size
             }
-            observe(ReindexStep.GENERATION_BUILT)
-
-            // The writer is closed before the marker is touched, so the successor is durable and
-            // complete while the marker still names the generation this process is serving.
-            next.commit()
-            next.close()
-            validate(nextName, liveIds, narrowed = requested != null)
-
-            val reopened = LuceneIndex.openGeneration(paths.indexDir, nextName, identity)
-            observe(ReindexStep.BEFORE_MARKER_SWAP)
-            LuceneIndex.publishMarker(paths.indexDir, nextName)
-            observe(ReindexStep.AFTER_MARKER_SWAP)
-            publish(reopened, previous)
-            if (previous.drainLeases(RETIRE_TIMEOUT_MILLIS)) {
-                previous.close()
-                removeGenerationDirectory(previousDirectory, nextName)
-            } else {
-                // A reader is still inside the retired generation. Closing it would cut that reader off,
-                // and deleting the directory would do the same on a non-POSIX filesystem; the contract of
-                // drainLeases says to leave the generation alone. It is unreferenced — the marker names the
-                // successor — so the next startup's sweep removes it, exactly as it removes other leftovers.
-                LOGGER.atWarn()
-                    .addKeyValue(GENERATION_FIELD, previous.name)
-                    .log(
-                        "retired generation still had readers after ${RETIRE_TIMEOUT_MILLIS} ms; " +
-                            "left in place for the next startup sweep",
-                    )
-            }
-
-            return ReindexResult(
-                generation = nextName,
-                documents = completed,
-                chunks = chunks,
-                documentsRebuilt = rebuilt,
-                staleDocuments = staleIds.size,
-            )
-        } catch (failure: Throwable) {
-            runCatching { next.close() }
-            discardUnpublished(nextName, previous.name, failure)
-            throw failure
         }
+        observe(ReindexStep.DOCUMENTS_REBUILT)
+        // Only a rebuild of every collection may say every vector is this model's.
+        if (requested == null) index.recordIdentity()
+        observe(ReindexStep.DONE)
+        ReindexResult(documents = completed, chunks = chunks, documentsRebuilt = rebuilt, shedRows = shed)
     }
 
     /**
-     * Whether the copied generation's rows for one document already agree with the database.
-     *
-     * Three things have to agree for a copy to stand in for a rebuild: the chunking marker names this
-     * tokenizer and budget (so the chunks in the database are the ones the index would be built from),
-     * the copied rows are exactly as many as those chunks (so the import's index half landed), and the
-     * generation being copied was built by the model this build embeds with (so its vectors are not
-     * stale). Any one of the three missing and the document is rebuilt from its text instead.
+     * Whether a document's rows already agree with its text: its chunks were measured by this tokenizer and
+     * budget, and it has exactly one row per chunk.
      */
-    private fun copiedRowsAgree(previous: LuceneIndex, documentId: DocumentId, chunker: Chunker): Boolean {
+    private fun rowsAgree(index: SearchIndex, documentId: DocumentId): Boolean {
         if (content.needsChunking(
                 documentId,
                 chunker.version,
@@ -314,25 +137,18 @@ class ReindexService(
         ) {
             return false
         }
-        return previous.rowCount(documentId) == content.chunkCount(documentId)
+        return index.rowCount(documentId) == content.chunkCount(documentId)
     }
 
     /**
-     * Rebuilds one document's rows from its persisted chunks, reusing the vectors it does not have to
-     * pay for again.
+     * Rebuilds one document's rows from its persisted chunks and replaces them in one transaction.
      *
      * A document with no chunks has no rows, which is not a failure: an extraction pass can finish with
-     * nothing searchable, and an index row for it would be a row nothing can explain. Its status is
-     * left alone — the rebuild repairs derived data and does not pretend an unfinished import finished.
+     * nothing searchable. Its status is left alone — the rebuild repairs derived data and does not pretend an
+     * unfinished import finished.
      */
-    private suspend fun indexDocument(
-        next: LuceneIndex,
-        collectionId: CollectionId,
-        documentId: DocumentId,
-    ): BuiltDocument {
+    private suspend fun rebuildDocument(index: SearchIndex, collectionId: CollectionId, documentId: DocumentId): Int {
         ensureChunksUnderTarget(collectionId, documentId)
-        // The revision the database publishes, so a rebuilt row and a staged row are told apart by the
-        // same tag and no document can end up with rows of two readings in one generation.
         val revisionId = revisions.activeRevisionId(documentId)
         val rows = mutableListOf<DocumentRow>()
         var afterOrdinal = -1
@@ -340,19 +156,21 @@ class ReindexService(
             val batch = content.listUnits(documentId, afterOrdinal = afterOrdinal, limit = UNIT_BATCH)
             if (batch.isEmpty()) break
             batch.forEach { unit ->
-                for (chunk in content.chunksOf(unit.id)) {
-                    rows.add(
-                        DocumentRow(
+                val unitChunks = content.chunksOf(unit.id)
+                unitChunks.chunked(EMBED_BATCH).forEach { group ->
+                    val vectors = embed(group.map { it.text }, documentId)
+                    group.forEachIndexed { position, chunk ->
+                        rows += DocumentRow(
                             collectionId = collectionId,
                             documentId = documentId,
                             unitId = unit.id,
                             locator = unit.locator,
                             locatorLabel = unit.locator.describe(),
                             chunk = chunk,
-                            vector = embed(chunk.text, documentId),
+                            vector = vectors[position],
                             revisionId = revisionId,
-                        ),
-                    )
+                        )
+                    }
                 }
                 afterOrdinal = unit.ordinal
             }
@@ -361,22 +179,18 @@ class ReindexService(
         if (rows.size > maxChunksPerDocument) {
             throw IllegalArgumentException(
                 "document ${documentId.value} has ${rows.size} chunks, more than the " +
-                    "$maxChunksPerDocument one index transaction may hold",
+                    "$maxChunksPerDocument one rebuild may hold",
             )
         }
-        if (rows.isNotEmpty()) {
-            next.replaceDocument(rows)
-        }
-        return BuiltDocument(chunks = rows.size)
+        if (rows.isEmpty()) index.deleteDocument(documentId) else index.replaceDocument(rows)
+        return rows.size
     }
 
     /**
      * Re-chunks a document whose chunks were measured by another tokenizer, before anything reads them.
      *
-     * Chunking is derived from the text, so a rebuild under this generation's tokenizer rebuilds the
-     * chunks the same way the import stage would — writing them, which keeps the database the thing the
-     * next rebuild and the next citation agree on. The document's extraction checkpoints are untouched:
-     * re-chunking is not re-reading.
+     * Chunking is derived from the text, so a rebuild rebuilds the chunks the same way the import stage would.
+     * The document's extraction checkpoints are untouched: re-chunking is not re-reading.
      */
     private suspend fun ensureChunksUnderTarget(collectionId: CollectionId, documentId: DocumentId) {
         val artifactRoot = paths.artifactsDir(collectionId, documentId)
@@ -416,176 +230,33 @@ class ReindexService(
         )
     }
 
-    private suspend fun embed(text: String, documentId: DocumentId): FloatArray {
+    private suspend fun embed(texts: List<String>, documentId: DocumentId): List<FloatArray> {
         val embedder = documentEmbedder()
-            ?: throw EmbeddingException(
-                code = ModelManager.MODEL_NOT_INSTALLED_CODE,
-                message = ModelManager.installRemedy(),
-            )
-        val vectors = embedder.embedDocuments(listOf(text))
-        if (vectors.size != 1) {
-            throw IllegalStateException(
-                "the embedder returned ${vectors.size} vectors for 1 passage of document " +
-                    "${documentId.value}",
-            )
+            ?: throw EmbeddingException(code = ModelManager.MODEL_NOT_INSTALLED_CODE, message = ModelManager.installRemedy())
+        val vectors = embedder.embedDocuments(texts)
+        check(vectors.size == texts.size) {
+            "the embedder returned ${vectors.size} vectors for ${texts.size} passages of document ${documentId.value}"
         }
-        return vectors.single()
+        return vectors
     }
-
-    /**
-     * Every document identity the database currently holds, whatever its collection's lifecycle.
-     *
-     * The live set is the database's, not the serving generation's: the rebuild's job is to make the
-     * two agree, so it reads the set it is aiming at rather than the state it is repairing. Search
-     * already masks rows whose collection is not active, so a tombstoned collection's rows stay in the
-     * set until its own deletion reaches the index — that is the deletion state machine's phase, not
-     * the rebuild's.
-     */
-    private fun liveDocumentIds(): Set<String> {
-        val identities = HashSet<String>()
-        for (collection in collections.list()) {
-            for (document in documents.listByCollection(collection.id, Int.MAX_VALUE)) {
-                identities += document.id.value
-            }
-        }
-        return identities
-    }
-
-    /**
-     * Confirms the successor agrees with the database before anything is published.
-     *
-     * Two checks, both against the database rather than against what the rebuild happened to write.
-     * The identity comparison is the one that catches a stale row: a count can agree while a document
-     * the database deleted still holds rows, so the successor's document identities are compared with
-     * the database's live set, not merely counted. Row counts are then checked per collection — one
-     * Lucene row per chunk — so a row the count cannot explain is caught wherever it sits, and every
-     * collection in the database is checked, not only the rebuild's scope, because the successor is
-     * the one index every collection reads.
-     */
-    private suspend fun validate(nextName: String, liveIds: Set<String>, narrowed: Boolean) {
-        val reopened = LuceneIndex.openGeneration(paths.indexDir, nextName, identity)
-        try {
-            if (reopened.schemaStatus !is SchemaStatus.Ready) {
-                throw IllegalStateException(
-                    "the rebuilt generation does not record this build's model identity",
-                )
-            }
-            val identities = reopened.storedDocumentIds()
-            if (identities != liveIds) {
-                val unexplained = identities - liveIds
-                val missing = liveIds - identities
-                val remedy = if (narrowed) {
-                    " Run `infoscry reindex` without --collection to rebuild every collection."
-                } else {
-                    ""
-                }
-                throw IllegalStateException(
-                    "the rebuilt generation holds ${unexplained.size} document(s) the database does not " +
-                        "have and is missing ${missing.size} it does; refusing to publish.$remedy",
-                )
-            }
-            for (collection in collections.list()) {
-                val expected = documents.listByCollection(collection.id, Int.MAX_VALUE).sumOf { document ->
-                    content.chunkCount(document.id)
-                }
-                val actual = reopened.rowCount(collection.id)
-                if (actual != expected) {
-                    throw IllegalStateException(
-                        "collection ${collection.name} has $expected chunks in the database and " +
-                            "$actual rows in the rebuilt generation; refusing to publish",
-                    )
-                }
-            }
-        } finally {
-            reopened.close()
-        }
-    }
-
-    /**
-     * Copies the committed generation's files into the successor's directory.
-     *
-     * The copy is plain file work, done while the source writer is idle: the maintenance scope has
-     * drained every other writer, so the segments on disk are exactly the ones the last commit named.
-     * The lock file is left behind on purpose — the successor's writer makes its own.
-     */
-    private fun copyGenerationFiles(source: Path, target: Path) {
-        Files.list(source).use { entries ->
-            entries
-                .filter { it.name != "write.lock" && it.extension != "tmp" }
-                .forEach { entry -> Files.copy(entry, target.resolve(entry.name), StandardCopyOption.REPLACE_EXISTING) }
-        }
-    }
-
-    /** Deletes a retired generation, or says why it could not. */
-    private fun removeGenerationDirectory(directory: Path, current: String) {
-        if (directory.fileName.toString() == current) {
-            LOGGER.atWarn().addKeyValue(GENERATION_FIELD, current)
-                .log("refused to remove the generation the marker names")
-            return
-        }
-        deleteRecursively(directory)
-    }
-
-    /**
-     * Discards a successor that was never published.
-     *
-     * A pre-swap failure leaves the marker naming the generation the caller was already served by, so
-     * the half-built directory is unreferenced and deleting it keeps the disk from filling with
-     * abandoned attempts. A directory the marker names is never touched, whatever the failure was.
-     */
-    private fun discardUnpublished(nextName: String, currentName: String, failure: Throwable) {
-        val durable = LuceneIndex.currentGenerationName(paths.indexDir)
-        if (durable == nextName) {
-            LOGGER.atWarn()
-                .addKeyValue(GENERATION_FIELD, nextName)
-                .setCause(failure)
-                .log("a rebuild failed after publishing its marker; the next open selects the new generation")
-            return
-        }
-        val directory = paths.indexDir.resolve(nextName)
-        if (Files.isDirectory(directory)) {
-            deleteRecursively(directory)
-            LOGGER.atInfo()
-                .addKeyValue(GENERATION_FIELD, nextName)
-                .setCause(failure)
-                .log("discarded an unpublished search index generation")
-        }
-    }
-
-    private fun deleteRecursively(directory: Path) {
-        Files.walk(directory).use { paths ->
-            paths.sorted(Comparator.reverseOrder()).forEach { path -> Files.deleteIfExists(path) }
-        }
-    }
-
-    /** What one document contributed to the rebuild's totals. */
-    private data class BuiltDocument(val chunks: Int)
 
     companion object {
-
         /** How many documents the rebuild reads from the database at a time. */
         private const val DOCUMENT_PAGE = 200
 
         /** How many units the rebuild reads at a time, the import stage's own page size. */
         private const val UNIT_BATCH = 64
 
-        /** The stage name a rebuild reports while it is building the successor. */
+        /** How many passages are embedded in one call. */
+        private const val EMBED_BATCH = 32
+
+        /** The stage name a rebuild reports while it rebuilds documents. */
         const val STAGE_REBUILD: String = "rebuild"
 
-        /** How long retirement waits for the readers it replaced before giving up. */
-        const val RETIRE_TIMEOUT_MILLIS: Long = 5_000L
-
-        /**
-         * A document may hold at most this many chunks in one index transaction's in-memory rows, the
-         * same ceiling the import stage keeps.
-         */
+        /** A document may hold at most this many chunks in one rebuild, the import stage's own ceiling. */
         const val MAX_CHUNKS_PER_DOCUMENT: Int = 50_000
 
-        private const val GENERATION_PREFIX: String = "lucene-"
-        private const val GENERATION_FIELD = "generation"
-
-        /** The structured field carrying how many stale revision tags a rebuild removed. */
-        private const val SHED_REVISIONS_FIELD = "shed_revisions"
+        private const val SHED_ROWS_FIELD = "shed_rows"
         private val LOGGER = LoggerFactory.getLogger("infoscry.reindex")
     }
 }

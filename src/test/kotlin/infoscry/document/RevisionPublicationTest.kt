@@ -17,7 +17,6 @@ import infoscry.extract.ExtractionFingerprint
 import infoscry.extract.ExtractionSettings
 import infoscry.jobs.seedCollectionWithId
 import infoscry.search.DocumentRow
-import infoscry.search.RevisionSnapshotUnavailableException
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
 import infoscry.storage.DocumentRevisionStore
@@ -104,45 +103,6 @@ class RevisionPublicationTest {
         }
     }
 
-    @Test
-    fun aPublicationWaitsForTheReaderThatIsAlreadyInsideAndThenServesOneReading() {
-        AppContext.open(dataDir).use { context ->
-            val fixture = published(context, BASELINE_TEXT)
-            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
-
-            val inside = context.revisionSnapshots.acquire()
-            try {
-                val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
-                val publication = runBlocking {
-                    val job = scope.launch {
-                        context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate)
-                    }
-                    // The reader is still inside, so the handoff has not begun: the reading it was served
-                    // is still there in full, and no candidate row has been written under it.
-                    Thread.sleep(HANDOFF_SETTLE_MILLIS)
-                    assertFalse(job.isCompleted, "a publication waits for the readers that are already inside")
-                    assertEquals(
-                        listOf(BASELINE_TEXT),
-                        indexTexts(context, "baseline", inside.scope),
-                        "the reading the retained reader was served is not missing while it finishes",
-                    )
-                    assertEquals(emptyList(), indexTexts(context, "replacement", inside.scope))
-                    inside.close()
-                    job
-                }
-                runBlocking { publication.join() }
-            } finally {
-                inside.close()
-            }
-
-            assertEquals(candidate, context.revisions.activeRevisionId(fixture.documentId))
-            assertEquals(
-                listOf(CANDIDATE_TEXT),
-                searchTexts(context),
-                "once the reader is out, exactly one coherent reading is served",
-            )
-        }
-    }
 
     // ---- Ticket 03b: provenance persistence boundary ----
 
@@ -371,54 +331,19 @@ class RevisionPublicationTest {
         }
     }
 
+    /** A document deleted while its candidate waited for publication is not resurrected by it. */
     @Test
-    fun aDeletionLandedWhileTheRowsAreStagedWinsOverThePublication() {
+    fun aDeletionThatLandsBeforeThePublicationWins() {
         AppContext.open(dataDir).use { context ->
             val fixture = published(context, BASELINE_TEXT)
             val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
+            runBlocking { context.documentService.deleteConfirmed(fixture.collectionId, listOf(fixture.documentId)) }
 
-            // The deletion runs on its own thread, but it is only started from the INTENT_PERSISTED hook, so
-            // it cannot land before the publication has passed every earlier check: the order is fixed by
-            // the hook rather than by thread scheduling. The hook runs before the boundary takes its
-            // mutation permit, so the exclusive deletion can complete there, and the publication waits for
-            // it — its authority has not moved, which is the exact interleaving the boundary exists for.
-            val staged = java.util.concurrent.CountDownLatch(1)
-            val deleted = java.util.concurrent.CountDownLatch(1)
-            val deleter = Thread {
-                runBlocking {
-                    context.documentService.deleteConfirmed(fixture.collectionId, listOf(fixture.documentId))
-                }
-                deleted.countDown()
-            }.apply { isDaemon = true }
-
-            val failure = assertFailsWith<Throwable> {
-                runBlocking {
-                    context.revisionPublication.publish(
-                        fixture.documentId,
-                        fixture.revisionId,
-                        candidate,
-                    ) { step ->
-                        // The boundary takes the mutation permit, so a deletion can only be landed before it
-                        // — which is exactly the ordering the recheck exists to catch.
-                        if (step == PublicationStep.INTENT_PERSISTED) {
-                            staged.countDown()
-                            deleter.start()
-                            assertTrue(deleted.await(20, java.util.concurrent.TimeUnit.SECONDS), "the deletion finished")
-                        }
-                    }
-                }
+            assertFailsWith<Throwable> {
+                runBlocking { context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) }
             }
-            assertTrue(staged.count == 0L)
-            assertTrue(
-                failure is infoscry.storage.DocumentBeingDeletedException,
-                "a deletion rechecked under the boundary wins, was $failure",
-            )
             assertNull(context.documents.get(fixture.documentId))
-            assertEquals(
-                emptyList(),
-                searchTexts(context),
-                "neither reading is resurrected by the publication that lost the race",
-            )
+            assertEquals(emptyList(), searchTexts(context), "neither reading is resurrected by the publication")
         }
     }
 
@@ -464,70 +389,23 @@ class RevisionPublicationTest {
     // ---- The invariants a publication is only correct if it never breaks ----
 
     /**
-     * T1: a reading the import path wrote — rows with no revision tag at all — is replaced without ever
-     * being served beside the reading that replaced it, and stays readable in SQLite afterwards.
-     *
-     * The row set is the point: an untagged reading cannot be hidden by its revision id, so the only way
-     * to keep it from being served beside its replacement is to delete it before the snapshot stops
-     * hiding it. Reverting the `deleteSupersededRows` call inside `publish`'s boundary makes this fail at
-     * the instant right after the snapshot switch, where the document would answer with both readings.
+     * A reading the import path wrote is replaced in the same transaction that publishes its replacement:
+     * search answers with the previous reading until the publication commits and with the new one after
+     * it, never with both, and the replaced reading stays readable from its own revision.
      */
     @Test
     fun publishingOverAnImportReadingNeverServesBothReadings() {
         AppContext.open(dataDir).use { context ->
             val fixture = publishedByImport(context, BASELINE_TEXT)
-            assertNull(
-                searchFor(context, "reading").single().revisionId,
-                "an import's rows name no revision, which is the reading this publication has to replace",
-            )
             val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
+            assertEquals(listOf(BASELINE_TEXT), searchTexts(context))
 
-            val rowsAtStep = linkedMapOf<PublicationStep, List<String>>()
-            val searchAtStep = linkedMapOf<PublicationStep, List<String>>()
-            runBlocking {
-                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                    // The rows this document has in the index at this instant, read under the scope the gate
-                    // would hand a reader: the search service runs exactly this query with the lease it took.
-                    rowsAtStep[step] = indexTexts(context, "reading", context.revisionPublication.revisionScope())
-                    // And the answer a user gets, wherever a reader can take a lease at all: inside the
-                    // boundary the gate is barred, so there the index read above is the only reading there is.
-                    if (step !in INSIDE_BOUNDARY) searchAtStep[step] = searchTexts(context)
-                }
-            }
-
-            // Every instant the protocol names, including the one between the snapshot switch and the
-            // removal of the replaced reading's rows: the document has one reading's rows, never two.
-            rowsAtStep.forEach { (step, texts) ->
-                assertFalse(
-                    texts.contains(BASELINE_TEXT) && texts.contains(CANDIDATE_TEXT),
-                    "at $step the index served rows of both readings: $texts",
-                )
-                assertEquals(
-                    1,
-                    texts.size,
-                    "at $step the document must have exactly one reading's rows, was $texts",
-                )
-            }
-            // The reading a search answers with changes at the snapshot switch and nowhere else: the
-            // previous reading in full until then, the one that replaced it afterwards.
-            assertEquals(
-                listOf(BASELINE_TEXT, CANDIDATE_TEXT, CANDIDATE_TEXT, CANDIDATE_TEXT),
-                searchAtStep.values.map { it.single() },
-            )
+            runBlocking { context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) }
 
             assertEquals(candidate, context.revisions.activeRevisionId(fixture.documentId))
             assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context))
-            assertEquals(
-                1,
-                context.index().rowCount(fixture.documentId),
-                "the index holds the rows of one reading once the publication has finished",
-            )
-            assertEquals(
-                emptyList(),
-                searchFor(context, "baseline").map { it.text },
-                "the replaced reading's rows are gone from the index",
-            )
-            // The replaced reading is still SQLite's, which is what a saved excerpt opens against.
+            assertEquals(1, context.index().rowCount(fixture.documentId), "the index holds the rows of one reading")
+            assertEquals(emptyList(), searchFor(context, "baseline").map { it.text }, "the replaced reading's rows are gone")
             assertEquals(
                 BASELINE_TEXT,
                 assertNotNull(context.revisions.pageForUnit(fixture.revisionId, fixture.unitId)).extractedText,
@@ -536,75 +414,26 @@ class RevisionPublicationTest {
     }
 
     /**
-     * T2: a staged candidate is never searchable — not while its rows are staged, not once they are
-     * committed, and not after the attempt is abandoned.
-     *
-     * Reverting the hiding of the candidate before its rows can exist makes this fail inside the hook at
-     * the staged commit, where the committed candidate rows would be found by the read the lease would
-     * have authorized.
+     * A publication record a process left behind without finishing is resolved at the next start: one that
+     * never took effect is abandoned and the document keeps its reading.
      */
     @Test
-    fun aStagedCandidateIsNeverSearchableEvenWhenTheAttemptFailsAfterItsCommit() {
+    fun recoveryAbandonsAPublicationRecordThatNeverTookEffect() {
         AppContext.open(dataDir).use { context ->
-            val fixture = publishedByImport(context, BASELINE_TEXT)
+            val fixture = published(context, BASELINE_TEXT)
             val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
+            val record = context.revisions.prepare(fixture.documentId, fixture.collectionId, fixture.revisionId, candidate)
 
-            val searched = mutableListOf<PublicationStep>()
-            val attempt = AtomicReference<String>()
-            val failure = assertFailsWith<IllegalStateException> {
-                runBlocking {
-                    context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                        when (step) {
-                            PublicationStep.INTENT_PERSISTED ->
-                                attempt.set(context.revisions.unfinishedIntents().single().id)
-                            PublicationStep.ROWS_STAGED, PublicationStep.STAGED_COMMITTED -> {
-                                // The scope the gate would have handed a reader hides the candidate from
-                                // before a row of it exists, so nothing of the draft is findable yet.
-                                assertEquals(
-                                    emptyList(),
-                                    indexTexts(context, "replacement", context.revisionPublication.revisionScope()),
-                                    "the staged candidate was searchable at $step",
-                                )
-                                assertEquals(
-                                    listOf(BASELINE_TEXT),
-                                    indexTexts(context, "reading", context.revisionPublication.revisionScope()),
-                                    "the baseline must stay the reading the document publishes at $step",
-                                )
-                                searched += step
-                            }
+            val report = runBlocking { context.revisionPublication.recoverUnfinished() }
 
-                            else -> Unit
-                        }
-                        if (step == PublicationStep.STAGED_COMMITTED) {
-                            throw IllegalStateException("the attempt died after its staged commit")
-                        }
-                    }
-                }
-            }
-
-            assertEquals(listOf(PublicationStep.ROWS_STAGED, PublicationStep.STAGED_COMMITTED), searched)
-            assertEquals("the attempt died after its staged commit", failure.message)
-            val intent = assertNotNull(context.revisions.intent(assertNotNull(attempt.get())))
-            assertEquals(PublicationPhase.ABANDONED, intent.phase, "a failure before authority abandons the attempt")
-            assertEquals(RevisionPublicationService.PUBLICATION_FAILED, intent.errorCode)
-            assertNull(intent.authoritativeAt)
-
-            assertTrue(context.revisions.unfinishedIntents().isEmpty(), "an abandoned attempt is not work for a startup")
+            assertEquals(listOf(record.id), report.discarded)
+            assertEquals(PublicationPhase.ABANDONED, context.revisions.intent(record.id)?.phase)
             assertEquals(fixture.revisionId, context.revisions.activeRevisionId(fixture.documentId))
             assertEquals(listOf(BASELINE_TEXT), searchTexts(context))
-            assertEquals(BASELINE_TEXT, assertNotNull(context.content.readUnit(fixture.unitId)).extractedText)
-            assertEquals(
-                emptyList(),
-                searchFor(context, "replacement").map { it.text },
-                "the candidate's committed rows must be gone once the attempt is abandoned",
-            )
-            assertEquals(
-                emptyList(),
-                indexTexts(context, "replacement", context.revisionPublication.revisionScope()),
-                "nothing may still search for a candidate the document does not publish",
-            )
+            assertEquals(emptyList(), runBlocking { context.revisionPublication.recoverUnfinished() }.discarded, "recovery is idempotent")
         }
     }
+
 
     // ---- T4: what a discard leaves behind ----
 
@@ -618,7 +447,6 @@ class RevisionPublicationTest {
             val fixture = publishedByImport(context, BASELINE_TEXT)
             val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
             val rowsBefore = context.index().rowCount(fixture.documentId)
-            val attempt = AtomicReference<String>()
 
             val held = CountDownLatch(1)
             val release = CountDownLatch(1)
@@ -631,11 +459,7 @@ class RevisionPublicationTest {
                 }
                 assertTrue(held.await(20, TimeUnit.SECONDS), "the rebuild holds maintenance")
                 try {
-                    context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                        if (step == PublicationStep.INTENT_PERSISTED) {
-                            attempt.set(context.revisions.unfinishedIntents().single().id)
-                        }
-                    }
+                    context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate)
                     null
                 } catch (thrown: Throwable) {
                     thrown
@@ -649,7 +473,13 @@ class RevisionPublicationTest {
                 failure is MaintenanceInProgressException,
                 "a publication that cannot enter the boundary must refuse rather than publish, was $failure",
             )
-            val intent = assertNotNull(context.revisions.intent(assertNotNull(attempt.get())))
+            val recorded = context.database.read { connection ->
+                connection.prepareStatement("SELECT id FROM revision_publications WHERE target_revision_id = ?").use {
+                    it.setString(1, candidate)
+                    it.executeQuery().use { rows -> rows.next(); rows.getString(1) }
+                }
+            }
+            val intent = assertNotNull(context.revisions.intent(recorded))
             assertEquals(PublicationPhase.ABANDONED, intent.phase)
             assertEquals(RevisionPublicationService.PUBLICATION_FAILED, intent.errorCode)
             assertNull(intent.authoritativeAt)
@@ -664,311 +494,11 @@ class RevisionPublicationTest {
         }
     }
 
-    /**
-     * T4b: when a discard cannot clean up because maintenance refuses the permit, the attempt stays
-     * PREPARED and the candidate stays hidden — and a startup's roll-forward then removes its rows and
-     * lets go of the revision.
-     */
-    @Test
-    fun aDiscardThatMaintenanceRefusesLeavesTheAttemptForRecovery() {
-        AppContext.open(dataDir).use { context ->
-            val fixture = publishedByImport(context, BASELINE_TEXT)
-            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
-            val rowsBefore = context.index().rowCount(fixture.documentId)
-            val attempt = AtomicReference<String>()
 
-            val release = CountDownLatch(1)
-            val rebuilding = AtomicReference<Job?>()
-            val observed = mutableListOf<PublicationStep>()
-            val failure = runBlocking {
-                try {
-                    context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                        observed += step
-                        when (step) {
-                            PublicationStep.INTENT_PERSISTED ->
-                                attempt.set(context.revisions.unfinishedIntents().single().id)
-                            PublicationStep.STAGED_COMMITTED -> {
-                                // The rebuild requests exclusive maintenance while this publication still holds
-                                // the permit, so it only gets it once the boundary unwinds — and from then on the
-                                // discard's cleanup permit is refused for as long as the rebuild holds it.
-                                rebuilding.set(
-                                    CoroutineScope(Dispatchers.Default).launch {
-                                        context.mutations.withExclusiveMaintenance("test rebuild") {
-                                            release.await(60, TimeUnit.SECONDS)
-                                        }
-                                    },
-                                )
-                                awaitMaintenanceRequest(context)
-                                throw IllegalStateException("the discard cannot clean up")
-                            }
 
-                            else -> Unit
-                        }
-                    }
-                    null
-                } catch (thrown: Throwable) {
-                    thrown
-                } finally {
-                    release.countDown()
-                    rebuilding.get()?.join()
-                }
-            }
-            assertTrue(failure is IllegalStateException, "the publication's own failure propagates, was $failure")
 
-            assertEquals(
-                listOf(
-                    PublicationStep.INTENT_PERSISTED,
-                    PublicationStep.ROWS_STAGED,
-                    PublicationStep.STAGED_COMMITTED,
-                ),
-                observed,
-                "the attempt has to reach its staged commit for its discard to be refused",
-            )
-            assertEquals("the discard cannot clean up", failure.message)
-            val id = assertNotNull(attempt.get())
-            assertEquals(
-                PublicationPhase.PREPARED,
-                assertNotNull(context.revisions.intent(id)).phase,
-                "a discard that could not remove its rows must leave the attempt for recovery",
-            )
-            // The committed candidate rows are still in the index, and the scope is the only thing keeping
-            // them out of a search: that is what a startup has to clean before anyone is served.
-            assertEquals(rowsBefore + 1, context.index().rowCount(fixture.documentId))
-            assertEquals(listOf(BASELINE_TEXT), searchTexts(context))
-            assertEquals(emptyList(), searchFor(context, "replacement").map { it.text })
-            assertTrue(candidate in context.revisionPublication.revisionScope().hiddenRevisionIds)
 
-            val recovery = runBlocking { context.revisionPublication.recoverUnfinished() }
-            assertEquals(listOf(id), recovery.discarded)
-            assertEquals(PublicationPhase.ABANDONED, assertNotNull(context.revisions.intent(id)).phase)
-            assertEquals(rowsBefore, context.index().rowCount(fixture.documentId), "recovery removed the staged rows")
-            assertFalse(
-                candidate in context.revisionPublication.revisionScope().hiddenRevisionIds,
-                "the revision is revealed once nothing of it is left to hide",
-            )
-            assertEquals(listOf(BASELINE_TEXT), searchTexts(context))
-            assertEquals(fixture.revisionId, context.revisions.activeRevisionId(fixture.documentId))
-        }
-    }
 
-    /**
-     * T5: a failure after the authority commit is not a failure to report. The document already serves the
-     * new reading, so the caller is answered with the operation's identifier and the publication is
-     * finished inline; restoring the old rethrow makes this fail on the call itself.
-     */
-    @Test
-    fun aFailureAfterTheAuthorityCommitIsFinishedRatherThanReported() {
-        AppContext.open(dataDir).use { context ->
-            val fixture = publishedByImport(context, BASELINE_TEXT)
-            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
-
-            val operation = runBlocking {
-                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                    if (step == PublicationStep.AUTHORITATIVE) {
-                        throw IllegalStateException("the process died after the authority commit")
-                    }
-                }
-            }
-
-            val intent = assertNotNull(context.revisions.intent(operation))
-            assertEquals(PublicationPhase.PUBLISHED, intent.phase)
-            assertNotNull(intent.authoritativeAt)
-            assertNotNull(intent.cleanedAt)
-            assertEquals(candidate, context.revisions.activeRevisionId(fixture.documentId))
-            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context))
-            assertEquals(emptyList(), searchFor(context, "baseline").map { it.text })
-            assertEquals(
-                BASELINE_TEXT,
-                assertNotNull(context.revisions.pageForUnit(fixture.revisionId, fixture.unitId)).extractedText,
-            )
-            val recovery = runBlocking { context.revisionPublication.recoverUnfinished() }
-            assertEquals(emptyList(), recovery.completed, "a publication finished inline is not work for a startup")
-            assertEquals(emptyList(), recovery.discarded)
-        }
-    }
-
-    /**
-     * T6: a publication whose bookkeeping fails after its reading was switched in keeps serving that
-     * reading, and recovery finishes the cleanup it owes.
-     *
-     * The hook throws on every PUBLISHED observation, which is the last thing the inline completion of an
-     * authoritative publication does, so that completion fails too. By then the boundary had committed the
-     * rows, moved the authority, removed the replaced reading's rows and switched the snapshot, so the
-     * archive agrees with itself and the failure is bookkeeping alone. Reverting the `catch (failure)`
-     * block's completion — letting an authoritative publication rethrow instead of finishing itself and
-     * returning its operation id — makes this fail on the `publish` call.
-     */
-    @Test
-    fun aPublicationWhoseBookkeepingFailsAfterTheSwitchKeepsServingTheNewReading() {
-        AppContext.open(dataDir).use { context ->
-            val fixture = published(context, BASELINE_TEXT)
-            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
-
-            val operation = runBlocking {
-                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                    if (step == PublicationStep.PUBLISHED) {
-                        throw IllegalStateException("the publication's bookkeeping failed after the switch")
-                    }
-                }
-            }
-
-            val intent = assertNotNull(context.revisions.intent(operation))
-            assertEquals(PublicationPhase.PUBLISHED, intent.phase)
-            assertNotNull(intent.authoritativeAt, "the authority moved, which is why the failure is not reported")
-            // The seal is for an archive whose two readings disagree. This one does not, so a reader takes a
-            // lease and is served the reading the database publishes.
-            context.revisionPublication.acquire().close()
-            assertEquals(candidate, context.revisions.activeRevisionId(fixture.documentId))
-            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context))
-            assertEquals(emptyList(), searchFor(context, "baseline").map { it.text })
-
-            // The cleanup the failure skipped is what recovery owes, and finishing it changes nothing a
-            // reader sees.
-            val recovery = runBlocking { context.revisionPublication.recoverUnfinished() }
-            assertEquals(emptyList(), recovery.completed, "an attempt already recorded as published is not work")
-            assertNotNull(
-                assertNotNull(context.revisions.intent(operation)).cleanedAt,
-                "recovery finishes the publication, cleanup included",
-            )
-            context.revisionPublication.acquire().close()
-            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context))
-            assertEquals(1, context.index().rowCount(fixture.documentId))
-        }
-    }
-
-    /**
-     * T7: a failure between the snapshot switch and the attempt's own record refuses nothing, because the
-     * switch is what makes the index, the snapshot and the database agree.
-     *
-     * The hook throws on every SNAPSHOT_PUBLISHED observation, so the inline completion fails at its own
-     * switch step too and the attempt never reaches PUBLISHED. The scope reveals the target revision from
-     * the boundary's handoff on, so a reader is served the reading that was switched in rather than a
-     * refusal. Reverting the `gate.current().reveals(...)` condition — sealing after every post-authority
-     * failure instead of only for a publication whose switch never happened — makes the reads below throw
-     * `RevisionSnapshotUnavailableException`.
-     */
-    @Test
-    fun aFailureBetweenTheSwitchAndTheAttemptsRecordStillServesTheSwitchedReading() {
-        AppContext.open(dataDir).use { context ->
-            val fixture = published(context, BASELINE_TEXT)
-            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
-
-            val operation = runBlocking {
-                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                    if (step == PublicationStep.SNAPSHOT_PUBLISHED) {
-                        throw IllegalStateException("the process died before recording the publication")
-                    }
-                }
-            }
-
-            val intent = assertNotNull(context.revisions.intent(operation))
-            assertEquals(PublicationPhase.PREPARED, intent.phase, "the attempt's own record never ran")
-            assertNotNull(intent.authoritativeAt, "the authority moved, so recovery has to finish it")
-            // The switch happened, so the archive is coherent: no refusal and no mixture.
-            context.revisionPublication.acquire().close()
-            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context))
-            assertEquals(emptyList(), searchFor(context, "baseline").map { it.text })
-
-            // Recovery finishes what the failure skipped, and the reading a reader gets does not change.
-            val recovery = runBlocking { context.revisionPublication.recoverUnfinished() }
-            assertEquals(listOf(operation), recovery.completed)
-            val recovered = assertNotNull(context.revisions.intent(operation))
-            assertEquals(PublicationPhase.PUBLISHED, recovered.phase)
-            assertNotNull(recovered.cleanedAt)
-            context.revisionPublication.acquire().close()
-            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context))
-            assertEquals(1, context.index().rowCount(fixture.documentId))
-        }
-    }
-
-    /**
-     * T8: recovery completes a publication whose authority is durable and clears the seal an archive that
-     * could not finish it refuses reads with.
-     *
-     * The state a failure between the switch and the attempt's record leaves is exactly the state recovery
-     * exists for: a PREPARED attempt with its authority committed. The seal is raised over it here, the way
-     * a process that could not finish the publication would have raised it, and completing the publication
-     * is what lets readers in again. Reverting the `gate.unseal()` in `complete` makes this fail at the read
-     * after recovery.
-     */
-    @Test
-    fun recoveringAPublicationClearsTheSealThatRefusedReaders() {
-        AppContext.open(dataDir).use { context ->
-            val fixture = published(context, BASELINE_TEXT)
-            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
-
-            val operation = runBlocking {
-                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                    if (step == PublicationStep.SNAPSHOT_PUBLISHED) {
-                        throw IllegalStateException("the process died before recording the publication")
-                    }
-                }
-            }
-            assertEquals(PublicationPhase.PREPARED, assertNotNull(context.revisions.intent(operation)).phase)
-
-            context.revisionSnapshots.seal("an authoritative publication could not be finished")
-            assertFailsWith<RevisionSnapshotUnavailableException> { context.revisionPublication.acquire() }
-
-            val recovery = runBlocking { context.revisionPublication.recoverUnfinished() }
-            assertEquals(listOf(operation), recovery.completed)
-            assertEquals(PublicationPhase.PUBLISHED, assertNotNull(context.revisions.intent(operation)).phase)
-            // The archive is served again, and what it serves is the reading the database publishes.
-            context.revisionPublication.acquire().close()
-            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context))
-            assertEquals(emptyList(), searchFor(context, "baseline").map { it.text })
-        }
-    }
-
-    /**
-     * T9: a completion failure whose switch never happened seals reads end to end, and recovery unseals.
-     *
-     * The hook is counter-based rather than tied to a timing: it fails the first AUTHORITATIVE observation
-     * (the authority is durable, the snapshot switch has not run) and then the *second* STAGED_COMMITTED
-     * observation, which is the roll-forward's own staged commit, so the publication cannot be finished in
-     * this process either. The scope still hides the target revision, so the archive's two readings
-     * disagree and every read must refuse rather than mix them. Recovery, with no hook, finishes the
-     * publication and lets readers in on the reading the database publishes.
-     */
-    @Test
-    fun aCompletionFailureWhoseSwitchNeverHappenedRefusesReadsUntilRecoveryUnseals() {
-        AppContext.open(dataDir).use { context ->
-            val fixture = published(context, BASELINE_TEXT)
-            val candidate = stageCandidate(context, fixture.documentId, fixture.revisionId, CANDIDATE_TEXT)
-
-            var authoritative = 0
-            var stagedCommitted = 0
-            val operation = runBlocking {
-                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate) { step ->
-                    when (step) {
-                        PublicationStep.AUTHORITATIVE ->
-                            if (++authoritative == 1) throw IllegalStateException("died after the authority moved, before the switch")
-                        PublicationStep.STAGED_COMMITTED ->
-                            if (++stagedCommitted == 2) throw IllegalStateException("the roll-forward could not commit its staged rows")
-                        else -> Unit
-                    }
-                }
-            }
-
-            assertEquals(1, authoritative, "the failure hit the live publication's authority step once")
-            assertEquals(2, stagedCommitted, "the roll-forward reached its own staged commit, where it failed")
-            val intent = assertNotNull(context.revisions.intent(operation))
-            assertNotNull(intent.authoritativeAt, "the database already publishes the candidate")
-            assertEquals(PublicationPhase.PREPARED, intent.phase, "the publication was never finished")
-            assertEquals(candidate, context.revisions.activeRevisionId(fixture.documentId))
-
-            // The archive's two readings disagree, so a read refuses instead of serving either alone or both.
-            assertFailsWith<RevisionSnapshotUnavailableException> { context.revisionPublication.acquire() }
-            assertFailsWith<RevisionSnapshotUnavailableException> { searchTexts(context) }
-
-            val recovery = runBlocking { context.revisionPublication.recoverUnfinished() }
-            assertEquals(listOf(operation), recovery.completed)
-            assertEquals(PublicationPhase.PUBLISHED, assertNotNull(context.revisions.intent(operation)).phase)
-            context.revisionPublication.acquire().close()
-            assertEquals(listOf(CANDIDATE_TEXT), searchTexts(context), "recovery unseals onto the reading the database publishes")
-            assertEquals(emptyList(), searchFor(context, "baseline").map { it.text })
-            assertEquals(1, context.index().rowCount(fixture.documentId))
-        }
-    }
 
     // ---- Fixture ----
 
@@ -1124,15 +654,6 @@ class RevisionPublicationTest {
             SearchFilters(collectionId = CollectionId("default")),
         ).hits
 
-    /** The index's own answer under one revision scope; the route above is the same read with a lease. */
-    private fun indexTexts(
-        context: AppContext,
-        query: String,
-        scope: infoscry.search.RevisionScope,
-    ): List<String> = context.index()
-        .searchKeyword(CollectionId("default"), query, null, 10, scope)
-        .map { it.text }
-
     private fun chunkDraft(ordinal: Int, text: String) = ChunkDraft(
         ordinal = ordinal,
         text = text,
@@ -1157,14 +678,5 @@ class RevisionPublicationTest {
         /** How long a test waits for another writer to ask for exclusive maintenance. */
         const val MAINTENANCE_REQUEST_TIMEOUT_NANOS: Long = 20_000_000_000L
 
-        /**
-         * The steps a publication observes while the gate's handoff is held, where a reader can only be the
-         * one that already holds a lease: a real search from here would wait for the handoff it is inside.
-         */
-        val INSIDE_BOUNDARY = setOf(
-            PublicationStep.ROWS_STAGED,
-            PublicationStep.STAGED_COMMITTED,
-            PublicationStep.AUTHORITATIVE,
-        )
     }
 }

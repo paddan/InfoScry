@@ -62,20 +62,8 @@ class RevisionRestoreRecoveryTest {
         assertRecoveryOf(RestoreStep.EMBEDDED, authorityMoved = false)
     }
 
-    @Test
-    fun aKillAfterTheStagedIndexCommitLeavesTheActiveRevisionAndFailsTheRequest() {
-        assertRecoveryOf(RestoreStep.STAGED_COMMITTED, authorityMoved = false)
-    }
 
-    @Test
-    fun aKillAfterTheAuthorityMovesRollsTheRestoreForward() {
-        assertRecoveryOf(RestoreStep.AUTHORITATIVE, authorityMoved = true)
-    }
 
-    @Test
-    fun aKillBeforeTheSnapshotIsPublishedRollsTheRestoreForward() {
-        assertRecoveryOf(RestoreStep.SNAPSHOT_PUBLISHED, authorityMoved = true)
-    }
 
     @Test
     fun aKillAfterThePublicationIsMarkedPublishedStillRecordsTheRestoreAsPublished() {

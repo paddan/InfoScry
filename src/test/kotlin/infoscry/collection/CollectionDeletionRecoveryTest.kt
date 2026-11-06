@@ -152,6 +152,17 @@ class CollectionDeletionRecoveryTest {
             val collection = runBlocking { context.collectionService.create(COLLECTION_NAME) }
             // Index one chunk the way an import would, through the real index with a deterministic vector.
             val documentId = DocumentId.new()
+            context.database.transaction { connection ->
+                connection.prepareStatement(
+                    "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, original_path, " +
+                        "size_bytes, status, created_at, updated_at) VALUES (?, ?, 'sha', 'text/plain', 'r.txt', '/r.txt', " +
+                        "1, 'COMPLETE', 't', 't')",
+                ).use {
+                    it.setString(1, documentId.value)
+                    it.setString(2, collection.id.value)
+                    it.executeUpdate()
+                }
+            }
             runBlocking {
                 context.index().replaceDocument(
                     listOf(
