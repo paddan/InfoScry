@@ -1806,6 +1806,45 @@ export async function resetUserPassword(id: string): Promise<string> {
   return ((await mutate(`/api/users/${encodeURIComponent(id)}/password-reset`, 'POST')) as { oneTimePassword: string }).oneTimePassword;
 }
 
+// ---- Memberships ----
+
+export type CollectionRole = 'OWNER' | 'EDITOR' | 'READER';
+
+export type Member = {
+  userId: string;
+  username: string;
+  displayName: string;
+  active: boolean;
+  role: CollectionRole;
+  addedAt: string;
+};
+
+export type DirectoryEntry = { id: string; username: string; displayName: string };
+
+/** A collection's members, and the caller's own role there (null for an administrator who is not a member). */
+export async function listMembers(collectionId: string): Promise<{ members: Member[]; callerRole: CollectionRole | null }> {
+  const body = (await readJson(await fetch(`/api/collections/${encodeURIComponent(collectionId)}/members`))) as {
+    members: Member[];
+    callerRole?: CollectionRole | null;
+  };
+  return { members: body.members, callerRole: body.callerRole ?? null };
+}
+
+/** Adds a member or changes their role; setting the role they have changes nothing. */
+export async function putMember(collectionId: string, userId: string, role: CollectionRole): Promise<Member> {
+  const path = `/api/collections/${encodeURIComponent(collectionId)}/members/${encodeURIComponent(userId)}`;
+  return ((await mutate(path, 'PUT', { role })) as { member: Member }).member;
+}
+
+export async function removeMember(collectionId: string, userId: string): Promise<void> {
+  await mutate(`/api/collections/${encodeURIComponent(collectionId)}/members/${encodeURIComponent(userId)}`, 'DELETE');
+}
+
+/** Active users an owner can add: ids and names only. */
+export async function listUserDirectory(): Promise<DirectoryEntry[]> {
+  return ((await readJson(await fetch('/api/users/directory'))) as { users: DirectoryEntry[] }).users;
+}
+
 async function readJson(response: Response): Promise<unknown> {
   const text = await response.text();
   let body: unknown = null;

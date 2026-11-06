@@ -7,6 +7,20 @@ sidebar and four views: **Search**, **Ask**, **Investigate** and **Admin**.
 Switching views preserves their current content. Search filters apply only to
 Search.
 
+## Members and roles
+
+Each collection has members. Whoever creates a collection becomes its owner. In the
+collection's **Settings → Members**, an owner adds colleagues and gives each a role:
+
+- **Reader**: search, read documents, Ask and Investigate.
+- **Editor**: also import, rescan, retry, delete documents, review pages, and edit
+  corrections, glossary groups and prompts.
+- **Owner**: also change the collection's settings and members, and delete it.
+
+A collection always keeps at least one owner. People who are not members do not
+see the collection at all. Administrators reach every collection and manage users
+and LLM profiles. Your Ask and Investigate conversations are visible only to you.
+
 ## Create a collection and import files
 
 1. Open **Admin → Collections** and create a collection.

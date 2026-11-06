@@ -41,6 +41,8 @@
   import { documentStatus } from './documentStatus';
 
   export let visible = true;
+  /** Whether the signed-in user is an administrator; passed to the members section. */
+  export let isAdmin = false;
   export let documentViewState: DocumentListViewState | undefined = undefined;
   export let onDocumentViewStateChange: (collectionId: string, state: DocumentListViewState) => void = () => {};
   export let collections: Collection[];
@@ -1675,6 +1677,7 @@
           collection={selected}
           {onCollectionsChanged}
           {onOpenLlmProfiles}
+          {isAdmin}
           onOpenDeleteDialog={openDeleteDialog}
           {promptsPendingFor}
           {onPromptsRevealed}

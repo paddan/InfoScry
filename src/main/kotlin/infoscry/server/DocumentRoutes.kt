@@ -296,7 +296,7 @@ fun Routing.configureDocumentRoutes(context: AppContext) {
                 // anything, so an unknown or cross-collection id rejects the whole request with no side
                 // effect. That check runs under the exclusive maintenance permit, which is also what
                 // drains the bounded mutation stages a running import is inside.
-                val operation = context.documentService.requestDeletion(collection.id, documentIds)
+                val operation = context.documentService.requestDeletion(collection.id, documentIds, call.principal.user.id)
                 call.respondJson(
                     HttpStatusCode.Accepted,
                     DeleteDocumentsResponse(

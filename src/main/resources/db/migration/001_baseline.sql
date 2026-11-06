@@ -1333,3 +1333,27 @@ CREATE TABLE access_tokens (
     revoked_at   TEXT
 );
 CREATE INDEX access_tokens_user ON access_tokens (user_id);
+
+-- ---------------------------------------------------------------------------------------------
+-- Memberships and ownership
+-- ---------------------------------------------------------------------------------------------
+
+-- Who may use a collection, and how. Administrators act as owners of every collection without a row here.
+-- A collection always keeps at least one OWNER; the membership service enforces that with the owner rows
+-- locked. The rows go with the collection.
+CREATE TABLE collection_members (
+    collection_id TEXT NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    user_id       TEXT NOT NULL REFERENCES users (id),
+    role          TEXT NOT NULL CHECK (role IN ('OWNER', 'EDITOR', 'READER')),
+    added_at      TEXT NOT NULL,
+    added_by      TEXT NOT NULL REFERENCES users (id),
+    PRIMARY KEY (collection_id, user_id)
+);
+CREATE INDEX collection_members_user ON collection_members (user_id);
+
+-- An Ask conversation or investigation belongs to the user who started it and is private to them.
+ALTER TABLE conversations ADD COLUMN owner_id TEXT NOT NULL REFERENCES users (id);
+CREATE INDEX conversations_owner ON conversations (owner_id, collection_id);
+
+-- Who asked for a deletion: they can follow it after the collection's rows, and memberships, are gone.
+ALTER TABLE deletion_operations ADD COLUMN requested_by TEXT REFERENCES users (id);

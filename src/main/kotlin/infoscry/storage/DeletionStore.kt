@@ -99,6 +99,8 @@ data class DeletionOperation(
     val updatedAt: String,
     val lastError: String? = null,
     val errorCode: String? = null,
+    /** The user who asked for the deletion; they can follow it after the collection's rows are gone. */
+    val requestedBy: infoscry.account.UserId? = null,
 ) {
     init {
         require(id.isNotBlank()) { "DeletionOperation.id must not be blank" }
@@ -229,8 +231,8 @@ class DeletionStore(private val database: Database) {
     private fun insert(connection: Connection, operation: DeletionOperation) {
         connection.prepareStatement(
             "INSERT INTO deletion_operations (id, collection_id, collection_name, trash_basename, " +
-                "managed_originals_existed, phase, kind, last_error, error_code, created_at, updated_at) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "managed_originals_existed, phase, kind, last_error, error_code, created_at, updated_at, requested_by) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).use { statement ->
             statement.setString(1, operation.id)
             statement.setString(2, operation.collectionId.value)
@@ -243,6 +245,7 @@ class DeletionStore(private val database: Database) {
             statement.setString(9, operation.errorCode)
             statement.setString(10, operation.createdAt)
             statement.setString(11, operation.updatedAt)
+            statement.setString(12, operation.requestedBy?.value)
             statement.executeUpdate()
         }
     }
@@ -453,6 +456,7 @@ class DeletionStore(private val database: Database) {
         updatedAt = getString("updated_at"),
         lastError = getString("last_error"),
         errorCode = getString("error_code"),
+        requestedBy = getString("requested_by")?.let { infoscry.account.UserId(it) },
     )
 
     private fun targets(connection: Connection, operationId: String): List<DocumentDeletionTarget> =
@@ -479,6 +483,6 @@ class DeletionStore(private val database: Database) {
     private companion object {
         const val SELECT_OPERATIONS =
             "SELECT id, collection_id, collection_name, trash_basename, managed_originals_existed, " +
-                "phase, kind, last_error, error_code, created_at, updated_at FROM deletion_operations"
+                "phase, kind, last_error, error_code, created_at, updated_at, requested_by FROM deletion_operations"
     }
 }

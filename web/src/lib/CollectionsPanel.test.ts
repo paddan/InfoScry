@@ -32,6 +32,8 @@ const api = vi.hoisted(() => ({
   getCollectionPrompts: vi.fn(),
   getCorrections: vi.fn(),
   listGlossary: vi.fn(),
+  listMembers: vi.fn(),
+  listUserDirectory: vi.fn(),
   updateCollectionIgnorePatterns: vi.fn(),
   deleteCollection: vi.fn(),
   deleteDocuments: vi.fn(),
@@ -86,6 +88,8 @@ vi.mock('./api', async (importOriginal) => ({
   getCollectionPrompts: api.getCollectionPrompts,
   getCorrections: api.getCorrections,
   listGlossary: api.listGlossary,
+  listMembers: api.listMembers,
+  listUserDirectory: api.listUserDirectory,
   updateCollectionIgnorePatterns: api.updateCollectionIgnorePatterns,
   deleteCollection: api.deleteCollection,
   deleteDocuments: api.deleteDocuments,
@@ -231,6 +235,8 @@ describe('collections panel', () => {
     api.getCollectionPrompts.mockResolvedValue({ coreRules: '', ask: { defaultId: 'default', prompts: [] }, investigate: { defaultId: 'default', prompts: [] } });
     api.getCorrections.mockResolvedValue({ rules: [], job: null });
     api.listGlossary.mockResolvedValue([]);
+    api.listMembers.mockResolvedValue({ members: [], callerRole: 'OWNER' });
+    api.listUserDirectory.mockResolvedValue([]);
     // Nothing is being deleted unless a test says so, and a followed operation stays unfinished by
     // default so a late poll cannot turn into a phantom completion.
     api.listUnfinishedDeletions.mockResolvedValue([]);

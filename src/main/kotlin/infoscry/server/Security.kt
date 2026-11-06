@@ -127,7 +127,7 @@ private val PASSWORD_CHANGE_ROUTES = PUBLIC_ROUTES + setOf(
  * the cookie must carry the session's CSRF token; and a user whose password was reset may only change it.
  * The static frontend is served to anyone, since it holds no data and shows the sign-in form.
  */
-fun Application.installRequestGuard(accounts: AccountService, settings: ServerSettings) {
+fun Application.installRequestGuard(accounts: AccountService, settings: ServerSettings, access: CollectionAccess? = null) {
     intercept(ApplicationCallPipeline.Plugins) {
         val host = call.request.headers[HttpHeaders.Host]
         val hostName = LoopbackHosts.nameOf(host)?.lowercase()
@@ -155,6 +155,7 @@ fun Application.installRequestGuard(accounts: AccountService, settings: ServerSe
             return@intercept
         }
         if (!isApiPath(path)) return@intercept
+        access?.let(call::attachAccess)
 
         val principal = try {
             authenticate(call, accounts)
@@ -196,6 +197,29 @@ fun Application.installRequestGuard(accounts: AccountService, settings: ServerSe
         }
         if (principal.user.mustChangePassword && route !in PASSWORD_CHANGE_ROUTES) {
             call.refuse(HttpStatusCode.Forbidden, "PASSWORD_CHANGE_REQUIRED", "choose a new password before going on")
+            finish()
+            return@intercept
+        }
+        if (access == null) return@intercept
+
+        // Who may use this route, from the one table in Authorization.kt. A route the table does not name is
+        // refused unless the caller is an administrator; the routing-tree test keeps that from happening.
+        val matched = ruleFor(method, path)
+        if (matched == null) {
+            if (!principal.isAdmin) {
+                call.refuse(HttpStatusCode.NotFound, "NOT_FOUND", "no such API route")
+                finish()
+            }
+            return@intercept
+        }
+        try {
+            access.enforce(principal, matched.first, matched.second)
+        } catch (fault: infoscry.domain.ApiFaultException) {
+            call.refuse(fault.apiStatus.toHttpStatusCode(), fault.code, fault.clientMessage())
+            finish()
+            return@intercept
+        } catch (missing: NoSuchElementException) {
+            call.refuse(HttpStatusCode.NotFound, "NOT_FOUND", missing.message.orEmpty())
             finish()
             return@intercept
         }

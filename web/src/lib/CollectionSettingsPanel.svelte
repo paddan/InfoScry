@@ -11,12 +11,14 @@
   import CollectionPromptSettings from './CollectionPromptSettings.svelte';
   import CollectionCorrectionSettings from './CollectionCorrectionSettings.svelte';
   import CollectionGlossarySettings from './CollectionGlossarySettings.svelte';
+  import CollectionMemberSettings from './CollectionMemberSettings.svelte';
 
   export let collection: Collection;
   export let onCollectionsChanged: (selectedId?: string) => Promise<void> | void;
   /** Opens Admin → LLM profiles, where a profile is checked for image reading before OCR can use it. */
   export let onOpenLlmProfiles: (() => void) | undefined = undefined;
   export let onOpenDeleteDialog: () => void;
+  export let isAdmin = false;
   /**
    * Manage prompts names the collection whose Prompts section must open. The section is revealed once
    * this panel shows that collection, and the page then clears the request so a later remount does not
@@ -211,6 +213,7 @@
     <CollectionPromptSettings bind:this={promptSettings} {collection} />
     <CollectionCorrectionSettings {collection} />
     <CollectionGlossarySettings {collection} />
+    <CollectionMemberSettings {collection} {isAdmin} />
   </section>
 
   <section class="collection-deletion" aria-label={`Delete ${collection.name}`}>

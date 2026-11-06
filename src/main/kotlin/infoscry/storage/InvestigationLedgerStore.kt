@@ -29,6 +29,8 @@ class InvestigationLedgerStore(private val database: Database, private val profi
 
     fun persistInvestigateConversation(
         collectionId: CollectionId,
+        /** The user who started the investigation; it is private to them. */
+        ownerId: infoscry.account.UserId,
         profile: LlmProfile,
         mode: String = "INVESTIGATE",
         prompt: ResolvedPrompt,
@@ -37,7 +39,7 @@ class InvestigationLedgerStore(private val database: Database, private val profi
         val conversationId = UUID.randomUUID().toString()
         database.transaction { connection ->
             connection.prepareStatement(
-                "INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,prompt_id,prompt_name,prompt_body,retrieval_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,prompt_id,prompt_name,prompt_body,retrieval_snapshot,created_at,owner_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ).use { s ->
                 s.setString(1, conversationId); s.setString(2, collectionId.value)
                 s.setString(3, mode); s.setString(4, profile.provider.name)
@@ -46,7 +48,7 @@ class InvestigationLedgerStore(private val database: Database, private val profi
                 s.setInt(8, prompt.version); s.setString(9, prompt.id)
                 s.setString(10, prompt.name); s.setString(11, prompt.body)
                 s.setString(12, retrievalSnapshot)
-                s.setString(13, Instants.now()); s.executeUpdate()
+                s.setString(13, Instants.now()); s.setString(14, ownerId.value); s.executeUpdate()
             }
         }
         return conversationId

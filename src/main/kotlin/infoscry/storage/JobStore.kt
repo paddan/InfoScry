@@ -83,15 +83,22 @@ open class JobStore(private val database: Database) {
      * Ordering ties are broken by insertion order (`insert_order`), because two jobs enqueued inside the same
      * millisecond must still page deterministically.
      */
-    fun list(limit: Int, offset: Int = 0): List<Job> {
+    /**
+     * The newest jobs. [visibleTo] narrows them to jobs of those collections (a caller who is not an
+     * administrator); `null` lists every job.
+     */
+    fun list(limit: Int, offset: Int = 0, visibleTo: Set<CollectionId>? = null): List<Job> {
         require(limit > 0) { "limit must be positive, was $limit" }
         require(offset >= 0) { "offset must not be negative, was $offset" }
         return database.read { connection ->
+            val filter = if (visibleTo == null) "" else " WHERE collection_id = ANY(?)"
             connection.prepareStatement(
-                "$SELECT_JOBS ORDER BY created_at DESC, insert_order DESC LIMIT ? OFFSET ?",
+                "$SELECT_JOBS$filter ORDER BY created_at DESC, insert_order DESC LIMIT ? OFFSET ?",
             ).use { statement ->
-                statement.setInt(1, limit)
-                statement.setInt(2, offset)
+                var index = 1
+                if (visibleTo != null) statement.setArray(index++, connection.createArrayOf("text", visibleTo.map { it.value }.toTypedArray()))
+                statement.setInt(index++, limit)
+                statement.setInt(index, offset)
                 statement.executeQuery().use { rows -> rows.readAll() }
             }
         }
@@ -189,17 +196,21 @@ open class JobStore(private val database: Database) {
      * on comes before the ones waiting behind it. Unlike [list], a running job is never pushed off the page
      * by newer jobs that have already ended.
      */
-    fun listActive(limit: Int, offset: Int = 0): List<Job> {
+    /** Queued and running jobs, oldest first; [visibleTo] narrows them as in [list]. */
+    fun listActive(limit: Int, offset: Int = 0, visibleTo: Set<CollectionId>? = null): List<Job> {
         require(limit > 0) { "limit must be positive, was $limit" }
         require(offset >= 0) { "offset must not be negative, was $offset" }
         return database.read { connection ->
+            val filter = if (visibleTo == null) "" else " AND collection_id = ANY(?)"
             connection.prepareStatement(
-                "$SELECT_JOBS WHERE state IN (?, ?) ORDER BY created_at ASC, insert_order ASC LIMIT ? OFFSET ?",
+                "$SELECT_JOBS WHERE state IN (?, ?)$filter ORDER BY created_at ASC, insert_order ASC LIMIT ? OFFSET ?",
             ).use { statement ->
                 statement.setString(1, JobState.QUEUED.name)
                 statement.setString(2, JobState.RUNNING.name)
-                statement.setInt(3, limit)
-                statement.setInt(4, offset)
+                var index = 3
+                if (visibleTo != null) statement.setArray(index++, connection.createArrayOf("text", visibleTo.map { it.value }.toTypedArray()))
+                statement.setInt(index++, limit)
+                statement.setInt(index, offset)
                 statement.executeQuery().use { rows -> rows.readAll() }
             }
         }

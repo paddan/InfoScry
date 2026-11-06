@@ -55,10 +55,8 @@ fun Routing.configureDeletionRoutes(context: AppContext) {
     route("/api/deletions") {
         get {
             call.handle {
-                call.respondJson(
-                    HttpStatusCode.OK,
-                    DeletionsResponse(context.collectionService.unfinishedDeletions().map { it.toApiView() }),
-                )
+                val listed = context.collectionService.unfinishedDeletions().filter { call.mayFollow(it) }
+                call.respondJson(HttpStatusCode.OK, DeletionsResponse(listed.map { it.toApiView() }))
             }
         }
 
@@ -66,7 +64,7 @@ fun Routing.configureDeletionRoutes(context: AppContext) {
             call.handle {
                 val id = call.parameters["operationId"]?.takeIf { it.isNotBlank() }
                     ?: throw BadRequestException("a deletion operation id is required in the path")
-                val operation = context.collectionService.deletionOperation(id)
+                val operation = context.collectionService.deletionOperation(id)?.takeIf { call.mayFollow(it) }
                     ?: throw NoSuchElementException("no deletion operation with id $id")
                 call.respondJson(HttpStatusCode.OK, DeletionOperationResponse(operation.toApiView()))
             }
@@ -84,3 +82,10 @@ internal fun DeletionOperation.toApiView() = DeletionOperationApiView(
     terminal = phase == DeletionPhase.DONE,
     errorCode = errorCode,
 )
+
+/**
+ * Whether the caller may follow [operation]: an administrator, the user who asked for it, or a member of a
+ * collection that still exists.
+ */
+private fun io.ktor.server.application.ApplicationCall.mayFollow(operation: DeletionOperation): Boolean =
+    principal.isAdmin || operation.requestedBy == principal.user.id || collectionRole(operation.collectionId) != null

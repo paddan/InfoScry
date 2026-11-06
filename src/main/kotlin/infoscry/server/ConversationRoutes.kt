@@ -20,11 +20,11 @@ fun Routing.configureConversationRoutes(context: AppContext) {
                 ?: throw BadRequestException("a conversation id is required in the path")
             val deleted = context.mutations.withMutation {
                 context.collectionService.requireMutationsAllowed()
-                context.conversations.deleteConversation(collection.id, conversationId)
+                context.conversations.deleteConversation(collection.id, conversationId, call.principal.user.id)
             }
             if (!deleted) {
-                // Unknown ids and ids owned by another collection are the same answer: not-found, and
-                // nothing deleted, so one collection's key can never touch another collection's rows.
+                // Unknown ids, ids of another collection and other users' conversations are the same
+                // answer: not-found, and nothing deleted. A conversation is private to its owner.
                 throw NoSuchElementException("no conversation with id $conversationId exists in this collection")
             }
             call.respondText("", status = HttpStatusCode.NoContent)

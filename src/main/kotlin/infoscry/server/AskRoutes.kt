@@ -34,6 +34,7 @@ fun Routing.configureAskRoutes(context: AppContext) {
     post("/api/ask") {
         call.handle {
             val body = call.receiveJson<AskApiRequest>()
+            call.requireCollectionRole(body.collection, infoscry.account.CollectionRole.READER)
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             // A profile that is switched off — retired by a person, or because its address carried a credential
@@ -41,6 +42,7 @@ fun Routing.configureAskRoutes(context: AppContext) {
             // caller can act on rather than an answer from an address nobody chose.
             profile.requireDispatchable()
             val collectionId = CollectionId(collection.id.value)
+            val owner = call.principal.user.id
             val prompt = context.collectionPrompts.resolve(collectionId, LlmPromptRole.ASK, body.prompt)
             val promptService = PromptService()
             val titler = ConversationTitler(
@@ -58,7 +60,7 @@ fun Routing.configureAskRoutes(context: AppContext) {
                     }
                 },
                 persistence = infoscry.ask.AskPersistence { ask, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
-                    context.conversations.persistAsk(ask.collectionId, ask.profile, ask.prompt, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+                    context.conversations.persistAsk(ask.collectionId, owner, ask.profile, ask.prompt, ask.question, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
                         .also { conversationId = it }
                 },
                 evidenceSession = StructuredEvidenceSource(context.content, context.paths).let { source -> { id -> source.session(id)::textOf } },
@@ -82,7 +84,7 @@ fun Routing.configureAskRoutes(context: AppContext) {
     get("/api/collections/{id}/asks") {
         call.handle {
             val collection = context.collectionService.requireActiveByNameOrId(call.collectionId().value)
-            val asks = context.database.read { connection -> loadAskHistory(connection, collection.id.value) }
+            val asks = context.database.read { connection -> loadAskHistory(connection, collection.id.value, call.principal.user.id.value) }
             call.respondJson(HttpStatusCode.OK, mapOf("asks" to asks))
         }
     }
@@ -136,15 +138,16 @@ private class AskHistoryRow(
  * answer is the one that shows: `persistAsk` stores the correction as the conversation's answer and
  * keeps both model calls for the audit.
  */
-private fun loadAskHistory(connection: Connection, collectionId: String): List<AskSummaryWire> {
+private fun loadAskHistory(connection: Connection, collectionId: String, ownerId: String): List<AskSummaryWire> {
     val conversations = connection.prepareStatement(
         "SELECT c.id, c.created_at, c.title, " +
             "COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '') AS question, " +
             "COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'assistant' ORDER BY m.seq DESC LIMIT 1), '') AS answer, " +
             "c.prompt_name " +
-            "FROM conversations c WHERE c.collection_id = ? AND c.mode = 'ASK' ORDER BY c.created_at DESC LIMIT 50",
+            "FROM conversations c WHERE c.collection_id = ? AND c.owner_id = ? AND c.mode = 'ASK' ORDER BY c.created_at DESC LIMIT 50",
     ).use { statement ->
         statement.setString(1, collectionId)
+        statement.setString(2, ownerId)
         statement.executeQuery().use { rows ->
             buildList {
                 while (rows.next()) {

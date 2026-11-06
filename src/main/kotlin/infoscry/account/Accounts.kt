@@ -17,8 +17,18 @@ value class UserId(val value: String) {
     }
 }
 
-/** The global role. Per-collection roles come with memberships. */
+/** The global role. What a user may do in one collection is their [CollectionRole] there. */
 enum class UserRole { ADMIN, USER }
+
+/** A user's role in one collection, in increasing order of what it allows. */
+enum class CollectionRole {
+    READER,
+    EDITOR,
+    OWNER;
+
+    /** Whether this role allows what [needed] allows. */
+    fun allows(needed: CollectionRole): Boolean = ordinal >= needed.ordinal
+}
 
 /** A person who signs in, as every caller may see them; the password hash never leaves the store. */
 @Serializable
