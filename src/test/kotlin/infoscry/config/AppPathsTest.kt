@@ -30,7 +30,7 @@ class AppPathsTest {
         val paths = AppPaths.from(dataDir)
 
         assertEquals(dataDir.toAbsolutePath().normalize(), paths.root)
-        assertEquals(listOf("index", "library", "logs", "models", "tmp"), childDirectoryNames(paths))
+        assertEquals(listOf("library", "logs", "models", "tmp"), childDirectoryNames(paths))
         assertEquals(paths.root.resolve("infoscry.lock"), paths.lockFile)
         assertEquals(paths.root.resolve("runtime.json"), paths.runtimeFile)
     }
@@ -41,7 +41,7 @@ class AppPathsTest {
 
         assertTrue(posixSupported(), "this test asserts POSIX modes and needs a POSIX filesystem")
         val privateDirectory = PosixFilePermissions.fromString("rwx------")
-        listOf(paths.root, paths.libraryDir, paths.indexDir, paths.modelsDir, paths.logsDir, paths.tempDir)
+        listOf(paths.root, paths.libraryDir, paths.modelsDir, paths.logsDir, paths.tempDir)
             .forEach { directory ->
                 assertEquals(
                     privateDirectory,
@@ -64,7 +64,7 @@ class AppPathsTest {
             PosixFilePermissions.fromString("rwx------"),
             Files.getPosixFilePermissions(wideOpen),
         )
-        assertEquals(listOf("index", "library", "logs", "models", "tmp"), childDirectoryNames(paths))
+        assertEquals(listOf("library", "logs", "models", "tmp"), childDirectoryNames(paths))
     }
 
     @Test

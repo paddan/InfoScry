@@ -11,7 +11,7 @@ import java.nio.file.attribute.PosixFilePermissions
 /**
  * The private file mode InfoScry gives its own data.
  *
- * The data directory holds imported originals, extracted text, and index files, so it must not be
+ * The data directory holds imported originals and their generated artifacts, so it must not be
  * readable by other users of the machine. Where the filesystem has no POSIX modes (for example a
  * mounted FAT volume) there is nothing to apply and nothing to claim: the mode is simply absent,
  * rather than reported as applied.
@@ -59,7 +59,6 @@ internal object PrivatePermissions {
  * <root>/runtime.json     PID, port and bearer token, present only while the server runs
  * <root>/library/<collection>/<document>/original.<ext>   immutable imported copy
  * <root>/library/<collection>/<document>/artifacts/       generated artifacts for that document
- * <root>/index/           Lucene generations
  * <root>/models/          pinned embedding model files
  * <root>/logs/            rolling structured logs
  * <root>/tmp/             scratch space for copies and child tools
@@ -70,7 +69,6 @@ class AppPaths private constructor(val root: Path) {
     val lockFile: Path = root.resolve("infoscry.lock")
     val runtimeFile: Path = root.resolve("runtime.json")
     val libraryDir: Path = root.resolve(LIBRARY_DIRECTORY)
-    val indexDir: Path = root.resolve("index")
     val modelsDir: Path = root.resolve("models")
     val logsDir: Path = root.resolve(LOGS_DIRECTORY)
     val tempDir: Path = root.resolve("tmp")
@@ -128,7 +126,7 @@ class AppPaths private constructor(val root: Path) {
     /** Creates every directory in the layout. Safe to call repeatedly, and re-hardens each one. */
     fun ensureDirectories(): AppPaths {
         createPrivateDirectory(root)
-        listOf(libraryDir, indexDir, modelsDir, logsDir, tempDir).forEach(::createPrivateDirectory)
+        listOf(libraryDir, modelsDir, logsDir, tempDir).forEach(::createPrivateDirectory)
         return this
     }
 
