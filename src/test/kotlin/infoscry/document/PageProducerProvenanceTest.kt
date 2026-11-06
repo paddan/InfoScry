@@ -58,6 +58,17 @@ class PageProducerProvenanceTest {
         assertEquals("Tesseract", context.pageReviewService.review(document.collectionId, document.id, 0).readingMethod)
     }
 
+    @Test fun `deleting a document removes its revisions although their pages name a producer revision`() {
+        val document = picture()
+        fixture.publish(document, listOf(imagePage(document, "first text", managedProvenance(document))), OcrEngine.TESSERACT)
+        runRescan(document, TestEngine("second text"))
+        val active = assertNotNull(context.revisions.activeRevisionId(document.id))
+        assertNotNull(context.revisions.page(active, 0)?.producerRevisionId)
+        context.documents.delete(document.id)
+        assertNull(context.revisions.activeRevisionId(document.id))
+        assertNull(context.revisions.page(active, 0))
+    }
+
     @Test fun `a page without recorded producer remains unknown despite a configured revision snapshot`() {
         val document = picture()
         val candidate = context.revisions.openCandidate(document.id, null, "unknown producer", readingSnapshot = snapshot(OcrEngine.TESSERACT))

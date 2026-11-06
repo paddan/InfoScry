@@ -712,7 +712,7 @@ CREATE TABLE document_revisions (
     insert_order BIGINT GENERATED ALWAYS AS IDENTITY,
     id                 TEXT    NOT NULL PRIMARY KEY,
     document_id        TEXT    NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
-    parent_revision_id TEXT    REFERENCES document_revisions (id),
+    parent_revision_id TEXT    REFERENCES document_revisions (id) DEFERRABLE INITIALLY DEFERRED,
     state              TEXT    NOT NULL CHECK (state IN ('CANDIDATE', 'PUBLISHED', 'SUPERSEDED', 'WITHDRAWN')),
     -- Why this revision exists and what produced it, so a reader is never told a provenance nobody
     -- recorded. Free-form on purpose: the values are read by the services that write them.
@@ -768,8 +768,11 @@ CREATE INDEX document_revisions_document ON document_revisions (document_id, cre
 --     image; half a measurement is not a measurement) and never exist without an image. Absent means
 --     "no image": zero, an empty reference or a guessed hash would each be a claim about pixels
 --     nobody looked at.
+-- References between revisions of one document are checked at commit: deleting a document cascades to all
+-- of its revisions and to the rows that name them in one statement, and Postgres would otherwise check a
+-- reference before the cascade has removed the row holding it.
 CREATE TABLE page_text_revisions (
-    producer_revision_id        TEXT REFERENCES document_revisions (id),
+    producer_revision_id        TEXT REFERENCES document_revisions (id) DEFERRABLE INITIALLY DEFERRED,
     revision_id                 TEXT    NOT NULL REFERENCES document_revisions (id) ON DELETE CASCADE,
     ordinal                     BIGINT NOT NULL CHECK (ordinal >= 0),
     unit_id                     TEXT    NOT NULL CHECK (length(unit_id) > 0),
@@ -892,7 +895,7 @@ CREATE TABLE revision_chunks (
 -- revision: a document whose extraction produced no unit is searchable by nothing.
 CREATE TABLE document_active_revisions (
     document_id TEXT NOT NULL PRIMARY KEY REFERENCES documents (id) ON DELETE CASCADE,
-    revision_id TEXT NOT NULL REFERENCES document_revisions (id),
+    revision_id TEXT NOT NULL REFERENCES document_revisions (id) DEFERRABLE INITIALLY DEFERRED,
     updated_at  TEXT NOT NULL
 );
 
@@ -906,7 +909,7 @@ CREATE TABLE revision_publications (
     document_id        TEXT    NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
     collection_id      TEXT    NOT NULL,
     base_revision_id   TEXT,
-    target_revision_id TEXT    NOT NULL REFERENCES document_revisions (id),
+    target_revision_id TEXT    NOT NULL REFERENCES document_revisions (id) DEFERRABLE INITIALLY DEFERRED,
     phase              TEXT    NOT NULL CHECK (phase IN ('PREPARED', 'PUBLISHED', 'ABANDONED', 'REFUSED')),
     authoritative_at   TEXT,
     prepared_at        TEXT    NOT NULL,
@@ -950,7 +953,7 @@ CREATE TABLE revision_restores (
     request_hash              TEXT    NOT NULL CHECK (length(request_hash) = 64),
     expected_revision_id      TEXT    NOT NULL,
     restored_from_revision_id TEXT    NOT NULL,
-    new_revision_id           TEXT    NOT NULL REFERENCES document_revisions (id),
+    new_revision_id           TEXT    NOT NULL REFERENCES document_revisions (id) DEFERRABLE INITIALLY DEFERRED,
     phase                     TEXT    NOT NULL CHECK (phase IN ('STAGED', 'PUBLISHED', 'FAILED')),
     error_code                TEXT,
     error_message             TEXT,

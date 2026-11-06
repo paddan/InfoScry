@@ -53,7 +53,14 @@ class CorrectionsBrowserAcceptanceTest {
                     Files.deleteIfExists(outputFile)
                 }
                 // Each document was rewritten twice, once by the rule and once back, and reads as it was read.
+                // The page may already say every document follows the list before the job that undoes the
+                // removed rule has run, so the facts are read once no job is left.
                 val context = harness.context
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60)
+                while (context.jobs.listActive(limit = 1).isNotEmpty()) {
+                    check(System.nanoTime() < deadline) { "the correction job never finished" }
+                    Thread.sleep(100)
+                }
                 val documents = context.documents.listByCollection(CollectionId("default"), limit = 10)
                 assertEquals(2, documents.size)
                 documents.forEach { document ->

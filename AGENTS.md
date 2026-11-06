@@ -12,6 +12,7 @@ Ask's per-collection prompt choice is covered there too.
 Investigate's browser flow is covered by `InvestigateBrowserAcceptanceTest`.
 Collection corrections are covered by `CorrectionsBrowserAcceptanceTest`.
 The collection glossary is covered by `GlossaryBrowserAcceptanceTest`.
+Sign-in, membership and attribution are covered by `MultiUserBrowserAcceptanceTest`.
 These browser tests sign in first and use local fake providers and embeddings,
 not real providers or GPU verification.
 

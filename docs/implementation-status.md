@@ -327,9 +327,20 @@ multipart.
   attribution and a stale edit refused with `EDIT_CONFLICT` naming the other
   person, uploads and `--server-path` imports with a link out of an import
   root refused, and a browser session surviving a server restart.
-- **Not run since the move:** `externalTest` (Playwright and Tesseract) and
-  `gpuIntegrationTest`; `docker compose up` itself (the same image and settings
-  were run with Podman directly).
+- **After ticket 9 (2026-11-06):** `./gradlew externalTest` ran 52 tests and 51
+  passed: every Playwright suite signed in, the Tesseract and Surya real-tool
+  tests, and the new `MultiUserBrowserAcceptanceTest` (an administrator adds a user and
+  makes them an editor; the user signs in with the one-time password, chooses
+  their own, edits the glossary, and the administrator sees "Changed by Erik").
+  The first run found that deleting a document whose pages name a producer
+  revision failed on Postgres (`DELETION_FAILED`): references between one
+  document's revisions are now checked at commit. The one failure, `CorrectionsBrowserAcceptanceTest`, read the
+  facts before the job undoing a removed rule had run; it now waits for that job
+  and passed three forced reruns.
+  `./gradlew gpuIntegrationTest` passed 10 tests on CoreML.
+  `podman compose up -d` (podman-compose 1.6.0) brought up a healthy database on
+  loopback; the installed server created an administrator and served against it,
+  and the account survived `down` and `up`.
 
 ## Recorded verification
 
@@ -467,11 +478,10 @@ owner's confirmation. Earlier test records above describe their own run scope.
 
 ## Open verification and product gates
 
-- Multi-user browser acceptance: the Playwright suites sign in, but have not run
-  since the move to the server, and the spec's scenario for user creation,
-  membership and attribution display is not written yet.
-- `docker compose up` with a Compose provider, and an explicit kill-and-restart
-  of a running import to watch its attribution survive.
+- An explicit kill-and-restart of a running import to watch its attribution
+  survive.
+- The launchd agent in the installation guide has been checked with `plutil`,
+  not loaded.
 - The spec's open questions: whether `pg_search`'s AGPL licence is acceptable,
   and whether Ask conversations should be shareable within a collection.
 
