@@ -68,10 +68,10 @@ class GlossaryQueryRewriter(
                 val clause = clauses[index]
                 val query = clause.query
                 when {
-                    query is TermQuery && query.term.field() == LuceneSchema.FIELD_TEXT && clause.occur.expands() -> {
+                    query is TermQuery && query.term.field() == PgSearchQuery.TEXT_FIELD && clause.occur.expands() -> {
                         var end = index
                         while (end < clauses.size && clauses[end].occur == clause.occur &&
-                            (clauses[end].query as? TermQuery)?.term?.field() == LuceneSchema.FIELD_TEXT
+                            (clauses[end].query as? TermQuery)?.term?.field() == PgSearchQuery.TEXT_FIELD
                         ) {
                             end++
                         }
@@ -146,7 +146,7 @@ class GlossaryQueryRewriter(
         /** Variants of [phrase] with its hits replaced by alternatives, or `null` when there are none that fit. */
         private fun phraseVariants(phrase: PhraseQuery): List<Query>? {
             val field = phrase.field ?: return null
-            if (field != LuceneSchema.FIELD_TEXT || phrase.positions.withIndex().any { (i, p) -> p != i }) return null
+            if (field != PgSearchQuery.TEXT_FIELD || phrase.positions.withIndex().any { (i, p) -> p != i }) return null
             val tokens = phrase.terms.map { it.text() }
             val hits = matcher.hits(tokens)
             if (hits.isEmpty()) return null
@@ -209,15 +209,15 @@ class GlossaryQueryRewriter(
     }
 
     private fun queryFor(term: GlossaryTerm): Query = when {
-        term.prefix -> PrefixQuery(Term(LuceneSchema.FIELD_TEXT, term.matchKey))
-        term.tokens.size == 1 -> TermQuery(Term(LuceneSchema.FIELD_TEXT, term.matchKey))
+        term.prefix -> PrefixQuery(Term(PgSearchQuery.TEXT_FIELD, term.matchKey))
+        term.tokens.size == 1 -> TermQuery(Term(PgSearchQuery.TEXT_FIELD, term.matchKey))
         else -> phraseOf(term.tokens, 0)
     }
 
     private fun phraseOf(tokens: List<String>, slop: Int): Query =
         PhraseQuery.Builder().apply {
             setSlop(slop)
-            tokens.forEach { add(Term(LuceneSchema.FIELD_TEXT, it)) }
+            tokens.forEach { add(Term(PgSearchQuery.TEXT_FIELD, it)) }
         }.build()
 
     private fun splice(tokens: List<String>, hits: List<GlossaryHit>, chosen: List<List<String>>): List<String> = buildList {

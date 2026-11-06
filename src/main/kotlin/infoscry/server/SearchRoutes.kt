@@ -8,7 +8,7 @@ import infoscry.jobs.ReindexJobPayload
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
 import infoscry.search.SearchService
-import infoscry.search.LuceneIndex
+import infoscry.search.SearchIndex
 import infoscry.search.SearchUnavailableException
 import infoscry.storage.MutationCoordinator
 import io.ktor.http.HttpStatusCode
@@ -220,7 +220,7 @@ internal fun searchFailureStatus(code: String): HttpStatusCode =
 
 /** The refusal codes that name a mistake the caller made, rather than an environment problem. */
 private val CLIENT_INPUT_CODES: Set<String> = setOf(
-    LuceneIndex.QUERY_TOO_LONG_CODE,
+    SearchIndex.QUERY_TOO_LONG_CODE,
     SearchService.FILTER_TOO_BROAD_CODE,
     SearchService.QUERY_TOO_BROAD_CODE,
 )

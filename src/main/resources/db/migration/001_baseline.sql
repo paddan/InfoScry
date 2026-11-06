@@ -10,6 +10,11 @@
 -- ICU at secondary strength, so case is ignored and accents still count.
 CREATE COLLATION infoscry_nocase (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
 
+-- Vector search (pgvector) and BM25 keyword search (ParadeDB pg_search) run inside this database, so a
+-- reading's searchable rows commit in the same transaction as the reading itself.
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_search;
+
 -- One row per applied schema version; the highest row is the database's version.
 CREATE TABLE schema_version (
     version BIGINT NOT NULL PRIMARY KEY,
@@ -1229,3 +1234,51 @@ ALTER TABLE collections
     ADD FOREIGN KEY (ocr_review_profile_id) REFERENCES ocr_profiles (id),
     ADD FOREIGN KEY (ask_prompt_id) REFERENCES collection_prompts (id) ON DELETE SET NULL,
     ADD FOREIGN KEY (investigate_prompt_id) REFERENCES collection_prompts (id) ON DELETE SET NULL;
+
+-- ---------------------------------------------------------------------------------------------
+-- Search
+-- ---------------------------------------------------------------------------------------------
+
+-- One row per searchable chunk of the reading each document publishes now. The rows are written in the same
+-- transaction that makes a reading the document's text and removed in the same transaction that replaces it,
+-- so search never sees a reading the database does not publish, and a deleted document or collection takes
+-- its rows with it. `revision_id` names the published revision the rows belong to; it is null only for rows
+-- written before the import recorded its revision in the same transaction.
+CREATE TABLE search_chunks (
+    row_id              BIGINT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    collection_id       TEXT    NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    document_id         TEXT    NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    revision_id         TEXT    REFERENCES document_revisions (id) ON DELETE CASCADE,
+    content_unit_id     TEXT    NOT NULL,
+    chunk_ordinal       BIGINT  NOT NULL CHECK (chunk_ordinal >= 0),
+    text                TEXT    NOT NULL CHECK (length(text) > 0),
+    locator             TEXT    NOT NULL,
+    locator_label       TEXT    NOT NULL,
+    -- Half precision halves the storage of a 768-dimension vector; the HNSW index for the model's
+    -- dimension is created by the application on the expression `embedding::halfvec(<dimension>)`.
+    embedding           HALFVEC NOT NULL,
+    embedding_dimension BIGINT  NOT NULL CHECK (embedding_dimension > 0)
+);
+CREATE INDEX search_chunks_document ON search_chunks (document_id);
+
+-- BM25 over the chunk text. The tokenizer yields exactly the tokens of the Lucene analyzer the query parser
+-- and the glossary use (standard tokenizer, ICU folding, lower case), so a parsed query term is an index
+-- term. The collection and document IDs are literal fields so their filters run inside the index.
+CREATE INDEX search_chunks_bm25 ON search_chunks USING bm25 (
+    row_id,
+    (text::pdb.unicode_words('ascii_folding=true')),
+    (collection_id::pdb.literal),
+    (document_id::pdb.literal)
+);
+
+-- What the stored vectors are: the model and dimension they were embedded with. A different model in this
+-- build means every vector must be rebuilt before semantic search may compare against them. One row.
+CREATE TABLE search_index_state (
+    singleton         BIGINT NOT NULL PRIMARY KEY CHECK (singleton = 1),
+    schema_version    BIGINT NOT NULL,
+    model             TEXT   NOT NULL,
+    model_revision    TEXT   NOT NULL,
+    model_fingerprint TEXT   NOT NULL,
+    dimension         BIGINT NOT NULL CHECK (dimension > 0),
+    updated_at        TEXT   NOT NULL
+);

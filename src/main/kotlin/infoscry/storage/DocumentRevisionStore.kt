@@ -668,6 +668,9 @@ class DocumentRevisionStore(private val database: Database, private val content:
      *
      * @return the new revision's identifier, or `null` when the document publishes no content yet.
      */
+    /** Runs [block] in one database transaction, so a caller can commit its own writes with this store's. */
+    fun <T> transaction(block: () -> T): T = database.transaction { block() }
+
     fun recordPublishedContent(
         documentId: DocumentId,
         provenance: String,

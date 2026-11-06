@@ -236,16 +236,4 @@ class CorrectionRoutesTest {
         assertEquals("CORRECTION_ID_TAKEN", json(refused).getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
     }
 
-    @Test
-    fun `the live reading is refused while the index is sealed`() = runBlocking {
-        val id = newCollection()
-        val fixture = RestoreFixtures.publishGenerations(harness.context, dataDir, CollectionId(id), marketReadings = listOf("hos spinners"))
-        harness.context.revisionSnapshots.seal("test seal")
-
-        val refused = harness.request(
-            HttpMethod.Get, "/api/collections/$id/sources/${fixture.unitIds[1].value}/reading", credential = Credential.BEARER,
-        )
-
-        assertEquals(HttpStatusCode.ServiceUnavailable, refused.status, refused.bodyAsText())
-    }
 }

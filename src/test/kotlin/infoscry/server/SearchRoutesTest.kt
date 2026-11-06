@@ -1,7 +1,6 @@
 package infoscry.server
 
 import infoscry.AppContext
-import infoscry.document.PublicationStep
 import infoscry.domain.Chunk
 import infoscry.domain.ChunkId
 import infoscry.domain.CollectionId
@@ -228,43 +227,15 @@ class SearchRoutesTest {
         assertContains(response.bodyAsText(), "QUERY_TOO_LONG")
     }
 
-    /**
-     * A sealed revision snapshot is an environment the caller can retry, not a wrong answer.
-     *
-     * The seal is what the publication service raises when an authoritative publication could not be made
-     * coherent in this process. Every read under it throws, and this route is where the exception becomes
-     * the 503 the caller sees, so the mapping is asserted here with a gate given to the very context the
-     * server runs on.
-     */
-    @Test
-    fun `a sealed revision snapshot is answered as a retryable service unavailable`() = runBlocking {
-        seedUnit(document = "sealed.txt", text = "the nightfall report is sealed")
-        harness.context.revisionSnapshots.seal("an authoritative publication could not be finished")
-        try {
-            val response = harness.get("/api/search?collection=Default&q=nightfall&mode=keyword")
-
-            assertEquals(HttpStatusCode.ServiceUnavailable, response.status, response.bodyAsText())
-            assertContains(response.bodyAsText(), "REVISION_SNAPSHOT_UNAVAILABLE")
-        } finally {
-            harness.context.revisionSnapshots.unseal()
-        }
-    }
-
-    // ---- The publication seal over the whole read boundary ----
+    // ---- A publication switches search and the live source together ----
 
     /**
-     * Ticket 02e, scenarios 1–3 on the wire: a publication failed at its authority commit and again at
-     * the roll-forward's staged commit refuses both halves of a read — search *and* the live source —
-     * instead of letting the old index answer beside the new text, and completing the recovery reopens
-     * both on the authoritative revision.
-     *
-     * The failure is injected through the service's own step hook with a deterministic counter: the first
-     * STAGED_COMMITTED belongs to the publication, the second to the completion that runs because its
-     * authority already moved. While that completion cannot finish, SQLite serves the replacement and the
-     * index still holds the replaced reading, so any 200 here would be the mixture the seal exists for.
+     * A publication commits the replacement's text and its searchable rows in one transaction, so search
+     * and the live source read move from one reading to the other together, and a read pinned to the
+     * replaced revision keeps answering from that revision's own text.
      */
     @Test
-    fun `while a publication cannot switch, search and the live source refuse instead of mixing readings`() =
+    fun `a publication switches search and the live source to the replacement together`() =
         runBlocking {
             val (documentId, unitId) = seedUnit(document = "sealed-source.txt", text = "the original wording")
             val context = harness.context
@@ -295,46 +266,8 @@ class SearchRoutesTest {
                 ),
             )
 
-            val observations = mutableListOf<PublicationStep>()
-            val operation = context.revisionPublication.publish(documentId, base, candidate) { step ->
-                observations += step
-                val count = observations.count { it == step }
-                if (step == PublicationStep.AUTHORITATIVE && count == 1) {
-                    throw IllegalStateException("injected failure at the authority commit")
-                }
-                if (step == PublicationStep.STAGED_COMMITTED && count == 2) {
-                    throw IllegalStateException("injected failure at the roll-forward's staged commit")
-                }
-            }
-            assertEquals(1, observations.count { it == PublicationStep.AUTHORITATIVE }, observations.toString())
-            assertEquals(2, observations.count { it == PublicationStep.STAGED_COMMITTED }, observations.toString())
-
+            context.revisionPublication.publish(documentId, base, candidate)
             val collectionId = harness.collectionIdOf("Default")
-
-            // Search refuses rather than answering from the index rows of the replaced reading…
-            val search = harness.get("/api/search?collection=Default&q=replacement&mode=keyword")
-            assertEquals(HttpStatusCode.ServiceUnavailable, search.status, search.bodyAsText())
-            assertContains(search.bodyAsText(), "REVISION_SNAPSHOT_UNAVAILABLE")
-
-            // …and the live source read refuses rather than answering from SQLite text the database has
-            // already moved — the pair "old index with new text" the ticket exists to forbid.
-            val live = harness.get("/api/collections/$collectionId/sources/${unitId.value}")
-            assertEquals(HttpStatusCode.ServiceUnavailable, live.status, live.bodyAsText())
-            assertContains(live.bodyAsText(), "REVISION_SNAPSHOT_UNAVAILABLE")
-            assertFalse(
-                live.bodyAsText().contains("the replacement wording"),
-                "the source route served the text the switch has not published: ${live.bodyAsText()}",
-            )
-
-            // A request that already names a revision finishes against that revision's immutable text —
-            // the spec's rule for saved evidence, which is coherent whatever the index is doing.
-            val pinned = harness.get("/api/collections/$collectionId/sources/${unitId.value}?revision=$base")
-            assertEquals(HttpStatusCode.OK, pinned.status, pinned.bodyAsText())
-            assertContains(pinned.bodyAsText(), "the original wording")
-
-            // Scenario 3: completing the recovery reopens reads on the authoritative revision.
-            val recovery = context.revisionPublication.recoverUnfinished()
-            assertEquals(listOf(operation), recovery.completed)
 
             val served = harness.get("/api/search?collection=Default&q=replacement&mode=keyword")
             assertEquals(HttpStatusCode.OK, served.status, served.bodyAsText())

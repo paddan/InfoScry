@@ -18,7 +18,7 @@ and served by Ktor.
 | Backend and CLI | Kotlin, Java 25, Ktor, Clikt |
 | Web reader | SvelteKit, Svelte and TypeScript |
 | Authoritative state and extracted text | PostgreSQL 17 (ParadeDB image, `compose.yaml`) |
-| Rebuildable keyword and vector index | Apache Lucene |
+| Keyword and vector search | `pg_search` (BM25) and `pgvector` (HNSW) in the same database; Lucene's analyzer and query parser as libraries |
 | Local embeddings | Multilingual E5, ONNX Runtime and CoreML |
 | Extraction | Tika, PDFBox, POI, jsoup and Commons CSV |
 | External document tools | Tesseract; optional Calibre |
@@ -38,7 +38,6 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 | `infoscry.lock` | Process ownership lock |
 | `runtime.json` | Running-server connection information |
 | `library/` | Immutable managed copies and document artifacts |
-| `index/` | Rebuildable Lucene index |
 | `models/` | Installed embedding model and tokenizer |
 | `logs/` | Structured application logs |
 | `tmp/` | Temporary work and GPU profiling artifacts |
@@ -88,8 +87,47 @@ behind a long import, and PDF jobs never take an import's place.
 ## Mutation, deletion and recovery
 
 Services share mutation admission and exclusive maintenance. Reindexing pauses
-mutations while existing searches continue; index publication must preserve all
-collections and publish the writer, reader and embedder together.
+mutations while existing searches continue.
+
+## Search storage
+
+Every document's published reading has one row per chunk in `search_chunks`
+(text, locator, `halfvec` embedding). The rows are written in the same
+transaction that makes the reading the document's text, and a deleted document
+or collection takes its rows with it, so search never serves a reading the
+database does not publish and there is nothing to stage, hide or repair.
+[SearchIndex](../src/main/kotlin/infoscry/search/SearchIndex.kt) holds the
+operations:
+
+- **Keyword.** Lucene's classic `QueryParser` parses the query with the analyzer
+  (standard tokenizer, ICU folding, lower case) and
+  [PgSearchQuery](../src/main/kotlin/infoscry/search/PgSearchQuery.kt) translates
+  the parsed tree to `paradedb.boolean`/`term`/`phrase`/`regex`/`fuzzy_term`/
+  `boost`/`const_score`. The BM25 index tokenizes with
+  `pdb.unicode_words('ascii_folding=true')`, which yields the same tokens, so a
+  parsed term is an index term. User text never reaches `pdb.parse`. Prefixes,
+  wildcards and regular expressions score as constants, as in Lucene. Collection
+  and document IDs are literal fields of the BM25 index, so their filters run
+  inside it.
+- **Vectors.** One HNSW index (`halfvec_ip_ops`) per model dimension on
+  `embedding::halfvec(<dimension>)`, created when the index opens. A scope of at
+  most 1,000 rows, or four times the requested count, is searched exactly;
+  larger ones use iterative index scans. Scores are `(1 + dot) / 2`.
+- **Identity.** `search_index_state` records the model the vectors were embedded
+  with. A different model in this build makes semantic search refuse with
+  `INDEX_REBUILD_REQUIRED` until a full `infoscry reindex` has rebuilt every
+  document and recorded the new model; keyword search keeps working.
+- **Reindex.** Under exclusive maintenance each document whose rows do not agree
+  with its chunks (or every document, after a model change) is re-chunked if
+  needed, embedded and replaced in its own transaction, so an interrupted rebuild
+  leaves every document whole and the next run continues.
+
+A publication (import, rescan, restore, corrections) is one transaction: recheck
+that the document and collection are live and the base is still published,
+record the publication, replace the document's rows, make the reading
+authoritative and mark it published. Its published hook (the selectable-PDF
+queue) runs after the commit; `cleaned_at` records that it ran, and startup runs
+it again for a publication whose process died before it.
 
 Collection and document deletion use persisted operations and recovery phases.
 An admitted deletion continues even if its initiating request is lost. The UI
@@ -330,7 +368,7 @@ The [design](specs/2026-10-23-collection-glossary-design.md) is implemented.
   in `GlossaryRules`: 2–20 terms, at most 200 characters and 8 tokens each, prefix
   only on one token of at least 3 characters.
 - **Search.** `GlossaryService.snapshot` (cached per collection, dropped on every
-  write) feeds `SearchService`. `LuceneIndex.expandKeyword` parses the query and
+  write) feeds `SearchService`. `SearchIndex.expandKeyword` parses the query and
   `GlossaryQueryRewriter` adds alternatives to runs of plain text-field term
   clauses and to phrases (`GlossaryMatcher`: longest match, prefix, no chaining):
   SHOULD hits gain SHOULD alternatives, MUST hits become one MUST choice, phrases

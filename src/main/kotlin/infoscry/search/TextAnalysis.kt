@@ -10,11 +10,11 @@ import org.apache.lucene.analysis.tokenattributes.CharTermAttribute
 object TextAnalysis {
 
     /** Analyzers are safe to share across threads; this one is never closed, as it lives as long as the process. */
-    private val analyzer: Analyzer = LuceneIndex.newAnalyzer()
+    private val analyzer: Analyzer = SearchIndex.newAnalyzer()
 
     /** The analyzed tokens of [text], normalized exactly as the text field stores them. */
     fun tokens(text: String): List<String> =
-        analyzer.tokenStream(LuceneSchema.FIELD_TEXT, text).use { stream ->
+        analyzer.tokenStream(PgSearchQuery.TEXT_FIELD, text).use { stream ->
             val term = stream.addAttribute(CharTermAttribute::class.java)
             stream.reset()
             buildList { while (stream.incrementToken()) add(term.toString()) }.also { stream.end() }

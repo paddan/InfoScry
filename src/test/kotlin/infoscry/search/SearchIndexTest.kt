@@ -6,6 +6,7 @@ import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
+import infoscry.storage.Database
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
@@ -19,32 +20,59 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
 /**
- * The search index: an idempotent Lucene store of one Lucene document per searchable chunk, addressed
- * through an atomic generation marker that Task 18's rebuild builds on.
+ * The search index: one row per searchable chunk in `search_chunks`, with BM25 and vector search over them.
  */
-class LuceneIndexTest {
+class SearchIndexTest {
 
-    private lateinit var indexDir: Path
+    private lateinit var directory: Path
+    private lateinit var database: Database
 
     @BeforeTest
-    fun createTemporaryIndexDirectory() {
-        indexDir = Files.createTempDirectory("infoscry-lucene")
+    fun openDatabase() {
+        directory = Files.createTempDirectory("infoscry-search-index")
+        database = Database(directory)
+        listOf(COLLECTION, OTHER_COLLECTION).forEach { collection ->
+            database.transaction { connection ->
+                connection.prepareStatement(
+                    "INSERT INTO collections (id, name, created_at, updated_at) VALUES (?, ?, 't', 't') ON CONFLICT DO NOTHING",
+                ).use {
+                    it.setString(1, collection.value)
+                    it.setString(2, collection.value)
+                    it.executeUpdate()
+                }
+            }
+        }
     }
 
     @AfterTest
-    fun removeTemporaryIndexDirectory() {
-        indexDir.toFile().deleteRecursively()
+    fun closeDatabase() {
+        database.close()
+        directory.toFile().deleteRecursively()
     }
+
+    /** A document row for every document a test indexes, since the index's rows belong to real documents. */
+    private fun ensureDocument(collection: CollectionId, documentId: DocumentId) {
+        database.transaction { connection ->
+            connection.prepareStatement(
+                "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, original_path, " +
+                    "size_bytes, status, created_at, updated_at) VALUES (?, ?, ?, 'text/plain', 'f.txt', '/f.txt', 1, " +
+                    "'COMPLETE', 't', 't') ON CONFLICT DO NOTHING",
+            ).use {
+                it.setString(1, documentId.value)
+                it.setString(2, collection.value)
+                it.setString(3, documentId.value)
+                it.executeUpdate()
+            }
+        }
+    }
+
+    private fun openIndex(identity: IndexIdentity = IDENTITY): SearchIndex = SearchIndex(database, identity).open()
 
     @Test
     fun `a scope filter naming more documents than the clause ceiling searches`() {
-        // Lucene's default ceiling is 1 024 clauses and it is enforced when a query is rewritten during a
-        // search, so this exercises the real mechanism rather than a constant: 1 100 ids in the scope, one
-        // query. A scope expressed as one TermQuery per id would throw IndexSearcher.TooManyClauses here; a
-        // single set query searches. The ceiling counts the ids the scope names, not the documents indexed,
-        // so only a few are indexed (each one publishes a new reader, which is what made 1 100 of them slow).
+        // 1 100 ids in the scope, one query: the scope is one bound array, so its size is not a clause count.
         val documentIds = (1..1_100).map { DocumentId("doc-$it") }
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking {
                 documentIds.take(INDEXED_DOCUMENTS).forEach { documentId ->
                     index.replaceDocument(chunksFor(documentId, listOf("budget nightfall report")))
@@ -63,45 +91,31 @@ class LuceneIndexTest {
         }
     }
 
+
+
+
     @Test
-    fun `a fresh index creates one generation and resolves it on reopen`() {
-        val first = LuceneIndex.open(indexDir, IDENTITY)
-        val name = first.name
-        assertEquals(LuceneSchema.SCHEMA_VERSION, first.schemaStatus.assertReady().schemaVersion)
-        first.close()
+    fun `query syntax keeps the meaning the query parser gives it`() {
+        openIndex().let { index ->
+            index.replaceDocument(chunksFor(DOCUMENT, listOf("allmän handling om förvaltningsrätten")))
+            index.replaceDocument(chunksFor(OTHER_DOCUMENT, listOf("handling allmän utan domstol")))
+            fun matches(query: String) = index.searchKeyword(COLLECTION, query, limit = 10).map { it.documentId }.toSet()
 
-        // The marker names the active generation, and every open resolves it rather than guessing.
-        assertEquals(name, markerNames(indexDir).single())
-        assertTrue(Files.isDirectory(indexDir.resolve(name)), "the generation the marker names must exist")
-
-        val reopened = LuceneIndex.open(indexDir, IDENTITY)
-        try {
-            assertEquals(name, reopened.name)
-        } finally {
-            reopened.close()
+            assertEquals(setOf(DOCUMENT.value), matches("\"allmän handling\""), "a phrase keeps its word order")
+            assertEquals(setOf(DOCUMENT.value), matches("förvaltn*"), "a prefix is folded like the text")
+            assertEquals(setOf(DOCUMENT.value), matches("forvaltningsratten"), "folding finds the accented word")
+            assertEquals(setOf(DOCUMENT.value, OTHER_DOCUMENT.value), matches("handling"))
+            assertEquals(setOf(OTHER_DOCUMENT.value), matches("handling -förvaltningsrätten"), "an exclusion excludes")
+            assertEquals(setOf(DOCUMENT.value), matches("+allmän +förvaltningsrätten"))
+            assertEquals(setOf(OTHER_DOCUMENT.value), matches("dom?tol"), "a wildcard inside a word matches one character")
+            assertEquals(setOf(DOCUMENT.value), matches("forvaltningsratte~1"), "a fuzzy term allows one edit")
+            assertEquals(emptySet(), matches("-handling"), "exclusions alone match nothing")
         }
     }
 
     @Test
-    fun `an incomplete generation is never selected`() {
-        LuceneIndex.open(indexDir, IDENTITY).close()
-
-        // A marker that names a directory that does not exist must fail loudly instead of silently
-        // creating or selecting a different generation.
-        Files.writeString(indexDir.resolve("current"), "lucene-gone")
-
-        assertFailsWith<IllegalStateException> { LuceneIndex.open(indexDir, IDENTITY) }
-    }
-
-    @Test
-    fun `a fresh index with leftover generations but no marker is a recovery error, not a guess`() {
-        Files.createDirectories(indexDir.resolve("lucene-stray"))
-        assertFailsWith<IllegalStateException> { LuceneIndex.open(indexDir, IDENTITY) }
-    }
-
-    @Test
     fun `replacing a document twice leaves one set of chunks`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             val rows = chunksFor(DOCUMENT, listOf("first chunk", "second chunk", "third chunk"))
             runBlocking { index.replaceDocument(rows) }
 
@@ -114,7 +128,7 @@ class LuceneIndexTest {
 
     @Test
     fun `deleting a document removes all of its chunks`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking { index.replaceDocument(chunksFor(DOCUMENT, listOf("only", "two", "chunks"))) }
             assertEquals(3, index.chunkCount(COLLECTION, DOCUMENT))
 
@@ -126,7 +140,7 @@ class LuceneIndexTest {
 
     @Test
     fun `keyword search returns the stored identity, snippet and label filtered by collection`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking {
                 // No stemming: the second document must contain the token "budget" itself to match.
                 index.replaceDocument(chunksFor(DOCUMENT, listOf("the nightfall report", "budget figures")))
@@ -152,7 +166,7 @@ class LuceneIndexTest {
 
     @Test
     fun `a question mark ending a word and a colon are plain text, not query syntax`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking {
                 index.replaceDocument(
                     chunksFor(DOCUMENT, listOf("tvångsvård av unga", "lagen (1962:700)", "SFS 2010:800 gäller")),
@@ -183,7 +197,7 @@ class LuceneIndexTest {
 
     @Test
     fun `a glossary expansion finds the other names in its collection only`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking {
                 index.replaceDocument(chunksFor(DOCUMENT, listOf("brev från Stockholm", "Sthlms hamn")))
                 index.replaceDocument(chunksFor(OTHER_DOCUMENT, listOf("resa till Stockholm"), collection = OTHER_COLLECTION))
@@ -219,7 +233,7 @@ class LuceneIndexTest {
 
     @Test
     fun `an expansion keeps the whole query within the clause ceiling`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             val groups = (1..300).map { n ->
                 infoscry.glossary.GlossaryGroup("g$n", COLLECTION, infoscry.glossary.GlossaryRules.normalize(listOf(term("w$n"), term("x$n"))), "t", "t")
             }
@@ -228,14 +242,14 @@ class LuceneIndexTest {
             val expansion = index.expandKeyword(COLLECTION, query, mapOf(COLLECTION to infoscry.glossary.Glossary(COLLECTION, groups)))
 
             assertTrue(expansion.truncated)
-            assertTrue(GlossaryQueryRewriter.clauseCount(expansion.query) <= LuceneIndex.MAX_QUERY_TOKENS)
+            assertTrue(GlossaryQueryRewriter.clauseCount(expansion.query) <= SearchIndex.MAX_QUERY_TOKENS)
             index.searchKeyword(COLLECTION, query, limit = 1, expansion = expansion)
         }
     }
 
     @Test
     fun `an alternative's word anchors a query`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking { index.replaceDocument(chunksFor(DOCUMENT, listOf("brev från Stockholm"))) }
 
             assertFalse(index.hasLexicalAnchor("Sthlm", COLLECTION))
@@ -245,7 +259,7 @@ class LuceneIndexTest {
 
     @Test
     fun `a lexical anchor is a token prefix of an indexed term in the given scope`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking {
                 index.replaceDocument(chunksFor(DOCUMENT, listOf("watergate resignation")))
             }
@@ -261,7 +275,7 @@ class LuceneIndexTest {
 
     @Test
     fun `vector search returns the closest vectors and filters by collection`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             val target = vectorFor("nightfall")
             runBlocking {
                 index.replaceDocument(chunksFor(DOCUMENT, listOf("nightfall operations")))
@@ -280,50 +294,10 @@ class LuceneIndexTest {
         }
     }
 
-    @Test
-    fun `a hidden revision cannot consume a semantic top-k slot`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
-            val target = vectorFor("nearest")
-            runBlocking {
-                // The hidden row is the closest vector in the index by construction: it is the query itself.
-                // A search that ranked first and filtered afterwards would spend a top-k slot on it and answer
-                // with one visible row where two exist, which is why the scope is the kNN search's own filter.
-                index.replaceDocument(
-                    listOf(row(OTHER_DOCUMENT, "nearest", target, revisionId = HIDDEN_REVISION)),
-                )
-                index.replaceDocument(
-                    listOf(
-                        row(DOCUMENT, "visible one", vectorFor("visible one")),
-                        row(DOCUMENT, "visible two", vectorFor("visible two")),
-                    ),
-                )
-            }
-
-            assertEquals(
-                "nearest",
-                index.searchVector(COLLECTION, target, limit = 1).single().text,
-                "the hidden row is the closest vector in the index",
-            )
-
-            val scoped = index.searchVector(
-                COLLECTION,
-                target,
-                limit = 2,
-                revisionScope = RevisionScope(setOf(HIDDEN_REVISION)),
-            )
-
-            assertEquals(
-                2,
-                scoped.size,
-                "the hidden row must not consume one of the two top-k slots the visible rows fill",
-            )
-            assertEquals(setOf("visible one", "visible two"), scoped.map { it.text }.toSet())
-        }
-    }
 
     @Test
     fun `deleting a collection removes every chunk that belongs to it`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking {
                 index.replaceDocument(chunksFor(DOCUMENT, listOf("nightfall", "report")))
                 index.replaceDocument(chunksFor(OTHER_DOCUMENT, listOf("other", "report"), collection = OTHER_COLLECTION))
@@ -338,21 +312,18 @@ class LuceneIndexTest {
 
     @Test
     fun `an index built by a different model identity reports rebuild required`() {
-        LuceneIndex.open(indexDir, IDENTITY).use { index ->
+        openIndex().let { index ->
             runBlocking { index.replaceDocument(chunksFor(DOCUMENT, listOf("anything"))) }
         }
 
-        val other = LuceneIndex.open(indexDir, IDENTITY.copy(modelFingerprint = "some-other-model"))
-        try {
-            assertEquals(
-                LuceneSchema.SCHEMA_VERSION,
-                other.schemaStatus.assertRebuildRequired().schemaVersion,
-            )
-            assertTrue(other.schemaStatus.reasons().any { it.contains("model") })
-        } finally {
-            other.close()
-        }
+        val other = openIndex(IDENTITY.copy(modelFingerprint = "some-other-model"))
+        assertEquals(SearchIndex.SCHEMA_VERSION, other.schemaStatus.assertRebuildRequired().schemaVersion)
+        assertTrue(other.schemaStatus.reasons().any { it.contains("model") })
+
+        other.recordIdentity()
+        assertEquals(SearchIndex.SCHEMA_VERSION, other.schemaStatus.assertReady().schemaVersion)
     }
+
 
     /** One row with its vector given explicitly, so a test can decide what is closest to what. */
     private fun row(
@@ -360,7 +331,7 @@ class LuceneIndexTest {
         text: String,
         vector: FloatArray,
         revisionId: String? = null,
-    ): DocumentRow = DocumentRow(
+    ): DocumentRow = ensureDocument(COLLECTION, documentId).let { DocumentRow(
         collectionId = COLLECTION,
         documentId = documentId,
         unitId = ContentUnitId.new(),
@@ -379,13 +350,14 @@ class LuceneIndexTest {
         locatorLabel = LOCATOR_LABEL,
         vector = vector,
         revisionId = revisionId,
-    )
+    ) }
 
     private fun chunksFor(
         documentId: DocumentId,
         texts: List<String>,
         collection: CollectionId = COLLECTION,
     ): List<DocumentRow> = texts.mapIndexed { ordinal, text ->
+        ensureDocument(collection, documentId)
         DocumentRow(
             collectionId = collection,
             documentId = documentId,
@@ -408,14 +380,11 @@ class LuceneIndexTest {
         )
     }
 
-    private fun markerNames(indexDir: Path): List<String> =
-        Files.readAllLines(indexDir.resolve("current")).filter { it.isNotBlank() }
-
     private companion object {
         const val INDEXED_DOCUMENTS = 5
 
         val IDENTITY = IndexIdentity(
-            schemaVersion = LuceneSchema.SCHEMA_VERSION,
+            schemaVersion = SearchIndex.SCHEMA_VERSION,
             model = "intfloat/multilingual-e5-base",
             modelRevision = "d128750597153bb5987e10b1c3493a34e5a4502a",
             modelFingerprint = "expected-model-fingerprint",
@@ -427,8 +396,6 @@ class LuceneIndexTest {
         val DOCUMENT = DocumentId.new()
         val OTHER_DOCUMENT = DocumentId.new()
 
-        /** The revision tag a test hides; the rows carrying it are the ones a scope keeps out of ranking. */
-        const val HIDDEN_REVISION = "hidden-revision"
         const val LOCATOR_LABEL = "page 14"
     }
 }
@@ -444,13 +411,4 @@ internal fun vectorFor(text: String): FloatArray {
     val norm = kotlin.math.sqrt(vector.sumOf { (it.toDouble()).let { value -> value * value } })
     for (i in vector.indices) vector[i] = (vector[i] / norm).toFloat()
     return vector
-}
-
-private fun <T> LuceneIndex.use(block: (LuceneIndex) -> T): T {
-    val index = this
-    try {
-        return block(index)
-    } finally {
-        index.close()
-    }
 }

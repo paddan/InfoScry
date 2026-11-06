@@ -51,9 +51,7 @@ import infoscry.ocr.StaleOcrStateCleanup
 import infoscry.pdf.SelectablePdfService
 import infoscry.storage.SelectablePdfStore
 import infoscry.search.IndexIdentity
-import infoscry.search.LuceneIndex
-import infoscry.search.LuceneSchema
-import infoscry.search.RevisionSnapshotGate
+import infoscry.search.SearchIndex
 import infoscry.search.SearchService
 import infoscry.storage.CollectionPromptStore
 import infoscry.storage.CollectionStore
@@ -111,7 +109,6 @@ class AppContext private constructor(
      * have to agree on which revisions a reader may see — a second gate would let a search read a
      * revision the publication had already replaced.
      */
-    val revisionSnapshots: RevisionSnapshotGate,
     val deletions: DeletionStore,
     val importItems: ImportItemStore,
     val library: ManagedLibrary,
@@ -128,7 +125,7 @@ class AppContext private constructor(
     val blockers: DeletionBlockers,
     private val injectedIndexRemover: CollectionIndexRemover,
     private val injectedDocumentIndexRemover: DocumentIndexRemover,
-    initialIndex: LuceneIndex,
+    private val searchIndex: SearchIndex,
     private val lock: ProcessLock,
     /** This process's claim on the database; released with [lock], after the database closes. */
     private val ownership: ProcessOwnership,
@@ -168,24 +165,8 @@ class AppContext private constructor(
 ) : AutoCloseable {
 
     /**
-     * The generation this data directory currently serves.
-     *
-     * A rebuild builds a successor and publishes it while this process keeps running, so readers take
-     * the current generation *by reference here* rather than holding the one they were opened with: a
-     * search that starts after the swap reads the new generation, and one that started before it
-     * finishes on the generation it already leased.
-     */
-    @Volatile
-    private var currentGeneration: LuceneIndex = initialIndex
-
-    /** Serializes publishing a successor, so two rebuilds cannot swap out of order. */
-    private val indexAdmission = Mutex()
-
-    /**
-     * The index phase of a deletion removes the collection's rows from the generation the process
-     * serves *right now*, which is why the remover reads through the accessor rather than holding the
-     * generation it was opened with: a deletion that finishes after a rebuild must clean the successor,
-     * not the one it replaced.
+     * The index phase of a deletion removes the collection's rows. A deleted collection's rows go with it
+     * in the database anyway, so this only makes the phase idempotent work rather than a separate store.
      */
     private val indexRemover: CollectionIndexRemover =
         if (injectedIndexRemover === CollectionIndexRemover.NONE) {
@@ -276,12 +257,12 @@ class AppContext private constructor(
      * where a deletion or a tombstoned collection gets to win.
      */
     val revisionPublication: RevisionPublicationService = RevisionPublicationService(
+        database = database,
         revisions = revisions,
         documents = documents,
         collections = collections,
         mutations = mutations,
         index = { index() },
-        gate = revisionSnapshots,
         onPublished = RevisionPublishedHook { documentId, collectionId, revisionId ->
             selectablePdfService.queueForPublishedRevision(documentId, collectionId, revisionId)
             followCorrections(collectionId, revisionId)
@@ -526,25 +507,8 @@ class AppContext private constructor(
         },
     )
 
-    /** The generation the process currently serves. Reading it is a single atomic reference read. */
-    fun index(): LuceneIndex = currentGeneration
-
-    /**
-     * Publishes [next] as the generation this process serves and hands [previous] back to retirement.
-     *
-     * The swap is ordered after the marker by the caller, so anything that reads the new generation
-     * here can rely on it being the durable one. The check is what stops two rebuilds from interleaving
-     * their swaps: the second one sees that the generation it built against is no longer served and
-     * refuses rather than publishing over it.
-     */
-    internal suspend fun publishGeneration(next: LuceneIndex, previous: LuceneIndex) {
-        indexAdmission.withLock {
-            check(currentGeneration === previous) {
-                "another rebuild published ${currentGeneration.name} while this one was building"
-            }
-            currentGeneration = next
-        }
-    }
+    /** The searchable rows of every document's published reading. */
+    fun index(): SearchIndex = searchIndex
 
     /**
      * Retrieval over this context's index, resolved lazily so a command that never searches does not
@@ -557,7 +521,6 @@ class AppContext private constructor(
             index = { index() },
             queryEmbedder = injectedQueryEmbedder
                 ?: pinnedEmbedder,
-            snapshots = revisionSnapshots,
             glossaries = { collectionId ->
                 if (collectionId != null) {
                     mapOf(collectionId to glossaryService.snapshot(collectionId))
@@ -626,11 +589,6 @@ class AppContext private constructor(
                     .setCause(failure)
                     .log("the job runner did not finish handing its attempts back to the queue")
             }
-        // The index closes before the database: both are derived from it, and an index writer that held
-        // the directory open while the database closed would be the one thing this process owns that
-        // outlived its archive. The generation served right now is the one to close; a retired one was
-        // closed by the rebuild that retired it.
-        runCatching { currentGeneration.close() }
         // The lock is released last: while the database is closing, this process still owns the data
         // directory, so no second process may open it in between.
         runCatching { database.close() }
@@ -703,10 +661,10 @@ class AppContext private constructor(
                     val conversations = ConversationStore(database)
                     val investigationLedger = InvestigationLedgerStore(database, llm)
 
-                    // The search index is part of the data directory, so every open has exactly one. It is
-                    // created before recovery so an unfinished deletion can finish its index phase, and it
-                    // records the pinned model's identity so stale vectors are detected rather than searched.
-                    val searchIndex = LuceneIndex.open(paths.indexDir, identityForCurrentModel())
+                    // The search rows live in the database; opening the index records the pinned model's identity
+                    // on an empty archive and creates the vector index for its dimension, so stale vectors are
+                    // detected rather than searched.
+                    val searchIndex = SearchIndex(database, identityForCurrentModel()).open()
                     try {
                         val context = AppContext(
                             paths = paths,
@@ -715,7 +673,6 @@ class AppContext private constructor(
                             documents = documents,
                             content = content,
                             revisions = revisions,
-                            revisionSnapshots = RevisionSnapshotGate(),
                             deletions = deletions,
                             importItems = importItems,
                             library = ManagedLibrary(paths, documents),
@@ -727,7 +684,7 @@ class AppContext private constructor(
                             blockers = DeletionBlockers(),
                             injectedIndexRemover = index,
                             injectedDocumentIndexRemover = documentIndex,
-                            initialIndex = searchIndex,
+                            searchIndex = searchIndex,
                             lock = lock,
                             ownership = ownership,
                             injectedQueryEmbedder = queryEmbedder,
@@ -735,10 +692,9 @@ class AppContext private constructor(
                             injectedRescanEmbedder = rescanEmbedder,
                             injectedRestoreEmbedder = restoreEmbedder,
                         )
-                        // A publication that a previous process did not finish is resolved before the
-                        // marker is resolved and before anything may read: an intent that moved authority
-                        // is completed from its own staged artifacts, and one that did not leaves the
-                        // reading it was replacing in place.
+                        // A publication record a previous process left unfinished is resolved before anything
+                        // may read: a committed publication gets its published hook, and a record of one that
+                        // never took effect is abandoned.
                         context.publicationRecovery = runBlocking {
                             context.revisionPublication.recoverUnfinished()
                         }
@@ -764,15 +720,6 @@ class AppContext private constructor(
                             LOGGER.atInfo().addKeyValue(SELECTABLE_PDF_REPAIRED_FIELD, selectablePdfRepaired)
                                 .log("repaired selectable-PDF artifacts whose job was not live")
                         }
-                        // The sweep runs after the marker is resolved and before any writer is admitted,
-                        // so the set it removes is exactly the unreferenced one: a half-built successor
-                        // and a generation a previous process could not retire.
-                        val swept = LuceneIndex.sweepUnreferenced(paths.indexDir, searchIndex.name)
-                        if (swept.isNotEmpty()) {
-                            LOGGER.atInfo()
-                                .addKeyValue(SWEPT_GENERATIONS_FIELD, swept.joinToString(", "))
-                                .log("removed unreferenced search index generations")
-                        }
                         // No worker is attached until AppContext.open has returned, so a persisted RUNNING
                         // owner belongs to the process that stopped; clean its operation before jobs are
                         // requeued below. Running this before resetInterrupted preserves the job's recovery
@@ -795,7 +742,6 @@ class AppContext private constructor(
                         }
                         return context
                     } catch (failure: Throwable) {
-                        runCatching { searchIndex.close() }
                         runCatching { database.close() }
                         throw failure
                     }
@@ -814,7 +760,7 @@ class AppContext private constructor(
         internal fun identityForCurrentModel(): IndexIdentity {
             val manifest = ModelManifest.load()
             return IndexIdentity(
-                schemaVersion = LuceneSchema.SCHEMA_VERSION,
+                schemaVersion = SearchIndex.SCHEMA_VERSION,
                 model = manifest.model,
                 modelRevision = manifest.revision,
                 modelFingerprint = manifest.fingerprint(),
@@ -824,7 +770,6 @@ class AppContext private constructor(
 
         private const val RESUMED_JOBS_FIELD = "resumed_jobs"
         private const val SELECTABLE_PDF_REPAIRED_FIELD = "selectable_pdf_repaired"
-        private const val SWEPT_GENERATIONS_FIELD = "swept_generations"
         private const val COMPONENT_FIELD = "component"
         private const val JOBS_COMPONENT = "jobs"
     }

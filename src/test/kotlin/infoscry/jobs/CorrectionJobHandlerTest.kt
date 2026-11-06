@@ -5,7 +5,6 @@ import infoscry.chunk.Chunker
 import infoscry.chunk.WhitespaceTokenCounter
 import infoscry.correction.CorrectionJobFailedException
 import infoscry.correction.CorrectionRuleInput
-import infoscry.document.PublicationStep
 import infoscry.document.RestoreDocument
 import infoscry.document.RestoreFixtures
 import infoscry.domain.CollectionId
@@ -50,7 +49,6 @@ class CorrectionJobHandlerTest {
         embedder: () -> DocumentEmbedder? = { TestDocumentEmbedder() },
         beforePublish: suspend (DocumentId) -> Unit = {},
         afterDocument: suspend (DocumentId) -> Unit = {},
-        observePublication: (PublicationStep) -> Unit = {},
     ): Job {
         val job = corrections().apply(collection)
         jobs.claim(job.id)
@@ -64,7 +62,6 @@ class CorrectionJobHandlerTest {
             documentEmbedder = embedder,
             beforePublish = beforePublish,
             afterDocument = afterDocument,
-            observePublication = observePublication,
         )
         runCatching { runBlocking { handler.handle(checkNotNull(jobs.get(job.id)), JobStage(job.id, jobs, collections, mutations)) } }
             .onSuccess { jobs.complete(job.id) }
@@ -197,8 +194,8 @@ class CorrectionJobHandlerTest {
     }
 
     @Test
-    fun `an interruption at any publication step converges on the next run`() {
-        PublicationStep.entries.forEach { step ->
+    fun `an interruption before publication converges on the next run`() {
+        run {
             val dir = Files.createTempDirectory("infoscry-correction-kill")
             try {
                 AppContext.open(dir).use { context -> context.seedCollectionWithId("default", "Default") }
@@ -213,7 +210,7 @@ class CorrectionJobHandlerTest {
                         publication = context.revisionPublication,
                         chunker = Chunker(WhitespaceTokenCounter(prefixTokens = 2, specialTokens = 1)),
                         documentEmbedder = { TestDocumentEmbedder() },
-                        observePublication = { observed -> if (observed == step) throw Killed() },
+                        beforePublish = { throw Killed() },
                     )
                     val job = context.correctionService.apply(collection)
                     context.jobs.claim(job.id)
@@ -235,10 +232,10 @@ class CorrectionJobHandlerTest {
                     )
                     runBlocking { handler.handle(checkNotNull(context.jobs.get(job.id)), JobStage(job.id, context.jobs, context.collections, context.mutations)) }
                     val active = checkNotNull(context.revisions.activeRevisionId(fixture.documentId))
-                    assertEquals("hos Spinnars", context.revisions.pages(active)[1].extractedText, "after a kill at $step")
+                    assertEquals("hos Spinnars", context.revisions.pages(active)[1].extractedText, "after a kill before publication")
                     val published = context.revisions.revisions(fixture.documentId)
                         .count { it.provenance == "CORRECTIONS" && (it.state == RevisionState.PUBLISHED || it.state == RevisionState.SUPERSEDED) }
-                    assertEquals(1, published, "after a kill at $step")
+                    assertEquals(1, published, "after a kill before publication")
                 }
             } finally {
                 dir.toFile().deleteRecursively()

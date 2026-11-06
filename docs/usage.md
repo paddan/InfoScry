@@ -78,7 +78,7 @@ selectable text** appear once it is ready; a partial result lists exactly which
 pages have no selectable text and why, and **Retry PDF generation** rebuilds a
 failed or partial copy without repeating any paid reading. This is a separate,
 revision-bound copy: the original and managed files are never changed, and
-archive search keeps using Lucene over the existing extracted text — this only
+archive search keeps using the existing extracted text — this only
 affects selecting and copying text inside the generated PDF. A document's very
 first import does not yet queue this automatically; use **Create PDF with
 selectable text** explicitly until that is addressed. Native PDF-reader

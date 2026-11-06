@@ -4,7 +4,6 @@ import infoscry.chunk.Chunker
 import infoscry.correction.CandidateCorrector
 import infoscry.correction.CorrectionJobFailedException
 import infoscry.correction.CorrectionRules
-import infoscry.document.PublicationStep
 import infoscry.document.RevisionPublicationService
 import infoscry.domain.CollectionId
 import infoscry.domain.DocumentId
@@ -42,8 +41,6 @@ class CorrectionJobHandler(
     private val beforePublish: suspend (DocumentId) -> Unit = {},
     /** Test seam: runs after each document of a pass. */
     private val afterDocument: suspend (DocumentId) -> Unit = {},
-    /** Test seam: the publication's own steps. */
-    private val observePublication: (PublicationStep) -> Unit = {},
 ) : JobHandler {
 
     override suspend fun handle(job: Job, stage: JobStage) {
@@ -80,7 +77,7 @@ class CorrectionJobHandler(
             try {
                 embedMissingVectors(candidate, embedder)
                 beforePublish(documentId)
-                publication.publish(documentId, active, candidate, observePublication)
+                publication.publish(documentId, active, candidate)
             } catch (cancelled: CancellationException) {
                 revisions.withdrawCandidateIfCandidate(candidate)
                 throw cancelled

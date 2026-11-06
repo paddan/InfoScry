@@ -34,23 +34,13 @@ import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 
 /**
- * One instant a restore can be parked at, in the order they happen.
- *
- * The first two are the restore's own — its candidate exists and is staged, then its passages are embedded —
- * and the ones between [INTENT_PERSISTED] and [CLEANED] are the publication protocol's, relayed unchanged under
- * the same names ([PublicationStep]), so a test that kills a restore at one of them is killing the shared
- * boundary, not a copy of it. [RECORDED] is the instant the restore request itself says it is published.
+ * One instant a restore can be parked at, in the order they happen: its candidate exists and is staged, its
+ * passages are embedded, the publication has committed, and the restore request itself says it is published.
  */
 enum class RestoreStep {
     STAGED,
     EMBEDDED,
-    INTENT_PERSISTED,
-    ROWS_STAGED,
-    STAGED_COMMITTED,
-    AUTHORITATIVE,
-    SNAPSHOT_PUBLISHED,
     PUBLISHED,
-    CLEANED,
     RECORDED,
 }
 
@@ -204,9 +194,8 @@ class RevisionRestoreService(
             mutations.withMutation { correct(collectionId, documentId, record) }
             embedOrRefuse(record, checkNotNull(resolved))
             observe(RestoreStep.EMBEDDED)
-            val publicationId = publication.publish(documentId, expectedRevisionId, record.newRevisionId) { step ->
-                observe(RestoreStep.valueOf(step.name))
-            }
+            val publicationId = publication.publish(documentId, expectedRevisionId, record.newRevisionId)
+            observe(RestoreStep.PUBLISHED)
             val intent = revisions.intent(publicationId)
             if (intent?.authoritativeAt != null) {
                 // The database says the restored reading is the document's text, whatever bookkeeping is left.

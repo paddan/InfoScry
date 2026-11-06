@@ -216,11 +216,9 @@ class CandidateCorrectorTest {
             }
             val candidate = RestoreFixtures.stage(context, documentId, null, listOf("hos spinners"), listOf(ContentUnitId.new()))
 
-            val steps = mutableListOf<infoscry.document.PublicationStep>()
-            runBlocking { context.revisionPublication.publish(documentId, null, candidate) { steps += it } }
+            runBlocking { context.revisionPublication.publish(documentId, null, candidate) }
 
             assertEquals(candidate, context.revisions.activeRevisionId(documentId))
-            assertTrue(infoscry.document.PublicationStep.CLEANED in steps, "the publication finished its own cleanup: $steps")
             assertEquals(emptyList(), context.revisions.intentsAwaitingCleanup())
         }
     }

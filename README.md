@@ -97,7 +97,7 @@ a revision-bound PDF copy places the published reading invisibly
 over its page image so it can be selected and copied in an ordinary PDF reader.
 Generation is durable, repeatable and recoverable; a selected-page rescan or
 Restore changes only its own export and keeps historical exports exact; archive
-search continues through Lucene, unaffected. Automated fake-provider tests cover
+search is unaffected. Automated fake-provider tests cover
 this end to end, including independent PDFBox byte inspection of the produced
 files and a real-browser acceptance scenario. Original and managed PDF files are
 never changed. A document's plain first import does not yet

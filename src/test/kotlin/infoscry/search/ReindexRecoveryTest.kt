@@ -44,17 +44,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 /**
- * The generation swap is the protocol the product's citations rest on, so the tests below ask the two
- * questions the brief names: what does a rebuild leave behind when the process dies at each instant of
- * the swap, and what does the archive serve afterwards. The kills are real — a child JVM runs the
- * service's own protocol through its observation seam and is terminated forcibly, the way
- * [infoscry.collection.DeletionHarness] is — so the state a test inspects is the state production would
- * leave, not a second copy of the protocol that could drift.
- *
- * The invariant every kill test shares is the marker's: the generation the `current` marker names is the
- * one the next open serves, and a successor that was never named is swept on the way in, whatever its
- * state. A narrowed rebuild additionally has to keep every other collection's rows, because one index
- * serves every collection.
+ * A rebuild rewrites each document's rows in a transaction of its own, so the questions are what an
+ * interrupted rebuild leaves — every document whole, the archive searchable — and whether running it again
+ * finishes the work. The kill is real: a child JVM runs the service and is terminated forcibly at the
+ * service's own observation seam, so the state a test inspects is the state production would leave.
  */
 class ReindexRecoveryTest {
 
@@ -73,16 +66,27 @@ class ReindexRecoveryTest {
     // ---- Terminated mid-rebuild ----
 
     @Test
-    fun `a rebuild killed while building the successor leaves the old generation serving`() =
-        assertSwapSurvived(ReindexStep.GENERATION_BUILT)
+    fun `a rebuild killed before it records the model leaves every document searchable and the next run finishes`() {
+        openSeededArchive(collections = 1, documentsPerCollection = 2).context.use { context ->
+            // A different model on record is what makes a full rebuild rebuild every document.
+            context.database.transaction { connection ->
+                connection.createStatement().use { it.execute("UPDATE search_index_state SET model_fingerprint = 'an-older-model'") }
+            }
+        }
+        terminateReindexAt(ReindexStep.DOCUMENTS_REBUILT)
 
-    @Test
-    fun `a rebuild killed before the marker swap leaves the old generation serving`() =
-        assertSwapSurvived(ReindexStep.BEFORE_MARKER_SWAP)
+        AppContext.open(dataDir).use { context ->
+            assertTrue(context.index().schemaStatus is SchemaStatus.RebuildRequired, "the model was never recorded")
+            val keyword = runBlocking { searchService(context).search("nightfall", mode = SearchMode.KEYWORD) }
+            assertEquals(4, keyword.hits.size, "every document keeps one whole set of rows")
 
-    @Test
-    fun `a rebuild killed after the marker swap makes the successor the next startup's generation`() =
-        assertSwapSelected(ReindexStep.AFTER_MARKER_SWAP)
+            val result = runBlocking { reindexService(context).reindex(ReindexRequest()) }
+            assertEquals(2, result.documents)
+            assertTrue(context.index().schemaStatus is SchemaStatus.Ready, "the second run records the model")
+            val hybrid = runBlocking { searchService(context).search("nightfall") }
+            assertEquals(4, hybrid.hits.size, "the archive is searchable by meaning again")
+        }
+    }
 
     // ---- What a finished rebuild keeps ----
 
@@ -94,8 +98,8 @@ class ReindexRecoveryTest {
             val result = runBlocking {
                 reindexService(closed).reindex(ReindexRequest(collectionId = collectionA))
             }
-            assertEquals(0, result.documentsRebuilt, "a document whose copy already agrees is not rebuilt")
-            assertEquals(rowsBefore, closed.index().rowCount(collectionA), "the copied rows are the same rows")
+            assertEquals(0, result.documentsRebuilt, "a document whose rows already agree is not rebuilt")
+            assertEquals(rowsBefore, closed.index().rowCount(collectionA), "the rows are the same rows")
         }
     }
 
@@ -139,13 +143,11 @@ class ReindexRecoveryTest {
             runBlocking { closed.documents.delete(deletedId) }
 
             val result = runBlocking { reindexService(closed).reindex(ReindexRequest()) }
-
-            assertEquals(1, result.staleDocuments, "the rows the copy inherited are accounted for")
             val liveIds = liveDocumentIds(closed)
             assertEquals(
                 liveIds,
                 closed.index().storedDocumentIds(),
-                "the published generation is exactly the database's live document set",
+                "the index holds exactly the database's live document set",
             )
             assertTrue(
                 deletedId.value !in closed.index().storedDocumentIds(),
@@ -175,11 +177,10 @@ class ReindexRecoveryTest {
             }
 
             assertEquals(1, result.documents, "the narrowed rebuild walks only the named collection")
-            assertEquals(1, result.staleDocuments, "the purge is not scoped to the named collection")
             assertEquals(
                 liveDocumentIds(closed),
                 closed.index().storedDocumentIds(),
-                "the published generation is the live set, whatever the rebuild's scope was",
+                "the index holds the live set, whatever the rebuild's scope was",
             )
             assertEquals(0, closed.index().rowCount(collectionB), "the stale collection's rows are gone")
             assertEquals(
@@ -245,7 +246,7 @@ class ReindexRecoveryTest {
             assertEquals(
                 0,
                 runBlocking { reindexService(closed).reindex(ReindexRequest()) }.documentsRebuilt,
-                "the re-chunk landed durably, so the next rebuild is a copy",
+                "the re-chunk landed durably, so the next rebuild keeps the rows",
             )
         }
     }
@@ -282,214 +283,15 @@ class ReindexRecoveryTest {
         }
     }
 
-    /** A reader lease remains valid while publication and maintenance happen concurrently. */
-    @Test
-    fun `readers keep searching the generation they leased while a rebuild holds maintenance`() {
-        val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
-        context.use { closed ->
-            markChunkingStale(closed, collectionA)
-            val before = runBlocking {
-                searchService(closed).search("nightfall", filters = SearchFilters(collectionId = collectionA))
-            }
-            // Hits are per chunk, and the seeded document's two chunks both contain the term.
-            assertEquals(2, before.hits.size, "the archive is searchable before the rebuild")
-
-            val entered = CompletableDeferred<Unit>()
-            val release = CompletableDeferred<Unit>()
-            val leaseEntered = CompletableDeferred<Unit>()
-            val leaseRelease = CompletableDeferred<Unit>()
-            val published = CompletableDeferred<Unit>()
-            val previous = closed.index()
-            val service = reindexService(closed) { BlockingDocumentEmbedder(entered, release) }
-
-            runBlocking {
-                val readerLease = launch(Dispatchers.Default) {
-                    previous.withReaderLease { searcher ->
-                        leaseEntered.complete(Unit)
-                        runBlocking { published.await() }
-                        val heldReaderHits = previous.searchKeywordWithReader(
-                            searcher = searcher,
-                            collectionId = collectionA,
-                            queryText = "nightfall",
-                            limit = 10,
-                        )
-                        assertEquals(2, heldReaderHits.size, "the held old reader still searches after publication")
-                        runBlocking { leaseRelease.await() }
-                    }
-                }
-                val rebuild = launch(Dispatchers.Default) { service.reindex(ReindexRequest(collectionId = collectionA)) }
-                withTimeout(SCREEN_TIMEOUT_MILLIS) { entered.await() }
-                withTimeout(SCREEN_TIMEOUT_MILLIS) { leaseEntered.await() }
-
-                val during = runBlocking {
-                    searchService(closed).search("nightfall", filters = SearchFilters(collectionId = collectionA))
-                }
-                assertEquals(
-                    before.hits.size,
-                    during.hits.size,
-                    "a reader is not broken by the maintenance a rebuild holds",
-                )
-
-                release.complete(Unit)
-                withTimeout(SCREEN_TIMEOUT_MILLIS) {
-                    while (closed.index() === previous) delay(POLL_MILLIS)
-                }
-                published.complete(Unit)
-                assertTrue(
-                    Files.exists(AppPaths.from(dataDir).indexDir.resolve(previous.name)),
-                    "the leased old generation remains on disk after publication",
-                )
-                leaseRelease.complete(Unit)
-                withTimeout(SCREEN_TIMEOUT_MILLIS) { rebuild.join() }
-                withTimeout(SCREEN_TIMEOUT_MILLIS) { readerLease.join() }
-                assertTrue(
-                    !Files.exists(AppPaths.from(dataDir).indexDir.resolve(previous.name)),
-                    "the old generation is retired after its reader lease drains",
-                )
-            }
-        }
-    }
 
     // ---- What startup keeps and sweeps ----
 
-    /**
-     * Startup removes what no marker names, whatever state it is in: a half-written successor, a
-     * generation a previous process retired without draining its readers, and the temporary marker a
-     * crash between write and rename leaves behind. The generation the marker names is never a
-     * candidate — including a successor that keeps the `next` spelling, because the marker names it.
-     */
-    @Test
-    fun `startup sweeps leftovers and keeps only the generation the marker names`() {
-        val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
-        val serving = context.index().name
-        val indexDir = AppPaths.from(dataDir).indexDir
-        context.close()
 
-        // A leftover for every shape a crashed rebuild leaves: a half-built successor, a retired
-        // generation whose readers never drained, and the temporary marker from a crash between
-        // write and rename.
-        val orphanGeneration = "$GENERATION_PREFIX" + "abandoned-" + java.util.UUID.randomUUID()
-        Files.createDirectory(indexDir.resolve(orphanGeneration))
-        val orphanSuccessor = "$GENERATION_PREFIX" + "next-" + java.util.UUID.randomUUID()
-        Files.createDirectory(indexDir.resolve(orphanSuccessor))
-        Files.writeString(indexDir.resolve("current.tmp"), orphanSuccessor)
-
-        AppContext.open(dataDir).use { reopened ->
-            assertEquals(serving, reopened.index().name, "the marker still names the serving generation")
-            assertEquals(
-                listOf(serving),
-                generationDirectories(),
-                "only the generation the marker names is left, kept: ${generationDirectories()}",
-            )
-            val outcome = runBlocking {
-                searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
-            }
-            assertEquals(2, outcome.hits.size, "the kept generation still serves its citations")
-        }
-    }
-
-    /**
-     * A published successor keeps the `next` spelling, and a directory that still carries it is the
-     * one the marker names — so a sweep keyed on the name would delete the index the caller just
-     * chose. The removal path refuses that name; this test pins that refusal from the filesystem.
-     */
-    @Test
-    fun `the generation the marker names survives startup even when its name still says next`() {
-        val successor = assertSwapSelectedReturnsNamed(ReindexStep.AFTER_MARKER_SWAP)
-        assertTrue(
-            successor.startsWith(GENERATION_PREFIX) && "next-" in successor,
-            "the published successor keeps the next spelling, was $successor",
-        )
-
-        AppContext.open(dataDir).use { reopened ->
-            assertEquals(successor, reopened.index().name)
-            assertEquals(
-                listOf(successor),
-                generationDirectories(),
-                "the marked generation is kept whatever its name spells, kept: ${generationDirectories()}",
-            )
-        }
-    }
 
     // ---- What a kill at one instant leaves behind ----
 
-    /**
-     * Kills the rebuild at [step] before it published, then asserts the archive still serves the
-     * generation it served before, that the unreferenced successor is swept on the way in, and that a
-     * later rebuild still works.
-     */
-    private fun assertSwapSurvived(step: ReindexStep) {
-        val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
-        val beforeName = context.index().name
-        context.close()
 
-        terminateReindexAt(step)
-        assertEquals(
-            beforeName,
-            LuceneIndex.currentGenerationName(AppPaths.from(dataDir).indexDir),
-            "the marker still names the generation that was serving when the process died",
-        )
 
-        AppContext.open(dataDir).use { reopened ->
-            assertEquals(beforeName, reopened.index().name, "the old generation is the one served")
-            val outcome = runBlocking {
-                searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
-            }
-            // Hits are per chunk, and the seeded document's two chunks both contain the term.
-            assertEquals(2, outcome.hits.size, "the archive is searchable from the generation it kept")
-            assertTrue(
-                generationDirectories().none { it != beforeName },
-                "an unreferenced successor is swept on the way in, kept: ${generationDirectories()}",
-            )
-            runBlocking { reindexService(reopened).reindex(ReindexRequest(collectionId = collectionA)) }
-            assertTrue(reopened.index().name != beforeName, "a later rebuild still works")
-        }
-    }
-
-    /**
-     * Kills the rebuild at [step] after it published the marker, then asserts the successor is the one
-     * the next startup selects — the durable swap is the truth, not the process's memory of it. Returns
-     * the name the marker published.
-     */
-    private fun assertSwapSelectedReturnsNamed(step: ReindexStep): String {
-        val (context, collectionA) = openSeededArchive(collections = 1, documentsPerCollection = 1)
-        val beforeName = context.index().name
-        context.close()
-
-        terminateReindexAt(step)
-        val named = LuceneIndex.currentGenerationName(AppPaths.from(dataDir).indexDir)
-        requireNotNull(named) { "the marker is unreadable after a kill at $step" }
-        assertTrue(named != beforeName, "the marker names the successor once it was published, was $named")
-
-        AppContext.open(dataDir).use { reopened ->
-            assertEquals(named, reopened.index().name, "the next startup selects the generation the marker names")
-            // Identity is more than a name: the rows the successor published are the rows the database
-            // holds, so the citations a caller follows are the same ones the archive can prove.
-            assertEquals(
-                liveDocumentIds(reopened),
-                reopened.index().storedDocumentIds(),
-                "the selected generation holds exactly the database's live document set",
-            )
-            val outcome = runBlocking {
-                searchService(reopened).search("nightfall", filters = SearchFilters(collectionId = collectionA))
-            }
-            // Hits are per chunk, and the seeded document's two chunks both contain the term.
-            assertEquals(2, outcome.hits.size, "the successor serves the same citations")
-            assertTrue(
-                generationDirectories().none { it == beforeName },
-                "the generation the marker replaced is swept",
-            )
-        }
-        return named
-    }
-
-    /**
-     * Kills the rebuild at [step] after it published the marker, then asserts the successor is the one
-     * the next startup selects — the durable swap is the truth, not the process's memory of it.
-     */
-    private fun assertSwapSelected(step: ReindexStep) {
-        assertSwapSelectedReturnsNamed(step)
-    }
 
     // ---- Fixtures ----
 
@@ -638,7 +440,7 @@ class ReindexRecoveryTest {
         }
     }
 
-    /** The document identities the database holds, the set a published generation must equal. */
+    /** The document identities the database holds, the set the index must equal. */
     private fun liveDocumentIds(context: AppContext): Set<String> =
         context.collections.list().flatMap { collection ->
             context.documents.listByCollection(collection.id, Int.MAX_VALUE).map { it.id.value }
@@ -668,10 +470,8 @@ class ReindexRecoveryTest {
             E5Embedder.productionCounter(context.paths.modelsDir, context.paths.embeddingProfileDir),
         ),
         paths = context.paths,
-        identity = AppContext.identityForCurrentModel(),
         documentEmbedder = documentEmbedder,
-        current = { context.index() },
-        publish = { next, previous -> context.publishGeneration(next, previous) },
+        index = { context.index() },
     )
 
     private fun terminateReindexAt(step: ReindexStep) {
@@ -712,10 +512,6 @@ class ReindexRecoveryTest {
         process.waitFor()
     }
 
-    private fun generationDirectories(): List<String> =
-        Files.list(AppPaths.from(dataDir).indexDir).use { entries ->
-            entries.map { it.fileName.toString() }.filter { it.startsWith(GENERATION_PREFIX) }.sorted().toList()
-        }
 
     /** The collections a seeded archive produced, with the context its caller closes. */
     private data class SeededArchive(
@@ -739,7 +535,6 @@ class ReindexRecoveryTest {
     companion object {
         private const val COLLECTION_A = "nightfall"
         private const val UNIT_BATCH = 64
-        private const val GENERATION_PREFIX = "lucene-"
         private const val HARNESS_TIMEOUT_NANOS: Long = 120_000_000_000L
         private const val SCREEN_TIMEOUT_MILLIS: Long = 60_000L
         private const val POLL_MILLIS: Long = 100L
@@ -787,10 +582,8 @@ object ReindexHarness {
             E5Embedder.productionCounter(context.paths.modelsDir, context.paths.embeddingProfileDir),
         ),
         paths = context.paths,
-        identity = AppContext.identityForCurrentModel(),
         documentEmbedder = { TestDocumentEmbedder() },
-        current = { context.index() },
-        publish = { next, previous -> context.publishGeneration(next, previous) },
+        index = { context.index() },
     )
 
     /**

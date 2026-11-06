@@ -45,12 +45,11 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
 /**
- * Retrieval over a real SQLite database and a real Lucene index, with a deterministic embedders pair:
+ * Retrieval over a real Postgres database and its search index, with a deterministic embedders pair:
  * a single-vector fake embedder per test indexes the chunks and the same vector answers the query, so
  * the semantic branch finds exactly what a deterministic vector says is nearest.
  *
- * Each test opens exactly one [LuceneIndex] for its data directory (a second writer on the same
- * generation would corrupt it) and shares that instance between indexing and [SearchService].
+ * Each test shares one [SearchIndex] over its database between indexing and [SearchService].
  */
 class SearchServiceTest {
 
@@ -133,7 +132,6 @@ class SearchServiceTest {
                 val semanticOnly = service.search("nightfall", mode = SearchMode.SEMANTIC)
                 assertEquals(setOf(SearchMode.SEMANTIC), semanticOnly.hits.single().matchedBy)
             } finally {
-                index.close()
             }
         }
     }
@@ -172,7 +170,6 @@ class SearchServiceTest {
                 assertEquals(1, semanticOnly.hits.size)
                 assertEquals(setOf(SearchMode.SEMANTIC), semanticOnly.hits.single().matchedBy)
             } finally {
-                index.close()
             }
         }
     }
@@ -194,7 +191,6 @@ class SearchServiceTest {
                 val semantic = service.search("watergate", mode = SearchMode.SEMANTIC)
                 assertEquals(0, semantic.hits.size, "a wordless passage must not be a semantic result")
             } finally {
-                index.close()
             }
         }
     }
@@ -219,7 +215,6 @@ class SearchServiceTest {
                 val anchored = service.search("spin", mode = SearchMode.HYBRID, requireLexicalAnchor = true)
                 assertEquals(listOf(valid.id), anchored.hits.map { it.documentId })
             } finally {
-                index.close()
             }
         }
     }
@@ -238,7 +233,6 @@ class SearchServiceTest {
                 assertContains(hit.highlighted.orEmpty(), "<mark>nightfall</mark>")
                 assertTrue(hit.highlighted.orEmpty().contains("&lt;"), "document text must be HTML-escaped")
             } finally {
-                index.close()
             }
         }
     }
@@ -257,7 +251,6 @@ class SearchServiceTest {
             assertContains(swedish.orEmpty(), "<mark>ÅNGSTRÖM</mark>")
             assertContains(swedish.orEmpty(), "<mark>A\u030angstro\u0308m</mark>")
         } finally {
-            index.close()
         }
     }
 
@@ -282,7 +275,6 @@ class SearchServiceTest {
                 assertTrue(outcome.hits.any { it.documentId == valid.id }, "the first 50 filtered vectors must not starve the valid 52nd candidate")
                 assertEquals(0, outcome.staleFiltered)
             } finally {
-                index.close()
             }
         }
     }
@@ -298,7 +290,7 @@ class SearchServiceTest {
             assertEquals(1_002, index.chunkCount(collection.id, document.id))
             val raw = index.searchVector(collection.id, vectorFor("Â"), limit = 1_600)
             assertEquals(1_002, raw.size, "the raw vector query should return every indexed chunk at k above the index size")
-            assertTrue(raw.any { it.chunkOrdinal == 1_001 }, "Lucene should include the valid vector in its raw nearest-neighbor candidates")
+            assertTrue(raw.any { it.chunkOrdinal == 1_001 }, "the raw nearest-neighbour candidates include the valid vector")
 
             val outcome = service.search(
                 "watergate",
@@ -309,12 +301,11 @@ class SearchServiceTest {
             assertEquals(1_001, outcome.hits.single().chunkOrdinal)
             assertEquals(0, outcome.staleFiltered)
         } finally {
-            index.close()
         }
     }
 
     @Test
-    fun `hybrid filters stale candidates before its top thirty fusion cut and keeps both badges`() {
+    fun `a deleted document's rows go with it, so hybrid fusion only sees live documents`() {
         val collection = collections.create("hybrid-refill")
         val (service, index) = openService(embedder = { QueryEmbedder { vectorFor("budget") } })
         try {
@@ -330,9 +321,9 @@ class SearchServiceTest {
 
             assertEquals(valid.id, outcome.hits.first().documentId)
             assertEquals(setOf(SearchMode.KEYWORD, SearchMode.SEMANTIC), outcome.hits.first().matchedBy)
-            assertEquals(31, outcome.staleFiltered, "stale rows shared by branches are counted once")
+            assertEquals(0, outcome.staleFiltered, "a deleted document takes its rows with it, so nothing is stale")
+            assertEquals(1, outcome.hits.size)
         } finally {
-            index.close()
         }
     }
 
@@ -348,7 +339,6 @@ class SearchServiceTest {
 
             assertEquals(listOf(document.id), outcome.hits.map { it.documentId })
         } finally {
-            index.close()
         }
     }
 
@@ -384,7 +374,6 @@ class SearchServiceTest {
             assertEquals(listOf(document.id), outcome.hits.map { it.documentId })
             assertEquals(listOf(document.id), dateOnly.hits.map { it.documentId })
         } finally {
-            index.close()
         }
     }
 
@@ -400,7 +389,6 @@ class SearchServiceTest {
 
                 assertTrue(outcome.hits.any { it.documentId == document.id }, "the escaped query should still match")
             } finally {
-                index.close()
             }
         }
     }
@@ -416,7 +404,6 @@ class SearchServiceTest {
                 }
                 assertEquals("MODEL_NOT_INSTALLED", failure.code)
             } finally {
-                index.close()
             }
         }
     }
@@ -425,10 +412,10 @@ class SearchServiceTest {
     fun `an index that does not match the pinned model refuses semantic search only`() {
         val collection = collections.create("Default-collection")
         val document = insertDocument(collection.id, "report.txt", "text/plain")
-        LuceneIndex.open(paths.indexDir, IDENTITY).use { index ->
+        SearchIndex(database, IDENTITY).open().let { index ->
             runBlocking { indexChunk(index, collection.id, document.id, "nightfall report") }
         }
-        val staleIndex = LuceneIndex.open(paths.indexDir, IDENTITY.copy(modelFingerprint = "another-model"))
+        val staleIndex = SearchIndex(database, IDENTITY.copy(modelFingerprint = "another-model")).open()
         try {
             val service = SearchService(
                 collections = collections,
@@ -445,7 +432,6 @@ class SearchServiceTest {
             val keywordOnly = service.search("nightfall", mode = SearchMode.KEYWORD)
             assertEquals(1, keywordOnly.hits.size)
         } finally {
-            staleIndex.close()
         }
     }
 
@@ -471,7 +457,6 @@ class SearchServiceTest {
                 assertEquals(setOf(text.id), filtered(setOf("text/plain")).hits.map { it.documentId }.toSet())
                 assertEquals(0, filtered(setOf("image/png")).hits.size)
             } finally {
-                index.close()
             }
         }
     }
@@ -515,7 +500,6 @@ class SearchServiceTest {
                     ).hits.map { it.documentId }.toSet(),
                 )
             } finally {
-                index.close()
             }
         }
     }
@@ -546,7 +530,6 @@ class SearchServiceTest {
                 )
                 assertEquals(setOf(failed.id), failedOnly.hits.map { it.documentId }.toSet())
             } finally {
-                index.close()
             }
         }
     }
@@ -572,20 +555,18 @@ class SearchServiceTest {
 
                 assertEquals(setOf(scanned.id), outcome.hits.map { it.documentId }.toSet())
             } finally {
-                index.close()
             }
         }
     }
 
     @Test
-    fun `hits whose document was deleted are dropped and counted as stale`() {
+    fun `a deleted document's rows are gone with it`() {
         val collection = collections.create("Delete-me")
         val document = insertDocument(collection.id, "gone.pdf", "application/pdf")
         openService(absentEmbedder()).let { (service, index) ->
             try {
                 runBlocking { indexChunk(index, collection.id, document.id, "nightfall before deletion") }
             } finally {
-                index.close()
             }
         }
 
@@ -595,9 +576,9 @@ class SearchServiceTest {
             try {
                 val outcome = service.search("nightfall", mode = SearchMode.KEYWORD)
                 assertEquals(0, outcome.hits.size)
-                assertEquals(1, outcome.staleFiltered)
+                assertEquals(0, outcome.staleFiltered, "the rows went with the document")
+                assertEquals(0, index.rowCount(document.id))
             } finally {
-                index.close()
             }
         }
     }
@@ -610,7 +591,6 @@ class SearchServiceTest {
             try {
                 runBlocking { indexChunk(index, collection.id, document.id, "nightfall in the tombstoned collection") }
             } finally {
-                index.close()
             }
         }
 
@@ -622,7 +602,6 @@ class SearchServiceTest {
                 assertEquals(0, outcome.hits.size)
                 assertEquals(1, outcome.staleFiltered)
             } finally {
-                index.close()
             }
         }
     }
@@ -656,7 +635,6 @@ class SearchServiceTest {
                     )
                 }
             } finally {
-                index.close()
             }
         }
     }
@@ -672,7 +650,7 @@ class SearchServiceTest {
             // Lucene enforces its clause ceiling when a query is rewritten during the search, and the parser
             // emits roughly one clause per analyzed token, so a query this long must be refused before it is
             // parsed rather than surface as an exception.
-            val overLong = (1..(LuceneIndex.MAX_QUERY_TOKENS + 100)).joinToString(" ") { "term$it" }
+            val overLong = (1..(SearchIndex.MAX_QUERY_TOKENS + 100)).joinToString(" ") { "term$it" }
             val failure = assertFailsWith<SearchUnavailableException> {
                 service.search(
                     overLong,
@@ -680,11 +658,11 @@ class SearchServiceTest {
                     filters = SearchFilters(collectionId = collection.id),
                 )
             }
-            assertEquals(LuceneIndex.QUERY_TOO_LONG_CODE, failure.code)
+            assertEquals(SearchIndex.QUERY_TOO_LONG_CODE, failure.code)
             assertContains(failure.remedy, "shorten")
 
             // A query within the bound still searches, so the refusal is a bound and not a blanket rejection.
-            val withinBound = (1..LuceneIndex.MAX_QUERY_TOKENS).joinToString(" ") { "term$it" }
+            val withinBound = (1..SearchIndex.MAX_QUERY_TOKENS).joinToString(" ") { "term$it" }
             assertEquals(
                 0,
                 service.search(
@@ -694,7 +672,6 @@ class SearchServiceTest {
                 ).hits.size,
             )
         } finally {
-            index.close()
         }
     }
 
@@ -707,7 +684,6 @@ class SearchServiceTest {
                 runBlocking { indexChunk(index, collection.id, document.id, "any words at all") }
                 assertEquals(0, service.search("   ", mode = SearchMode.KEYWORD).hits.size)
             } finally {
-                index.close()
             }
         }
     }
@@ -731,7 +707,6 @@ class SearchServiceTest {
             assertEquals(SearchService.FILTER_TOO_BROAD_CODE, failure.code)
             assertContains(failure.remedy, "narrow")
         } finally {
-            index.close()
         }
     }
 
@@ -752,7 +727,6 @@ class SearchServiceTest {
             assertEquals(0, outcome.hits.size)
             assertEquals(0, outcome.staleFiltered)
         } finally {
-            index.close()
         }
     }
 
@@ -786,7 +760,6 @@ class SearchServiceTest {
             val resolved = service.resolveHit(valid, "nightfall")
             assertEquals(SourceLocation.TextLines(2, 2), resolved?.locator)
         } finally {
-            index.close()
         }
     }
 
@@ -818,7 +791,6 @@ class SearchServiceTest {
             val minutesHit = outcome.hits.single { it.documentId == minutes.id }.highlighted
             assertEquals("möte i <mark>Sthlms</mark> <mark>stad</mark> om <mark>Sthlmsregionen</mark>", minutesHit)
         } finally {
-            index.close()
         }
     }
 
@@ -835,7 +807,6 @@ class SearchServiceTest {
             assertEquals(1, outcome.hits.size)
             assertTrue(outcome.expandedWith.isEmpty())
         } finally {
-            index.close()
         }
     }
 
@@ -852,19 +823,18 @@ class SearchServiceTest {
 
             assertEquals(document.id, outcome.hits.single().documentId)
         } finally {
-            index.close()
         }
     }
 
     // ---- fixtures ----
 
-    /** One LuceneIndex for the whole test, shared by indexing and the service. */
+    /** One SearchIndex for the whole test, shared by indexing and the service. */
     private fun openService(
         embedder: () -> QueryEmbedder?,
         maxScopeTerms: Int = SearchService.DEFAULT_MAX_SCOPE_TERMS,
         glossaries: (CollectionId?) -> Map<CollectionId, Glossary> = { emptyMap() },
-    ): Pair<SearchService, LuceneIndex> {
-        val index = LuceneIndex.open(paths.indexDir, IDENTITY)
+    ): Pair<SearchService, SearchIndex> {
+        val index = SearchIndex(database, IDENTITY).open()
         val service = SearchService(
             collections = collections,
             documents = documents,
@@ -906,7 +876,7 @@ class SearchServiceTest {
     }
 
     private suspend fun indexChunk(
-        index: LuceneIndex,
+        index: SearchIndex,
         collectionId: CollectionId,
         documentId: DocumentId,
         text: String,
@@ -937,7 +907,7 @@ class SearchServiceTest {
     }
 
     private suspend fun indexChunks(
-        index: LuceneIndex,
+        index: SearchIndex,
         collectionId: CollectionId,
         documentId: DocumentId,
         texts: List<String>,
@@ -1015,7 +985,7 @@ class SearchServiceTest {
 
     private companion object {
         val IDENTITY = IndexIdentity(
-            schemaVersion = LuceneSchema.SCHEMA_VERSION,
+            schemaVersion = SearchIndex.SCHEMA_VERSION,
             model = "intfloat/multilingual-e5-base",
             modelRevision = "d128750597153bb5987e10b1c3493a34e5a4502a",
             modelFingerprint = "expected-model-fingerprint",

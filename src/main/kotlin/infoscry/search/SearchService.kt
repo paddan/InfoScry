@@ -22,7 +22,6 @@ import infoscry.storage.DocumentStore
 import com.ibm.icu.lang.UCharacter
 import com.ibm.icu.text.Normalizer2
 import kotlinx.serialization.json.Json
-import org.apache.lucene.search.IndexSearcher
 import org.slf4j.LoggerFactory
 
 /**
@@ -44,19 +43,9 @@ import org.slf4j.LoggerFactory
 class SearchService(
     private val collections: CollectionStore,
     private val documents: DocumentStore,
-    private val index: () -> LuceneIndex,
+    private val index: () -> SearchIndex,
     private val queryEmbedder: () -> QueryEmbedder?,
     private val maxScopeTerms: Int = DEFAULT_MAX_SCOPE_TERMS,
-    /**
-     * The revision snapshots a search reads under.
-     *
-     * A search takes one lease for its whole duration, so a publication that lands while it is running
-     * cannot show it half of one reading and half of another: the rows it may match were decided before
-     * it started, and the reading it publishes keeps its own rows until the readers that leased them
-     * have finished. The default gate restricts nothing, which is what a caller that does not track
-     * revisions — a test, or a command with no publication service — should see.
-     */
-    private val snapshots: RevisionSnapshotGate = RevisionSnapshotGate(),
     /**
      * The glossaries a keyword search expands with: the scoped collection's, or, for a search across collections,
      * every active collection's that has groups. A lookup that fails leaves the search unexpanded.
@@ -68,7 +57,7 @@ class SearchService(
      * Runs one search.
      *
      * @param queryText the user's query; blank is an empty result, and syntax the classic parser cannot
-     *   read is escaped inside [LuceneIndex] rather than surfacing as an error.
+     *   read is escaped inside [SearchIndex] rather than surfacing as an error.
      * @param mode the retrieval mode, hybrid by default.
      * @param filters what the result is restricted to, before retrieval.
      * @param requireLexicalAnchor whether hybrid retrieval may publish semantic-only hits for a query
@@ -85,22 +74,6 @@ class SearchService(
         mode: SearchMode = SearchMode.DEFAULT,
         filters: SearchFilters = SearchFilters(),
         requireLexicalAnchor: Boolean = false,
-    ): SearchOutcome {
-        val lease = snapshots.acquire()
-        try {
-            return searchUnder(queryText, mode, filters, requireLexicalAnchor, lease.scope)
-        } finally {
-            lease.close()
-        }
-    }
-
-    /** One search under the revision scope its lease was handed. */
-    private fun searchUnder(
-        queryText: String,
-        mode: SearchMode,
-        filters: SearchFilters,
-        requireLexicalAnchor: Boolean,
-        scope: RevisionScope,
     ): SearchOutcome {
         val normalizedFilters = filters.normalized()
         if (queryText.isBlank()) return SearchOutcome(emptyList(), 0)
@@ -127,25 +100,24 @@ class SearchService(
             SearchMode.KEYWORD, SearchMode.HYBRID ->
                 validatedCandidates(SearchMode.KEYWORD, queryText, alternatives = alternatives) { limit ->
                     searchRefusingOverbroad {
-                        index().searchKeyword(normalizedFilters.collectionId, queryText, documentIds, limit, scope, expansion)
+                        index().searchKeyword(normalizedFilters.collectionId, queryText, documentIds, limit, expansion)
                     }
                 }
             SearchMode.SEMANTIC -> ValidatedCandidates.empty()
         }
 
         val semantic = when (mode) {
-            SearchMode.SEMANTIC -> semanticSearch(queryText, normalizedFilters, documentIds, scope)
+            SearchMode.SEMANTIC -> semanticSearch(queryText, normalizedFilters, documentIds)
             SearchMode.HYBRID -> if (semanticsApply(
                     queryText,
                     keyword.rawCandidates,
                     normalizedFilters,
                     documentIds,
                     requireLexicalAnchor,
-                    scope,
                     alternatives.flatMap { group -> group.terms.flatMap { it.tokens } },
                 )
             ) {
-                semanticSearch(queryText, normalizedFilters, documentIds, scope)
+                semanticSearch(queryText, normalizedFilters, documentIds)
             } else {
                 ValidatedCandidates.empty()
             }
@@ -182,16 +154,17 @@ class SearchService(
     }
 
     /**
-     * Wraps a Lucene branch so a pathological index cannot surface as a server error.
+     * Wraps a keyword branch so an over-broad query cannot surface as a server error.
      *
-     * The pre-parse guard bounds how many tokens a query may analyze into, but a short query with a
-     * broad wildcard expands at *rewrite* time, inside the searcher, and a rewrite can still run past
-     * Lucene's clause ceiling on an index large enough to feed it. That is the caller's query doing
-     * it, not a corrupt index, so it is answered with the same shape every other caller mistake uses.
+     * The pre-parse guard bounds how many tokens a query may analyze into, but a short query with a broad
+     * wildcard expands when it runs, and that expansion can run past what the database evaluates.
      */
     private inline fun <T> searchRefusingOverbroad(block: () -> T): T = try {
         block()
-    } catch (tooMany: IndexSearcher.TooManyClauses) {
+    } catch (tooMany: java.sql.SQLException) {
+        // A broad wildcard or regular expression can expand past what the database will evaluate; that is the
+        // caller's query doing it, answered like any other caller mistake. Any other database error is not.
+        if (tooMany.sqlState?.startsWith(PROGRAM_LIMIT_CLASS) != true) throw tooMany
         throw SearchUnavailableException(
             QUERY_TOO_BROAD_CODE,
             "the query expands to more clauses than the index can hold; narrow the wildcards or " +
@@ -203,7 +176,6 @@ class SearchService(
         queryText: String,
         filters: SearchFilters,
         documentIds: Set<String>?,
-        scope: RevisionScope,
     ): ValidatedCandidates {
         val status = index().schemaStatus
         if (status !is SchemaStatus.Ready) {
@@ -224,10 +196,10 @@ class SearchService(
         } catch (failure: EmbeddingException) {
             throw SearchUnavailableException(failure.code, failure.message ?: "the query could not be embedded")
         }
-        val candidateCount = index().vectorCandidateCount(filters.collectionId, documentIds, scope)
+        val candidateCount = index().vectorCandidateCount(filters.collectionId, documentIds)
         return validatedCandidates(SearchMode.SEMANTIC, queryText, candidateCount) { limit ->
             searchRefusingOverbroad {
-                index().searchVector(filters.collectionId, vector, documentIds, limit, scope)
+                index().searchVector(filters.collectionId, vector, documentIds, limit)
             }
         }
     }
@@ -236,7 +208,7 @@ class SearchService(
      * Whether the semantic half of a hybrid search may run.
      *
      * A query the keyword half already matched is grounded by definition. Otherwise an interactive search
-     * asks [LuceneIndex.hasLexicalAnchor] before spending an embedding on a query the archive has never
+     * asks [SearchIndex.hasLexicalAnchor] before spending an embedding on a query the archive has never
      * seen a word of — the answer that keeps the semantic branch from inventing matches for nonsense.
      */
     private fun semanticsApply(
@@ -245,11 +217,10 @@ class SearchService(
         filters: SearchFilters,
         documentIds: Set<String>?,
         requireLexicalAnchor: Boolean,
-        scope: RevisionScope,
         alternativeTokens: List<String>,
     ): Boolean {
         if (!requireLexicalAnchor || keywordHits.isNotEmpty()) return true
-        return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds, scope, alternativeTokens)
+        return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds, alternativeTokens)
     }
 
     /**
@@ -498,6 +469,9 @@ class SearchService(
     )
 
     companion object {
+        /** SQLSTATE class 54, "program limit exceeded": a query the database refuses to expand further. */
+        private const val PROGRAM_LIMIT_CLASS: String = "54"
+
         const val TOP_PER_BRANCH: Int = 50
         const val FUSION_TOP: Int = 30
         const val REBUILD_REQUIRED_CODE: String = "INDEX_REBUILD_REQUIRED"
