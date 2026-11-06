@@ -26,6 +26,7 @@ class InvestigationLedgerStoreTest {
 
     private lateinit var directory: Path
     private lateinit var database: Database
+    private lateinit var owner: infoscry.account.User
     private lateinit var profiles: LlmProfileStore
     private lateinit var store: InvestigationLedgerStore
 
@@ -39,6 +40,7 @@ class InvestigationLedgerStoreTest {
         // A new archive has no automatic Default collection, and these tests name one: create it the way
         // a person would rather than seeding a row the product no longer creates.
         CollectionStore(database).create("Default")
+        owner = infoscry.account.testOwner(database)
     }
 
     @AfterTest
@@ -66,7 +68,7 @@ class InvestigationLedgerStoreTest {
     @Test
     fun `persistInvestigateConversation creates a row and returns an id`() {
         val convId = store.persistInvestigateConversation(
-            defaultCollectionId(), pricedProfile(), "INVESTIGATE", defaultTestPrompt(1), "{\"mode\":\"HYBRID\"}",
+            defaultCollectionId(), owner.id, pricedProfile(), "INVESTIGATE", defaultTestPrompt(1), "{\"mode\":\"HYBRID\"}",
         )
         assertEquals(1, countTable("conversations"))
         database.read { connection ->
@@ -83,7 +85,7 @@ class InvestigationLedgerStoreTest {
 
     @Test
     fun `persistInvestigateMessage writes a message row`() {
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         store.persistInvestigateMessage(convId, 0, "user", "hello")
         store.persistInvestigateMessage(convId, 1, "assistant", "hi")
         assertEquals(2, countTable("messages"))
@@ -94,7 +96,7 @@ class InvestigationLedgerStoreTest {
         val savedProfile = pricedProfile()
         profiles.create(savedProfile)
         val locked = ResolvedPrompt(id = "prompt-9", name = "Named", version = 3, body = "LOCKED BODY")
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, prompt = locked, retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, savedProfile, prompt = locked, retrievalSnapshot = "{}")
 
         assertEquals(locked, store.loadInvestigateHistory(convId)?.prompt)
     }
@@ -103,7 +105,7 @@ class InvestigationLedgerStoreTest {
     fun `investigate tool exchange retains provider call ids after reload`() {
         val savedProfile = pricedProfile()
         profiles.create(savedProfile)
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         val call = ToolCall("call-1", "search_collection", "{\"query\":\"x\"}")
         val expected = listOf(
             LlmMessage("user", "find x"),
@@ -119,7 +121,7 @@ class InvestigationLedgerStoreTest {
     @Test
     fun `legacy investigate tool rows without call ids are omitted on reload`() {
         profiles.create(pricedProfile())
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         store.persistInvestigateMessage(convId, 0, "user", "find x")
         store.persistInvestigateMessage(convId, 1, "assistant", "")
         store.persistInvestigateMessage(convId, 2, "tool", "legacy result")
@@ -133,7 +135,7 @@ class InvestigationLedgerStoreTest {
 
     @Test
     fun `persistInvestigateModelCall writes usage and cost`() {
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         val callId = store.persistInvestigateModelCall(
             convId, "OPENAI_COMPATIBLE", null, "model", "priced", 1,
             "SUCCEEDED", 100L, 50L, 0L, 0.00035,
@@ -155,7 +157,7 @@ class InvestigationLedgerStoreTest {
 
     @Test
     fun `persistInvestigateToolCall writes a tool call row`() {
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         val callId = store.persistInvestigateModelCall(convId, "OPENAI_COMPATIBLE", null, "model", "priced", 1, "SUCCEEDED", 10L, 5L, 0L, 0.0)
         store.persistInvestigateToolCall(convId, callId, "search_collection", "{\"query\":\"x\"}", "SUCCESS", 42L)
         assertEquals(1, countTable("tool_calls"))
@@ -176,7 +178,7 @@ class InvestigationLedgerStoreTest {
     fun `the ledger stores the revision with the evidence and reads it back`() {
         val savedProfile = pricedProfile()
         profiles.create(savedProfile)
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{\"page\":1}", "excerpt one", messageSeq = 1, revisionId = "revision-a")
         store.persistEvidenceLedgerEntry(convId, "S2", "unit-2", "{\"page\":2}", "excerpt two", messageSeq = 1)
 
@@ -266,7 +268,7 @@ class InvestigationLedgerStoreTest {
         val savedProfile = pricedProfile()
         profiles.create(savedProfile)
         val conversationId = store.persistInvestigateConversation(
-            collectionId, savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}",
+            collectionId, owner.id, savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}",
         )
         store.persistEvidenceLedgerEntry(conversationId, "S1", oldUnitId, "{\"page\":1}", "historical excerpt", revisionId = oldRevisionId)
         store.persistEvidenceLedgerEntry(conversationId, "S2", "foreign-unit", "{\"page\":1}", "foreign excerpt", revisionId = foreignRevisionId)
@@ -287,7 +289,7 @@ class InvestigationLedgerStoreTest {
 
     @Test
     fun `evidence ledger entries are durable within a conversation`() {
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{\"page\":1}", "excerpt one")
         store.persistEvidenceLedgerEntry(convId, "S2", "unit-2", "{\"page\":2}", "excerpt two")
         assertEquals(2, countTable("evidence_ledger"))
@@ -310,7 +312,7 @@ class InvestigationLedgerStoreTest {
     fun `evidence ledger entries round trip their introducing message seq`() {
         val savedProfile = pricedProfile()
         profiles.create(savedProfile)
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{}", "excerpt one", messageSeq = 2)
         store.persistEvidenceLedgerEntry(convId, "S2", "unit-2", "{}", "excerpt two")
         val history = store.loadInvestigateHistory(convId)
@@ -322,7 +324,7 @@ class InvestigationLedgerStoreTest {
     fun `superseded investigate messages are excluded from reloaded history`() {
         val savedProfile = pricedProfile()
         profiles.create(savedProfile)
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         store.persistInvestigateMessage(convId, 0, "user", "question")
         store.persistInvestigateMessage(convId, 1, LlmMessage("assistant", "draft [S9]"), superseded = true)
         store.persistInvestigateMessage(convId, 2, "assistant", "adopted [S1]")
@@ -336,7 +338,7 @@ class InvestigationLedgerStoreTest {
     fun `legacy evidence without a message seq is associated with its tool result on reload`() {
         val savedProfile = pricedProfile()
         profiles.create(savedProfile)
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, savedProfile, prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         val call = ToolCall("call-1", "read_content_unit", "{\"contentUnitId\":\"unit-1\"}")
         store.persistInvestigateMessage(convId, 0, "user", "find x")
         store.persistInvestigateMessage(convId, 1, LlmMessage("assistant", "", toolCalls = listOf(call)))
@@ -353,7 +355,7 @@ class InvestigationLedgerStoreTest {
 
     @Test
     fun `request eligibility records which evidence ids were in a model call`() {
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         store.persistEvidenceLedgerEntry(convId, "S1", "unit-1", "{}", "excerpt")
         store.persistEvidenceLedgerEntry(convId, "S2", "unit-2", "{}", "excerpt")
         val callId = store.persistInvestigateModelCall(convId, "OPENAI_COMPATIBLE", null, "m", "priced", 1, "SUCCEEDED", 1L, 1L, 0L, 0.0)
@@ -363,7 +365,7 @@ class InvestigationLedgerStoreTest {
 
     @Test
     fun `request omissions record which groups were pruned`() {
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         val callId = store.persistInvestigateModelCall(convId, "OPENAI_COMPATIBLE", null, "m", "priced", 1, "SUCCEEDED", 1L, 1L, 0L, 0.0)
         store.persistRequestOmissions(callId, convId, listOf("turn-0", "exchange-1"))
         assertEquals(2, countTable("request_omissions"))
@@ -382,7 +384,7 @@ class InvestigationLedgerStoreTest {
 
     @Test
     fun `limit events are durable`() {
-        val convId = store.persistInvestigateConversation(defaultCollectionId(), pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
+        val convId = store.persistInvestigateConversation(defaultCollectionId(), owner.id, pricedProfile(), prompt = defaultTestPrompt(1), retrievalSnapshot = "{}")
         store.persistLimitEvent(convId, "MAX_TOOL_CALLS", "limit of 20 tool calls reached")
         store.persistLimitEvent(convId, "CONTEXT_BUDGET_EXCEEDED", "irreducible request too large")
         assertEquals(2, countTable("limit_events"))
@@ -405,6 +407,7 @@ class InvestigationLedgerStoreTest {
         val persisted = profiles.findByName("priced")!!
         val conversationId = store.persistInvestigateConversation(
             collectionId = defaultCollectionId(),
+            ownerId = owner.id,
             profile = persisted,
             prompt = defaultTestPrompt(3),
             retrievalSnapshot = "{\"mode\":\"HYBRID\",\"topHits\":30}",
@@ -439,6 +442,7 @@ class InvestigationLedgerStoreTest {
         val persisted = profiles.findByName("priced")!!
         val askConversation = store.persistInvestigateConversation(
             collectionId = defaultCollectionId(),
+            ownerId = owner.id,
             profile = persisted,
             mode = "ASK",
             prompt = defaultTestPrompt(1),
@@ -453,6 +457,7 @@ class InvestigationLedgerStoreTest {
         profiles.create(pricedProfile())
         val conversationId = store.persistInvestigateConversation(
             collectionId = defaultCollectionId(),
+            ownerId = owner.id,
             profile = profiles.findByName("priced")!!,
             prompt = defaultTestPrompt(1),
             retrievalSnapshot = "{}",

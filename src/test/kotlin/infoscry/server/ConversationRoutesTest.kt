@@ -52,6 +52,7 @@ class ConversationRoutesTest {
                 // and a limit event.
                 val investigateId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = defaultTestPrompt(1),
                     retrievalSnapshot = RetrievalSnapshot.value(),
@@ -83,6 +84,7 @@ class ConversationRoutesTest {
                 // A stored Ask answer with its own messages, model call and citation rows.
                 val askId = harness.context.conversations.persistAsk(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = defaultTestPrompt(),
                     question = "Who signed it?",
@@ -168,6 +170,7 @@ class ConversationRoutesTest {
                 val profile = createProfile(harness, "delete-owner")
                 val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = defaultTestPrompt(1),
                     retrievalSnapshot = RetrievalSnapshot.value(),

@@ -21,6 +21,9 @@ class RunningServer internal constructor(
 ) : AutoCloseable {
 
     /** Where a browser reaches the server: the public origin when one is configured, else loopback. */
+    /** The application, so a test can read its routing tree. */
+    internal val application: io.ktor.server.application.Application get() = engine.application
+
     val url: String
         get() = settings.publicOrigin ?: "http://${if (isWildcard(settings.host)) LOOPBACK_HOST else displayHost(settings.host)}:$port"
 

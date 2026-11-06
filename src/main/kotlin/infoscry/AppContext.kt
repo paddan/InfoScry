@@ -175,6 +175,12 @@ class AppContext private constructor(
             injectedIndexRemover
         }
 
+    /** Who may use which collection, and how. */
+    val memberships: infoscry.collection.MembershipService = infoscry.collection.MembershipService(
+        infoscry.storage.MembershipStore(database),
+        infoscry.storage.AccountStore(database),
+    )
+
     /** Users, browser sessions and personal access tokens. */
     val accounts: infoscry.account.AccountService = infoscry.account.AccountService(
         infoscry.storage.AccountStore(database),

@@ -242,7 +242,7 @@ fun Application.configureRoutes(
     jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
     picker: suspend (Boolean) -> List<String> = ::pickWithOsascript,
 ) {
-    installRequestGuard(context.accounts, settings)
+    installRequestGuard(context.accounts, settings, CollectionAccess(context))
 
     // One pick dialog at a time for the whole process: a second concurrent pick would open another
     // dialog on top of the first, which a user cannot even see, let alone answer.
@@ -250,11 +250,15 @@ fun Application.configureRoutes(
 
     routing {
         configureAccountRoutes(context.accounts, settings)
+        configureMembershipRoutes(context)
 
         route("/api/collections") {
             get {
                 call.handle {
-                    call.respondJson(HttpStatusCode.OK, CollectionsResponse(context.collectionService.list()))
+                    // A caller sees the collections they are a member of; an administrator sees every one.
+                    val visible = call.visibleCollections()
+                    val listed = context.collectionService.list().filter { visible == null || it.id in visible }
+                    call.respondJson(HttpStatusCode.OK, CollectionsResponse(listed))
                 }
             }
             post {
@@ -265,6 +269,7 @@ fun Application.configureRoutes(
                         description = request.description,
                         ocrLanguages = request.ocrLanguages?.takeIf { it.isNotBlank() }
                             ?: infoscry.storage.CollectionStore.DEFAULT_OCR_LANGUAGES,
+                        owner = call.principal.user.id,
                     )
                     call.respondJson(HttpStatusCode.Created, CollectionResponse(created))
                 }
@@ -289,7 +294,7 @@ fun Application.configureRoutes(
                 call.handle {
                     val id = call.collectionId()
                     val request = call.receiveJson<DeleteCollectionRequest>()
-                    val operation = context.collectionService.requestDeletion(id, request.confirmName)
+                    val operation = context.collectionService.requestDeletion(id, request.confirmName, call.principal.user.id)
                     call.respondJson(
                         HttpStatusCode.Accepted,
                         DeleteCollectionResponse(
@@ -347,6 +352,10 @@ fun Application.configureRoutes(
             post("/preview") {
                 call.handle {
                     val request = call.receiveJson<ImportPreviewRouteRequest>()
+                    // Until import roots exist, a preview names paths on the server's file system, which only an
+                    // administrator may choose; the collection still needs an editor.
+                    call.requireAdministrator()
+                    call.requireCollectionRole(request.collection, infoscry.account.CollectionRole.EDITOR)
                     val method = try {
                         ReadingMethod.parse(request.method)
                     } catch (_: IllegalArgumentException) {
@@ -369,6 +378,8 @@ fun Application.configureRoutes(
             post {
                 call.handle {
                     val request = call.receiveJson<ImportRequest>()
+                    call.requireAdministrator()
+                    call.requireCollectionRole(request.collection, infoscry.account.CollectionRole.EDITOR)
                     val method = try {
                         ReadingMethod.parse(request.method)
                     } catch (_: IllegalArgumentException) {
@@ -477,7 +488,8 @@ fun Application.configureRoutes(
                         parameter.toBooleanStrictOrNull()
                             ?: throw BadRequestException("active must be true or false, was '$parameter'")
                     } ?: false
-                    val jobs = if (active) context.jobs.listActive(limit, offset) else context.jobs.list(limit, offset)
+                    val visible = call.visibleCollections()
+                    val jobs = if (active) context.jobs.listActive(limit, offset, visible) else context.jobs.list(limit, offset, visible)
                     call.respondJson(HttpStatusCode.OK, JobsResponse(jobs.map { it.toApiView(context) }))
                 }
             }
@@ -867,7 +879,7 @@ private val LOGGER = LoggerFactory.getLogger("infoscry.server")
 private const val ERROR_DETAIL_FIELD = "error_detail"
 
 /** The one place an [ApiStatus] becomes the `HttpStatusCode` the client sees. */
-private fun ApiStatus.toHttpStatusCode(): HttpStatusCode = when (this) {
+internal fun ApiStatus.toHttpStatusCode(): HttpStatusCode = when (this) {
     ApiStatus.BAD_REQUEST -> HttpStatusCode.BadRequest
     ApiStatus.UNAUTHORIZED -> HttpStatusCode.Unauthorized
     ApiStatus.FORBIDDEN -> HttpStatusCode.Forbidden

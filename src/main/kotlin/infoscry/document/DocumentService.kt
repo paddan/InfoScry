@@ -95,7 +95,11 @@ class DocumentService(
      * is compared before the documents are validated, because a retry after their rows are gone must
      * still find the operation it is repeating rather than a 404.
      */
-    suspend fun requestDeletion(collectionId: CollectionId, documentIds: List<DocumentId>): DeletionOperation {
+    suspend fun requestDeletion(
+        collectionId: CollectionId,
+        documentIds: List<DocumentId>,
+        requestedBy: infoscry.account.UserId? = null,
+    ): DeletionOperation {
         requireMutationsAllowed()
         existingFor(collectionId, documentIds)?.let { return it }
 
@@ -106,7 +110,7 @@ class DocumentService(
                     "delete ${documentIds.size} document(s) from ${collectionId.value}",
                 ) {
                     requireMutationsAllowed()
-                    val operation = beginDeletion(collectionId, documentIds)
+                    val operation = beginDeletion(collectionId, documentIds, requestedBy)
                     admitted.complete(operation)
                     finishDeletion(operation)
                 }
@@ -191,7 +195,11 @@ class DocumentService(
      * belongs to another collection, rejects the whole request and records nothing. The caller cannot
      * learn from the refusal which of the two it was, because both are the same not-found answer.
      */
-    internal fun beginDeletion(collectionId: CollectionId, documentIds: List<DocumentId>): DeletionOperation {
+    internal fun beginDeletion(
+        collectionId: CollectionId,
+        documentIds: List<DocumentId>,
+        requestedBy: infoscry.account.UserId? = null,
+    ): DeletionOperation {
         val requested = documentIds.distinct()
         require(requested.isNotEmpty()) { "a document deletion needs at least one document" }
         val collection = activeCollection(collectionId)
@@ -224,6 +232,7 @@ class DocumentService(
                 targets = targets,
                 createdAt = now,
                 updatedAt = now,
+                requestedBy = requestedBy,
             ),
         )
     }

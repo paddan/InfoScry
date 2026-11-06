@@ -682,7 +682,7 @@
   function handleAdminTabKeydown(event: KeyboardEvent): void {
     const tabs: ('COLLECTIONS' | 'JOBS' | 'LLM' | 'ACCOUNT' | 'USERS')[] = user.role === 'ADMIN'
       ? ['COLLECTIONS', 'JOBS', 'LLM', 'ACCOUNT', 'USERS']
-      : ['COLLECTIONS', 'JOBS', 'LLM', 'ACCOUNT'];
+      : ['COLLECTIONS', 'JOBS', 'ACCOUNT'];
     const current = tabs.indexOf(adminTab);
     let next = current;
     if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
@@ -1184,6 +1184,7 @@
             tabindex={adminTab === 'JOBS' ? 0 : -1}
             onclick={() => (adminTab = 'JOBS')}
           >Jobs</button>
+          {#if user.role === 'ADMIN'}
           <button
             id="admin-tab-llm"
             role="tab"
@@ -1192,6 +1193,7 @@
             tabindex={adminTab === 'LLM' ? 0 : -1}
             onclick={() => (adminTab = 'LLM')}
           >LLM profiles</button>
+          {/if}
           <button
             id="admin-tab-account"
             role="tab"
@@ -1238,7 +1240,8 @@
                 onDocumentDeleted={handleManagedDocumentDeleted}
                 onRetryDocument={retryManagedDocument}
                 onRetryAllDocuments={retryAllManagedDocuments}
-                onOpenLlmProfiles={() => (adminTab = 'LLM')}
+                onOpenLlmProfiles={user.role === 'ADMIN' ? () => (adminTab = 'LLM') : undefined}
+                isAdmin={user.role === 'ADMIN'}
                 promptsPendingFor={promptsPendingFor}
                 onPromptsRevealed={() => (promptsPendingFor = null)}
               />
@@ -1247,7 +1250,7 @@
           <div id="admin-panel-jobs" role="tabpanel" aria-labelledby="admin-tab-jobs" hidden={adminTab !== 'JOBS'}>
             <JobsPanel {collections} visible={activeMode === 'ADMIN' && adminTab === 'JOBS'} />
           </div>
-          <div id="admin-panel-llm" role="tabpanel" aria-labelledby="admin-tab-llm" hidden={adminTab !== 'LLM'}><LlmAdminPanel /></div>
+          {#if user.role === 'ADMIN'}<div id="admin-panel-llm" role="tabpanel" aria-labelledby="admin-tab-llm" hidden={adminTab !== 'LLM'}><LlmAdminPanel /></div>{/if}
           <div id="admin-panel-account" role="tabpanel" aria-labelledby="admin-tab-account" hidden={adminTab !== 'ACCOUNT'}>
             {#if activeMode === 'ADMIN' && adminTab === 'ACCOUNT'}<AccountPanel bind:user />{/if}
           </div>

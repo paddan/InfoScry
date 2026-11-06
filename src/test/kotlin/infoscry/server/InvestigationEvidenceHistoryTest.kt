@@ -100,6 +100,7 @@ class InvestigationEvidenceHistoryTest {
 
                 val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = defaultTestPrompt(1),
                     retrievalSnapshot = RetrievalSnapshot.value(),

@@ -229,13 +229,25 @@ class CollectionService(
 
     // ---- Ordinary mutations ----
 
+    /**
+     * Creates a collection. [owner], the user who asked, becomes its first `OWNER` in the same transaction,
+     * so a collection never exists without someone who may manage it.
+     */
     suspend fun create(
         name: String,
         description: String? = null,
         ocrLanguages: String = CollectionStore.DEFAULT_OCR_LANGUAGES,
+        owner: infoscry.account.UserId? = null,
     ): Collection = coordinator.withMutation {
         requireMutationsAllowed()
-        collections.create(name, description, ocrLanguages)
+        database.transaction {
+            val created = collections.create(name, description, ocrLanguages)
+            if (owner != null) {
+                infoscry.storage.MembershipStore(database)
+                    .put(created.id, owner, infoscry.account.CollectionRole.OWNER, Instants.now(), owner)
+            }
+            created
+        }
     }
 
     suspend fun rename(id: CollectionId, newName: String): Collection = coordinator.withMutation {
@@ -342,7 +354,11 @@ class CollectionService(
      * request answers with the same id and phase, which is what makes a repeated confirmation
      * idempotent. The confirmation is still checked while the collection's row exists.
      */
-    suspend fun requestDeletion(collectionId: CollectionId, confirmName: String): DeletionOperation {
+    suspend fun requestDeletion(
+        collectionId: CollectionId,
+        confirmName: String,
+        requestedBy: infoscry.account.UserId? = null,
+    ): DeletionOperation {
         requireMutationsAllowed()
         val existing = deletions.unfinishedFor(collectionId).firstOrNull()
         if (existing != null) {
@@ -355,7 +371,7 @@ class CollectionService(
             try {
                 coordinator.withExclusiveMaintenance("delete collection ${collectionId.value}") {
                     requireMutationsAllowed()
-                    val operation = beginDeletion(collectionId, confirmName)
+                    val operation = beginDeletion(collectionId, confirmName, requestedBy)
                     // The caller's answer is the durable admission, not the finished deletion: the
                     // phases below take minutes and nothing about them belongs to this request.
                     admitted.complete(operation)
@@ -466,7 +482,11 @@ class CollectionService(
      * Idempotent: called again for a collection whose deletion is already recorded, it returns the
      * existing operation rather than starting a second one.
      */
-    internal fun beginDeletion(collectionId: CollectionId, confirmName: String): DeletionOperation {
+    internal fun beginDeletion(
+        collectionId: CollectionId,
+        confirmName: String,
+        requestedBy: infoscry.account.UserId? = null,
+    ): DeletionOperation {
         val collection = collections.get(collectionId)
             ?: throw NoSuchElementException("no collection with id ${collectionId.value}")
         requireConfirmation(collection.name, confirmName)
@@ -482,6 +502,7 @@ class CollectionService(
             phase = DeletionPhase.PREPARED,
             createdAt = now,
             updatedAt = now,
+            requestedBy = requestedBy,
         )
         return deletions.begin(operation)
     }

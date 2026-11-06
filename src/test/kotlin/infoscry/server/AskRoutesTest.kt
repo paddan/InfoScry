@@ -155,6 +155,7 @@ class AskRoutesTest {
                 ).unit
                 harness.context.conversations.persistAsk(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = defaultTestPrompt(),
                     question = "Who signed it?",
@@ -294,6 +295,7 @@ class AskRoutesTest {
                 val locator = SourceLocation.TextLines(1, 1)
                 harness.context.conversations.persistAsk(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = defaultTestPrompt(),
                     question = "What did the page say?",
@@ -600,6 +602,7 @@ class AskRoutesTest {
                 val profile = createLlmProfile(harness, name = "list-asker", model = "list-model", endpoint = "https://provider.invalid/v1")
                 harness.context.conversations.persistAsk(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = defaultTestPrompt(),
                     question = "Who signed it?",
@@ -610,6 +613,7 @@ class AskRoutesTest {
                 )
                 val titled = harness.context.conversations.persistAsk(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = defaultTestPrompt(),
                     question = "What day was it?",
@@ -645,6 +649,7 @@ class AskRoutesTest {
                 val profile = createLlmProfile(harness, name = "named-asker", model = "named-model", endpoint = "https://provider.invalid/v1")
                 harness.context.conversations.persistAsk(
                     collectionId = collection.id,
+                    ownerId = harness.admin.id,
                     profile = profile,
                     prompt = infoscry.llm.ResolvedPrompt(id = null, name = "Short", version = 1, body = "Answer in one line."),
                     question = "Who signed it?",

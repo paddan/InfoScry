@@ -27,6 +27,8 @@ class ConversationStore(private val database: Database) {
      */
     fun persistAsk(
         collectionId: CollectionId,
+        /** The user who asked; the conversation is private to them. */
+        ownerId: infoscry.account.UserId,
         profile: LlmProfile,
         prompt: ResolvedPrompt,
         question: String,
@@ -41,8 +43,8 @@ class ConversationStore(private val database: Database) {
         val callId = UUID.randomUUID().toString()
         val persistedAnswer = correction?.answer ?: answer
         database.transaction { connection ->
-            connection.prepareStatement("INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,prompt_id,prompt_name,prompt_body,retrieval_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
-                listOf(conversationId, collectionId.value, "ASK", profile.provider.name, profile.endpoint, profile.model, profile.name, prompt.version.toString(), prompt.id, prompt.name, prompt.body, retrievalSnapshot, Instants.now()).forEachIndexed { i, v -> s.setString(i + 1, v) }; s.setInt(8, prompt.version); s.executeUpdate()
+            connection.prepareStatement("INSERT INTO conversations (id,collection_id,mode,profile_provider,profile_endpoint,profile_model,profile_name,prompt_version,prompt_id,prompt_name,prompt_body,retrieval_snapshot,created_at,owner_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").use { s ->
+                listOf(conversationId, collectionId.value, "ASK", profile.provider.name, profile.endpoint, profile.model, profile.name, prompt.version.toString(), prompt.id, prompt.name, prompt.body, retrievalSnapshot, Instants.now(), ownerId.value).forEachIndexed { i, v -> s.setString(i + 1, v) }; s.setInt(8, prompt.version); s.executeUpdate()
             }
             connection.prepareStatement("INSERT INTO messages (id,conversation_id,seq,role,content,created_at) VALUES (?,?,?,?,?,?)").use { s ->
                 listOf(UUID.randomUUID().toString() to question, UUID.randomUUID().toString() to persistedAnswer).forEachIndexed { i, pair -> s.setString(1,pair.first); s.setString(2,conversationId); s.setInt(3,i); s.setString(4,if(i==0) "user" else "assistant"); s.setString(5,pair.second); s.setString(6,Instants.now()); s.addBatch() }; s.executeBatch()
@@ -65,6 +67,30 @@ class ConversationStore(private val database: Database) {
         }
         return conversationId
     }
+
+    /** Whether [conversationId] exists in [collectionId] and belongs to [ownerId]. */
+    fun isOwnedBy(collectionId: CollectionId, conversationId: String, ownerId: infoscry.account.UserId): Boolean =
+        database.read { connection ->
+            connection.prepareStatement(
+                "SELECT 1 FROM conversations WHERE id = ? AND collection_id = ? AND owner_id = ?",
+            ).use { statement ->
+                statement.setString(1, conversationId)
+                statement.setString(2, collectionId.value)
+                statement.setString(3, ownerId.value)
+                statement.executeQuery().use { it.next() }
+            }
+        }
+
+    /** The collection and owner of [conversationId], or null when there is no such conversation. */
+    fun ownership(conversationId: String): Pair<CollectionId, infoscry.account.UserId>? =
+        database.read { connection ->
+            connection.prepareStatement("SELECT collection_id, owner_id FROM conversations WHERE id = ?").use { statement ->
+                statement.setString(1, conversationId)
+                statement.executeQuery().use { rows ->
+                    if (rows.next()) CollectionId(rows.getString(1)) to infoscry.account.UserId(rows.getString(2)) else null
+                }
+            }
+        }
 
     /**
      * Writes the one title field of a conversation whose first turn already completed. Best-effort
@@ -90,11 +116,12 @@ class ConversationStore(private val database: Database) {
      * citations, tool calls, evidence ledger entries, request eligibility and omission rows, and
      * limit events with the conversation row.
      */
-    fun deleteConversation(collectionId: CollectionId, conversationId: String): Boolean =
+    fun deleteConversation(collectionId: CollectionId, conversationId: String, ownerId: infoscry.account.UserId): Boolean =
         database.transaction { connection ->
-            connection.prepareStatement("DELETE FROM conversations WHERE id = ? AND collection_id = ?").use { statement ->
+            connection.prepareStatement("DELETE FROM conversations WHERE id = ? AND collection_id = ? AND owner_id = ?").use { statement ->
                 statement.setString(1, conversationId)
                 statement.setString(2, collectionId.value)
+                statement.setString(3, ownerId.value)
                 statement.executeUpdate() > 0
             }
         }

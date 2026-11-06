@@ -98,9 +98,10 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             val investigations = context.database.read { connection ->
                 connection.prepareStatement(
                     "SELECT c.id, c.created_at, c.title, c.prompt_name, COALESCE((SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '') AS question " +
-                        "FROM conversations c WHERE c.collection_id = ? AND c.mode = 'INVESTIGATE' ORDER BY c.created_at DESC LIMIT 50",
+                        "FROM conversations c WHERE c.collection_id = ? AND c.owner_id = ? AND c.mode = 'INVESTIGATE' ORDER BY c.created_at DESC LIMIT 50",
                 ).use { statement ->
                     statement.setString(1, collection.id.value)
+                    statement.setString(2, call.principal.user.id.value)
                     statement.executeQuery().use { rows ->
                         buildList {
                             while (rows.next()) {
@@ -131,10 +132,11 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                 ?: throw BadRequestException("a conversation id is required in the path")
             val belongsToCollection = context.database.read { connection ->
                 connection.prepareStatement(
-                    "SELECT 1 FROM conversations WHERE id = ? AND collection_id = ? AND mode = 'INVESTIGATE'",
+                    "SELECT 1 FROM conversations WHERE id = ? AND collection_id = ? AND owner_id = ? AND mode = 'INVESTIGATE'",
                 ).use { statement ->
                     statement.setString(1, conversationId)
                     statement.setString(2, collection.id.value)
+                    statement.setString(3, call.principal.user.id.value)
                     statement.executeQuery().use { it.next() }
                 }
             }
@@ -238,6 +240,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
     post("/api/investigations") {
         call.handle {
             val body = call.receiveJsonRejectingUnknownFields<InvestigationApiRequest>()
+            call.requireCollectionRole(body.collection, infoscry.account.CollectionRole.READER)
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             // A switched-off profile is refused before the capability gate, the conversation or the SSE
@@ -264,7 +267,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
                     persist = context.conversations::setConversationTitle,
                 )
                 call.streamInvestigation(
-                    investigationService(context, collectionId, profile),
+                    investigationService(context, collectionId, profile, call.principal.user.id),
                     InvestigateRequest(collectionId, body.question, profile, prompt = prompt, limits = preset.limits, reasoning = preset.reasoning),
                     runningTurns,
                     activeTurnIds,
@@ -281,11 +284,17 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
         call.handle {
             val conversationId = call.conversationId()
             val body = call.receiveJsonRejectingUnknownFields<InvestigationApiRequest>()
+            call.requireCollectionRole(body.collection, infoscry.account.CollectionRole.READER)
             val collection = context.collectionService.requireActiveByNameOrId(body.collection)
             val profile = context.llm.findByName(body.profile) ?: throw NoSuchElementException("no such LLM profile")
             profile.requireDispatchable()
             // Tools stay scoped to the conversation's locked collection even when the request names a
             // different one; an unknown conversation still streams the service's CONVERSATION_NOT_FOUND.
+            // Only the user who started the conversation continues it; for anyone else it does not exist.
+            context.conversations.ownership(conversationId)?.let { (conversationCollection, owner) ->
+                if (owner != call.principal.user.id) throw NoSuchElementException("no investigation with id $conversationId")
+                call.requireCollectionRole(conversationCollection.value, infoscry.account.CollectionRole.READER)
+            }
             val history = context.investigationLedger.loadInvestigateHistory(conversationId)
             // The turn dispatches through the profile the conversation *locked*, not the one this request
             // names, so the locked snapshot passes the same gate: a conversation whose profile was switched
@@ -302,7 +311,7 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
             }
             try {
                 call.streamInvestigation(
-                    investigationService(context, lockedCollectionId, profile),
+                    investigationService(context, lockedCollectionId, profile, call.principal.user.id),
                     InvestigateRequest(
                         CollectionId(collection.id.value),
                         body.question,
@@ -327,7 +336,8 @@ fun Routing.configureInvestigationRoutes(context: AppContext) {
     post("/api/investigations/{id}/cancel") {
         call.handle {
             val conversationId = call.conversationId()
-            val job = runningTurns[conversationId]
+            val ownedByCaller = context.conversations.ownership(conversationId)?.second == call.principal.user.id
+            val job = runningTurns[conversationId]?.takeIf { ownedByCaller }
             if (job == null) {
                 call.respondJson(
                     HttpStatusCode.NotFound,
@@ -345,7 +355,12 @@ private fun ApplicationCall.conversationId(): String =
     parameters["id"]?.takeIf { it.isNotBlank() }
         ?: throw BadRequestException("a conversation id is required in the path")
 
-private fun investigationService(context: AppContext, collectionId: CollectionId, profile: LlmProfile): InvestigationService {
+private fun investigationService(
+    context: AppContext,
+    collectionId: CollectionId,
+    profile: LlmProfile,
+    ownerId: infoscry.account.UserId,
+): InvestigationService {
     val persistence = object : InvestigatePersistence {
         override fun createConversation(
             collectionId: CollectionId,
@@ -354,6 +369,7 @@ private fun investigationService(context: AppContext, collectionId: CollectionId
             retrievalSnapshot: String,
         ): String = context.investigationLedger.persistInvestigateConversation(
             collectionId = collectionId,
+            ownerId = ownerId,
             profile = profile,
             prompt = prompt,
             retrievalSnapshot = retrievalSnapshot,

@@ -111,6 +111,9 @@ fun Route.configureSearchRoutes(context: AppContext, coordinator: MutationCoordi
                 // Enqueueing is a write, so it is admitted through the gate like any other mutation: a
                 // rebuild already running is exclusive maintenance, and another one queueing behind it
                 // would be a job whose whole purpose is to wait for itself.
+                // Rebuilding one collection is its owner's call; rebuilding every collection is an administrator's.
+                if (request.collection == null) call.requireAdministrator()
+                else call.requireCollectionRole(request.collection, infoscry.account.CollectionRole.OWNER)
                 coordinator.withMutation {
                     val collectionId = request.collection?.let { reference ->
                         context.collectionService.requireActiveByNameOrId(reference).id
@@ -138,6 +141,7 @@ private suspend fun ApplicationCall.runSearch(
 ): SearchResponse {
     // The collection is resolved here, at the boundary, because SearchService legitimately supports a
     // null collection for the rebuild's own assertions; a caller-facing search names one.
+    requireCollectionRole(request.collection, infoscry.account.CollectionRole.READER)
     val collection = context.collectionService.requireActiveByNameOrId(request.collection)
     val outcome = context.search.search(
         queryText = query,

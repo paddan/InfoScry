@@ -551,6 +551,7 @@ class InvestigationRoutesTest {
         val retired = harness.context.llm.findByName("retired")!!
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
+            ownerId = harness.admin.id,
             profile = retired,
             prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
@@ -581,6 +582,7 @@ class InvestigationRoutesTest {
             val profile = harness.context.llm.findByName("fixed-since")!!
             val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                 collectionId = collection.id,
+                ownerId = harness.admin.id,
                 profile = profile,
                 prompt = defaultTestPrompt(1),
                 retrievalSnapshot = RetrievalSnapshot.value(),
@@ -974,6 +976,7 @@ class InvestigationRoutesTest {
             val profile = harness.context.llm.findByName("investigator")!!
             val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
                 collectionId = collection.id,
+                ownerId = harness.admin.id,
                 profile = profile,
                 prompt = defaultTestPrompt(1),
                 retrievalSnapshot = RetrievalSnapshot.value(),
@@ -1031,6 +1034,7 @@ class InvestigationRoutesTest {
         val profile = harness.context.llm.findByName("investigator")!!
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
+            ownerId = harness.admin.id,
             profile = profile,
             prompt = defaultTestPrompt(3),
             retrievalSnapshot = RetrievalSnapshot.value(),
@@ -1204,6 +1208,7 @@ class InvestigationRoutesTest {
         val profile = harness.context.llm.findByName("investigator")!!
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
+            ownerId = harness.admin.id,
             profile = profile,
             prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
@@ -1212,6 +1217,7 @@ class InvestigationRoutesTest {
         harness.context.investigationLedger.persistInvestigateMessage(conversationId, 1, "assistant", "Mira signed it.")
         val titledId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
+            ownerId = harness.admin.id,
             profile = profile,
             prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
@@ -1239,6 +1245,7 @@ class InvestigationRoutesTest {
         val profile = harness.context.llm.findByName("investigator")!!
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = defaultCollection.id,
+            ownerId = harness.admin.id,
             profile = profile,
             prompt = infoscry.llm.ResolvedPrompt(id = null, name = "Locked", version = 1, body = "Investigate carefully."),
             retrievalSnapshot = RetrievalSnapshot.value(),
@@ -1569,6 +1576,7 @@ class InvestigationRoutesTest {
         val profile = harness.context.llm.findByName("evidence-keeper")!!
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
+            ownerId = harness.admin.id,
             profile = profile,
             prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),
@@ -1704,6 +1712,7 @@ class InvestigationRoutesTest {
         val profile = harness.context.llm.findByName("doomed-keeper")!!
         val conversationId = harness.context.investigationLedger.persistInvestigateConversation(
             collectionId = collection.id,
+            ownerId = harness.admin.id,
             profile = profile,
             prompt = defaultTestPrompt(1),
             retrievalSnapshot = RetrievalSnapshot.value(),

@@ -414,9 +414,23 @@ in 15 minutes (429 with `Retry-After`); the answer never says whether the
 username exists. Users are never deleted; deactivation ends their sessions and
 revokes their tokens, and the last active administrator cannot be deactivated
 or demoted. Personal access tokens are created and revoked only from a browser
-session. Until memberships exist (ticket 6 of the multi-user spec), every
-signed-in user can use every collection and only user management is limited to
-administrators.
+session.
+
+Collections have members with the role `OWNER`, `EDITOR` or `READER`
+(`collection_members`); the creator of a collection becomes its owner, and a
+collection always keeps one (409 `LAST_OWNER`). Readers search, read and ask;
+editors also import, rescan, retry, delete documents, review pages and edit
+corrections, glossary groups and prompts; owners also change settings and
+members, reindex and delete the collection. Administrators act as owners of
+every collection and alone manage users, LLM and OCR profiles and a reindex of
+everything. A collection the caller is not a member of answers 404 as if it did
+not exist; too low a role answers 403 `COLLECTION_ROLE_REQUIRED`. Every API
+route has an entry in the rule table in
+[Authorization.kt](../src/main/kotlin/infoscry/server/Authorization.kt), which
+the request guard enforces and a test checks against the routing tree. Ask
+conversations and investigations belong to the user who started them and are
+private to that user. Until import roots exist, choosing server paths for an
+import is limited to administrators.
 
 API keys are read only from environment variables. Profiles and browser requests
 carry the variable's name, never its value. Keys, questions, answers, document

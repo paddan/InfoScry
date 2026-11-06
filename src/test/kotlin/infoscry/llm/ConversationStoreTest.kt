@@ -24,6 +24,7 @@ class ConversationStoreTest {
 
     private lateinit var directory: Path
     private lateinit var database: Database
+    private lateinit var owner: infoscry.account.User
     private lateinit var profiles: LlmProfileStore
     private lateinit var store: ConversationStore
 
@@ -37,6 +38,7 @@ class ConversationStoreTest {
         // A new archive has no automatic Default collection, and these tests name one: create it the way
         // a person would rather than seeding a row the product no longer creates.
         CollectionStore(database).create("Default")
+        owner = infoscry.account.testOwner(database)
     }
 
     @AfterTest
@@ -83,7 +85,7 @@ class ConversationStoreTest {
         )
 
         store.persistAsk(
-            collectionId, priced, defaultTestPrompt(), "question", "initial [S999]", listOf(evidence),
+            collectionId, owner.id, priced, defaultTestPrompt(), "question", "initial [S999]", listOf(evidence),
             initialUsage = TokenUsage(11, 13, 17),
             initialCitations = CitationValidation(emptyList(), listOf("S999")),
             retrievalSnapshot = "{\"mode\":\"HYBRID\",\"topHits\":30,\"maxEvidence\":12}",
@@ -155,7 +157,7 @@ class ConversationStoreTest {
         )
 
         store.persistAsk(
-            collectionId, askProfile, defaultTestPrompt(), "question", "answer [S1]", listOf(evidence),
+            collectionId, owner.id, askProfile, defaultTestPrompt(), "question", "answer [S1]", listOf(evidence),
             initialUsage = TokenUsage(1, 2, 0),
             initialCitations = CitationValidation(listOf("S1"), emptyList()),
             retrievalSnapshot = "{\"mode\":\"HYBRID\"}",
@@ -194,7 +196,7 @@ class ConversationStoreTest {
         val prompt = ResolvedPrompt(id = "prompt-7", name = "Short", version = 4, body = "Answer in one line.")
 
         store.persistAsk(
-            collectionId, askProfile, prompt, "question", "answer", emptyList(),
+            collectionId, owner.id, askProfile, prompt, "question", "answer", emptyList(),
             initialUsage = TokenUsage(1, 2, 0),
             initialCitations = CitationValidation(emptyList(), emptyList()),
         )
@@ -220,7 +222,7 @@ class ConversationStoreTest {
         }
 
         store.persistAsk(
-            collectionId, askProfile, defaultTestPrompt(), "question", "answer", emptyList(),
+            collectionId, owner.id, askProfile, defaultTestPrompt(), "question", "answer", emptyList(),
             initialUsage = TokenUsage(1, 2, 0),
             initialCitations = CitationValidation(emptyList(), emptyList()),
         )
