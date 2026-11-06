@@ -90,6 +90,27 @@ class JobStoreTest {
     }
 
     @Test
+    fun `a claim skips a job another worker is claiming instead of waiting for it`() {
+        val first = jobs.enqueue(JobType.IMPORT, collectionId)
+        val second = jobs.enqueue(JobType.IMPORT, collectionId)
+
+        // Another worker in another process holds the oldest job's row in an open claim.
+        Database(dataDir.resolve("infoscry.db")).use { other ->
+            other.transaction { connection ->
+                connection.prepareStatement("SELECT id FROM jobs WHERE id = ? FOR UPDATE").use {
+                    it.setString(1, first.id.value)
+                    it.executeQuery().close()
+                }
+                val claimed = java.util.concurrent.CompletableFuture.supplyAsync { jobs.claimNextQueued() }
+                    .get(10, java.util.concurrent.TimeUnit.SECONDS)
+                assertEquals(second.id, claimed?.id, "the locked job is skipped, not waited for")
+            }
+        }
+        assertEquals(first.id, jobs.claimNextQueued()?.id, "once released, the older job is claimed")
+        assertNull(jobs.claimNextQueued())
+    }
+
+    @Test
     fun `a lane claims only its own kinds of job, oldest first`() {
         val import = jobs.enqueue(JobType.IMPORT, collectionId)
         val pdf = jobs.enqueue(JobType.SELECTABLE_PDF, collectionId)
