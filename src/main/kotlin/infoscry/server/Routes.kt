@@ -158,7 +158,10 @@ data class ImportItemApiView(
 @Serializable
 data class ImportRequest(
     val collection: String,
-    val paths: List<String>,
+    /** Paths inside an import root. */
+    val paths: List<String> = emptyList(),
+    /** Files uploaded to the collection, by upload id. */
+    val uploads: List<String> = emptyList(),
     // Defaulted rather than required so a caller that predates the flag keeps working, and it defaults to
     // false on purpose: a directory import no longer descends into subdirectories unless recursion is
     // asked for, so a request that says nothing gets exactly that non-recursive behavior.
@@ -176,7 +179,10 @@ data class ImportRequest(
 @Serializable
 data class ImportPreviewRouteRequest(
     val collection: String,
-    val paths: List<String>,
+    /** Paths inside an import root. */
+    val paths: List<String> = emptyList(),
+    /** Files uploaded to the collection, by upload id. */
+    val uploads: List<String> = emptyList(),
     val recursive: Boolean = false,
     val include: List<String> = emptyList(),
     val exclude: List<String> = emptyList(),
@@ -255,6 +261,7 @@ fun Application.configureRoutes(
     routing {
         configureAccountRoutes(context.accounts, settings)
         configureMembershipRoutes(context)
+        configureUploadRoutes(context)
 
         route("/api/collections") {
             get {
@@ -357,9 +364,7 @@ fun Application.configureRoutes(
             post("/preview") {
                 call.handle {
                     val request = call.receiveJson<ImportPreviewRouteRequest>()
-                    // Until import roots exist, a preview names paths on the server's file system, which only an
-                    // administrator may choose; the collection still needs an editor.
-                    call.requireAdministrator()
+                    // Paths are checked against the import roots by the preview itself; the collection needs an editor.
                     call.requireCollectionRole(request.collection, infoscry.account.CollectionRole.EDITOR)
                     val method = try {
                         ReadingMethod.parse(request.method)
@@ -370,21 +375,29 @@ fun Application.configureRoutes(
                     val preview = context.importPreviewService.preview(
                         ServiceImportPreviewRequest(
                             collection = collection.id,
-                            paths = request.paths,
+                            paths = request.paths + context.uploadPaths(collection.id, request.uploads),
                             recursive = request.recursive,
                             include = request.include,
                             exclude = request.exclude,
                             method = method,
                         ),
                     )
-                    call.respondJson(HttpStatusCode.OK, preview)
+                    // An uploaded file is named as the person knows it, not by where the server keeps it.
+                    val uploadArea = context.importRoots.uploadArea(collection.id).toString()
+                    call.respondJson(
+                        HttpStatusCode.OK,
+                        preview.copy(files = preview.files.map { file ->
+                            if (file.path.startsWith(uploadArea)) file.copy(path = java.nio.file.Path.of(file.path).fileName.toString()) else file
+                        }),
+                    )
                 }
             }
             post {
                 call.handle {
                     val request = call.receiveJson<ImportRequest>()
-                    call.requireAdministrator()
                     call.requireCollectionRole(request.collection, infoscry.account.CollectionRole.EDITOR)
+                    val uploaded = if (request.uploads.isEmpty()) emptyList() else
+                        context.uploadPaths(context.collectionService.requireActiveByNameOrId(request.collection).id, request.uploads)
                     val method = try {
                         ReadingMethod.parse(request.method)
                     } catch (_: IllegalArgumentException) {
@@ -393,7 +406,7 @@ fun Application.configureRoutes(
                     val job = context.importStartService.start(
                         ImportStartRequest(
                             collectionId = CollectionId(request.collection),
-                            paths = request.paths,
+                            paths = request.paths + uploaded,
                             recursive = request.recursive,
                             include = request.include,
                             exclude = request.exclude,

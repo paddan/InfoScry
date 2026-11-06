@@ -182,6 +182,8 @@ class AttributionRoutesTest {
         val accepted = send("anna", HttpMethod.Post, "/api/reindex", """{"collection":"$collectionId"}""")
         assertEquals(HttpStatusCode.Accepted, accepted.status, accepted.bodyAsText())
         val queued = harness.context.jobs.enqueue(JobType.REINDEX, collectionId = CollectionId(collectionId))
+        // Claimed here, so the worker this class runs cannot take it and finish it before the cancellation.
+        harness.context.jobs.claim(queued.id)
         // Enqueued outside a request: nobody in person.
         assertEquals(null, harness.context.jobs.get(queued.id)?.startedBy)
 

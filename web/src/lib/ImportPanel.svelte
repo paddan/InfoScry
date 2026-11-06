@@ -6,6 +6,7 @@
     getImportItems,
     getJob,
     pickPaths,
+    uploadFile,
     type ImportStarted,
     type ImportItemApiView,
     type JobApiView,
@@ -13,6 +14,7 @@
   } from './api';
   import type { RescanStarted } from './api';
   import ImportUnitProgress from './ImportUnitProgress.svelte';
+  import ImportRootBrowser from './ImportRootBrowser.svelte';
   import StartReadingDialog from './StartReadingDialog.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { importProgressText } from './importProgress';
@@ -25,6 +27,42 @@
   export let collectionName: string;
   /** An import of this collection that has not finished yet; the panel shows its progress as its own. */
   export let unfinishedImportId: string | null = null;
+  /** Administrators may also open the server's own pick dialog. */
+  export let isAdmin = false;
+
+  /** Files uploaded from this browser and ready to import. */
+  let uploads: { id: string; name: string }[] = [];
+  let uploading: string | null = null;
+  let uploadNotice: string | null = null;
+  let browsing = false;
+  let fileInput: HTMLInputElement | null = null;
+
+  async function uploadChosen(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    if (files.length === 0 || collectionId === '') return;
+    error = null;
+    uploadNotice = null;
+    let already = 0;
+    try {
+      for (const [index, file] of files.entries()) {
+        uploading = `Uploading ${index + 1} of ${files.length}: ${file.name}`;
+        const answer = await uploadFile(collectionId, file);
+        if (answer.uploadId) uploads = [...uploads, { id: answer.uploadId, name: answer.name }];
+        else already += 1;
+      }
+      if (already > 0) uploadNotice = `${already} file${already === 1 ? ' is' : 's are'} already in the collection and ${already === 1 ? 'was' : 'were'} not uploaded again.`;
+    } catch (failure) {
+      error = describe(failure);
+    } finally {
+      uploading = null;
+    }
+  }
+
+  function removeUpload(id: string): void {
+    uploads = uploads.filter((upload) => upload.id !== id);
+  }
 
   let selectedPaths: string[] = [];
   let recursive = false;
@@ -151,7 +189,7 @@
   }
 
   function startImport(): void {
-    if (collectionId === '' || selectedPaths.length === 0 || extensionListEmpty || importing) return;
+    if (collectionId === '' || (selectedPaths.length === 0 && uploads.length === 0) || extensionListEmpty || importing) return;
     dialogOpen = true;
   }
 
@@ -340,14 +378,25 @@
   {/if}
 
   <div class="picker-row">
-    <button type="button" onclick={chooseFiles} disabled={picking}>
-      {picking ? 'Choosing…' : 'Choose files…'}
+    <input class="visually-hidden" type="file" multiple bind:this={fileInput} onchange={uploadChosen} aria-label="Files to upload" />
+    <button type="button" class="primary-outline" onclick={() => fileInput?.click()} disabled={uploading !== null || collectionId === ''}>
+      {uploading !== null ? 'Uploading…' : 'Upload files…'}
     </button>
-    <button type="button" onclick={chooseFolder} disabled={picking}>
-      {picking ? 'Choosing…' : 'Choose folder…'}
-    </button>
+    <button type="button" onclick={() => (browsing = !browsing)} aria-expanded={browsing}>Server folders…</button>
+    {#if isAdmin}
+      <button type="button" onclick={chooseFiles} disabled={picking}>
+        {picking ? 'Choosing…' : 'Choose files…'}
+      </button>
+      <button type="button" onclick={chooseFolder} disabled={picking}>
+        {picking ? 'Choosing…' : 'Choose folder…'}
+      </button>
+    {/if}
     <label class="check-label"><input type="checkbox" bind:checked={recursive} /> Include subfolders</label>
   </div>
+
+  {#if uploading !== null}<p role="status">{uploading}</p>{/if}
+  {#if uploadNotice !== null}<p role="status">{uploadNotice}</p>{/if}
+  {#if browsing}<ImportRootBrowser onAdd={(path) => addPaths([path])} />{/if}
 
   <fieldset class="file-types">
     <legend>File types</legend>
@@ -375,11 +424,17 @@
   {/if}
 
   <div class="paths">
-    <span class="eyebrow">SELECTED PATHS</span>
-    {#if selectedPaths.length === 0}
-      <p role="status">No paths selected yet.</p>
+    <span class="eyebrow">SELECTED</span>
+    {#if selectedPaths.length === 0 && uploads.length === 0}
+      <p role="status">Nothing selected yet.</p>
     {:else}
       <ul>
+        {#each uploads as upload (upload.id)}
+          <li>
+            <span>{upload.name} <span class="hint">(uploaded)</span></span>
+            <button type="button" aria-label="Remove {upload.name}" onclick={() => removeUpload(upload.id)}>×</button>
+          </li>
+        {/each}
         {#each selectedPaths as path (path)}
           <li>
             <span>{path}</span>
@@ -391,11 +446,11 @@
   </div>
 
   <div class="import-row">
-    <button type="button" class="primary" onclick={startImport} disabled={importing || collectionId === '' || selectedPaths.length === 0 || extensionListEmpty}>
+    <button type="button" class="primary" onclick={startImport} disabled={importing || collectionId === '' || (selectedPaths.length === 0 && uploads.length === 0) || extensionListEmpty}>
       {importing ? 'Importing…' : 'Import'}
     </button>
     {#if collectionId === ''}<p class="hint">Select a collection to import into.</p>{/if}
-    {#if !importing && collectionId !== '' && selectedPaths.length === 0}<p class="hint">Choose files or a folder to import.</p>{/if}
+    {#if !importing && collectionId !== '' && selectedPaths.length === 0 && uploads.length === 0}<p class="hint">Upload files, or choose them in a server folder.</p>{/if}
     {#if extensionListEmpty}<p class="hint">Enter at least one extension.</p>{/if}
   </div>
 
@@ -430,7 +485,7 @@
   {#if dialogOpen}
     <StartReadingDialog
       {collectionId}
-      request={{ kind: 'import', paths: selectedPaths, recursive, include: fileTypes === 'include' ? listedExtensions : [], exclude: fileTypes === 'exclude' ? listedExtensions : [] }}
+      request={{ kind: 'import', paths: selectedPaths, uploads: uploads.map((upload) => upload.id), recursive, include: fileTypes === 'include' ? listedExtensions : [], exclude: fileTypes === 'exclude' ? listedExtensions : [] }}
       onstarted={readingStarted}
       oncancel={() => (dialogOpen = false)}
     />

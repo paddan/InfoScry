@@ -6,7 +6,7 @@ import * as api from './api';
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
   pickPaths: vi.fn(), listReadingMethods: vi.fn(), previewImport: vi.fn(), startImport: vi.fn(), getJob: vi.fn(), getImportItems: vi.fn(),
-  cancelJob: vi.fn(),
+  cancelJob: vi.fn(), uploadFile: vi.fn(),
 }));
 
 const methods: api.ReadingMethodList = { default: 'surya', methods: [
@@ -32,7 +32,7 @@ describe('ImportPanel', () => {
       currentItem: 'a.pdf', currentProgress: { unitKind: 'PAGE', processedUnits: 1, totalUnits: 4, failedUnits: 0 } } } as api.ImportStarted);
     vi.mocked(api.getJob).mockResolvedValue({ ...job, state: 'RUNNING', completed: 0,
       currentItem: 'a.pdf', currentProgress: { unitKind: 'PAGE', processedUnits: 2, totalUnits: 4, failedUnits: 0 } } as api.JobApiView);
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
     await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
@@ -45,7 +45,7 @@ describe('ImportPanel', () => {
   });
 
   it('routes import through the dialog and confirms the method and preview hash', async () => {
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
     await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
     expect(await screen.findByText('/archive/a.pdf')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
@@ -53,7 +53,7 @@ describe('ImportPanel', () => {
     const confirm = await screen.findByRole('button', { name: 'Read 4 pages with Surya' });
     await fireEvent.click(confirm);
     await waitFor(() => expect(api.startImport).toHaveBeenCalledTimes(1));
-    expect(api.previewImport).toHaveBeenCalledWith({ collection: 'c1', paths: ['/archive/a.pdf'], recursive: false, include: [], exclude: [], method: 'surya' });
+    expect(api.previewImport).toHaveBeenCalledWith({ collection: 'c1', paths: ['/archive/a.pdf'], uploads: [], recursive: false, include: [], exclude: [], method: 'surya' });
     expect(api.startImport).toHaveBeenCalledWith(expect.objectContaining({
       collection: 'c1', paths: ['/archive/a.pdf'], method: 'surya', previewHash: 'confirmed-hash', requestId: expect.any(String),
     }));
@@ -61,7 +61,7 @@ describe('ImportPanel', () => {
   });
 
   it('keeps the selected folder filters and recursive flag in the dialog request', async () => {
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
     await fireEvent.click(screen.getByRole('button', { name: 'Choose folder…' }));
     await fireEvent.click(screen.getByLabelText('Include subfolders'));
     await fireEvent.click(screen.getByLabelText('Only these extensions'));
@@ -74,7 +74,7 @@ describe('ImportPanel', () => {
   });
 
   it('retains the readable import status container without showing approval UI', async () => {
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
     await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
     await screen.findByText('/archive/a.pdf');
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
@@ -91,7 +91,7 @@ describe('ImportPanel', () => {
       cancelled = true;
       return { ...running, cancelRequested: true };
     });
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
     await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
@@ -109,7 +109,7 @@ describe('ImportPanel', () => {
     vi.mocked(api.startImport).mockResolvedValue({ job: running });
     vi.mocked(api.getJob).mockResolvedValue(running);
     vi.mocked(api.cancelJob).mockRejectedValue(new Error('Server unavailable.'));
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
     await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
@@ -121,7 +121,7 @@ describe('ImportPanel', () => {
   it('follows an unfinished import it is handed, as after a server restart', async () => {
     vi.mocked(api.getJob).mockResolvedValue({ ...job, state: 'RUNNING', completed: 1, total: 3,
       currentItem: 'a.pdf', currentProgress: { unitKind: 'PAGE', processedUnits: 2, totalUnits: 4, failedUnits: 0 } } as api.JobApiView);
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', unfinishedImportId: 'job-1' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true, unfinishedImportId: 'job-1' });
     const files = await screen.findByRole('progressbar', { name: 'Import progress' });
     expect(api.getJob).toHaveBeenCalledWith('job-1');
     expect(files.getAttribute('value')).toBe('1');
@@ -132,7 +132,7 @@ describe('ImportPanel', () => {
   });
 
   it('shows no progress when the handed import has already ended', async () => {
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', unfinishedImportId: 'job-1' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true, unfinishedImportId: 'job-1' });
     await waitFor(() => expect(api.getJob).toHaveBeenCalledWith('job-1'));
     expect(screen.queryByRole('progressbar')).toBeNull();
     expect(screen.queryByText(/Import complete/)).toBeNull();
@@ -144,7 +144,7 @@ describe('ImportPanel', () => {
       items: Array.from({ length: Math.min(page.limit, 120 - page.offset) }, (_, i) => item(page.offset + i + 1)),
       total: 120,
     }));
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
     await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
@@ -160,5 +160,23 @@ describe('ImportPanel', () => {
     expect(await screen.findByText('Showing 101–120 of 120 files')).toBeTruthy();
     expect(screen.getByText('file-120.pdf')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Next files' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('uploads chosen files, skips ones already in the collection, and imports the uploads', async () => {
+    vi.mocked(api.uploadFile)
+      .mockResolvedValueOnce({ uploadId: 'u-1', name: 'minutes.pdf', sizeBytes: 3, sha256: 'a' })
+      .mockResolvedValueOnce({ name: 'old.pdf', sizeBytes: 3, sha256: 'b', existingDocumentId: 'd-1' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+
+    expect(screen.queryByRole('button', { name: 'Choose files…' })).toBeNull();
+    const input = screen.getByLabelText('Files to upload') as HTMLInputElement;
+    const files = [new File(['abc'], 'minutes.pdf'), new File(['def'], 'old.pdf')];
+    Object.defineProperty(input, 'files', { value: files, configurable: true });
+    await fireEvent.change(input);
+
+    expect(await screen.findByText(/1 file is already in the collection/)).toBeTruthy();
+    expect(screen.getByText('minutes.pdf')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await waitFor(() => expect(api.previewImport).toHaveBeenCalledWith(expect.objectContaining({ paths: [], uploads: ['u-1'] })));
   });
 });

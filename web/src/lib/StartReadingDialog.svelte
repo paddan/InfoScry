@@ -5,7 +5,7 @@
 
   export let collectionId: string;
   export let request:
-    | { kind: 'import'; paths: string[]; recursive: boolean; include: string[]; exclude: string[] }
+    | { kind: 'import'; paths: string[]; uploads?: string[]; recursive: boolean; include: string[]; exclude: string[] }
     | { kind: 'rescan'; documentId: string; selection?: RescanSelection };
   export let onstarted: (run: ImportStarted | RescanStarted) => void;
   export let oncancel: () => void;
@@ -93,7 +93,7 @@
     error = null;
     try {
       const next = currentRequest.kind === 'import'
-        ? await previewImport({ collection: collectionId, paths: currentRequest.paths, recursive: currentRequest.recursive, include: currentRequest.include, exclude: currentRequest.exclude, method: selectedMethod })
+        ? await previewImport({ collection: collectionId, paths: currentRequest.paths, uploads: [...(currentRequest.uploads ?? [])], recursive: currentRequest.recursive, include: currentRequest.include, exclude: currentRequest.exclude, method: selectedMethod })
         : currentRequest.selection === undefined
           ? await previewRescan(collectionId, currentRequest.documentId, selectedMethod)
           : await previewRescan(collectionId, currentRequest.documentId, selectedMethod, currentRequest.selection);
@@ -139,7 +139,7 @@
       if (pendingStart === null) {
         const currentRequest = request;
         pendingStart = currentRequest.kind === 'import'
-          ? { kind: 'import', body: { collection: collectionId, paths: [...currentRequest.paths], recursive: currentRequest.recursive, include: [...currentRequest.include], exclude: [...currentRequest.exclude], method: selectedMethod, previewHash: (preview as ImportPreview).previewHash, requestId } }
+          ? { kind: 'import', body: { collection: collectionId, paths: [...currentRequest.paths], uploads: [...(currentRequest.uploads ?? [])], recursive: currentRequest.recursive, include: [...currentRequest.include], exclude: [...currentRequest.exclude], method: selectedMethod, previewHash: (preview as ImportPreview).previewHash, requestId } }
           : { kind: 'rescan', collectionId, documentId: currentRequest.documentId, body: { previewId: (preview as RescanPreview).previewId, requestId } };
       }
       const run = pendingStart.kind === 'import'
@@ -227,7 +227,7 @@
     {#if preview !== null}
       <section class="summary" aria-label="Reading summary">
         {#if 'files' in preview}
-          <ul>{#each preview.files as file (file.path)}<li>{file.path}: {file.pages === null ? file.reason ?? 'page count unknown' : typeof file.documentPages === 'number' && file.documentPages > file.pages ? `${file.pages} of ${file.documentPages} pages will be read` : `${file.pages} pages`}</li>{/each}</ul>
+          <ul>{#each preview.files as file (file.path)}<li>{file.path}: {file.pages == null ? file.reason ?? 'page count unknown' : typeof file.documentPages === 'number' && file.documentPages > file.pages ? `${file.pages} of ${file.documentPages} pages will be read` : `${file.pages} pages`}</li>{/each}</ul>
         {/if}
         {#if usesOwnText}
           <p>No page is read. Each page keeps the document's own text; pages without text are kept without text.</p>

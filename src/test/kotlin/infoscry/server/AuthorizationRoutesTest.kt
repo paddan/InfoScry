@@ -168,11 +168,12 @@ class AuthorizationRoutesTest {
         assertEquals(HttpStatusCode.Forbidden, status("editor", HttpMethod.Post, "/api/reindex", """{"collection":"$collectionId"}"""))
         assertEquals(HttpStatusCode.Accepted, status("owner", HttpMethod.Post, "/api/reindex", """{"collection":"$collectionId"}"""))
 
-        // Server paths are an administrator's to choose until import roots exist.
+        // An editor imports, but only from inside an import root; the server's own files are outside them.
         val preview = """{"collection":"$collectionId","paths":["/etc/hosts"],"method":"none"}"""
         val editorPreview = send("editor", HttpMethod.Post, "/api/imports/preview", preview)
         assertEquals(HttpStatusCode.Forbidden, editorPreview.status)
-        assertContains(editorPreview.bodyAsText(), "ADMINISTRATOR_REQUIRED")
+        assertContains(editorPreview.bodyAsText(), "IMPORT_PATH_NOT_ALLOWED")
+        assertEquals(HttpStatusCode.Forbidden, status("reader", HttpMethod.Post, "/api/imports/preview", preview))
     }
 
     @Test

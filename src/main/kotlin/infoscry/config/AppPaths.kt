@@ -71,6 +71,9 @@ class AppPaths private constructor(val root: Path) {
     val logsDir: Path = root.resolve(LOGS_DIRECTORY)
     val tempDir: Path = root.resolve("tmp")
 
+    /** Files uploaded for import, one area per collection, removed a week after upload. */
+    val uploadsDir: Path = root.resolve("uploads")
+
     /**
      * Where the accelerator records its one verification profile, under the temp root.
      *
@@ -124,7 +127,7 @@ class AppPaths private constructor(val root: Path) {
     /** Creates every directory in the layout. Safe to call repeatedly, and re-hardens each one. */
     fun ensureDirectories(): AppPaths {
         createPrivateDirectory(root)
-        listOf(libraryDir, modelsDir, logsDir, tempDir).forEach(::createPrivateDirectory)
+        listOf(libraryDir, modelsDir, logsDir, tempDir, uploadsDir).forEach(::createPrivateDirectory)
         return this
     }
 

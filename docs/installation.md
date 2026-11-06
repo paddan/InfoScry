@@ -290,7 +290,16 @@ infoscry import --collection Notes --wait /absolute/path/to/document.pdf
 ```
 
 The CLI sends each request to the running server (`INFOSCRY_URL`, default
-<http://127.0.0.1:8080>). Import paths are paths on the server's machine.
+<http://127.0.0.1:8080>) and uploads the files it imports.
+
+To let editors import from directories on the server itself, list them in
+`INFOSCRY_IMPORT_ROOTS` (separated by `:`) before starting the server; they can
+then browse and pick files there, and `infoscry import --server-path` names
+paths inside them. A path outside these directories, also through a symbolic
+link, is refused. Uploaded files wait in `<data directory>/uploads` and are
+removed a week later; an upload may be at most `INFOSCRY_UPLOAD_MAX_BYTES`
+(default 4 GiB). Back up both the Postgres database and the data directory's
+`library/`.
 For a disposable sample, use `src/test/resources/fixtures/sample.txt` from the
 repository root. Import keeps an immutable managed copy and leaves the original
 unchanged.

@@ -1231,7 +1231,10 @@ export type ReadingMethodOption = {
 export type ReadingMethodList = { methods: ReadingMethodOption[]; default: string | null };
 export type ImportPreviewRequest = {
   collection: string;
+  /** Paths inside one of the server's import roots. */
   paths: string[];
+  /** Files uploaded to the collection, by upload id. */
+  uploads?: string[];
   recursive: boolean;
   include: string[];
   exclude: string[];
@@ -1253,6 +1256,37 @@ export type ImportStarted = { accepted?: boolean; job: JobApiView };
 export async function listReadingMethods(collectionId: string): Promise<ReadingMethodList> {
   const collection = encodeURIComponent(collectionId);
   return (await readJson(await fetch(`/api/collections/${collection}/reading-methods`))) as ReadingMethodList;
+}
+
+/** An uploaded file: its upload id to import, or the document its bytes already are in the collection. */
+export type Upload = { uploadId?: string | null; name: string; sizeBytes: number; sha256: string; existingDocumentId?: string | null };
+
+/** Uploads one file to a collection for import, as the raw body of one request. */
+export async function uploadFile(collectionId: string, file: File): Promise<Upload> {
+  const send = async (): Promise<Response> => fetch(`/api/collections/${encodeURIComponent(collectionId)}/uploads`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-InfoScry-Filename': encodeURIComponent(file.name),
+      [CSRF_HEADER]: await csrfToken(),
+    },
+    body: file,
+  });
+  return (await readJson(await sendWithSessionRetry(send, 'CSRF_TOKEN_INVALID'))) as Upload;
+}
+
+/** A directory an administrator opened for import on the server. */
+export type ImportRoot = { index: number; name: string; path: string };
+export type ImportRootEntry = { name: string; path: string; directory: boolean; sizeBytes?: number | null };
+
+export async function listImportRoots(): Promise<ImportRoot[]> {
+  return ((await readJson(await fetch('/api/import-roots'))) as { roots: ImportRoot[] }).roots;
+}
+
+/** One folder of an import root: its folders first, then its files. */
+export async function browseImportRoot(root: number, path: string): Promise<{ root: ImportRoot; path: string; entries: ImportRootEntry[] }> {
+  const query = `root=${root}&path=${encodeURIComponent(path)}`;
+  return (await readJson(await fetch(`/api/import-roots/browse?${query}`))) as { root: ImportRoot; path: string; entries: ImportRootEntry[] };
 }
 
 export async function previewImport(request: ImportPreviewRequest): Promise<ImportPreview> {

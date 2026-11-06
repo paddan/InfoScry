@@ -53,7 +53,8 @@ way: state and search are in PostgreSQL, people sign in with local accounts, and
 the CLI is a client of the server with a personal access token, collections
 have members with owner, editor and reader roles, and records show who created
 and changed them, with edits checked against the version they were made from.
-Uploads and import roots come next;
+Imports come from uploads or from import roots an administrator opens on the
+server;
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
 The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan (including No OCR, which uses the

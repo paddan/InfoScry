@@ -197,11 +197,14 @@ Options: `--prefix`, `--group`, `--json`.
 
 Import files or directories into a collection as immutable managed copies.
 Requires `--collection` and at least one path. The collection must already
-exist; create it with `infoscry collection create` first. A directory is read at
-its top level only; pass `--recursive` to descend into its subdirectories. With
-`--wait`, the command blocks until the import finishes and reports every
-document (and exits nonzero if any failed). Without a running server, the
-import runs in this process regardless of `--wait`.
+exist; create it with `infoscry collection create` first. The paths are on this
+machine: each file is uploaded to the server (a folder's files, its whole tree
+with `--recursive`; hidden files are left out), and a file whose bytes are
+already a document of the collection is reported as a duplicate without being
+sent. With `--server-path` the paths are instead on the server, inside one of
+its import roots (`INFOSCRY_IMPORT_ROOTS`); a directory is read at its top level
+unless `--recursive` is given. With `--wait`, the command blocks until the
+import finishes and reports every document (and exits nonzero if any failed).
 
 `--method none|tesseract|surya|llm:<profileId>` selects the reading method; without it
 the collection default is used. `none` (No OCR) reads no page: each page keeps the
@@ -232,7 +235,7 @@ infoscry import --collection Notes --recursive --include=pdf,docx /path/to/dir
 infoscry import --collection Notes --recursive --exclude=tmp,log /path/to/dir
 ```
 
-Options: `--collection`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`.
+Options: `--collection`, `--server-path`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`.
 
 ## search
 

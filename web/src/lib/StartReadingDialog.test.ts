@@ -50,7 +50,7 @@ describe('StartReadingDialog', () => {
     // A profile that has not passed its image check cannot be used, so it is not listed at all.
     expect(screen.queryByRole('option', { name: /Unchecked/ })).toBeNull();
     expect(screen.queryByText(/image check/)).toBeNull();
-    expect(api.previewImport).toHaveBeenLastCalledWith({ collection: 'c', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [], method: 'surya' });
+    expect(api.previewImport).toHaveBeenLastCalledWith({ collection: 'c', paths: ['/data/report.pdf'], uploads: [], recursive: false, include: [], exclude: [], method: 'surya' });
     await fireEvent.change(select, { target: { value: 'tesseract' } });
     await waitFor(() => expect(api.previewImport).toHaveBeenLastCalledWith(expect.objectContaining({ method: 'tesseract' })));
   });
