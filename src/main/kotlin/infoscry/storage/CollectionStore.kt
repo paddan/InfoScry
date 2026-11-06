@@ -117,11 +117,13 @@ class CollectionStore(private val database: Database) {
         selectById(connection, id)
     }
 
-    fun rename(id: CollectionId, newName: String): Collection {
+    fun rename(id: CollectionId, newName: String, expectedVersion: Long? = null): Collection {
         val trimmedName = requireName(newName)
         return database.transaction { connection ->
-            val existing = selectById(connection, id)
+            val existing = selectById(connection, id, forUpdate = true)
                 ?: throw NoSuchElementException("no collection with id ${id.value}")
+            if (existing.name == trimmedName) return@transaction existing
+            infoscry.domain.requireVersion(expectedVersion, existing.version, existing.updatedBy)
             val updatedAt = Instants.now()
             try {
                 connection.prepareStatement(
@@ -135,7 +137,7 @@ class CollectionStore(private val database: Database) {
             } catch (failure: SQLException) {
                 failure.rethrowAsNameConflict(trimmedName)
             }
-            existing.copy(name = trimmedName, updatedAt = updatedAt)
+            checkNotNull(selectById(connection, id))
         }
     }
 
@@ -146,9 +148,9 @@ class CollectionStore(private val database: Database) {
      * only meaningful together: an engine without the profile it reads through is not a collection state.
      * Already queued payloads are untouched — this changes what the *next* attempt snapshots.
      */
-    fun updateOcrSettings(id: CollectionId, settings: CollectionOcrSettings): Collection =
+    fun updateOcrSettings(id: CollectionId, settings: CollectionOcrSettings, expectedVersion: Long? = null): Collection =
         database.transaction { connection ->
-            val existing = selectById(connection, id)
+            val existing = selectById(connection, id, forUpdate = true)
                 ?: throw NoSuchElementException("no collection with id ${id.value}")
             val language = requireOcrLanguages(settings.language)
             val (engine, profileId) = when (val method = settings.defaultMethod) {
@@ -162,6 +164,7 @@ class CollectionStore(private val database: Database) {
             ) {
                 return@transaction existing
             }
+            infoscry.domain.requireVersion(expectedVersion, existing.version, existing.updatedBy)
             val updatedAt = Instants.now()
             connection.prepareStatement(
                 "UPDATE collections SET ocr_languages = ?, ocr_engine = ?, " +
@@ -174,12 +177,7 @@ class CollectionStore(private val database: Database) {
                 statement.setString(5, id.value)
                 statement.executeUpdate()
             }
-            existing.copy(
-                ocrLanguages = language,
-                ocrEngine = engine,
-                ocrTranscriptionProfileId = profileId,
-                updatedAt = updatedAt,
-            )
+            checkNotNull(selectById(connection, id))
         }
 
     /**
@@ -213,12 +211,20 @@ class CollectionStore(private val database: Database) {
      * Replaces the collection's whole ignore list. An emptied list stays empty: the defaults are given to a new
      * collection only, so a person who removes them is not handed them back. The caller validates the lines.
      */
-    fun replaceIgnorePatterns(id: CollectionId, patterns: List<String>) {
+    fun replaceIgnorePatterns(id: CollectionId, patterns: List<String>, expectedVersion: Long? = null) {
         database.transaction { connection ->
-            if (selectById(connection, id) == null) {
-                throw NoSuchElementException("no collection with id ${id.value} exists")
-            }
+            val existing = selectById(connection, id, forUpdate = true)
+                ?: throw NoSuchElementException("no collection with id ${id.value} exists")
+            if (readIgnorePatterns(connection, id) == patterns) return@transaction
+            infoscry.domain.requireVersion(expectedVersion, existing.version, existing.updatedBy)
             writeIgnorePatterns(connection, id, patterns)
+            // The patterns are the collection's settings: touching its row records who changed them and moves
+            // its version, which is what an edit of the settings is checked against.
+            connection.prepareStatement("UPDATE collections SET updated_at = ? WHERE id = ?").use { statement ->
+                statement.setString(1, Instants.now())
+                statement.setString(2, id.value)
+                statement.executeUpdate()
+            }
         }
     }
 
@@ -249,8 +255,8 @@ class CollectionStore(private val database: Database) {
         }
     }
 
-    private fun selectById(connection: Connection, id: CollectionId): Collection? =
-        connection.prepareStatement("$SELECT_COLLECTIONS WHERE id = ?").use { statement ->
+    private fun selectById(connection: Connection, id: CollectionId, forUpdate: Boolean = false): Collection? =
+        connection.prepareStatement("$SELECT_COLLECTIONS WHERE id = ?${if (forUpdate) " FOR UPDATE" else ""}").use { statement ->
             statement.setString(1, id.value)
             statement.executeQuery().use { rows ->
                 if (rows.next()) rows.toCollection() else null
@@ -284,6 +290,8 @@ class CollectionStore(private val database: Database) {
         lifecycle = CollectionLifecycle.valueOf(getString("lifecycle")),
         ocrEngine = OcrEngine.valueOf(getString("ocr_engine")),
         ocrTranscriptionProfileId = getString("ocr_transcription_profile_id"),
+        version = getLong("version"),
+        updatedBy = getString("updated_by")?.let { infoscry.domain.UserRef(it, getString("updated_by_name") ?: it) },
     )
 
     companion object {
@@ -294,7 +302,8 @@ class CollectionStore(private val database: Database) {
 
         private const val SELECT_COLLECTIONS =
             "SELECT id, name, description, ocr_languages, lifecycle, created_at, updated_at, " +
-                "ocr_engine, ocr_transcription_profile_id FROM collections"
+                "ocr_engine, ocr_transcription_profile_id, version, updated_by, " +
+                "(SELECT display_name FROM users WHERE id = collections.updated_by) AS updated_by_name FROM collections"
 
         /**
          * The same columns plus a document count, joined and grouped so one round trip answers the
@@ -303,7 +312,8 @@ class CollectionStore(private val database: Database) {
          */
         private const val SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT =
             "SELECT c.id, c.name, c.description, c.ocr_languages, c.lifecycle, c.created_at, " +
-                "c.updated_at, c.ocr_engine, c.ocr_transcription_profile_id, COUNT(d.id) AS document_count " +
+                "c.updated_at, c.ocr_engine, c.ocr_transcription_profile_id, c.version, c.updated_by, " +
+                "(SELECT display_name FROM users WHERE id = c.updated_by) AS updated_by_name, COUNT(d.id) AS document_count " +
                 "FROM collections c LEFT JOIN documents d ON d.collection_id = c.id GROUP BY c.id"
     }
 }

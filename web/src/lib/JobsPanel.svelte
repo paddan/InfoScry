@@ -105,11 +105,12 @@
           <div class="head">
             <strong>{TYPE_LABELS[job.type] ?? job.type}</strong>
             {#if collectionName(job) !== ''}<span class="collection">{collectionName(job)}</span>{/if}
+            {#if job.startedBy}<span class="collection">started by {job.startedBy.displayName}</span>{/if}
             <button type="button" onclick={() => stop(job)} disabled={stopping.has(job.id) || job.cancelRequested}>
               {stopping.has(job.id) || job.cancelRequested ? 'Stopping…' : 'Stop'}
             </button>
           </div>
-          <p class="status">{statusText(job)}</p>
+          <p class="status">{statusText(job)}{#if job.cancelledBy}, stop asked by {job.cancelledBy.displayName}{/if}</p>
           {#if job.total > 0}
             <div class="files">
               <progress value={job.completed} max={job.total} aria-label="Job progress"></progress>

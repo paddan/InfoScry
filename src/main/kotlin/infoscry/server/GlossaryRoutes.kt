@@ -18,7 +18,15 @@ data class GlossaryTermWire(val text: String, val prefix: Boolean = false)
 
 /** One group of names with the same meaning, terms in the order typed. */
 @Serializable
-data class GlossaryGroupWire(val id: String, val terms: List<GlossaryTermWire>)
+data class GlossaryGroupWire(
+    val id: String,
+    val terms: List<GlossaryTermWire>,
+    /** The group's version, to send back in `If-Match` with an edit; absent where the group is only named. */
+    val version: Long? = null,
+    /** Who last changed the group. */
+    val updatedBy: infoscry.domain.UserRef? = null,
+    val updatedAt: String? = null,
+)
 
 @Serializable
 data class GlossaryListWire(val groups: List<GlossaryGroupWire>)
@@ -41,7 +49,7 @@ fun Route.glossaryRoutes(context: AppContext) {
         call.handle {
             val id = call.collectionId()
             val request = call.receiveJson<PutGlossaryGroupRequest>()
-            val group = context.glossaryService.put(id, call.groupId(), request.terms.map { GlossaryTermInput(it.text, it.prefix) })
+            val group = context.glossaryService.put(id, call.groupId(), request.terms.map { GlossaryTermInput(it.text, it.prefix) }, call.ifMatchVersion())
             call.respondJson(HttpStatusCode.OK, group.toWire())
         }
     }
@@ -57,6 +65,6 @@ fun Route.glossaryRoutes(context: AppContext) {
 private fun ApplicationCall.groupId(): String =
     parameters["groupId"]?.takeIf { it.isNotBlank() } ?: throw BadRequestException("a glossary group id is required in the path")
 
-fun GlossaryGroup.toWire() = GlossaryGroupWire(id, terms.map { GlossaryTermWire(it.text, it.prefix) })
+fun GlossaryGroup.toWire() = GlossaryGroupWire(id, terms.map { GlossaryTermWire(it.text, it.prefix) }, version, updatedBy, updatedAt)
 
 private fun Glossary.toWire() = GlossaryListWire(groups.map { it.toWire() })

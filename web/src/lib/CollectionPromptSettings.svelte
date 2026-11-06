@@ -70,7 +70,9 @@
     { role: 'INVESTIGATE' as const, label: 'Investigate', list: prompts?.investigate ?? null },
   ];
   $: selected = findSelected(prompts, activeRole, selectedId);
-  $: readOnly = !creating && selected !== null && selected.builtIn;
+  /** Readers see the prompts and use them; only editors and owners change them. */
+  $: canEdit = (collection.callerRole ?? 'OWNER') !== 'READER';
+  $: readOnly = !canEdit || (!creating && selected !== null && selected.builtIn);
   $: isCollectionDefault = selected !== null && section(activeRole)?.defaultId === selected.id;
   $: dirty = creating
     ? draftName.trim() !== '' && draftBody.trim() !== ''
@@ -203,7 +205,7 @@
     try {
       stored = isNew
         ? await createCollectionPrompt(target, role, name, body)
-        : await updateCollectionPrompt(target, promptId ?? '', name, body);
+        : await updateCollectionPrompt(target, promptId ?? '', name, body, selected?.version);
     } catch (failure) {
       if (mine === generation) saveError = describe(failure);
       if (mine === generation) saving = false;
@@ -368,7 +370,7 @@
               {/each}
             </ul>
             <div class="actions">
-              <button type="button" onclick={() => startNew(entry.role)} disabled={busy}>New prompt</button>
+              {#if canEdit}<button type="button" onclick={() => startNew(entry.role)} disabled={busy}>New prompt</button>{/if}
             </div>
           </section>
         {/if}
@@ -378,6 +380,7 @@
     {#if creating || selected !== null}
       <form class="settings-form prompt-editor" onsubmit={save}>
         <p class="hint">Changes apply to new conversations. Existing conversations keep the prompt they started with.</p>
+        {#if !creating && selected?.updatedBy}<p class="hint">Version {selected.version}, last changed by {selected.updatedBy.displayName}.</p>{/if}
         <div class="field">
           <label for="collection-prompt-name">Prompt name</label>
           <input
@@ -420,10 +423,10 @@
           {#if !readOnly}
             <button type="submit" class="primary" disabled={!canSave}>{saving ? 'Saving prompt…' : 'Save prompt'}</button>
           {/if}
-          {#if !creating && selected !== null}
+          {#if canEdit && !creating && selected !== null}
             <button type="button" onclick={duplicate} disabled={busy}>Duplicate</button>
           {/if}
-          {#if !creating && selected !== null && !selected.builtIn}
+          {#if canEdit && !creating && selected !== null && !selected.builtIn}
             <button type="button" onclick={openDelete} disabled={busy}>Delete prompt</button>
           {/if}
         </div>
@@ -435,7 +438,7 @@
         <div class="actions">
           {#if isCollectionDefault}
             <span class="hint" role="status">This is the collection default for {roleLabel(activeRole)}.</span>
-          {:else}
+          {:else if canEdit}
             <button type="button" onclick={useAsDefault} disabled={busy}>
               {defaultSaving ? 'Saving default…' : 'Use as collection default'}
             </button>

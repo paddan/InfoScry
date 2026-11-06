@@ -1357,3 +1357,143 @@ CREATE INDEX conversations_owner ON conversations (owner_id, collection_id);
 
 -- Who asked for a deletion: they can follow it after the collection's rows, and memberships, are gone.
 ALTER TABLE deletion_operations ADD COLUMN requested_by TEXT REFERENCES users (id);
+
+-- ---------------------------------------------------------------------------------------------
+-- Attribution: who created and last changed each record
+-- ---------------------------------------------------------------------------------------------
+
+-- The application tells each connection who is acting in the session setting `infoscry.actor` (a user id,
+-- or empty when nobody acts in person, as in startup recovery). These triggers write it into the records,
+-- so attribution does not depend on every write path remembering it. NULL means nobody in person.
+
+CREATE FUNCTION infoscry_actor() RETURNS TEXT AS $$
+    SELECT nullif(current_setting('infoscry.actor', true), '')
+$$ LANGUAGE sql STABLE;
+
+-- Fills the column named by the trigger's argument on insert, unless the row already names someone.
+CREATE FUNCTION infoscry_stamp_insert() RETURNS trigger AS $$
+DECLARE
+    actor TEXT := infoscry_actor();
+BEGIN
+    IF actor IS NOT NULL AND (to_jsonb(NEW) ->> TG_ARGV[0]) IS NULL THEN
+        NEW := jsonb_populate_record(NEW, jsonb_build_object(TG_ARGV[0], actor));
+    END IF;
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql;
+
+-- created_by and updated_by: both on insert, updated_by on every update made by someone.
+CREATE FUNCTION infoscry_stamp_change() RETURNS trigger AS $$
+DECLARE
+    actor TEXT := infoscry_actor();
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        NEW.created_by := coalesce(NEW.created_by, actor);
+        NEW.updated_by := coalesce(NEW.updated_by, actor);
+    ELSIF actor IS NOT NULL THEN
+        NEW.updated_by := actor;
+    END IF;
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql;
+
+-- The same, and the record's version counts every change, for optimistic edits (If-Match).
+CREATE FUNCTION infoscry_stamp_versioned_change() RETURNS trigger AS $$
+DECLARE
+    actor TEXT := infoscry_actor();
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        NEW.created_by := coalesce(NEW.created_by, actor);
+        NEW.updated_by := coalesce(NEW.updated_by, actor);
+        NEW.version := 1;
+    ELSE
+        IF actor IS NOT NULL THEN
+            NEW.updated_by := actor;
+        END IF;
+        IF NEW IS DISTINCT FROM OLD THEN
+            NEW.version := OLD.version + 1;
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql;
+
+-- A job's cancellation is attributed to whoever asked for it.
+CREATE FUNCTION infoscry_stamp_cancellation() RETURNS trigger AS $$
+DECLARE
+    actor TEXT := infoscry_actor();
+BEGIN
+    IF NEW.cancel_requested = 1 AND OLD.cancel_requested = 0 AND actor IS NOT NULL THEN
+        NEW.cancelled_by := actor;
+    END IF;
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql;
+
+ALTER TABLE collections
+    ADD COLUMN created_by TEXT REFERENCES users (id),
+    ADD COLUMN updated_by TEXT REFERENCES users (id),
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 1;
+CREATE TRIGGER collections_attribution BEFORE INSERT OR UPDATE ON collections
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_versioned_change();
+
+ALTER TABLE collection_corrections
+    ADD COLUMN created_by TEXT REFERENCES users (id),
+    ADD COLUMN updated_by TEXT REFERENCES users (id),
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 1;
+CREATE TRIGGER collection_corrections_attribution BEFORE INSERT OR UPDATE ON collection_corrections
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_versioned_change();
+
+ALTER TABLE collection_glossary_groups
+    ADD COLUMN created_by TEXT REFERENCES users (id),
+    ADD COLUMN updated_by TEXT REFERENCES users (id),
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 1;
+CREATE TRIGGER collection_glossary_groups_attribution BEFORE INSERT OR UPDATE ON collection_glossary_groups
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_versioned_change();
+
+-- A prompt's own `version` counts its text versions and is kept by the application.
+ALTER TABLE collection_prompts
+    ADD COLUMN created_by TEXT REFERENCES users (id),
+    ADD COLUMN updated_by TEXT REFERENCES users (id);
+CREATE TRIGGER collection_prompts_attribution BEFORE INSERT OR UPDATE ON collection_prompts
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_change();
+
+ALTER TABLE llm_profiles
+    ADD COLUMN created_by TEXT REFERENCES users (id),
+    ADD COLUMN updated_by TEXT REFERENCES users (id);
+CREATE TRIGGER llm_profiles_attribution BEFORE INSERT OR UPDATE ON llm_profiles
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_change();
+
+ALTER TABLE ocr_profiles
+    ADD COLUMN created_by TEXT REFERENCES users (id),
+    ADD COLUMN updated_by TEXT REFERENCES users (id);
+CREATE TRIGGER ocr_profiles_attribution BEFORE INSERT OR UPDATE ON ocr_profiles
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_change();
+
+ALTER TABLE documents ADD COLUMN imported_by TEXT REFERENCES users (id);
+CREATE TRIGGER documents_attribution BEFORE INSERT ON documents
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_insert('imported_by');
+
+ALTER TABLE document_revisions ADD COLUMN created_by TEXT REFERENCES users (id);
+CREATE TRIGGER document_revisions_attribution BEFORE INSERT ON document_revisions
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_insert('created_by');
+
+ALTER TABLE jobs
+    ADD COLUMN started_by TEXT REFERENCES users (id),
+    ADD COLUMN cancelled_by TEXT REFERENCES users (id);
+CREATE TRIGGER jobs_attribution BEFORE INSERT ON jobs
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_insert('started_by');
+CREATE TRIGGER jobs_cancellation BEFORE UPDATE ON jobs
+    FOR EACH ROW EXECUTE FUNCTION infoscry_stamp_cancellation();
+
+-- A person's decision on a published reading: APPROVE keeps it, REJECT restores the text before it (the
+-- restore records itself). The first decision for a revision decides; a later one is answered with this row.
+CREATE TABLE page_decisions (
+    document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    revision_id TEXT NOT NULL REFERENCES document_revisions (id) ON DELETE CASCADE,
+    decision    TEXT NOT NULL CHECK (decision IN ('APPROVE', 'REJECT')),
+    decided_by  TEXT REFERENCES users (id),
+    decided_at  TEXT NOT NULL,
+    restore_id  TEXT,
+    PRIMARY KEY (document_id, revision_id)
+);

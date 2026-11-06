@@ -14,4 +14,8 @@ data class CorrectionRule(
     val exactCase: Boolean,
     val createdAt: String,
     val updatedAt: String,
+    /** Counts every change, for optimistic edits. */
+    val version: Long = 1,
+    /** Who last changed the rule. */
+    val updatedBy: infoscry.domain.UserRef? = null,
 )

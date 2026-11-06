@@ -54,7 +54,7 @@
       await updateCollectionOcrSettings(collection.id, {
         language: language.trim(),
         ...(defaultMethod === '' ? {} : { defaultMethod }),
-      });
+      }, collection.version);
       await onChanged();
       if (mine === generation) saved = true;
     } catch (failure) {

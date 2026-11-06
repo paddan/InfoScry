@@ -178,7 +178,7 @@ private suspend fun ApplicationCall.runSearch(
             )
         },
         staleFiltered = outcome.staleFiltered,
-        expandedWith = outcome.expandedWith.map { it.toWire() }.ifEmpty { null },
+        expandedWith = outcome.expandedWith.map { GlossaryGroupWire(it.id, it.toWire().terms) }.ifEmpty { null },
         expansionTruncated = outcome.expansionTruncated.takeIf { it },
     )
 }

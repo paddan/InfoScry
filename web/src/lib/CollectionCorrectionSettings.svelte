@@ -2,6 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import {
     ApiError,
+    attribution,
     applyCorrections,
     deleteCorrection,
     getCorrections,
@@ -14,6 +15,8 @@
   import { containDialogFocus, holdDialogFocus } from './dialogFocus';
 
   export let collection: Collection;
+  /** Readers see the rules; only editors and owners change them. */
+  $: canEdit = (collection.callerRole ?? 'OWNER') !== 'READER';
 
   const POLL_MILLIS = 2000;
 
@@ -220,7 +223,7 @@
     {#if list.rules.length > 0}
       <table>
         <thead>
-          <tr><th scope="col">Wrong</th><th scope="col">Correct</th><th scope="col">Exact case</th><th scope="col">Matches</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+          <tr><th scope="col">Wrong</th><th scope="col">Correct</th><th scope="col">Exact case</th><th scope="col">Matches</th><th scope="col">Last changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
         </thead>
         <tbody>
           {#each list.rules as rule (rule.id)}
@@ -229,16 +232,19 @@
               <td>{rule.replace}</td>
               <td>{rule.exactCase ? 'Yes' : 'No'}</td>
               <td>{number(rule.matches)}</td>
+              <td class="changed">{attribution(rule.updatedBy, rule.updatedAt) ?? '—'}</td>
               <td class="row-actions">
-                <button type="button" aria-label={`Edit ${rule.find}`} onclick={(event) => openDialog(event, rule)}>Edit</button>
-                <button type="button" aria-label={`Remove ${rule.find}`} onclick={(event) => openRemove(event, rule)}>Remove</button>
+                {#if canEdit}
+                  <button type="button" aria-label={`Edit ${rule.find}`} onclick={(event) => openDialog(event, rule)}>Edit</button>
+                  <button type="button" aria-label={`Remove ${rule.find}`} onclick={(event) => openRemove(event, rule)}>Remove</button>
+                {/if}
               </td>
             </tr>
           {/each}
         </tbody>
       </table>
     {/if}
-    <div class="actions"><button type="button" bind:this={addButton} onclick={(event) => openDialog(event, 'new')}>Add correction</button></div>
+    {#if canEdit}<div class="actions"><button type="button" bind:this={addButton} onclick={(event) => openDialog(event, 'new')}>Add correction</button></div>{/if}
   {/if}
 </section>
 
@@ -279,6 +285,7 @@
 {/if}
 
 <style>
+  .changed { color: #929997; font-size: 0.78rem; }
   .correction-settings { display: grid; gap: 0.7rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .correction-settings h4 { margin: 0; font-size: 0.9rem; }
   .hint { color: #929997; font-size: 0.82rem; margin: 0; }

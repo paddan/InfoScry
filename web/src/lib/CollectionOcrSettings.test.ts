@@ -44,7 +44,7 @@ describe('CollectionOcrSettings', () => {
     await fireEvent.input(screen.getByLabelText('OCR language'), { target: { value: 'swe' } });
     await fireEvent.change(screen.getByLabelText('Default reading method'), { target: { value: 'tesseract' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
-    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'swe', defaultMethod: 'tesseract' }));
+    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'swe', defaultMethod: 'tesseract' }, undefined));
     expect(onChanged).toHaveBeenCalledOnce();
   });
 
@@ -53,7 +53,7 @@ describe('CollectionOcrSettings', () => {
     await screen.findByRole('option', { name: "No OCR (use the document's own text)" });
     await fireEvent.change(screen.getByLabelText('Default reading method'), { target: { value: 'none' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
-    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng', defaultMethod: 'none' }));
+    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng', defaultMethod: 'none' }, undefined));
   });
 
   it('saves language when no default method is stored without sending an empty default', async () => {
@@ -67,7 +67,7 @@ describe('CollectionOcrSettings', () => {
     expect((screen.getByRole('button', { name: 'Save OCR settings' }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByRole('option', { name: 'No default method' })).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
-    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng+deu' }));
+    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng+deu' }, undefined));
   });
 
   it('preserves a stored but unavailable method while saving the language', async () => {
@@ -76,6 +76,6 @@ describe('CollectionOcrSettings', () => {
     await fireEvent.input(screen.getByLabelText('OCR language'), { target: { value: 'eng+deu' } });
     expect((screen.getByRole('button', { name: 'Save OCR settings' }) as HTMLButtonElement).disabled).toBe(false);
     await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
-    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng+deu', defaultMethod: 'surya' }));
+    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng+deu', defaultMethod: 'surya' }, undefined));
   });
 });

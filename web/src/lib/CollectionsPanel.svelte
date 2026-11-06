@@ -1546,7 +1546,7 @@
                               <dt>Size</dt>
                               <dd>{formatSize(detail.document.sizeBytes)}</dd>
                               <dt>Imported</dt>
-                              <dd>{formatDate(detail.document.createdAt)}</dd>
+                              <dd>{formatDate(detail.document.createdAt)}{#if detail.importedBy}, by {detail.importedBy.displayName}{/if}</dd>
                             </dl>
                             {#if detail.progress !== null && detail.progress !== undefined}
                               <dl class="progress">

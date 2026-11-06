@@ -99,6 +99,33 @@ data class RevisionView(
     val noOcrNeeded: Boolean = false,
     /** What each correction rule changed in this revision; empty when no correction changed anything. */
     val corrections: List<AppliedCorrection> = emptyList(),
+    /** The person whose run or edit produced this revision. */
+    val createdBy: infoscry.domain.UserRef? = null,
+    /** Whether someone approved or rejected this reading, and who. */
+    val decision: PageDecisionView? = null,
+)
+
+@Serializable
+data class PageDecisionView(val decision: String, val decidedBy: infoscry.domain.UserRef? = null, val decidedAt: String)
+
+/**
+ * Approving or rejecting a published reading. A rejection names the earlier revision to restore; the first
+ * decision for a revision decides, and a later one is answered with the recorded decision.
+ */
+@Serializable
+data class PageDecisionRequest(
+    val revisionId: String,
+    val decision: String,
+    val requestId: String? = null,
+    val restoreRevisionId: String? = null,
+)
+
+/** The decision on record, whether this request made it, and the restore a rejection started. */
+@Serializable
+data class PageDecisionResponse(
+    val decision: PageDecisionView,
+    val decidedHere: Boolean,
+    val restore: RestoreOperationView? = null,
 )
 
 /** A page of a document's published history, with the revision that is active now. */
@@ -240,10 +267,18 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                 // Scoped like every other id in this tree: a document of another collection is answered exactly
                 // like one that does not exist, so the history confirms nothing the caller did not scope.
                 val history = context.revisionHistory.history(call.collectionId(), call.documentId())
+                val decisions = infoscry.storage.PageDecisionStore(context.database)
+                val decided = decisions.forDocument(call.documentId())
+                val authors = decisions.revisionAuthors(call.documentId())
                 call.respondJson(
                     HttpStatusCode.OK,
                     RevisionsResponse(
-                        revisions = history.drop(offset).take(limit).map(RevisionHistoryEntry::toApiView),
+                        revisions = history.drop(offset).take(limit).map { entry ->
+                            entry.toApiView().copy(
+                                createdBy = authors[entry.revision.id],
+                                decision = decided[entry.revision.id]?.toView(),
+                            )
+                        },
                         total = history.size,
                         activeRevisionId = history.firstOrNull { it.active }?.revision?.id,
                     ),
@@ -270,6 +305,47 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                     restoreRevisionId = request.restoreRevisionId,
                 )
                 call.respondJson(HttpStatusCode.Accepted, restore.toApiView())
+            }
+        }
+
+        post("/decisions") {
+            call.handle {
+                val request = call.receiveJson<PageDecisionRequest>()
+                val decision = request.decision.uppercase()
+                if (request.revisionId.isBlank() || decision !in setOf("APPROVE", "REJECT")) {
+                    throw BadRequestException("a decision names a revision and is APPROVE or REJECT")
+                }
+                if (decision == "REJECT" && (request.requestId.isNullOrBlank() || request.restoreRevisionId.isNullOrBlank())) {
+                    throw BadRequestException("a rejection names its request id and the revision to restore")
+                }
+                val collectionId = call.collectionId()
+                val documentId = call.documentId()
+                // The revision must be this document's, in this collection: the history read scopes both.
+                context.revisionHistory.history(collectionId, documentId).firstOrNull { it.revision.id == request.revisionId }
+                    ?: throw NoSuchElementException("no revision with id ${request.revisionId} for this document")
+                val decisions = infoscry.storage.PageDecisionStore(context.database)
+                val (recorded, decidedHere) = decisions.decide(documentId, request.revisionId, decision)
+                // A rejection restores the text before the reading; a repeat of the same rejection follows the
+                // restore it already started, and a second person's decision starts nothing.
+                val restore = if (recorded.decision == "REJECT" && (decidedHere || recorded.decidedBy?.id == call.principal.user.id.value)) {
+                    val record = try {
+                        context.revisionRestore.restore(
+                            collectionId = collectionId,
+                            documentId = documentId,
+                            requestId = checkNotNull(request.requestId),
+                            expectedRevisionId = request.revisionId,
+                            restoreRevisionId = checkNotNull(request.restoreRevisionId),
+                        )
+                    } catch (failure: Exception) {
+                        if (decidedHere) decisions.withdraw(documentId, request.revisionId)
+                        throw failure
+                    }
+                    decisions.recordRestore(documentId, request.revisionId, record.restoreId)
+                    record.toApiView()
+                } else {
+                    null
+                }
+                call.respondJson(HttpStatusCode.OK, PageDecisionResponse(recorded.toView(), decidedHere, restore))
             }
         }
 
@@ -364,3 +440,5 @@ private fun ApplicationCall.boundedOffset(): Int {
 
 private const val DEFAULT_REVISIONS = 50
 private const val MAX_PAGE = 200
+
+private fun infoscry.storage.PageDecision.toView() = PageDecisionView(decision, decidedBy, decidedAt)

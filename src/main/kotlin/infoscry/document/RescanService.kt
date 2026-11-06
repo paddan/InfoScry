@@ -719,6 +719,11 @@ class RescanService(
             // Signal a live worker before the store transaction closes its operation. The transaction below
             // still enforces replacement atomically, including a concurrent admission that wins this race.
             operations.activeOperation(documentId)?.let { previous ->
+                // Someone else's running reading is answered, not replaced: two people starting the same work
+                // get the same operation. The person who started it may still replace it with a new choice.
+                val startedBy = previous.jobId?.let { jobs.get(infoscry.domain.JobId(it))?.startedBy }
+                val caller = infoscry.storage.Actor.current()
+                if (startedBy != null && caller != null && startedBy != caller) return@withMutation previous
                 cancelWithinMutation(collectionId, documentId, previous.operationId)
             }
             val admitted = operations.admit(

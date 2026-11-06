@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { documentPageReviewImageUrl, getDocumentPageReview, getRestoreOperation, restoreRevision, SOURCE_PAGE_CHARS, type PageReviewResponse, type RestoreOperation, type StructureView } from './api';
+  import { documentPageReviewImageUrl, getDocumentPageReview, decidePage, getRestoreOperation, SOURCE_PAGE_CHARS, type PageDecision, type PageReviewResponse, type RestoreOperation, type StructureView } from './api';
   import { newRequestId } from './ocrRescan';
   import { diffText } from './textDiff';
   import SelectablePdfActions from './SelectablePdfActions.svelte';
@@ -217,10 +217,29 @@
     return `Text quality: ${shown(before)} before, ${shown(now)} now${change}`;
   }
 
-  function approveReading(): void {
-    pendingReading = null;
+  /** Records the approval; when someone decided first, their decision is what the page says. */
+  async function approveReading(): Promise<void> {
+    const reading = pendingReading;
+    if (reading === null || rejecting) return;
     readingError = null;
-    readingNotice = 'The new reading is kept.';
+    try {
+      const answer = await decidePage(collectionId, documentId, reading.current, 'APPROVE');
+      if (destroyed) return;
+      pendingReading = null;
+      readingNotice = decidedElsewhere(answer) ?? 'The new reading is kept.';
+    } catch (failure) {
+      if (destroyed) return;
+      readingError = `The approval could not be recorded: ${messageOf(failure)}`;
+    }
+  }
+
+  /** The sentence for a decision someone else made first, or null when this request decided. */
+  function decidedElsewhere(answer: { decision: PageDecision; decidedHere: boolean }): string | null {
+    if (answer.decidedHere) return null;
+    const who = answer.decision.decidedBy?.displayName ?? 'Someone';
+    return answer.decision.decision === 'APPROVE'
+      ? `${who} already approved this reading.`
+      : `${who} already rejected this reading; the previous text is being restored.`;
   }
 
   /** Reject restores the earlier text as a new version; the rejected reading stays in history. */
@@ -233,10 +252,21 @@
     // An identical retry after an unanswered request is the same request, so it cannot restore twice.
     if (rejectRequest === null || rejectRequest.key !== key) rejectRequest = { key, requestId: newRequestId() };
     try {
-      const operation = await restoreRevision(collectionId, documentId, rejectRequest.requestId, reading.current, reading.previous);
+      const answer = await decidePage(collectionId, documentId, reading.current, 'REJECT', {
+        requestId: rejectRequest.requestId,
+        restoreRevisionId: reading.previous,
+      });
       if (destroyed) return;
       rejectRequest = null;
-      await settleReject(operation);
+      const elsewhere = decidedElsewhere(answer);
+      if (elsewhere !== null || !answer.restore) {
+        // Someone decided first: nothing was restored by this click, and the page says what was decided.
+        pendingReading = null;
+        rejecting = false;
+        readingNotice = elsewhere ?? 'The reading was already decided.';
+        return;
+      }
+      await settleReject(answer.restore);
     } catch (failure) {
       if (destroyed) return;
       const status = (failure as { status?: number | null } | null)?.status ?? null;
@@ -387,7 +417,7 @@
       {#if pendingReading !== null}
         <p>The text below is the new reading. Keep it, or reject it to bring back the previous text.</p>
         <div class="selection-actions">
-          <button type="button" class="primary" onclick={approveReading} disabled={rejecting}>Approve</button>
+          <button type="button" class="primary" onclick={() => void approveReading()} disabled={rejecting}>Approve</button>
           <button type="button" onclick={() => void rejectReading()} disabled={rejecting}>{rejecting ? 'Rejecting…' : 'Reject'}</button>
         </div>
       {:else if readingNotice !== null}

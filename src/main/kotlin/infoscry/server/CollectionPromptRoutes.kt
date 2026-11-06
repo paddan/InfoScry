@@ -17,7 +17,15 @@ import kotlinx.serialization.Serializable
 
 /** One prompt as the client sees it. The Default prompt is `builtIn` and never has a stored row. */
 @Serializable
-data class PromptWire(val id: String, val name: String, val body: String, val version: Int, val builtIn: Boolean)
+data class PromptWire(
+    val id: String,
+    val name: String,
+    val body: String,
+    val version: Int,
+    val builtIn: Boolean,
+    /** Who wrote the current version; absent for the shipped Default. */
+    val updatedBy: infoscry.domain.UserRef? = null,
+)
 
 @Serializable
 data class RolePromptsWire(val defaultId: String, val prompts: List<PromptWire>)
@@ -68,7 +76,7 @@ fun Route.collectionPromptRoutes(context: AppContext) {
             val request = call.receiveJson<UpdatePromptRequest>()
             call.respondJson(
                 HttpStatusCode.OK,
-                context.collectionPrompts.update(id, promptId, request.name, request.body).toWire(),
+                context.collectionPrompts.update(id, promptId, request.name, request.body, call.ifMatchVersion()).toWire(),
             )
         }
     }
@@ -101,7 +109,7 @@ private fun ApplicationCall.promptRole(): LlmPromptRole {
         ?: throw BadRequestException("the prompt role must be ask or investigate")
 }
 
-private fun CollectionPrompt.toWire() = PromptWire(id, name, body, version, builtIn)
+private fun CollectionPrompt.toWire() = PromptWire(id, name, body, version, builtIn, updatedBy)
 
 private fun RolePrompts.toWire() = RolePromptsWire(defaultId, prompts.map { it.toWire() })
 

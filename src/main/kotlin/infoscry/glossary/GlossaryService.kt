@@ -27,12 +27,12 @@ class GlossaryService(
     }
 
     /** Creates or replaces group [id] with [terms]. */
-    suspend fun put(collectionId: CollectionId, id: String, terms: List<GlossaryTermInput>): GlossaryGroup =
+    suspend fun put(collectionId: CollectionId, id: String, terms: List<GlossaryTermInput>, expectedVersion: Long? = null): GlossaryGroup =
         mutations.withMutation {
             collections.requireMutationsAllowed()
             collections.requireActive(collectionId)
             try {
-                store.put(collectionId, id, terms)
+                store.put(collectionId, id, terms, expectedVersion)
             } finally {
                 cache.remove(collectionId)
             }

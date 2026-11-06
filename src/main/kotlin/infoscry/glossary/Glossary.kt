@@ -22,6 +22,10 @@ data class GlossaryGroup(
     val terms: List<GlossaryTerm>,
     val createdAt: String,
     val updatedAt: String,
+    /** Counts every change, for optimistic edits. */
+    val version: Long = 1,
+    /** Who last changed the group. */
+    val updatedBy: infoscry.domain.UserRef? = null,
 )
 
 /** A collection's glossary, groups oldest first. */

@@ -14,6 +14,8 @@ data class CollectionPrompt(
     val body: String,
     val version: Int,
     val builtIn: Boolean,
+    /** Who wrote the current version; `null` for the shipped Default. */
+    val updatedBy: infoscry.domain.UserRef? = null,
 )
 
 /** The shipped Default prompt bodies, read from the classpath; they are never rows and never editable. */

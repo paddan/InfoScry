@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import { ApiError, deleteGlossaryGroup, listGlossary, type Collection, type GlossaryGroup } from './api';
+  import { ApiError, attribution, deleteGlossaryGroup, listGlossary, type Collection, type GlossaryGroup } from './api';
   import GlossaryDialog from './GlossaryDialog.svelte';
 
   export let collection: Collection;
+  /** Readers see the groups; only editors and owners change them. */
+  $: canEdit = (collection.callerRole ?? 'OWNER') !== 'READER';
 
   let groups: GlossaryGroup[] | null = null;
   let loadError: string | null = null;
@@ -109,7 +111,8 @@
             <span class="terms">
               {#each group.terms as term, position (position)}<span class="chip">{label(term)}</span>{/each}
             </span>
-            <span class="row-actions">
+            {#if attribution(group.updatedBy, group.updatedAt)}<span class="changed">Changed by {attribution(group.updatedBy, group.updatedAt)}</span>{/if}
+            {#if canEdit}<span class="row-actions">
               <button type="button" class="edit" aria-label={`Edit ${group.terms[0]?.text ?? ''}`} onclick={(event) => openDialog(event, group)}>Edit</button>
               <button
                 type="button"
@@ -117,12 +120,12 @@
                 disabled={removingId !== null}
                 onclick={() => remove(group, index)}
               >Remove</button>
-            </span>
+            </span>{/if}
           </li>
         {/each}
       </ul>
     {/if}
-    <div class="actions"><button type="button" bind:this={addButton} onclick={(event) => openDialog(event, 'new')}>Add group</button></div>
+    {#if canEdit}<div class="actions"><button type="button" bind:this={addButton} onclick={(event) => openDialog(event, 'new')}>Add group</button></div>{/if}
   {/if}
 </section>
 
@@ -137,6 +140,7 @@
 {/if}
 
 <style>
+  .changed { color: #929997; font-size: 0.78rem; }
   .glossary-settings { display: grid; gap: 0.7rem; border: 1px solid #303535; border-radius: 0.55rem; background: #191c1d; padding: 1rem; }
   .glossary-settings h4 { margin: 0; font-size: 0.9rem; }
   .hint { color: #929997; font-size: 0.82rem; margin: 0; }

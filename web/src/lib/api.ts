@@ -14,6 +14,19 @@ export type OcrEngine = 'TESSERACT' | 'SURYA' | 'LLM' | 'NONE';
 /** Whether a reading only fills pages with no text, or also checks and improves text that exists. */
 export type OcrImportMode = 'FILL_MISSING' | 'CHECK_AND_IMPROVE';
 
+/** A person, as attribution names them. */
+export type UserRef = { id: string; displayName: string };
+
+/** "Erik just now", "Erik on 4 Nov 2026": who did something and when, for the line beside a record. */
+export function attribution(who: UserRef | null | undefined, when: string | null | undefined, now: Date = new Date()): string | null {
+  if (!who) return null;
+  if (!when) return who.displayName;
+  const at = new Date(when);
+  if (Number.isNaN(at.getTime())) return who.displayName;
+  if (now.getTime() - at.getTime() < 60_000) return `${who.displayName} just now`;
+  return `${who.displayName} on ${at.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+}
+
 export type Collection = {
   id: string;
   name: string;
@@ -25,6 +38,12 @@ export type Collection = {
   lifecycle: 'ACTIVE' | 'DELETING';
   /** Documents the collection holds; the listing route counts them, a read by id reports `0`. */
   documentCount: number;
+  /** Counts every change to the collection's settings; sent back with a settings edit. */
+  version?: number;
+  /** Who last changed the collection's settings. */
+  updatedBy?: UserRef | null;
+  /** The signed-in user's role here; absent from servers and fixtures that do not send it (treated as owner). */
+  callerRole?: 'OWNER' | 'EDITOR' | 'READER' | null;
 };
 
 /** Current servers still serialize the persisted OCR engine/profile pair; newer ones may also send its method id. */
@@ -76,6 +95,9 @@ export type JobType = 'IMPORT' | 'REINDEX' | 'RETRY' | 'RESCAN' | 'SELECTABLE_PD
  * treat `collectionId`, `stage`, `currentItem` and `errorCode` as possibly undefined.
  */
 export type JobApiView = {
+  /** Who started the job, and who asked to cancel it. */
+  startedBy?: UserRef | null;
+  cancelledBy?: UserRef | null;
   id: string;
   type: JobType;
   state: JobState;
@@ -494,6 +516,8 @@ export type DocumentsPage = { documents: DocumentApiRow[]; total: number };
 /** One document's collection-scoped detail: its row, its curated error sentence, its first source unit. */
 export type DocumentDetail = {
   document: DocumentApiRow;
+  /** Who imported the document: whoever started the import that read it in. */
+  importedBy?: UserRef | null;
   /** InfoScry's own sentence for the error code; never the stored message, which may quote the document. */
   errorMessage?: string | null;
   /** The first content unit a reader can open, or null when the document has none yet. */
@@ -1335,8 +1359,8 @@ export async function createCollection(name: string, description?: string): Prom
 }
 
 /** Renames a collection. Its id, its documents and its import history stay as they were. */
-export async function renameCollection(collectionId: string, name: string): Promise<Collection> {
-  const body = (await mutate(`/api/collections/${encodeURIComponent(collectionId)}`, 'PATCH', { name })) as {
+export async function renameCollection(collectionId: string, name: string, version?: number): Promise<Collection> {
+  const body = (await mutate(`/api/collections/${encodeURIComponent(collectionId)}`, 'PATCH', { name }, version)) as {
     collection: CollectionResponse;
   };
   return decodeCollection(body.collection);
@@ -1358,11 +1382,12 @@ export async function getCollectionIgnorePatterns(collectionId: string): Promise
  * Replaces a collection's ignore patterns. The server validates every line and refuses an invalid one with
  * `INVALID_REQUEST`; it answers with the list as saved (trimmed, blank lines dropped).
  */
-export async function updateCollectionIgnorePatterns(collectionId: string, patterns: string[]): Promise<string[]> {
+export async function updateCollectionIgnorePatterns(collectionId: string, patterns: string[], version?: number): Promise<string[]> {
   const body = (await mutate(
     `/api/collections/${encodeURIComponent(collectionId)}/ignore-patterns`,
     'PUT',
     { patterns },
+    version,
   )) as { patterns: string[] };
   return body.patterns;
 }
@@ -1377,6 +1402,8 @@ export type CollectionPrompt = {
   body: string;
   version: number;
   builtIn: boolean;
+  /** Who wrote the current version; absent for the shipped Default. */
+  updatedBy?: UserRef | null;
 };
 
 /** The prompts for one role, Default first, and the id of the one new conversations start with. */
@@ -1412,8 +1439,9 @@ export async function updateCollectionPrompt(
   promptId: string,
   name: string,
   body: string,
+  version?: number,
 ): Promise<CollectionPrompt> {
-  return (await mutate(`${promptsPath(collectionId)}/${encodeURIComponent(promptId)}`, 'PUT', { name, body })) as CollectionPrompt;
+  return (await mutate(`${promptsPath(collectionId)}/${encodeURIComponent(promptId)}`, 'PUT', { name, body }, version)) as CollectionPrompt;
 }
 
 /** Removes a stored prompt; a prompt already gone is not an error. */
@@ -1424,7 +1452,18 @@ export async function deleteCollectionPrompt(collectionId: string, promptId: str
 // ---- collection corrections ----
 
 /** A standing correction of a collection, with how many places it changed in published text. */
-export type CorrectionRule = { id: string; find: string; replace: string; exactCase: boolean; matches: number };
+export type CorrectionRule = {
+  id: string;
+  find: string;
+  replace: string;
+  exactCase: boolean;
+  matches: number;
+  /** The rule's version, sent back with an edit. */
+  version?: number;
+  /** Who last changed the rule, and when. */
+  updatedBy?: UserRef | null;
+  updatedAt?: string | null;
+};
 
 /** A rule as the reader writes it. */
 export type CorrectionRuleInput = { find: string; replace: string; exactCase: boolean };
@@ -1446,8 +1485,8 @@ export async function getCorrections(collectionId: string): Promise<CorrectionLi
 }
 
 /** Stores rule [ruleId] and starts the collection's correction job; repeating it stores nothing new. */
-export async function putCorrection(collectionId: string, ruleId: string, rule: CorrectionRuleInput): Promise<CorrectionRule> {
-  return (await mutate(`${correctionsPath(collectionId)}/${encodeURIComponent(ruleId)}`, 'PUT', rule)) as CorrectionRule;
+export async function putCorrection(collectionId: string, ruleId: string, rule: CorrectionRuleInput, version?: number): Promise<CorrectionRule> {
+  return (await mutate(`${correctionsPath(collectionId)}/${encodeURIComponent(ruleId)}`, 'PUT', rule, version)) as CorrectionRule;
 }
 
 /** Removes a rule; one already gone is not an error. */
@@ -1481,7 +1520,15 @@ export async function applyCorrections(collectionId: string): Promise<JobApiView
 export type GlossaryTerm = { text: string; prefix: boolean };
 
 /** Names with the same meaning in a collection, in the order they were typed. */
-export type GlossaryGroup = { id: string; terms: GlossaryTerm[] };
+export type GlossaryGroup = {
+  id: string;
+  terms: GlossaryTerm[];
+  /** The group's version, sent back with an edit. */
+  version?: number | null;
+  /** Who last changed the group, and when. */
+  updatedBy?: UserRef | null;
+  updatedAt?: string | null;
+};
 
 const glossaryPath = (collectionId: string): string => `/api/collections/${encodeURIComponent(collectionId)}/glossary`;
 
@@ -1492,8 +1539,8 @@ export async function listGlossary(collectionId: string): Promise<GlossaryGroup[
 }
 
 /** Creates or replaces group [groupId]; repeating it stores nothing new. */
-export async function putGlossaryGroup(collectionId: string, groupId: string, terms: GlossaryTerm[]): Promise<GlossaryGroup> {
-  return (await mutate(`${glossaryPath(collectionId)}/${encodeURIComponent(groupId)}`, 'PUT', { terms })) as GlossaryGroup;
+export async function putGlossaryGroup(collectionId: string, groupId: string, terms: GlossaryTerm[], version?: number): Promise<GlossaryGroup> {
+  return (await mutate(`${glossaryPath(collectionId)}/${encodeURIComponent(groupId)}`, 'PUT', { terms }, version)) as GlossaryGroup;
 }
 
 /** Removes a group; one already gone is not an error. */
@@ -1533,11 +1580,13 @@ export type CollectionOcrSettingsPatch = {
 export async function updateCollectionOcrSettings(
   collectionId: string,
   patch: CollectionOcrSettingsPatch,
+  version?: number,
 ): Promise<Collection> {
   const body = (await mutate(
     `/api/collections/${encodeURIComponent(collectionId)}/ocr-languages`,
     'PATCH',
     patch,
+    version,
   )) as { collection: CollectionResponse };
   return decodeCollection(body.collection);
 }
@@ -1664,12 +1713,14 @@ export async function listUnfinishedDeletions(): Promise<DeletionOperation[]> {
  * cached token (the same recovery the streaming calls use). A `DELETE` with an empty body needs the
  * same token, so this helper covers both.
  */
-async function mutate(path: string, method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', body?: unknown): Promise<unknown> {
+async function mutate(path: string, method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', body?: unknown, version?: number): Promise<unknown> {
+  // An edit names the version it was made against, so an edit someone else replaced meanwhile is refused.
+  const ifMatch: Record<string, string> = version === undefined ? {} : { 'If-Match': `"${version}"` };
   const send = async (): Promise<Response> => fetch(path, {
     method,
     headers: body === undefined
-      ? { [CSRF_HEADER]: await csrfToken() }
-      : { 'Content-Type': 'application/json', [CSRF_HEADER]: await csrfToken() },
+      ? { [CSRF_HEADER]: await csrfToken(), ...ifMatch }
+      : { 'Content-Type': 'application/json', [CSRF_HEADER]: await csrfToken(), ...ifMatch },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return readJson(await sendWithSessionRetry(send, 'CSRF_TOKEN_INVALID'));
@@ -2062,7 +2113,14 @@ export type PageChanges = {
 };
 
 /** One published text version with the provenance the archive recorded; nothing here is guessed. */
+/** A person's decision on a published reading. */
+export type PageDecision = { decision: 'APPROVE' | 'REJECT'; decidedBy?: UserRef | null; decidedAt: string };
+
 export type RevisionView = {
+  /** The person whose run or edit produced this revision. */
+  createdBy?: UserRef | null;
+  /** Whether someone approved or rejected this reading, and who. */
+  decision?: PageDecision | null;
   revisionId: string;
   parentRevisionId?: string | null;
   state: string;
@@ -2139,4 +2197,24 @@ export async function getRestoreOperation(
   return (await readJson(
     await fetch(`${ocrPath(collectionId, documentId)}/restores/${encodeURIComponent(restoreId)}`),
   )) as RestoreOperation;
+}
+
+/**
+ * Approves or rejects a published reading. A rejection restores [restoreRevisionId] (the text before the
+ * reading). The first decision for a revision decides: when someone else already decided, the answer is their
+ * decision with `decidedHere: false`, and no restore is started.
+ */
+export async function decidePage(
+  collectionId: string,
+  documentId: string,
+  revisionId: string,
+  decision: 'APPROVE' | 'REJECT',
+  reject?: { requestId: string; restoreRevisionId: string },
+): Promise<{ decision: PageDecision; decidedHere: boolean; restore?: RestoreOperation | null }> {
+  return (await mutate(`${ocrPath(collectionId, documentId)}/decisions`, 'POST', {
+    revisionId,
+    decision,
+    requestId: reject?.requestId,
+    restoreRevisionId: reject?.restoreRevisionId,
+  })) as { decision: PageDecision; decidedHere: boolean; restore?: RestoreOperation | null };
 }

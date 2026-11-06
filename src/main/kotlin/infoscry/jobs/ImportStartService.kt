@@ -99,13 +99,20 @@ class ImportStartService internal constructor(
                     ignore = IgnorePatterns.NONE,
                     confirmedSources = confirmed.sources,
                 )
+                // An import of the same files into the same collection that is still queued or running is
+                // that work: it is the answer, whoever started it, rather than a second job racing it.
+                val sameWork = jobs.listActive(ACTIVE_SCAN_LIMIT).firstOrNull { active ->
+                    active.type == JobType.IMPORT && active.collectionId == collection.id &&
+                        runCatching { ImportJobPayload.decode(active.payload).sources.sorted() }.getOrNull() ==
+                        payload.sources.sorted()
+                }
                 val jobId = requests.claim(
                     requestId = request.requestId,
                     kind = KIND,
                     bodyHash = bodyHash,
                     restartStopped = request.restartStopped,
                     create = {
-                        jobs.enqueue(
+                        sameWork?.id ?: jobs.enqueue(
                             type = JobType.IMPORT,
                             collectionId = collection.id,
                             payload = payload.encode(),
@@ -151,6 +158,8 @@ class ImportStartService internal constructor(
 
     companion object {
         const val KIND = "import"
+        /** How many active jobs are looked through for the same import; the queue is never longer in practice. */
+        private const val ACTIVE_SCAN_LIMIT = 500
         private val RESTARTABLE_STATES = setOf(infoscry.domain.JobState.FAILED, infoscry.domain.JobState.CANCELLED)
     }
 }

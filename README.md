@@ -50,8 +50,10 @@ which may be an external service.
 Implementation is in progress. The backend, CLI and web reader exist. The
 [multi-user server](docs/specs/2026-11-05-multi-user-server-design.md) is under
 way: state and search are in PostgreSQL, people sign in with local accounts, and
-the CLI is a client of the server with a personal access token, and collections
-have members with owner, editor and reader roles. Attribution and uploads come next;
+the CLI is a client of the server with a personal access token, collections
+have members with owner, editor and reader roles, and records show who created
+and changed them, with edits checked against the version they were made from.
+Uploads and import roots come next;
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
 The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan (including No OCR, which uses the

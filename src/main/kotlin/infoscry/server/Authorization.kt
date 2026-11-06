@@ -150,6 +150,7 @@ val ACCESS_RULES: Map<Pair<HttpMethod, String>, AccessRule> = buildMap {
     rule(post, "$ocr/operations/{operationId}/resume", AccessRule.InCollection(EDITOR))
     rule(get, "$ocr/revisions", AccessRule.InCollection(READER))
     rule(post, "$ocr/restore", AccessRule.InCollection(EDITOR))
+    rule(post, "$ocr/decisions", AccessRule.InCollection(EDITOR))
     rule(get, "$ocr/restores/{restoreId}", AccessRule.InCollection(READER))
 
     // Asking: the collection's readers; each conversation is its owner's alone (checked in the handler).

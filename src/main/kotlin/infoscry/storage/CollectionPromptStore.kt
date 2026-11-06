@@ -16,7 +16,7 @@ open class CollectionPromptStore(private val database: Database) {
     /** Stored prompts for [collectionId] and [role], by name case-insensitively. The shipped Default is not included. */
     open fun list(collectionId: CollectionId, role: LlmPromptRole): List<CollectionPrompt> = database.read { connection ->
         connection.prepareStatement(
-            "SELECT id, collection_id, role, name, body, version FROM collection_prompts " +
+            "SELECT id, collection_id, role, name, body, version, updated_by, $UPDATED_BY_NAME FROM collection_prompts " +
                 "WHERE collection_id = ? AND role = ? ORDER BY name COLLATE infoscry_nocase",
         ).use { statement ->
             statement.setString(1, collectionId.value)
@@ -29,7 +29,7 @@ open class CollectionPromptStore(private val database: Database) {
 
     fun findById(id: String): CollectionPrompt? = database.read { connection ->
         connection.prepareStatement(
-            "SELECT id, collection_id, role, name, body, version FROM collection_prompts WHERE id = ?",
+            "SELECT id, collection_id, role, name, body, version, updated_by, $UPDATED_BY_NAME FROM collection_prompts WHERE id = ?",
         ).use { statement ->
             statement.setString(1, id)
             statement.executeQuery().use { results -> if (results.next()) readPrompt(results) else null }
@@ -62,17 +62,20 @@ open class CollectionPromptStore(private val database: Database) {
      * Sets the name and body of prompt [id]. The version grows by one only when [body] differs from the
      * stored body; `updated_at` moves on every write.
      */
-    fun update(id: String, name: String, body: String): CollectionPrompt {
+    fun update(id: String, name: String, body: String, expectedVersion: Long? = null): CollectionPrompt {
         database.transaction { connection ->
-            val stored = connection.prepareStatement(
-                "SELECT body, version FROM collection_prompts WHERE id = ?",
+            val current = connection.prepareStatement(
+                "SELECT id, collection_id, role, name, body, version, updated_by, $UPDATED_BY_NAME " +
+                    "FROM collection_prompts WHERE id = ? FOR UPDATE",
             ).use { statement ->
                 statement.setString(1, id)
-                statement.executeQuery().use { results ->
-                    if (results.next()) results.getString("body") to results.getInt("version") else null
-                }
+                statement.executeQuery().use { results -> if (results.next()) readPrompt(results) else null }
             } ?: throw IllegalArgumentException("no collection prompt with id $id")
-            val (storedBody, storedVersion) = stored
+            // The same text again is no edit, whichever version the caller saw.
+            if (current.name == name && current.body == body) return@transaction
+            infoscry.domain.requireVersion(expectedVersion, current.version.toLong(), current.updatedBy)
+            val storedBody = current.body
+            val storedVersion = current.version
             val version = if (storedBody == body) storedVersion else storedVersion + 1
             connection.prepareStatement(
                 "UPDATE collection_prompts SET name = ?, body = ?, version = ?, updated_at = ? WHERE id = ?",
@@ -135,5 +138,10 @@ open class CollectionPromptStore(private val database: Database) {
         body = results.getString("body"),
         version = results.getInt("version"),
         builtIn = false,
+        updatedBy = results.getString("updated_by")?.let { infoscry.domain.UserRef(it, results.getString("updated_by_name") ?: it) },
     )
+
+    private companion object {
+        const val UPDATED_BY_NAME = "(SELECT display_name FROM users WHERE id = collection_prompts.updated_by) AS updated_by_name"
+    }
 }
