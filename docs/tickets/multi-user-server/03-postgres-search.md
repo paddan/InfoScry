@@ -35,7 +35,14 @@ Native `timestamptz`/`jsonb`, the job queue, users and the multi-user rules (tic
 
 ## Verification record (2026-11-06)
 
-- `./gradlew check` on this Mac with Podman (see the commit for the result).
+- `./gradlew check` on this Mac with Podman: 2,205 backend and 576 frontend tests, 0 failures.
+- Manual with the real CoreML embedder (model reinstalled with `./gradlew embeddingModel`) and a ParadeDB
+  container: a CLI import of three fixtures, keyword, semantic and hybrid search with the same hits as on
+  `main`, ten rows tagged with their revision and a 768-dimension HNSW index; `reindex` with an unchanged
+  model kept the rows; with an older model on record semantic search refused with `INDEX_REBUILD_REQUIRED`,
+  a full `reindex` re-embedded and recorded the model, and hybrid search worked again; `serve`, a restart
+  and the same search.
+- Not run: `externalTest` (browser acceptance, Tesseract) and `gpuIntegrationTest`.
 - `SearchIndexTest` covers the translated query syntax (phrase, prefix, folding, `+`/`-`, wildcard,
   fuzzy, exclusions alone), glossary expansion, lexical anchors, vector search and model identity.
 - Tests of the removed protocol (snapshot gate, reader leases, publication kill points, generation swap
