@@ -32,8 +32,12 @@ version. The first person to approve or reject a new reading decides.
 
 1. Open **Admin → Collections** and create a collection.
 2. Select the destination collection and choose **Add documents**.
-3. Use **Choose files…** or **Choose folder…**. Enable **Include subfolders**
-   to import a folder recursively.
+3. Use **Upload files…** to send files from your own computer, or **Server
+   folders…** to pick files and folders in the import folders an administrator
+   opened on the server. Enable **Include subfolders** to import a server folder
+   recursively. A file that is already in the collection is not uploaded again.
+   Administrators also have **Choose files…** and **Choose folder…**, which open
+   a dialog on the server's own screen.
 4. Press **Import** to open the reading dialog. Choose Tesseract, Surya or an
    enabled image-capable LLM profile. The collection default only pre-selects it.
 5. Check the page count, destination and estimated cost, then confirm **Read …**

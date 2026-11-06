@@ -56,10 +56,10 @@ class ImportCommandProcessTest {
     }
 
     @Test
-    fun `method selection prints the preview and an identical command returns the same job`() {
+    fun `method selection prints the preview and an identical server-path command returns the same job`() {
         val source = writeSource("repeat.txt", "Read once.\n")
         val args = arrayOf("import", "--collection", "Default",
-            "--method", "tesseract", "--yes", "--json", "--wait", source.toString())
+            "--method", "tesseract", "--yes", "--json", "--wait", "--server-path", source.toRealPath().toString())
         val first = cli.run(*args)
         assertEquals(0, first.exitCode, first.stderr)
         assertContains(first.stderr, "this machine")
@@ -69,6 +69,30 @@ class ImportCommandProcessTest {
         val two = ApiJson.decodeFromString<ImportResult>(again.stdout.lines().last { it.isNotBlank() })
         assertEquals(one.jobId, two.jobId)
         assertEquals(1, two.imported)
+    }
+
+    @Test
+    fun `local files are uploaded, and a file already in the collection is reported as a duplicate without a new job`() {
+        val source = writeSource("uploaded.txt", "Sent from here.\n")
+        val first = cli.run("import", "--collection", "Default", "--method", "none", "--json", "--wait", source.toString())
+        assertEquals(0, first.exitCode, first.stderr)
+        assertEquals(1, ApiJson.decodeFromString<ImportResult>(first.stdout.lines().last { it.isNotBlank() }).imported)
+        val jobs = cli.context.jobs.list(100).size
+
+        val again = cli.run("import", "--collection", "Default", "--method", "none", "--json", "--wait", source.toString())
+
+        assertEquals(0, again.exitCode, again.stderr)
+        assertEquals(1, ApiJson.decodeFromString<ImportResult>(again.stdout.lines().last { it.isNotBlank() }).duplicates)
+        assertEquals(jobs, cli.context.jobs.list(100).size, "nothing new was queued")
+    }
+
+    @Test
+    fun `a server path outside the import roots is refused`() {
+        ImportProcessHarness.gate = null
+        val result = cli.run("import", "--collection", "Default", "--method", "none", "--server-path", "/etc/hosts")
+
+        assertNotEquals(0, result.exitCode)
+        assertContains(result.stderr, "IMPORT_PATH_NOT_ALLOWED")
     }
 
     @Test
@@ -145,10 +169,9 @@ class ImportCommandProcessTest {
         )
         assertEquals(0, recursive.exitCode, recursive.stderr)
         val recursiveReport = ApiJson.decodeFromString<ImportResult>(recursive.stdout.lines().last { it.isNotBlank() })
-        assertEquals(
-            listOf("deep.txt", "top.txt"),
-            recursiveReport.items.map { it.sourceName!! }.sorted(),
-        )
+        // top.txt is already in the collection from the first run, so it is a duplicate the second time.
+        assertEquals(listOf("deep.txt"), recursiveReport.items.map { it.sourceName!! }.sorted())
+        assertEquals(1, recursiveReport.duplicates)
     }
 
     @Test
@@ -300,7 +323,7 @@ class ImportCommandProcessTest {
         assertContains(result.stderr, "example.invalid")
         assertContains(result.stderr, "Send")
         assertContains(result.stderr, "All pages in these files")
-        assertContains(result.stderr, source.toRealPath().toString())
+        assertContains(result.stderr, "scan.txt: page count unknown")
         assertFalse(result.stderr.contains("Estimated cost: USD"), result.stderr)
         assertTrue(cli.context.jobs.list(100).isEmpty(), "declining confirmation must create no job")
     }

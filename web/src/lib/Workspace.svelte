@@ -1035,7 +1035,7 @@
         <div class="sidebar-note">
           <span class="eyebrow">ADMINISTRATION</span>
           {#if adminTab === 'COLLECTIONS'}
-            <p>Create or select a collection and add local files or folders to it. Choosing paths opens a native dialog on this machine.</p>
+            <p>Create or select a collection and add documents: upload files from this computer, or pick them in the folders the server offers for import.</p>
           {:else if adminTab === 'JOBS'}
             <p>Imports, rescans and other work that is queued or running. Stopping a job keeps what it has already saved.</p>
           {:else}

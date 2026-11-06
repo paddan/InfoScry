@@ -45,6 +45,7 @@ import io.ktor.client.plugins.timeout
 import io.ktor.client.request.preparePost
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.utils.io.readUTF8Line
+import io.ktor.utils.io.writeFully
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.post
@@ -265,7 +266,30 @@ class ApiClient(
             expect(client.get("$base/api/jobs?limit=$limit")),
         ).jobs.map { it.toDomain() }
 
-    suspend fun previewImport(request: infoscry.jobs.ImportPreviewRequest): infoscry.jobs.ImportPreview {
+    /** Uploads one local file to [collectionId] for import, streamed from disk. */
+    suspend fun upload(collectionId: String, file: java.nio.file.Path): infoscry.server.UploadResponse {
+        val response = client.post("$base/api/collections/${collectionId.encodeURLPathPart()}/uploads") {
+            headers.append(infoscry.server.UPLOAD_FILENAME_HEADER, file.fileName.toString().encodeURLPathPart())
+            setBody(object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
+                override val contentType: ContentType = ContentType.Application.OctetStream
+                override val contentLength: Long = java.nio.file.Files.size(file)
+                override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
+                    java.nio.file.Files.newInputStream(file).use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            channel.writeFully(buffer, 0, read)
+                        }
+                    }
+                }
+            })
+            timeout { requestTimeoutMillis = io.ktor.client.plugins.HttpTimeoutConfig.INFINITE_TIMEOUT_MS }
+        }
+        return ApiJson.decodeFromString(expect(response))
+    }
+
+    suspend fun previewImport(request: infoscry.server.ImportPreviewRouteRequest): infoscry.jobs.ImportPreview {
         val response = client.post("$base/api/imports/preview") {
             contentType(ContentType.Application.Json)
             setBody(ApiJson.encodeToString(request))

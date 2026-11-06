@@ -30,7 +30,7 @@ class AppPathsTest {
         val paths = AppPaths.from(dataDir)
 
         assertEquals(dataDir.toAbsolutePath().normalize(), paths.root)
-        assertEquals(listOf("library", "logs", "models", "tmp"), childDirectoryNames(paths))
+        assertEquals(listOf("library", "logs", "models", "tmp", "uploads"), childDirectoryNames(paths))
         assertEquals(paths.root.resolve("infoscry.lock"), paths.lockFile)
     }
 
@@ -63,7 +63,7 @@ class AppPathsTest {
             PosixFilePermissions.fromString("rwx------"),
             Files.getPosixFilePermissions(wideOpen),
         )
-        assertEquals(listOf("library", "logs", "models", "tmp"), childDirectoryNames(paths))
+        assertEquals(listOf("library", "logs", "models", "tmp", "uploads"), childDirectoryNames(paths))
     }
 
     @Test

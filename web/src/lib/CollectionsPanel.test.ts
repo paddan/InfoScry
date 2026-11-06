@@ -186,6 +186,7 @@ function deletion(over: Partial<DeletionOperation> = {}): DeletionOperation {
 /** The props the page supplies; the tests override the list, the selection, and the callbacks. */
 function props(over: Partial<ComponentProps<typeof CollectionsPanel>> = {}): ComponentProps<typeof CollectionsPanel> {
   return {
+    isAdmin: true,
     collections: [],
     selectedId: '',
     loading: false,

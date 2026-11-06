@@ -452,6 +452,19 @@ running OCR operation answers with that operation. The first approve or reject
 of a published reading decides; a later one answers with the recorded decision
 and starts no restore.
 
+Imports read from two places ([ImportRoots](../src/main/kotlin/infoscry/jobs/ImportRoots.kt)):
+the directories in `INFOSCRY_IMPORT_ROOTS` and the collection's upload area
+`<data>/uploads/<collection>/<upload>/<file>`. The import preview, which the
+start also runs, refuses any path whose real path (links resolved) is outside
+them with 403 `IMPORT_PATH_NOT_ALLOWED`, for administrators too. Editors browse
+the roots through `GET /api/import-roots/browse`, where links out of a root are
+not listed. An upload is one file per request as the raw body
+(`POST /api/collections/{id}/uploads`, file name in `X-InfoScry-Filename`),
+streamed and hashed; bytes that are already a document of the collection answer
+with that document and are not kept. Preview and start take upload ids in
+`uploads`. Upload areas older than seven days are removed at start. The
+server's native pick dialog stays administrator-only.
+
 API keys are read only from environment variables. Profiles and browser requests
 carry the variable's name, never its value. Keys, questions, answers, document
 text, provider authorization headers, passwords, session IDs, CSRF tokens and

@@ -21,6 +21,9 @@ import org.testcontainers.utility.DockerImageName
  * milliseconds. [TestDatabaseExtension] drops the databases a test class created once the class is done.
  */
 object TestDatabases {
+    /** Where every test's temporary files live, and so the import root tests import from. */
+    val TEMP_ROOT: java.nio.file.Path = java.nio.file.Path.of(System.getProperty("java.io.tmpdir")).toRealPath()
+
     /** The image the multi-user server spec pins, which the pg_search spike measured. */
     const val IMAGE = "docker.io/paradedb/paradedb:0.26.5-pg17"
 
@@ -151,6 +154,7 @@ object TestDatabases {
 /** Gives the child JVM this builder starts the database of the data directory its command names. */
 fun ProcessBuilder.withTestDatabase(): ProcessBuilder = apply {
     environment().putAll(TestDatabases.environmentForCommand(command()))
+    environment()["INFOSCRY_IMPORT_ROOTS"] = TestDatabases.TEMP_ROOT.toString()
 }
 
 /** A database for [path], opened the way a test used to open the SQLite file at that path. */
@@ -164,6 +168,8 @@ fun Database(path: Path): Database = Database(TestDatabases.configFor(path), max
 class TestDatabaseExtension : BeforeAllCallback, AfterAllCallback {
     override fun beforeAll(context: ExtensionContext) {
         DatabaseResolver.resolve = { paths: AppPaths -> TestDatabases.configFor(paths.root) }
+        // Tests import from temporary directories, so the temporary directory is the import root.
+        infoscry.jobs.ImportRoots.configured = { listOf(TestDatabases.TEMP_ROOT) }
     }
 
     override fun afterAll(context: ExtensionContext) {

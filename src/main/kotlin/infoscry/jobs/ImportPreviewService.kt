@@ -59,6 +59,8 @@ class ImportPreviewService internal constructor(
     private val selection: ImportSelection,
     private val enumerate: (List<String>, Boolean, IgnorePatterns) -> List<ImportSource>,
     private val ignorePatterns: (CollectionId) -> IgnorePatterns,
+    /** Refuses paths outside the import roots and the collection's upload area; the default allows every path. */
+    private val allowPaths: (CollectionId, List<String>) -> Unit = { _, _ -> },
 ) {
     fun preview(request: ImportPreviewRequest): ImportPreview {
         val collection = requireCollection(request.collection)
@@ -125,6 +127,7 @@ class ImportPreviewService internal constructor(
 
     private fun selectedFiles(request: ImportPreviewRequest, ignore: IgnorePatterns): List<ImportSource> {
         require(request.paths.isNotEmpty()) { "an import preview needs at least one file or directory" }
+        allowPaths(request.collection, request.paths)
         val extensions = ExtensionFilter.of(request.include, request.exclude)
         return enumerate(request.paths, request.recursive, ignore)
             .filter { source -> selection.admits(source.path, source.relativePath, source.exists, ignore, extensions) }

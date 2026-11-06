@@ -69,8 +69,13 @@ class ImportCommand : CliktCommand(name = "import") {
 
     private val sources by argument(
         name = "paths",
-        help = "Files or directories to import",
+        help = "Files or directories to import: on this machine (uploaded), or with --server-path inside a server import root",
     ).multiple(required = true)
+
+    private val serverPathFlag by option(
+        "--server-path",
+        help = "The paths are on the server, inside one of its import roots, rather than files to upload",
+    ).flag()
 
     private val methodOption by option("--method", help = "Reading method: none, tesseract, surya, or llm:<profileId>")
     private val yesFlag by option("--yes", help = "Confirm sending the previewed pages to an external endpoint").flag()
@@ -104,7 +109,7 @@ class ImportCommand : CliktCommand(name = "import") {
         val options = resolveOptions(parentOptions, jsonFlag, null)
         // Refused before anything is sent, so a bad extension list has no effect at all.
         val extensions = extensionFilter()
-        val requested = canonicalSources(sources)
+        val requested = if (serverPathFlag) serverPaths(sources) else canonicalSources(sources)
         try {
             importThroughServer(requested, extensions, options)
         } catch (invalid: IllegalArgumentException) {
@@ -138,17 +143,41 @@ class ImportCommand : CliktCommand(name = "import") {
                         all.firstOrNull { it.id.value == collection } ?: all.firstOrNull { it.name.equals(collection, ignoreCase = true) }
                     } ?: throw CliFailure("no usable collection named or identified by '$collection'")
                     val method = methodOption?.let(infoscry.ocr.ReadingMethod::parse) ?: selected.ocrSettings().defaultMethod
-                    val request = infoscry.jobs.ImportPreviewRequest(collection = selected.id, paths = requested,
-                        recursive = recursiveFlag, include = extensions.include, exclude = extensions.exclude, method = method)
+                    // Local files travel to the server first; a file whose bytes are already a document of the
+                    // collection is not sent twice, and is reported as a duplicate.
+                    val uploads = if (serverPathFlag) emptyList() else localFiles(requested).mapNotNull { file ->
+                        val answer = api.upload(selected.id.value, file)
+                        if (answer.existingDocumentId != null) {
+                            alreadyImported += 1
+                            echo("DUPLICATE  ${file.fileName}  -> document ${answer.existingDocumentId}", err = true)
+                        }
+                        answer.uploadId?.let { it to answer.sha256 }
+                    }
+                    if (!serverPathFlag && uploads.isEmpty()) return@runBlocking null
+                    val serverPaths = if (serverPathFlag) requested else emptyList()
+                    val request = infoscry.server.ImportPreviewRouteRequest(collection = selected.id.value, paths = serverPaths,
+                        uploads = uploads.map { it.first }, recursive = serverPathFlag && recursiveFlag,
+                        include = extensions.include, exclude = extensions.exclude, method = method.id)
                     val preview = api.previewImport(request)
                     confirmPreview(preview, method.id)
-                    api.enqueueImport(infoscry.server.ImportRequest(collection = selected.id.value, paths = requested,
-                        recursive = recursiveFlag, include = extensions.include, exclude = extensions.exclude,
+                    val identity = if (serverPathFlag) serverPaths else uploads.map { it.second }
+                    api.enqueueImport(infoscry.server.ImportRequest(collection = selected.id.value, paths = serverPaths,
+                        uploads = uploads.map { it.first }, recursive = request.recursive,
+                        include = extensions.include, exclude = extensions.exclude,
                         method = method.id, previewHash = preview.previewHash,
-                        requestId = commandRequestId(request, preview.previewHash), restartStopped = true))
+                        requestId = commandRequestId(identity, request, preview.previewHash), restartStopped = true))
                 }
             } catch (failure: RemoteApiFailure) {
                 throw CliFailure("${failure.code}: ${failure.message}", failure)
+            }
+            if (accepted == null) {
+                // Every file was already a document of the collection: there is nothing to import.
+                if (options.json) {
+                    echo(ApiJson.encodeToString(ImportResult("", "COMPLETE", 0, alreadyImported, 0, emptyList())))
+                } else {
+                    echo("Imported 0, duplicate $alreadyImported, failed 0 of $alreadyImported.")
+                }
+                return
             }
             if (!waitFlag) {
                 reportAccepted(accepted.job.id, accepted.job.state, options)
@@ -186,10 +215,11 @@ class ImportCommand : CliktCommand(name = "import") {
         }
     }
 
-    private fun commandRequestId(request: infoscry.jobs.ImportPreviewRequest, previewHash: String): String {
-        val canonical = request.copy(paths = request.paths.distinct().sorted(),
-            include = request.include.sorted(), exclude = request.exclude.sorted())
-        val bytes = (ApiJson.encodeToString(canonical) + "\n" + previewHash).toByteArray(Charsets.UTF_8)
+    /** One id per identical command: the same server paths or the same file contents, settings and preview. */
+    private fun commandRequestId(identity: List<String>, request: infoscry.server.ImportPreviewRouteRequest, previewHash: String): String {
+        val canonical = listOf(request.collection, request.method, request.recursive.toString()) +
+            identity.distinct().sorted() + request.include.sorted() + listOf("|") + request.exclude.sorted()
+        val bytes = (canonical.joinToString("\n") + "\n" + previewHash).toByteArray(Charsets.UTF_8)
         return "cli-import-" + java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))
     }
 
@@ -223,7 +253,8 @@ class ImportCommand : CliktCommand(name = "import") {
     ) {
         val counts = items.groupingBy { it.outcome }.eachCount()
         val imported = counts[ImportItemOutcome.IMPORTED] ?: 0
-        val duplicates = counts[ImportItemOutcome.DUPLICATE] ?: 0
+        // Files found to be in the collection already while uploading never became items of the job.
+        val duplicates = (counts[ImportItemOutcome.DUPLICATE] ?: 0) + alreadyImported
         val failed = counts[ImportItemOutcome.FAILED] ?: 0
 
         if (options.json) {
@@ -252,7 +283,7 @@ class ImportCommand : CliktCommand(name = "import") {
             )
         } else {
             items.forEach { item -> echo(describe(item)) }
-            echo("Imported $imported, duplicate $duplicates, failed $failed of ${items.size}.")
+            echo("Imported $imported, duplicate $duplicates, failed $failed of ${items.size + alreadyImported}.")
             if (job.state == JobState.FAILED) {
                 val detail = ". Detailed failure text is omitted by the API; see the server log."
                 echo("The job failed: ${job.errorCode ?: "JOB_FAILED"}$detail".trim(), err = true)
@@ -288,6 +319,33 @@ class ImportCommand : CliktCommand(name = "import") {
             append("  ")
             append(code)
             item.errorMessage?.let { message -> append(": ").append(message) }
+        }
+    }
+
+    /** Files already in the collection, counted while uploading. */
+    private var alreadyImported = 0
+
+    /** Server paths are the server's to judge; they only have to be absolute. */
+    private fun serverPaths(paths: List<String>): List<String> {
+        require(paths.isNotEmpty()) { "an import needs at least one path" }
+        return paths.map { raw ->
+            if (!Path.of(raw).isAbsolute) throw CliFailure("a server path must be absolute: $raw")
+            raw
+        }
+    }
+
+    /**
+     * The local files [paths] name: a file itself, and a folder's files (its whole tree with --recursive). Hidden
+     * files and folders are left out, and links are not followed, as the server's own folder walk does.
+     */
+    private fun localFiles(paths: List<String>): List<Path> = paths.flatMap { raw ->
+        val path = Path.of(raw)
+        if (!Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return@flatMap listOf(path)
+        Files.walk(path, if (recursiveFlag) Int.MAX_VALUE else 1).use { stream ->
+            stream.filter { candidate ->
+                Files.isRegularFile(candidate, java.nio.file.LinkOption.NOFOLLOW_LINKS) &&
+                    path.relativize(candidate).none { it.toString().startsWith(".") }
+            }.sorted().toList()
         }
     }
 

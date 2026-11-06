@@ -1382,7 +1382,7 @@
         </div>
         {#if addingDocuments}
           {#key selected.id}
-            <ImportPanel collectionId={selected.id} collectionName={selected.name} onImportChanged={importChanged} {unfinishedImportId} {visible} />
+            <ImportPanel collectionId={selected.id} collectionName={selected.name} onImportChanged={importChanged} {unfinishedImportId} {visible} {isAdmin} />
           {/key}
         {/if}
 
