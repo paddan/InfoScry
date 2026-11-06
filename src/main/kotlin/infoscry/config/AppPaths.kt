@@ -56,17 +56,30 @@ internal object PrivatePermissions {
  *
  * ```
  * <root>/infoscry.lock    single-writer process lock
- * <root>/library/<collection>/<document>/original.<ext>   immutable imported copy
- * <root>/library/<collection>/<document>/artifacts/       generated artifacts for that document
+ * <library>/<collection>/<document>/original.<ext>   immutable imported copy
+ * <library>/<collection>/<document>/artifacts/       generated artifacts for that document
+ * <library>/.import-tmp/  scratch for a copy on its way into the library
  * <root>/models/          pinned embedding model files
  * <root>/logs/            rolling structured logs
  * <root>/tmp/             scratch space for copies and child tools
  * ```
+ *
+ * `<library>` is `<root>/library` unless `INFOSCRY_LIBRARY_DIR` names another directory on the server, such as
+ * a larger disk; each collection keeps its documents in a directory of its own there either way.
  */
-class AppPaths private constructor(val root: Path) {
+class AppPaths private constructor(val root: Path, library: Path? = null) {
 
     val lockFile: Path = root.resolve("infoscry.lock")
-    val libraryDir: Path = root.resolve(LIBRARY_DIRECTORY)
+
+    /** Where imported documents are kept: one directory per collection, named by its id. */
+    val libraryDir: Path = library ?: root.resolve(LIBRARY_DIRECTORY)
+
+    /**
+     * Scratch for a managed copy being written. It is inside the library so moving the finished copy into place
+     * stays an atomic rename when the library is on a disk of its own; the leading dot keeps it from being
+     * mistaken for a collection.
+     */
+    val libraryScratchDir: Path get() = libraryDir.resolve(".import-tmp")
     val modelsDir: Path = root.resolve("models")
     val logsDir: Path = root.resolve(LOGS_DIRECTORY)
     val tempDir: Path = root.resolve("tmp")
@@ -127,7 +140,7 @@ class AppPaths private constructor(val root: Path) {
     /** Creates every directory in the layout. Safe to call repeatedly, and re-hardens each one. */
     fun ensureDirectories(): AppPaths {
         createPrivateDirectory(root)
-        listOf(libraryDir, modelsDir, logsDir, tempDir, uploadsDir).forEach(::createPrivateDirectory)
+        listOf(libraryDir, libraryScratchDir, modelsDir, logsDir, tempDir, uploadsDir).forEach(::createPrivateDirectory)
         return this
     }
 
@@ -152,10 +165,28 @@ class AppPaths private constructor(val root: Path) {
          * Reading logs or running diagnostics must not change the state an operator asked about, so
          * these callers need the layout without the setup [from] performs.
          */
-        fun of(dataDir: Path): AppPaths = AppPaths(dataDir.toAbsolutePath().normalize())
+        fun of(dataDir: Path): AppPaths = AppPaths(dataDir.toAbsolutePath().normalize(), configuredLibrary())
 
         /** The data directory of a running InfoScry, created if it does not exist yet. */
         fun from(dataDir: Path): AppPaths =
-            AppPaths(dataDir.toAbsolutePath().normalize()).ensureDirectories()
+            AppPaths(dataDir.toAbsolutePath().normalize(), configuredLibrary()).ensureDirectories()
+
+        const val LIBRARY_VARIABLE = "INFOSCRY_LIBRARY_DIR"
+
+        /** Where `INFOSCRY_LIBRARY_DIR` puts the library; tests replace it, as they replace the database. */
+        @Volatile
+        var libraryFromEnvironment: () -> String? = { System.getenv(LIBRARY_VARIABLE) }
+
+        /** The library `INFOSCRY_LIBRARY_DIR` names, or `null` for `<data directory>/library`. */
+        internal fun configuredLibrary(): Path? {
+            val raw = libraryFromEnvironment()?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val path = Path.of(raw)
+            check(path.isAbsolute) { "$LIBRARY_VARIABLE must be an absolute path, was '$raw'" }
+            // A library on a disk that is not connected must not quietly become an empty folder somewhere else.
+            check(path.normalize().parent?.let(Files::isDirectory) ?: true) {
+                "$LIBRARY_VARIABLE is $raw, but the folder that holds it does not exist; connect the disk or create the folder"
+            }
+            return path.normalize()
+        }
     }
 }

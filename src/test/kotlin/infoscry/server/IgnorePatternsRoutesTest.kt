@@ -122,7 +122,7 @@ class IgnorePatternsRoutesTest {
         write(id, """{"patterns":["*.other"]}""")
 
         val payload = ImportJobPayload.decode(harness.context.jobs.list(100).single().payload)
-        assertEquals(listOf(source.toRealPath().toString()), payload.confirmedSources?.map { it.path })
+        assertEquals(listOf("a.txt"), payload.confirmedSources?.map { java.nio.file.Path.of(it.path).fileName.toString() })
         assertEquals(listOf("*.other"), read(id))
     }
 

@@ -35,6 +35,35 @@ class AppPathsTest {
     }
 
     @Test
+    fun `INFOSCRY_LIBRARY_DIR moves the library and nothing else`() {
+        val elsewhere = Files.createTempDirectory("infoscry-paths-library")
+        AppPaths.libraryFromEnvironment = { elsewhere.resolve("Library").toString() }
+        try {
+            val paths = AppPaths.from(dataDir)
+            assertEquals(elsewhere.resolve("Library"), paths.libraryDir)
+            assertTrue(Files.isDirectory(paths.libraryScratchDir))
+            assertEquals(listOf("logs", "models", "tmp", "uploads"), childDirectoryNames(paths))
+            assertEquals(elsewhere.resolve("Library/c1"), paths.collectionDir(CollectionId("c1")))
+        } finally {
+            AppPaths.libraryFromEnvironment = { null }
+            elsewhere.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `INFOSCRY_LIBRARY_DIR must be absolute and on a disk that is there`() {
+        for (value in listOf("relative/library", "/Volumes/infoscry-not-connected-${System.nanoTime()}/Library")) {
+            AppPaths.libraryFromEnvironment = { value }
+            try {
+                val failure = kotlin.test.assertFailsWith<IllegalStateException> { AppPaths.from(dataDir) }
+                assertTrue(failure.message!!.contains("INFOSCRY_LIBRARY_DIR"), failure.message)
+            } finally {
+                AppPaths.libraryFromEnvironment = { null }
+            }
+        }
+    }
+
+    @Test
     fun `data directories are private on posix filesystems`() {
         val paths = AppPaths.from(dataDir)
 

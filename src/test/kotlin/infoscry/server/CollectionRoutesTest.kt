@@ -254,13 +254,14 @@ class CollectionRoutesTest {
         harness.createCollection("Restart imports", Credential.BEARER)
         val collectionId = harness.collectionIdOf("Restart imports")
         val source = dataDir.resolve("restart.txt").also { Files.writeString(it, "read this") }
+        val upload = harness.upload(collectionId, source)
         val previewResponse = harness.request(
             HttpMethod.Post,
             "/api/imports/preview",
             ApiJson.encodeToString(
                 ImportPreviewRouteRequest(
                     collection = collectionId,
-                    paths = listOf(source.toString()),
+                    uploads = listOf(upload),
                     method = "tesseract",
                 ),
             ),
@@ -270,7 +271,7 @@ class CollectionRoutesTest {
         val preview = ApiJson.decodeFromString<infoscry.jobs.ImportPreview>(previewResponse.bodyAsText())
         val cliRequest = ImportRequest(
             collection = collectionId,
-            paths = listOf(source.toString()),
+            uploads = listOf(upload),
             method = "tesseract",
             previewHash = preview.previewHash,
             requestId = "route-cli-restart",
@@ -413,6 +414,7 @@ class CollectionRoutesTest {
         val id = harness.collectionIdOf("OCR settings")
         val source = dataDir.resolve("future.txt")
         Files.writeString(source, "A report.")
+        val upload = harness.upload(id, source)
 
         val saved = harness.request(
             HttpMethod.Patch,
@@ -425,7 +427,7 @@ class CollectionRoutesTest {
         val preview = harness.request(
             HttpMethod.Post,
             "/api/imports/preview",
-            body = """{"collection":"$id","paths":["$source"],"method":"tesseract"}""",
+            body = """{"collection":"$id","uploads":["$upload"],"method":"tesseract"}""",
             credential = Credential.BEARER,
         )
         assertEquals(HttpStatusCode.OK, preview.status, preview.bodyAsText())
@@ -433,7 +435,7 @@ class CollectionRoutesTest {
         val accepted = harness.request(
             HttpMethod.Post,
             "/api/imports",
-            body = """{"collection":"$id","paths":["$source"],"method":"tesseract","previewHash":"$previewHash","requestId":"collection-settings-future-import"}""",
+            body = """{"collection":"$id","uploads":["$upload"],"method":"tesseract","previewHash":"$previewHash","requestId":"collection-settings-future-import"}""",
             credential = Credential.BEARER,
         )
 
@@ -611,6 +613,7 @@ class CollectionRoutesTest {
         // The import needs a collection that exists: a refused request is refused for maintenance, not
         // for an unknown collection.
         harness.createCollection("Default", Credential.BEARER)
+        val upload = harness.upload("Default", source)
         val maintenance = async(Dispatchers.Default) {
             harness.context.mutations.withExclusiveMaintenance("reindex") {
                 started.complete(Unit)
@@ -622,7 +625,7 @@ class CollectionRoutesTest {
         val refused = harness.request(
             HttpMethod.Post,
             "/api/imports",
-            body = """{"collection":"Default","paths":["$source"],"method":"tesseract","previewHash":"${"a".repeat(64)}","requestId":"locked-import"}""",
+            body = """{"collection":"Default","uploads":["$upload"],"method":"tesseract","previewHash":"${"a".repeat(64)}","requestId":"locked-import"}""",
             credential = Credential.BEARER,
         )
 
@@ -635,7 +638,7 @@ class CollectionRoutesTest {
         val stale = harness.request(
             HttpMethod.Post,
             "/api/imports",
-            body = """{"collection":"Default","paths":["$source"],"method":"tesseract","previewHash":"${"a".repeat(64)}","requestId":"stale-import"}""",
+            body = """{"collection":"Default","uploads":["$upload"],"method":"tesseract","previewHash":"${"a".repeat(64)}","requestId":"stale-import"}""",
             credential = Credential.BEARER,
         )
         assertEquals(HttpStatusCode.Conflict, stale.status, stale.bodyAsText())
@@ -648,11 +651,12 @@ class CollectionRoutesTest {
         val source = dataDir.resolve("both-lists.txt")
         Files.writeString(source, "A report.")
         harness.createCollection("Default", Credential.BEARER)
+        val upload = harness.upload("Default", source)
 
         val refused = harness.request(
             HttpMethod.Post,
             "/api/imports",
-            body = """{"collection":"Default","paths":["$source"],"method":"tesseract","previewHash":"${"a".repeat(64)}","requestId":"bad-filters","include":["pdf"],"exclude":["log"]}""",
+            body = """{"collection":"Default","uploads":["$upload"],"method":"tesseract","previewHash":"${"a".repeat(64)}","requestId":"bad-filters","include":["pdf"],"exclude":["log"]}""",
             credential = Credential.BEARER,
         )
 

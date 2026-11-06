@@ -5,7 +5,7 @@ import * as api from './api';
 
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
-  pickPaths: vi.fn(), listReadingMethods: vi.fn(), previewImport: vi.fn(), startImport: vi.fn(), getJob: vi.fn(), getImportItems: vi.fn(),
+  listReadingMethods: vi.fn(), previewImport: vi.fn(), startImport: vi.fn(), getJob: vi.fn(), getImportItems: vi.fn(),
   cancelJob: vi.fn(), uploadFile: vi.fn(),
 }));
 
@@ -15,10 +15,23 @@ const methods: api.ReadingMethodList = { default: 'surya', methods: [
 const job: api.JobApiView = { id: 'job-1', type: 'IMPORT', state: 'COMPLETE', createdAt: '', updatedAt: '', completed: 1, total: 1, cancelRequested: false };
 const preview: api.ImportPreview = { files: [{ path: '/archive/a.pdf', pages: 4, reason: null }], totalPages: 4, atLeast: false, destination: 'this machine', external: false, estimatedCostUsd: null, costBasis: null, previewHash: 'confirmed-hash' };
 
+/** Chooses [files] in one of the panel's inputs, as the browser's own dialog would. */
+async function choose(label: 'Files to upload' | 'Folder to upload', files: File[]): Promise<void> {
+  const input = screen.getByLabelText(label) as HTMLInputElement;
+  Object.defineProperty(input, 'files', { value: files, configurable: true });
+  await fireEvent.change(input);
+}
+
+function inFolder(path: string, content = 'x'): File {
+  const file = new File([content], path.split('/').pop()!);
+  Object.defineProperty(file, 'webkitRelativePath', { value: path });
+  return file;
+}
+
 describe('ImportPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.pickPaths).mockResolvedValue(['/archive/a.pdf']);
+    vi.mocked(api.uploadFile).mockImplementation(async (_collection, file) => ({ uploadId: `u-${file.name}`, name: file.name, sizeBytes: file.size, sha256: file.name }));
     vi.mocked(api.listReadingMethods).mockResolvedValue(methods);
     vi.mocked(api.previewImport).mockResolvedValue(preview);
     vi.mocked(api.startImport).mockResolvedValue({ job });
@@ -33,7 +46,7 @@ describe('ImportPanel', () => {
     vi.mocked(api.getJob).mockResolvedValue({ ...job, state: 'RUNNING', completed: 0,
       currentItem: 'a.pdf', currentProgress: { unitKind: 'PAGE', processedUnits: 2, totalUnits: 4, failedUnits: 0 } } as api.JobApiView);
     render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await choose('Files to upload', [new File(['x'], 'a.pdf')]);
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
     const pages = await screen.findByRole('progressbar', { name: 'Page progress' });
@@ -46,37 +59,68 @@ describe('ImportPanel', () => {
 
   it('routes import through the dialog and confirms the method and preview hash', async () => {
     render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
-    expect(await screen.findByText('/archive/a.pdf')).toBeTruthy();
+    await choose('Files to upload', [new File(['x'], 'a.pdf')]);
+    expect(await screen.findByText('a.pdf')).toBeTruthy();
+    expect(api.uploadFile).not.toHaveBeenCalled();
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
     const confirm = await screen.findByRole('button', { name: 'Read 4 pages with Surya' });
     await fireEvent.click(confirm);
     await waitFor(() => expect(api.startImport).toHaveBeenCalledTimes(1));
-    expect(api.previewImport).toHaveBeenCalledWith({ collection: 'c1', paths: ['/archive/a.pdf'], uploads: [], recursive: false, include: [], exclude: [], method: 'surya' });
+    expect(api.previewImport).toHaveBeenCalledWith({ collection: 'c1', uploads: ['u-a.pdf'], include: [], exclude: [], method: 'surya' });
     expect(api.startImport).toHaveBeenCalledWith(expect.objectContaining({
-      collection: 'c1', paths: ['/archive/a.pdf'], method: 'surya', previewHash: 'confirmed-hash', requestId: expect.any(String),
+      collection: 'c1', uploads: ['u-a.pdf'], method: 'surya', previewHash: 'confirmed-hash', requestId: expect.any(String),
     }));
     expect(await screen.findByText('Import complete. 0 files.')).toBeTruthy();
   });
 
-  it('keeps the selected folder filters and recursive flag in the dialog request', async () => {
-    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose folder…' }));
+  it('uploads only the folder files the file types and Include subfolders keep', async () => {
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await choose('Folder to upload', [
+      inFolder('Letters/a.PDF'), inFolder('Letters/b.txt'), inFolder('Letters/1902/c.docx'), inFolder('Letters/.DS_Store'), inFolder('Letters/.git/d.pdf'),
+    ]);
+    expect(await screen.findByText('Letters/')).toBeTruthy();
+    expect(screen.getByText('(2 files)')).toBeTruthy();
     await fireEvent.click(screen.getByLabelText('Include subfolders'));
+    expect(screen.getByText('(3 files)')).toBeTruthy();
     await fireEvent.click(screen.getByLabelText('Only these extensions'));
     await fireEvent.input(screen.getByLabelText('Extensions'), { target: { value: '.PDF, docx' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await screen.findByRole('dialog');
-    await waitFor(() => expect(api.previewImport).toHaveBeenCalledWith(expect.objectContaining({
-      recursive: true, include: ['pdf', 'docx'], exclude: [],
-    })));
+    expect(vi.mocked(api.uploadFile).mock.calls.map(([, file]) => file.name)).toEqual(['c.docx', 'a.PDF']);
+    await waitFor(() => expect(api.previewImport).toHaveBeenCalledWith(expect.objectContaining({ uploads: ['u-c.docx', 'u-a.PDF'] })));
+  });
+
+  it('imports identical chosen files once and says so', async () => {
+    vi.mocked(api.uploadFile).mockResolvedValue({ uploadId: 'u-same', name: 'a.txt', sizeBytes: 1, sha256: 's' });
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await choose('Files to upload', [new File(['x'], 'a.txt'), new File(['x'], 'b.txt'), new File(['x'], 'c.txt')]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    expect(await screen.findByText('2 files are identical to another chosen file and are imported once.')).toBeTruthy();
+    await waitFor(() => expect(api.previewImport).toHaveBeenCalledWith(expect.objectContaining({ uploads: ['u-same'] })));
+  });
+
+  it('lists a chosen folder in name order', async () => {
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await choose('Folder to upload', [inFolder('F/b.txt'), inFolder('F/a.txt'), inFolder('F/c.txt')]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await screen.findByRole('dialog');
+    expect(vi.mocked(api.uploadFile).mock.calls.map(([, file]) => file.name)).toEqual(['a.txt', 'b.txt', 'c.txt']);
+  });
+
+  it('says when no chosen file matches the file types', async () => {
+    render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
+    await choose('Files to upload', [new File(['x'], 'notes.txt')]);
+    await fireEvent.click(screen.getByLabelText('Only these extensions'));
+    await fireEvent.input(screen.getByLabelText('Extensions'), { target: { value: 'pdf' } });
+    expect(await screen.findByText('No chosen file matches the file types.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('retains the readable import status container without showing approval UI', async () => {
     render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
-    await screen.findByText('/archive/a.pdf');
+    await choose('Files to upload', [new File(['x'], 'a.pdf')]);
+    await screen.findByText('a.pdf');
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(screen.queryByText(/approval|review/i)).toBeNull();
@@ -92,7 +136,7 @@ describe('ImportPanel', () => {
       return { ...running, cancelRequested: true };
     });
     render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await choose('Files to upload', [new File(['x'], 'a.pdf')]);
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Stop importing' }));
@@ -110,7 +154,7 @@ describe('ImportPanel', () => {
     vi.mocked(api.getJob).mockResolvedValue(running);
     vi.mocked(api.cancelJob).mockRejectedValue(new Error('Server unavailable.'));
     render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await choose('Files to upload', [new File(['x'], 'a.pdf')]);
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Stop importing' }));
@@ -145,7 +189,7 @@ describe('ImportPanel', () => {
       total: 120,
     }));
     render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive', isAdmin: true });
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    await choose('Files to upload', [new File(['x'], 'a.pdf')]);
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 4 pages with Surya' }));
     expect(await screen.findByText('Import complete. 120 files.')).toBeTruthy();
@@ -162,21 +206,22 @@ describe('ImportPanel', () => {
     expect((screen.getByRole('button', { name: 'Next files' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('uploads chosen files, skips ones already in the collection, and imports the uploads', async () => {
+  it('uploads chosen files at Import, skips ones already in the collection, and does not send them twice', async () => {
     vi.mocked(api.uploadFile)
       .mockResolvedValueOnce({ uploadId: 'u-1', name: 'minutes.pdf', sizeBytes: 3, sha256: 'a' })
       .mockResolvedValueOnce({ name: 'old.pdf', sizeBytes: 3, sha256: 'b', existingDocumentId: 'd-1' });
     render(ImportPanel, { collectionId: 'c1', collectionName: 'Archive' });
 
-    expect(screen.queryByRole('button', { name: 'Choose files…' })).toBeNull();
-    const input = screen.getByLabelText('Files to upload') as HTMLInputElement;
-    const files = [new File(['abc'], 'minutes.pdf'), new File(['def'], 'old.pdf')];
-    Object.defineProperty(input, 'files', { value: files, configurable: true });
-    await fireEvent.change(input);
-
-    expect(await screen.findByText(/1 file is already in the collection/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Server folders|Choose files/ })).toBeNull();
+    await choose('Files to upload', [new File(['abc'], 'minutes.pdf'), new File(['def'], 'old.pdf')]);
     expect(screen.getByText('minutes.pdf')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
-    await waitFor(() => expect(api.previewImport).toHaveBeenCalledWith(expect.objectContaining({ paths: [], uploads: ['u-1'] })));
+
+    expect(await screen.findByText(/1 file is already in the collection/)).toBeTruthy();
+    await waitFor(() => expect(api.previewImport).toHaveBeenCalledWith(expect.objectContaining({ uploads: ['u-1'] })));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await screen.findByRole('dialog');
+    expect(api.uploadFile).toHaveBeenCalledTimes(2);
   });
 });

@@ -72,6 +72,25 @@ class ManagedLibraryTest {
     }
 
     @Test
+    fun `INFOSCRY_LIBRARY_DIR keeps each collection's documents in its own directory there`() {
+        val elsewhere = Files.createTempDirectory("infoscry-library-elsewhere").resolve("Library")
+        AppPaths.libraryFromEnvironment = { elsewhere.toString() }
+        try {
+            val relocated = AppPaths.from(dataDir)
+            val relocatedLibrary = ManagedLibrary(relocated, documents)
+            val inNightfall = relocatedLibrary.importFile(nightfall, sourceFile("a.pdf", "nightfall"))
+            val inAcme = relocatedLibrary.importFile(acme, sourceFile("b.pdf", "acme"))
+
+            assertEquals(elsewhere.resolve(nightfall.value), inNightfall.managedPath.parent.parent)
+            assertEquals(elsewhere.resolve(acme.value), inAcme.managedPath.parent.parent)
+            assertEquals(emptyList(), Files.list(relocated.libraryScratchDir).use { it.toList() }, "no scratch is left behind")
+        } finally {
+            AppPaths.libraryFromEnvironment = { null }
+            elsewhere.parent.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `the same bytes in another collection are a separate document`() {
         val source = sourceFile("report.pdf", "nightfall report")
 
@@ -139,8 +158,8 @@ class ManagedLibraryTest {
 
         // Block the copy step itself: the temporary directory the copy streams into is replaced by a
         // regular file, so creating the temporary file fails before any document directory exists.
-        Files.delete(paths.tempDir)
-        Files.createFile(paths.tempDir)
+        Files.delete(paths.libraryScratchDir)
+        Files.createFile(paths.libraryScratchDir)
 
         assertFailsWith<java.io.IOException> { library.importFile(nightfall, source) }
 
@@ -154,11 +173,11 @@ class ManagedLibraryTest {
     @Test
     fun `a copy that cannot start leaves the data directory usable`() {
         val source = sourceFile("report.pdf", "nightfall report")
-        Files.delete(paths.tempDir)
-        Files.createFile(paths.tempDir)
+        Files.delete(paths.libraryScratchDir)
+        Files.createFile(paths.libraryScratchDir)
         assertFailsWith<java.io.IOException> { library.importFile(nightfall, source) }
 
-        Files.delete(paths.tempDir)
+        Files.delete(paths.libraryScratchDir)
         paths.ensureDirectories()
 
         val imported = library.importFile(nightfall, source)
@@ -188,7 +207,7 @@ class ManagedLibraryTest {
             library.importFile(CollectionId("missing"), source)
         }
 
-        assertEquals(0, Files.list(paths.libraryDir).use { it.count() }.toInt())
+        assertEquals(0, Files.list(paths.libraryDir).use { entries -> entries.filter { !it.fileName.toString().startsWith(".") }.count() }.toInt())
         assertEquals(emptyList(), tempFiles())
     }
 
@@ -229,7 +248,7 @@ class ManagedLibraryTest {
     }
 
     private fun tempFiles(): List<String> =
-        Files.newDirectoryStream(paths.tempDir).use { entries ->
+        Files.newDirectoryStream(paths.libraryScratchDir).use { entries ->
             entries.map { it.fileName.toString() }.sorted()
         }
 

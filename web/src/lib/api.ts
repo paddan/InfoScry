@@ -1183,41 +1183,12 @@ function decodePdfPageResult(value: unknown): PdfPageResult {
 }
 
 /**
- * Ask the server to open the native pick dialog for files (`directory = false`) or one folder.
- * Returns the absolute paths the user chose, in pick order.
- */
-export async function pickPaths(directory: boolean): Promise<string[]> {
-  const body = (await mutate('/api/imports/pick', 'POST', { directory })) as { paths: string[] };
-  return body.paths;
-}
-
-/**
- * The extensions a folder import keeps. `include` keeps only those extensions; `exclude` keeps everything else.
+ * The extensions an import keeps. `include` keeps only those extensions; `exclude` keeps everything else.
  * Both empty means every file. The server refuses a request that gives both.
  */
 export interface ExtensionFilterRequest {
   include: string[];
   exclude: string[];
-}
-
-/** Queue an import of the selected paths into a collection; the job runs in the background. */
-export async function enqueueImport(
-  collection: string,
-  paths: string[],
-  recursive: boolean,
-  extensions: ExtensionFilterRequest = { include: [], exclude: [] },
-): Promise<{ accepted: boolean; job: JobApiView }> {
-  const body = {
-    collection,
-    paths,
-    recursive,
-    include: extensions.include,
-    exclude: extensions.exclude,
-  };
-  return (await mutate('/api/imports', 'POST', body)) as {
-    accepted: boolean;
-    job: JobApiView;
-  };
 }
 
 export type ReadingMethodOption = {
@@ -1231,11 +1202,8 @@ export type ReadingMethodOption = {
 export type ReadingMethodList = { methods: ReadingMethodOption[]; default: string | null };
 export type ImportPreviewRequest = {
   collection: string;
-  /** Paths inside one of the server's import roots. */
-  paths: string[];
-  /** Files uploaded to the collection, by upload id. */
-  uploads?: string[];
-  recursive: boolean;
+  /** Files uploaded to the collection from this computer, by upload id: the only thing an import reads. */
+  uploads: string[];
   include: string[];
   exclude: string[];
   method: string;
@@ -1273,40 +1241,6 @@ export async function uploadFile(collectionId: string, file: File): Promise<Uplo
     body: file,
   });
   return (await readJson(await sendWithSessionRetry(send, 'CSRF_TOKEN_INVALID'))) as Upload;
-}
-
-/**
- * A directory on the server that editors may import from: added under Admin, or listed in the server's
- * INFOSCRY_IMPORT_ROOTS. An unavailable one (its folder is gone or unreadable) cannot be browsed.
- */
-export type ImportRoot = {
-  id: string;
-  name: string;
-  path: string;
-  source: 'ADMIN' | 'ENVIRONMENT';
-  available: boolean;
-  addedAt?: string | null;
-  addedBy?: string | null;
-};
-export type ImportRootEntry = { name: string; path: string; directory: boolean; sizeBytes?: number | null };
-
-export async function listImportRoots(): Promise<ImportRoot[]> {
-  return ((await readJson(await fetch('/api/import-roots'))) as { roots: ImportRoot[] }).roots;
-}
-
-/** Adds a server folder by its full path; a folder that is already one answers with `created: false`. */
-export async function addImportRoot(path: string): Promise<{ root: ImportRoot; created: boolean }> {
-  return (await mutate('/api/import-roots', 'POST', { path })) as { root: ImportRoot; created: boolean };
-}
-
-export async function removeImportRoot(id: string): Promise<void> {
-  await mutate(`/api/import-roots/${encodeURIComponent(id)}`, 'DELETE');
-}
-
-/** One folder of an import root: its folders first, then its files. */
-export async function browseImportRoot(root: string, path: string): Promise<{ root: ImportRoot; path: string; entries: ImportRootEntry[] }> {
-  const query = `root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`;
-  return (await readJson(await fetch(`/api/import-roots/browse?${query}`))) as { root: ImportRoot; path: string; entries: ImportRootEntry[] };
 }
 
 export async function previewImport(request: ImportPreviewRequest): Promise<ImportPreview> {

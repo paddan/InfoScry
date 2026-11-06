@@ -20,6 +20,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
+import io.ktor.http.isSuccess
 import java.util.UUID
 import java.nio.file.Path
 import infoscry.server.DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS
@@ -57,7 +58,6 @@ internal class ApiTestServer(
     val dataDir: Path,
     index: CollectionIndexRemover = CollectionIndexRemover.NONE,
     jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
-    picker: suspend (Boolean) -> List<String> = ::pickWithOsascript,
     /** A deterministic retrieval vector for tests that drive a whole search-backed route without a model. */
     queryEmbedder: (() -> QueryEmbedder?)? = null,
     /** The document index phase, for tests that need to hold or fail a document deletion's index step. */
@@ -91,7 +91,6 @@ internal class ApiTestServer(
             context,
             ServerSettings(port = 0),
             jobEventIdleDeadlineMillis = jobEventIdleDeadlineMillis,
-            picker = picker,
         )
     }
     val client: HttpClient = HttpClient(CIO)
@@ -182,14 +181,42 @@ internal class ApiTestServer(
         credential = credential,
     )
 
-    /** Imports selected files through the same preview and confirmed-start contract as the web and CLI. */
+    /** Uploads [file] to [collection] (by name or id) as a browser or the CLI does. */
+    suspend fun uploadResponse(collection: String, file: Path, credential: Credential = Credential.BEARER): HttpResponse {
+        val collectionId = runCatching { collectionIdOf(collection) }.getOrDefault(collection)
+        return client.request(url + "/api/collections/$collectionId/uploads") {
+            this.method = HttpMethod.Post
+            applyCredential(credential)
+            header(UPLOAD_FILENAME_HEADER, java.net.URLEncoder.encode(file.fileName.toString(), Charsets.UTF_8).replace("+", "%20"))
+            contentType(ContentType.Application.OctetStream)
+            setBody(java.nio.file.Files.readAllBytes(file))
+        }
+    }
+
+    /** Uploads [file] and answers its upload id, for a test that then names it in an import request. */
+    suspend fun upload(collection: String, file: Path, credential: Credential = Credential.BEARER): String {
+        val response = uploadResponse(collection, file, credential)
+        check(response.status.isSuccess()) { "uploading $file should succeed, was ${response.status}: ${response.bodyAsText()}" }
+        return ApiJson.decodeFromString<UploadResponse>(response.bodyAsText()).uploadId!!
+    }
+
+    /**
+     * Imports files from this machine the way the web and the CLI do: each is uploaded to the collection, then
+     * the uploads go through the preview and the confirmed start. An upload the server refuses is the answer.
+     */
     suspend fun previewAndStartImport(
         collection: String,
         paths: List<String>,
         credential: Credential = Credential.BEARER,
         method: String = "tesseract",
     ): HttpResponse {
-        val previewRequest = ImportPreviewRouteRequest(collection = collection, paths = paths, method = method)
+        val uploads = mutableListOf<String>()
+        for (path in paths) {
+            val uploaded = uploadResponse(collection, Path.of(path), credential)
+            if (!uploaded.status.isSuccess()) return uploaded
+            ApiJson.decodeFromString<UploadResponse>(uploaded.bodyAsText()).uploadId?.let(uploads::add)
+        }
+        val previewRequest = ImportPreviewRouteRequest(collection = collection, uploads = uploads, method = method)
         val previewResponse = request(
             HttpMethod.Post,
             "/api/imports/preview",
@@ -202,7 +229,7 @@ internal class ApiTestServer(
         val preview = ApiJson.decodeFromString<infoscry.jobs.ImportPreview>(previewResponse.bodyAsText())
         val startRequest = ImportRequest(
             collection = collection,
-            paths = paths,
+            uploads = uploads,
             method = method,
             previewHash = preview.previewHash,
             requestId = "test-import-${UUID.randomUUID()}",

@@ -50,17 +50,16 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
 
             assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
-            assertEquals(2, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(3, SchemaMigrator.SUPPORTED_VERSION)
             assertEquals(SchemaMigrator.SUPPORTED_VERSION, count(database, "schema_version"), "one row per applied step")
         }
     }
 
     @Test
-    fun `a database at the baseline version gets the later steps and keeps its rows`() {
+    fun `a database at an older version gets the later steps and keeps its rows`() {
         newDatabase().use { database ->
             SchemaMigrator(database).migrate(upTo = 1)
             assertEquals(1, database.schemaVersion())
-            assertFalse("import_roots" in tableNames(database))
             database.transaction { connection ->
                 connection.createStatement().use {
                     it.executeUpdate(
@@ -73,9 +72,26 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(2, database.schemaVersion())
-            assertTrue("import_roots" in tableNames(database))
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
+            assertFalse("import_roots" in tableNames(database), "version 3 removes the import roots version 2 added")
             assertEquals(1, count(database, "collections"), "a step keeps what the database already holds")
+        }
+    }
+
+    @Test
+    fun `a database with import roots from version 2 loses only that list`() {
+        newDatabase().use { database ->
+            SchemaMigrator(database).migrate(upTo = 2)
+            database.transaction { connection ->
+                connection.createStatement().use {
+                    it.executeUpdate("INSERT INTO import_roots (id, path, created_at, updated_at) VALUES ('r', '/srv/a', 'x', 'x')")
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+
+            assertEquals(3, database.schemaVersion())
+            assertFalse("import_roots" in tableNames(database))
         }
     }
 

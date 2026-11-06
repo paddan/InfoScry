@@ -63,6 +63,7 @@ class SchemaMigrator(private val database: Database) {
         private val STEPS = listOf(
             "db/migration/001_baseline.sql",
             "db/migration/002_import_roots.sql",
+            "db/migration/003_drop_import_roots.sql",
         )
 
         /** The schema version this build writes and understands. */

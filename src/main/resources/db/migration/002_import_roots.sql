@@ -1,4 +1,5 @@
 -- Version 2: import roots kept in the database, so an administrator adds and removes them under Admin.
+-- Version 3 removes them again; this step stays so a database at any version reaches the current one.
 
 -- A directory on the server that editors may browse and import from. `path` is the directory's real path
 -- (symbolic links resolved) when it was added; a root whose directory has since gone is kept and shown as

@@ -312,10 +312,10 @@ internal object AcceptanceFixtures {
         return sourcesDir
     }
 
-    /** The absolute path the picker returns for a folder choice. */
+    /** The folder a scenario chooses on the computer. */
     fun folder(sourcesDir: Path, name: String): List<String> = listOf(sourcesDir.resolve(name).toString())
 
-    /** The absolute paths the picker returns for a file choice. */
+    /** The files a scenario chooses on the computer. */
     fun files(sourcesDir: Path, vararg names: String): List<String> = names.map { sourcesDir.resolve(it).toString() }
 
     private fun writeText(path: Path, content: String) {
@@ -328,19 +328,16 @@ internal object AcceptanceFixtures {
 }
 
 /**
- * What the server's picker answers, per scenario.
+ * What the person chooses on their own computer, per scenario.
  *
- * The native picker needs a graphical session and a person, so the acceptance server is handed this
- * instead: the browser clicks `Choose files…` or `Choose folder…`, the route asks this, and the paths it
- * returns are the fixtures the scenario queued. The real dialog stays a manual gate.
+ * The browser script hands these to the import panel's file and folder inputs, which upload them, as a person
+ * choosing files or a folder in the browser's own dialog would. The server never reads them itself.
  */
-internal class AcceptancePicker(private val sourcesDir: Path) {
+internal class AcceptanceChoice {
 
     @Volatile
     var folder: List<String> = emptyList()
 
     @Volatile
     var files: List<String> = emptyList()
-
-    suspend fun choose(directory: Boolean): List<String> = if (directory) folder else files
 }

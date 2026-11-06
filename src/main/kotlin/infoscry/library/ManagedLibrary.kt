@@ -94,8 +94,9 @@ class ManagedLibrary(
             "only regular files can be imported, but $canonicalSource is not one"
         }
 
+        Files.createDirectories(paths.libraryScratchDir)
         val temporary = Files.createTempFile(
-            paths.tempDir,
+            paths.libraryScratchDir,
             "import-",
             ".part",
             *PrivatePermissions.fileAttributes(),
@@ -189,9 +190,9 @@ class ManagedLibrary(
 
     /**
      * Moves the finished copy into place. A rename on the same filesystem is atomic, which is what
-     * makes the managed original appear complete or not at all. Filesystems that cannot rename
-     * atomically still get a move rather than a copy, because the scratch directory and the library
-     * are both inside the data directory.
+     * makes the managed original appear complete or not at all. The scratch directory is inside the
+     * library for that reason, also when `INFOSCRY_LIBRARY_DIR` puts the library on a disk of its own;
+     * a filesystem that cannot rename atomically still gets a move rather than a copy.
      */
     private fun moveInto(temporary: Path, managedPath: Path) {
         try {

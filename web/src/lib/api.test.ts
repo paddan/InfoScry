@@ -193,7 +193,7 @@ describe('reading workflow requests', () => {
     }));
 
     await listReadingMethods('a/b');
-    const request = { collection: 'c', paths: ['/a.pdf'], recursive: true, include: ['pdf'], exclude: [], method: 'surya' };
+    const request = { collection: 'c', uploads: ['u1'], include: ['pdf'], exclude: [], method: 'surya' };
     await previewImport(request);
     await startImport({ ...request, previewHash: 'hash', requestId: 'request-1' });
     await previewRescan('c', 'd/1', 'llm:p1', { mode: 'explicit', ordinals: [2, 4] });
@@ -215,7 +215,7 @@ describe('reading workflow requests', () => {
       if (String(input) === '/api/session') return { ok: true, status: 200, text: async () => JSON.stringify({ csrfToken: 'token' }) } as Response;
       return { ok: false, status: 409, statusText: 'Conflict', text: async () => JSON.stringify({ error: { code: 'PREVIEW_STALE', message: 'The files changed; review the summary again.' } }) } as Response;
     }));
-    await expect(startImport({ collection: 'c', paths: [], recursive: false, include: [], exclude: [], method: 'tesseract', previewHash: 'old', requestId: 'id' }))
+    await expect(startImport({ collection: 'c', uploads: ['u1'], include: [], exclude: [], method: 'tesseract', previewHash: 'old', requestId: 'id' }))
       .rejects.toMatchObject({ code: 'PREVIEW_STALE' });
   });
 });

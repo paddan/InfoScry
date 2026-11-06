@@ -51,10 +51,9 @@ suspend fun startServer(
     context: AppContext,
     settings: ServerSettings = ServerSettings(),
     jobEventIdleDeadlineMillis: Long = DEFAULT_JOB_EVENT_IDLE_DEADLINE_MILLIS,
-    picker: suspend (Boolean) -> List<String> = ::pickWithOsascript,
 ): RunningServer {
     val engine = embeddedServer(Netty, port = settings.port, host = settings.host) {
-        configureRoutes(context, settings, jobEventIdleDeadlineMillis, picker)
+        configureRoutes(context, settings, jobEventIdleDeadlineMillis)
     }
     val boundPort = try {
         engine.start(wait = false)

@@ -80,9 +80,10 @@ not real providers or GPU verification.
 - Every API route has an entry in the rule table in
   `src/main/kotlin/infoscry/server/Authorization.kt`; a collection the caller is
   not a member of answers 404. Records people create and change carry
-  attribution, stamped from the ambient actor. Imports read only from
-  the import roots (Admin → Server folders, and `INFOSCRY_IMPORT_ROOTS`) and
-  the collection's uploads.
+  attribution, stamped from the ambient actor. Imports read only
+  from files uploaded from the client's computer; the server never imports
+  from its own folders. Managed copies live in one directory per collection
+  under the library (`INFOSCRY_LIBRARY_DIR`, default `<data>/library`).
 - A stopped import or rescan (cancelled, failed, interrupted, process killed)
   must never block starting again, and starting again must never answer with
   "waiting for approval", "pending review" or "cannot start yet". Recover or

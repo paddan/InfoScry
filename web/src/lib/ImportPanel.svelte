@@ -5,7 +5,6 @@
     cancelJob,
     getImportItems,
     getJob,
-    pickPaths,
     uploadFile,
     type ImportStarted,
     type ImportItemApiView,
@@ -14,7 +13,6 @@
   } from './api';
   import type { RescanStarted } from './api';
   import ImportUnitProgress from './ImportUnitProgress.svelte';
-  import ImportRootBrowser from './ImportRootBrowser.svelte';
   import StartReadingDialog from './StartReadingDialog.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { importProgressText } from './importProgress';
@@ -27,51 +25,78 @@
   export let collectionName: string;
   /** An import of this collection that has not finished yet; the panel shows its progress as its own. */
   export let unfinishedImportId: string | null = null;
-  /** Administrators may also open the server's own pick dialog. */
+  /** Kept for the panel's callers; importing is the same for everyone who may import. */
   export let isAdmin = false;
+  $: void isAdmin;
 
-  /** Files uploaded from this browser and ready to import. */
-  let uploads: { id: string; name: string }[] = [];
+  /**
+   * What the person chose on this computer: single files, or a folder with everything under it. Nothing is
+   * sent until Import is pressed, so the file types and Include subfolders still decide what is uploaded.
+   */
+  type Chosen = { key: string; label: string; folder: boolean; files: File[] };
+  let chosen: Chosen[] = [];
   let uploading: string | null = null;
   let uploadNotice: string | null = null;
-  let browsing = false;
   let fileInput: HTMLInputElement | null = null;
+  let folderInput: HTMLInputElement | null = null;
+  /** Upload ids of files already sent from this panel, so a cancelled dialog does not send them again. */
+  const uploaded = new Map<File, string | null>();
+  /** Upload ids the start dialog is opened with. */
+  let uploadIds: string[] = [];
 
-  async function uploadChosen(event: Event): Promise<void> {
+  function addChosen(items: Chosen[]): void {
+    const known = new Set(chosen.map((item) => item.key));
+    chosen = [...chosen, ...items.filter((item) => !known.has(item.key))];
+  }
+
+  function chooseFiles(event: Event): void {
     const input = event.currentTarget as HTMLInputElement;
     const files = Array.from(input.files ?? []);
     input.value = '';
-    if (files.length === 0 || collectionId === '') return;
-    error = null;
-    uploadNotice = null;
-    let already = 0;
-    try {
-      for (const [index, file] of files.entries()) {
-        uploading = `Uploading ${index + 1} of ${files.length}: ${file.name}`;
-        const answer = await uploadFile(collectionId, file);
-        if (answer.uploadId) uploads = [...uploads, { id: answer.uploadId, name: answer.name }];
-        else already += 1;
-      }
-      if (already > 0) uploadNotice = `${already} file${already === 1 ? ' is' : 's are'} already in the collection and ${already === 1 ? 'was' : 'were'} not uploaded again.`;
-    } catch (failure) {
-      error = describe(failure);
-    } finally {
-      uploading = null;
+    addChosen(files.map((file) => ({ key: `file:${file.name}:${file.size}:${file.lastModified}`, label: file.name, folder: false, files: [file] })));
+  }
+
+  function chooseFolder(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    // Name order, as a folder reads in a file manager, rather than whatever order the browser lists it in.
+    const files = Array.from(input.files ?? []).sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
+    input.value = '';
+    const byFolder = new Map<string, File[]>();
+    for (const file of files) {
+      const top = (file.webkitRelativePath || file.name).split('/')[0];
+      byFolder.set(top, [...(byFolder.get(top) ?? []), file]);
     }
+    addChosen([...byFolder].map(([folder, inFolder]) => ({ key: `folder:${folder}:${inFolder.length}`, label: `${folder}/`, folder: true, files: inFolder })));
   }
 
-  function removeUpload(id: string): void {
-    uploads = uploads.filter((upload) => upload.id !== id);
+  function removeChosen(key: string): void {
+    chosen = chosen.filter((item) => item.key !== key);
   }
 
-  let selectedPaths: string[] = [];
   let recursive = false;
-  /** Which files of a folder are imported: every type, only the listed extensions, or all but the listed ones. */
+  /** Which files are imported: every type, only the listed extensions, or all but the listed ones. */
   let fileTypes: 'all' | 'include' | 'exclude' = 'all';
   let extensionText = '';
-  let picking = false;
-  let pickerUnavailable = false;
-  let manualPath = '';
+
+  /** A chosen folder's files: hidden ones are left out, and files in subfolders only with Include subfolders. */
+  function filesOf(item: Chosen, subfolders: boolean): File[] {
+    if (!item.folder) return item.files;
+    return item.files.filter((file) => {
+      const segments = (file.webkitRelativePath || file.name).split('/');
+      if (segments.some((segment) => segment.startsWith('.'))) return false;
+      return subfolders || segments.length <= 2;
+    });
+  }
+
+  function keptByType(file: File, types: typeof fileTypes, extensions: string[]): boolean {
+    if (types === 'all') return true;
+    const dot = file.name.lastIndexOf('.');
+    const extension = dot <= 0 ? '' : file.name.slice(dot + 1).toLowerCase();
+    return types === 'include' ? extensions.includes(extension) : !extensions.includes(extension);
+  }
+
+  $: importable = chosen.flatMap((item) => filesOf(item, recursive)).filter((file) => keptByType(file, fileTypes, listedExtensions));
+
   let importing = false;
   let error: string | null = null;
   let job: JobApiView | null = null;
@@ -132,50 +157,6 @@
     return TERMINAL_STATES.includes(state);
   }
 
-  function addPaths(paths: string[]): void {
-    const additions = paths.filter((path) => path.trim() !== '' && !selectedPaths.includes(path));
-    if (additions.length > 0) selectedPaths = [...selectedPaths, ...additions];
-  }
-
-  async function chooseFiles(): Promise<void> {
-    await openPicker(false);
-  }
-
-  async function chooseFolder(): Promise<void> {
-    await openPicker(true);
-  }
-
-  async function openPicker(directory: boolean): Promise<void> {
-    if (picking) return;
-    picking = true;
-    error = null;
-    try {
-      addPaths(await pickPaths(directory));
-    } catch (failure) {
-      if (failure instanceof ApiError && failure.code === 'PICK_CANCELLED') {
-        // The user closed the dialog without choosing anything; that is not an error.
-      } else if (failure instanceof ApiError && failure.code === 'PICK_UNAVAILABLE') {
-        pickerUnavailable = true;
-        error = describe(failure);
-      } else {
-        error = describe(failure);
-      }
-    } finally {
-      picking = false;
-    }
-  }
-
-  function addManualPath(): void {
-    const path = manualPath.trim();
-    if (path === '') return;
-    addPaths([path]);
-    manualPath = '';
-  }
-
-  function removePath(path: string): void {
-    selectedPaths = selectedPaths.filter((candidate) => candidate !== path);
-  }
-
   function sleep(milliseconds: number): Promise<void> {
     return new Promise((resolve) => {
       endPollWait = () => {
@@ -188,8 +169,40 @@
     });
   }
 
-  function startImport(): void {
-    if (collectionId === '' || (selectedPaths.length === 0 && uploads.length === 0) || extensionListEmpty || importing) return;
+  /** Uploads what will be imported, then opens the start dialog; files already in the collection are not sent twice. */
+  async function startImport(): Promise<void> {
+    if (collectionId === '' || importable.length === 0 || extensionListEmpty || importing || uploading !== null) return;
+    error = null;
+    uploadNotice = null;
+    const files = importable;
+    const ids: string[] = [];
+    let already = 0;
+    let same = 0;
+    try {
+      for (const [index, file] of files.entries()) {
+        if (!uploaded.has(file)) {
+          uploading = `Uploading ${index + 1} of ${files.length}: ${file.name}`;
+          const answer = await uploadFile(collectionId, file);
+          uploaded.set(file, answer.uploadId ?? null);
+        }
+        const id = uploaded.get(file);
+        // The server keeps one upload per content, so a file identical to another chosen one comes back as it.
+        if (id && ids.includes(id)) same += 1;
+        else if (id) ids.push(id);
+        else already += 1;
+      }
+    } catch (failure) {
+      error = describe(failure);
+      return;
+    } finally {
+      uploading = null;
+    }
+    const notices: string[] = [];
+    if (already > 0) notices.push(`${already} file${already === 1 ? ' is' : 's are'} already in the collection and ${already === 1 ? 'was' : 'were'} not uploaded again.`);
+    if (same > 0) notices.push(`${same} file${same === 1 ? ' is' : 's are'} identical to another chosen file and ${same === 1 ? 'is' : 'are'} imported once.`);
+    if (notices.length > 0) uploadNotice = notices.join(' ');
+    if (ids.length === 0) return;
+    uploadIds = ids;
     dialogOpen = true;
   }
 
@@ -378,25 +391,16 @@
   {/if}
 
   <div class="picker-row">
-    <input class="visually-hidden" type="file" multiple bind:this={fileInput} onchange={uploadChosen} aria-label="Files to upload" />
-    <button type="button" class="primary-outline" onclick={() => fileInput?.click()} disabled={uploading !== null || collectionId === ''}>
-      {uploading !== null ? 'Uploading…' : 'Upload files…'}
-    </button>
-    <button type="button" onclick={() => (browsing = !browsing)} aria-expanded={browsing}>Server folders…</button>
-    {#if isAdmin}
-      <button type="button" onclick={chooseFiles} disabled={picking}>
-        {picking ? 'Choosing…' : 'Choose files…'}
-      </button>
-      <button type="button" onclick={chooseFolder} disabled={picking}>
-        {picking ? 'Choosing…' : 'Choose folder…'}
-      </button>
-    {/if}
+    <input class="visually-hidden" type="file" multiple bind:this={fileInput} onchange={chooseFiles} aria-label="Files to upload" />
+    <input class="visually-hidden" type="file" webkitdirectory bind:this={folderInput} onchange={chooseFolder} aria-label="Folder to upload" />
+    <button type="button" class="primary-outline" onclick={() => fileInput?.click()} disabled={uploading !== null || collectionId === ''}>Upload files…</button>
+    <button type="button" onclick={() => folderInput?.click()} disabled={uploading !== null || collectionId === ''}>Upload folder…</button>
     <label class="check-label"><input type="checkbox" bind:checked={recursive} /> Include subfolders</label>
   </div>
+  <p class="hint">Files are chosen on this computer and uploaded when you press Import.</p>
 
   {#if uploading !== null}<p role="status">{uploading}</p>{/if}
   {#if uploadNotice !== null}<p role="status">{uploadNotice}</p>{/if}
-  {#if browsing}<ImportRootBrowser onAdd={(path) => addPaths([path])} />{/if}
 
   <fieldset class="file-types">
     <legend>File types</legend>
@@ -412,33 +416,16 @@
     {/if}
   </fieldset>
 
-  {#if pickerUnavailable}
-    <div class="manual-fallback">
-      <p>This machine cannot open the pick dialog, so enter each path to import by hand.</p>
-      <div class="manual-row">
-        <label class="visually-hidden" for="manual-path">Path</label>
-        <input id="manual-path" bind:value={manualPath} placeholder="/path/to/file-or-folder" onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addManualPath(); } }} />
-        <button type="button" onclick={addManualPath} disabled={manualPath.trim() === ''}>Add</button>
-      </div>
-    </div>
-  {/if}
-
   <div class="paths">
     <span class="eyebrow">SELECTED</span>
-    {#if selectedPaths.length === 0 && uploads.length === 0}
+    {#if chosen.length === 0}
       <p role="status">Nothing selected yet.</p>
     {:else}
       <ul>
-        {#each uploads as upload (upload.id)}
+        {#each chosen as item (item.key)}
           <li>
-            <span>{upload.name} <span class="hint">(uploaded)</span></span>
-            <button type="button" aria-label="Remove {upload.name}" onclick={() => removeUpload(upload.id)}>×</button>
-          </li>
-        {/each}
-        {#each selectedPaths as path (path)}
-          <li>
-            <span>{path}</span>
-            <button type="button" aria-label="Remove {path}" onclick={() => removePath(path)}>×</button>
+            <span>{item.label}{#if item.folder} <span class="hint">({filesOf(item, recursive).length} file{filesOf(item, recursive).length === 1 ? '' : 's'})</span>{/if}</span>
+            <button type="button" aria-label="Remove {item.label}" onclick={() => removeChosen(item.key)}>×</button>
           </li>
         {/each}
       </ul>
@@ -446,11 +433,12 @@
   </div>
 
   <div class="import-row">
-    <button type="button" class="primary" onclick={startImport} disabled={importing || collectionId === '' || (selectedPaths.length === 0 && uploads.length === 0) || extensionListEmpty}>
-      {importing ? 'Importing…' : 'Import'}
+    <button type="button" class="primary" onclick={startImport} disabled={importing || uploading !== null || collectionId === '' || importable.length === 0 || extensionListEmpty}>
+      {importing ? 'Importing…' : uploading !== null ? 'Uploading…' : 'Import'}
     </button>
     {#if collectionId === ''}<p class="hint">Select a collection to import into.</p>{/if}
-    {#if !importing && collectionId !== '' && selectedPaths.length === 0 && uploads.length === 0}<p class="hint">Upload files, or choose them in a server folder.</p>{/if}
+    {#if !importing && collectionId !== '' && chosen.length === 0}<p class="hint">Choose files or a folder on this computer.</p>{/if}
+    {#if chosen.length > 0 && importable.length === 0 && !extensionListEmpty}<p class="hint">No chosen file matches the file types.</p>{/if}
     {#if extensionListEmpty}<p class="hint">Enter at least one extension.</p>{/if}
   </div>
 
@@ -485,7 +473,7 @@
   {#if dialogOpen}
     <StartReadingDialog
       {collectionId}
-      request={{ kind: 'import', paths: selectedPaths, uploads: uploads.map((upload) => upload.id), recursive, include: fileTypes === 'include' ? listedExtensions : [], exclude: fileTypes === 'exclude' ? listedExtensions : [] }}
+      request={{ kind: 'import', uploads: uploadIds, include: [], exclude: [] }}
       onstarted={readingStarted}
       oncancel={() => (dialogOpen = false)}
     />
@@ -497,15 +485,13 @@
   .destination { margin: 0; }
   .destination strong { color: #f3e6d1; }
   .picker-row { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+  .picker-row + .hint { margin: -0.6rem 0 0; color: #929997; font-size: 0.8rem; }
   .check-label { display: flex; align-items: center; gap: 0.5rem; }
   .check-label input { accent-color: #c4a77d; }
   .file-types { display: grid; gap: 0.5rem; margin: 0; padding: 0; border: 0; }
   .file-types legend { color: #858a8a; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; padding: 0; margin-bottom: 0.35rem; }
   .file-types .hint { margin: 0; color: #929997; font-size: 0.8rem; }
   .extension-row { display: flex; align-items: center; gap: 0.55rem; }
-  .manual-fallback { display: grid; gap: 0.5rem; padding: 0.85rem; border: 1px solid #6e5a33; border-radius: 0.55rem; background: #1d1c1a; }
-  .manual-fallback p { margin: 0; color: #d8c9a8; font-size: 0.85rem; }
-  .manual-row { display: flex; gap: 0.55rem; }
   .paths { display: grid; gap: 0.55rem; }
   .paths p { margin: 0; color: #929997; font-size: 0.85rem; }
   .paths ul { margin: 0; padding: 0; list-style: none; border-top: 1px solid #2b3030; }

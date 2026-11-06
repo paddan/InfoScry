@@ -41,7 +41,7 @@ describe('StartReadingDialog', () => {
   });
 
   it('preselects the collection default, shows unavailable reasons and previews the selected method', async () => {
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
     const select = await screen.findByLabelText('Reading method') as HTMLSelectElement;
     await waitFor(() => expect(select.value).toBe('surya'));
     expect((screen.getByRole('option', { name: 'Cloud OCR — unavailable' }) as HTMLOptionElement).disabled).toBe(true);
@@ -50,7 +50,7 @@ describe('StartReadingDialog', () => {
     // A profile that has not passed its image check cannot be used, so it is not listed at all.
     expect(screen.queryByRole('option', { name: /Unchecked/ })).toBeNull();
     expect(screen.queryByText(/image check/)).toBeNull();
-    expect(api.previewImport).toHaveBeenLastCalledWith({ collection: 'c', paths: ['/data/report.pdf'], uploads: [], recursive: false, include: [], exclude: [], method: 'surya' });
+    expect(api.previewImport).toHaveBeenLastCalledWith({ collection: 'c', uploads: ['u1'], include: [], exclude: [], method: 'surya' });
     await fireEvent.change(select, { target: { value: 'tesseract' } });
     await waitFor(() => expect(api.previewImport).toHaveBeenLastCalledWith(expect.objectContaining({ method: 'tesseract' })));
   });
@@ -60,7 +60,7 @@ describe('StartReadingDialog', () => {
     vi.mocked(api.previewImport)
       .mockImplementationOnce(() => new Promise((resolve) => { finishSlow = resolve; }))
       .mockResolvedValueOnce({ ...importPreview, totalPages: 12, previewHash: 'hash-2' });
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data'], recursive: true, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
     const select = await screen.findByLabelText('Reading method') as HTMLSelectElement;
     expect(screen.queryByText('Loading reading methods…')).toBeNull();
     expect(screen.getByText('Preparing page summary…')).toBeTruthy();
@@ -75,7 +75,7 @@ describe('StartReadingDialog', () => {
 
   it('names the confirmed method and page total and submits once with the preview hash', async () => {
     const onstarted = vi.fn();
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
     const confirm = await screen.findByRole('button', { name: 'Read 48 pages with Surya' });
     await fireEvent.click(confirm);
     await fireEvent.click(confirm);
@@ -90,7 +90,7 @@ describe('StartReadingDialog', () => {
       default: 'llm:p1', methods: [{ ...methods.methods[2], available: true, unavailableReason: null }],
     });
     vi.mocked(api.previewImport).mockResolvedValue({ ...importPreview, files: [{ path: '/data/report.pdf', pages: null, reason: 'page count unknown' }], atLeast: true, external: true, destination: 'api.example.com', estimatedCostUsd: 3.25, costBasis: 'estimated from 48 pages' });
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
     await screen.findByRole('button', { name: 'Send at least 48 pages to api.example.com with Cloud OCR' });
     expect(screen.getByText('All pages in the listed files will be sent; total cost is unavailable because the page count is unknown.')).toBeTruthy();
     expect(screen.queryByText(/\$3\.2500/)).toBeNull();
@@ -98,7 +98,7 @@ describe('StartReadingDialog', () => {
 
   it('re-previews a stale preview and explains why', async () => {
     vi.mocked(api.startImport).mockRejectedValueOnce(new api.ApiError('PREVIEW_STALE', 'stale'));
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 48 pages with Surya' }));
     expect(await screen.findByText('The files changed; review the summary again.')).toBeTruthy();
     await waitFor(() => expect(api.previewImport).toHaveBeenCalledTimes(2));
@@ -120,7 +120,7 @@ describe('StartReadingDialog', () => {
       files: [{ path: '/data/report.pdf', pages: 12, reason: null, documentPages: 48 }],
       totalPages: 12,
     });
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
 
     expect(await screen.findByText('/data/report.pdf: 12 of 48 pages will be read')).toBeTruthy();
     expect(await screen.findByRole('button', { name: 'Read 12 pages with Surya' })).toBeTruthy();
@@ -131,7 +131,7 @@ describe('StartReadingDialog', () => {
       ...importPreview,
       files: [{ path: '/data/report.pdf', pages: 48, reason: null, documentPages: 48 }],
     });
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
 
     expect(await screen.findByText('/data/report.pdf: 48 pages')).toBeTruthy();
     expect(screen.queryByText(/will be read \(of/)).toBeNull();
@@ -210,7 +210,7 @@ describe('StartReadingDialog', () => {
       totalPages: 0,
     });
     const onstarted = vi.fn();
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
     const select = await screen.findByLabelText('Reading method') as HTMLSelectElement;
     await fireEvent.change(select, { target: { value: 'none' } });
     await waitFor(() => expect(api.previewImport).toHaveBeenLastCalledWith(expect.objectContaining({ method: 'none' })));
@@ -243,7 +243,7 @@ describe('StartReadingDialog', () => {
       totalPages: 0,
     });
     const onstarted = vi.fn();
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/digital.pdf'], recursive: false, include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted, oncancel: vi.fn() });
 
     expect(await screen.findByText('No pages need image reading; the files will still be imported.')).toBeTruthy();
     const confirm = screen.getByRole('button', { name: 'Import without image reading' }) as HTMLButtonElement;
@@ -257,7 +257,7 @@ describe('StartReadingDialog', () => {
     vi.mocked(api.startImport).mockRejectedValueOnce(new TypeError('NetworkError'));
     const onstarted = vi.fn();
     const oncancel = vi.fn();
-    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted, oncancel });
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted, oncancel });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 48 pages with Surya' }));
     await screen.findByRole('alert');
@@ -281,7 +281,7 @@ describe('StartReadingDialog', () => {
     const opener = document.createElement('button');
     document.body.append(opener);
     opener.focus();
-    const { unmount } = render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', paths: ['/data/report.pdf'], recursive: false, include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    const { unmount } = render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
     const dialog = await screen.findByTestId('start-reading-dialog');
     const method = await screen.findByLabelText('Reading method');
     const cancel = screen.getByRole('button', { name: 'Cancel' });
