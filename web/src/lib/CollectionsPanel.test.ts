@@ -19,8 +19,7 @@ import {
 
 const api = vi.hoisted(() => ({
   createCollection: vi.fn(),
-  pickPaths: vi.fn(),
-  enqueueImport: vi.fn(),
+  uploadFile: vi.fn(),
   getJob: vi.fn(),
   getImportItems: vi.fn(),
   getCollectionDocumentSummary: vi.fn(),
@@ -75,8 +74,7 @@ vi.mock('./api', async (importOriginal) => ({
   listRescanOperations: api.listRescanOperations,
   cancelRescan: api.cancelRescan,
   createCollection: api.createCollection,
-  pickPaths: api.pickPaths,
-  enqueueImport: api.enqueueImport,
+  uploadFile: api.uploadFile,
   getJob: api.getJob,
   getImportItems: api.getImportItems,
   getCollectionDocumentSummary: api.getCollectionDocumentSummary,
@@ -749,7 +747,7 @@ describe('collections panel', () => {
   });
 
   it('refreshes collapsed idle counts after a newly started import and its terminal outcome', async () => {
-    api.pickPaths.mockResolvedValue(['/tmp/one.pdf']);
+    api.uploadFile.mockResolvedValue({ uploadId: 'u-1', name: 'one.pdf', sizeBytes: 1, sha256: 'a' });
     api.startImport.mockResolvedValue({ job: { id: 'new-import', state: 'COMPLETE', completed: 1, total: 1 } });
     api.getImportItems.mockResolvedValue({ items: [], total: 0 });
     api.getCollectionDocumentSummary.mockResolvedValueOnce({ total: 0, byStatus: {} })
@@ -757,7 +755,11 @@ describe('collections panel', () => {
     render(CollectionsPanel, props({ collections: [collection('Nightfall')], selectedId: 'nightfall' }));
     await screen.findByRole('button', { name: '0 total' });
     await fireEvent.click(screen.getByRole('button', { name: 'Add documents' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+    {
+      const input = screen.getByLabelText('Files to upload') as HTMLInputElement;
+      Object.defineProperty(input, 'files', { value: [new File(['x'], 'one.pdf')], configurable: true });
+      await fireEvent.change(input);
+    }
     await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Read 1 page with Tesseract' }));
     expect(await screen.findByText('Import complete. 0 files.')).toBeTruthy();
@@ -769,7 +771,7 @@ describe('collections panel', () => {
   it('pauses an active import while hidden and resumes its terminal refresh without submitting again', async () => {
     vi.useFakeTimers();
     try {
-      api.pickPaths.mockResolvedValue(['/tmp/one.pdf']);
+      api.uploadFile.mockResolvedValue({ uploadId: 'u-1', name: 'one.pdf', sizeBytes: 1, sha256: 'a' });
       api.startImport.mockResolvedValue({ job: { id: 'new-import', state: 'RUNNING', completed: 0, total: 1 } });
       api.getJob.mockResolvedValue({ id: 'new-import', state: 'RUNNING', completed: 0, total: 1 });
       api.getImportItems.mockResolvedValue({ items: [], total: 0 });
@@ -781,7 +783,11 @@ describe('collections panel', () => {
       const view = render(CollectionsPanel, initial);
       await act(async () => {});
       await fireEvent.click(screen.getByRole('button', { name: 'Add documents' }));
-      await fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+      {
+      const input = screen.getByLabelText('Files to upload') as HTMLInputElement;
+      Object.defineProperty(input, 'files', { value: [new File(['x'], 'one.pdf')], configurable: true });
+      await fireEvent.change(input);
+    }
       await fireEvent.click(screen.getByRole('button', { name: 'Import' }));
       await act(async () => {});
       await fireEvent.click(screen.getByRole('button', { name: 'Read 1 page with Tesseract' }));
@@ -990,7 +996,8 @@ describe('collections panel', () => {
     expect(screen.getByRole('button', { name: 'Add documents' }).getAttribute('aria-expanded')).toBe('true');
     // The reused import panel names the destination collection explicitly.
     expect(await screen.findByText('Nightfall', { selector: 'strong' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Choose files…' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Upload files…' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Upload folder…' })).toBeTruthy();
   });
 
   it('asks for a selection when the archive has collections but none is managed', () => {
@@ -2051,7 +2058,7 @@ describe('collections panel', () => {
     expect((await screen.findByLabelText('OCR language') as HTMLInputElement).value).toBe('eng');
     expect(await screen.findByLabelText('Default reading method')).toBeTruthy();
     expect(api.listCollectionDocuments).toHaveBeenCalledTimes(1);
-    expect(api.enqueueImport).not.toHaveBeenCalled();
+    expect(api.uploadFile).not.toHaveBeenCalled();
   });
 
   it('switches OCR settings with the selected collection', async () => {

@@ -169,12 +169,7 @@ val ACCESS_RULES: Map<Pair<HttpMethod, String>, AccessRule> = buildMap {
     rule(post, "/api/reindex", AccessRule.InHandler("one collection's owner, or an administrator for all"))
     rule(post, "/api/imports/preview", AccessRule.InHandler("an editor of the collection in the body; paths inside an import root"))
     rule(post, "/api/imports", AccessRule.InHandler("an editor of the collection in the body; paths inside an import root"))
-    rule(post, "/api/imports/pick", AccessRule.Administrator)
     rule(post, "/api/collections/{id}/uploads", AccessRule.InCollection(EDITOR))
-    rule(get, "/api/import-roots", AccessRule.InHandler("an editor of any collection"))
-    rule(post, "/api/import-roots", AccessRule.Administrator)
-    rule(delete, "/api/import-roots/{rootId}", AccessRule.Administrator)
-    rule(get, "/api/import-roots/browse", AccessRule.InHandler("an editor of any collection"))
 
     // Jobs and deletions follow their collection; the lists show what the caller may see.
     rule(get, "/api/jobs", AccessRule.SignedIn)

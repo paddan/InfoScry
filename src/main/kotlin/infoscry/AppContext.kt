@@ -226,19 +226,12 @@ class AppContext private constructor(
                 enumerateImportSources(sources, recursive, ignore, selection)
             },
             ignorePatterns = { collectionId -> collectionService.ignorePatterns(collectionId) },
-            allowPaths = importRoots::requireAllowed,
+            allowPaths = uploadAreas::requireAllowed,
         )
     }
 
-    /** Where imports may read from: the import roots (Admin's and the environment's) and each collection's upload area. */
-    val importRoots: infoscry.jobs.ImportRoots by lazy {
-        infoscry.jobs.ImportRoots(
-            infoscry.storage.ImportRootStore(database),
-            infoscry.jobs.ImportRoots.configured(),
-            paths.uploadsDir,
-            paths.root,
-        )
-    }
+    /** Where imports read from: each collection's upload area, holding the files people uploaded. */
+    val uploadAreas: infoscry.jobs.UploadAreas by lazy { infoscry.jobs.UploadAreas(paths.uploadsDir) }
 
     /** Shared method/hash/idempotency admission used by HTTP imports and the standalone CLI import. */
     val importStartService: ImportStartService by lazy {
@@ -762,7 +755,7 @@ class AppContext private constructor(
                         // attempt that a previous process was inside is queued again, and a cancellation
                         // request that previous process recorded is honoured rather than re-run.
                         // Uploads older than their retention have been imported (or abandoned) long ago.
-                        runCatching { context.importRoots.sweepUploads() }
+                        runCatching { context.uploadAreas.sweepUploads() }
                         val resumed = jobs.resetInterrupted()
                         if (resumed > 0) {
                             LOGGER.atInfo().addKeyValue(RESUMED_JOBS_FIELD, resumed)

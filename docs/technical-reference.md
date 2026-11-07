@@ -36,7 +36,7 @@ archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its 
 | Path | Contents |
 |---|---|
 | `infoscry.lock` | Process ownership lock |
-| `library/` | Immutable managed copies and document artifacts |
+| `library/` | Immutable managed copies and document artifacts, one directory per collection; elsewhere when `INFOSCRY_LIBRARY_DIR` names another directory |
 | `models/` | Installed embedding model and tokenizer |
 | `logs/` | Structured application logs |
 | `tmp/` | Temporary work and GPU profiling artifacts |
@@ -55,8 +55,9 @@ names use the ICU collation `infoscry_nocase`.
 The schema starts with the baseline
 [001_baseline.sql](../src/main/resources/db/migration/001_baseline.sql)
 (version 1). Each later change is a numbered script beside it that changes a
-database at the version before it and keeps its rows, such as `002_import_roots.sql`
-(version 2). [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
+database at the version before it and keeps its rows: `002_import_roots.sql`
+(version 2) and `003_drop_import_roots.sql` (version 3), which removes what
+version 2 added once imports came only from uploads. [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
 applies every script above the database's version in one transaction, recording
 each version in `schema_version`, so a crash leaves the version it started from
 and starting again resumes. Values keep their
@@ -455,27 +456,25 @@ running OCR operation answers with that operation. The first approve or reject
 of a published reading decides; a later one answers with the recorded decision
 and starts no restore.
 
-Imports read from two places ([ImportRoots](../src/main/kotlin/infoscry/jobs/ImportRoots.kt)):
-the import roots and the collection's upload area
+Imports read only from the collection's upload area
+([UploadAreas](../src/main/kotlin/infoscry/jobs/UploadAreas.kt))
 `<data>/uploads/<collection>/<upload>/<file>`. The import preview, which the
 start also runs, refuses any path whose real path (links resolved) is outside
-them with 403 `IMPORT_PATH_NOT_ALLOWED`, for administrators too. Editors browse
-the roots through `GET /api/import-roots/browse`, where links out of a root are
-not listed. An administrator adds and removes roots under **Admin → Server
-folders** (`POST /api/import-roots` with the folder's absolute path,
-`DELETE /api/import-roots/{rootId}`); they are rows of `import_roots`, stored by
-real path and attributed to who added them, and each decision reads them, so a
-change counts at once. Adding a folder that is already a root, also through a
-link, answers with that root; a relative path, a missing folder, `/` and the
-data directory are refused. A root whose folder has gone is listed as
-unavailable and cannot be browsed. Directories in `INFOSCRY_IMPORT_ROOTS` are
-roots too, listed as set by the environment and removed there (409
-`IMPORT_ROOT_FROM_ENVIRONMENT`). An upload is one file per request as the raw body
+it with 403 `IMPORT_PATH_NOT_ALLOWED`, for administrators too. The server never
+imports from its own folders: preview and start take only upload ids
+(`uploads`) and refuse any other field, such as `paths`, with 400. A folder is
+uploaded from the browser file by file, after the file types and **Include
+subfolders** have chosen its files. An upload is one file per request as the raw body
 (`POST /api/collections/{id}/uploads`, file name in `X-InfoScry-Filename`),
 streamed and hashed; bytes that are already a document of the collection answer
 with that document and are not kept. Preview and start take upload ids in
-`uploads`. Upload areas older than seven days are removed at start. The
-server's native pick dialog stays administrator-only.
+`uploads`. Upload areas older than seven days are removed at start.
+
+Managed copies live in the library, `<data>/library` or the absolute directory
+`INFOSCRY_LIBRARY_DIR` names, one directory per collection id. A copy is
+written to `<library>/.import-tmp/` and renamed into place, so it stays atomic
+when the library is on a disk of its own; the server refuses to start when the
+library's parent folder is missing.
 
 API keys are read only from environment variables. Profiles and browser requests
 carry the variable's name, never its value. Keys, questions, answers, document

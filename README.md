@@ -59,7 +59,9 @@ InfoScry is a [multi-user server](docs/specs/2026-11-05-multi-user-server-design
 state and search (BM25 and vectors) are in PostgreSQL, people sign in with local
 accounts, collections have owner, editor and reader members, records show who
 created and changed them, and edits are checked against the version they were
-made from. Imports come from uploads or from import roots on the server. The CLI
+made from. Imports come only from files and folders uploaded from the person's
+own computer, and imported documents are kept in one directory per collection
+under the server's library (`INFOSCRY_LIBRARY_DIR`). The CLI
 is a client of the server with a personal access token. Earlier single-user
 archives are not migrated; collections are imported again.
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.

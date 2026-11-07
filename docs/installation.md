@@ -313,16 +313,27 @@ infoscry import --collection Notes --wait /absolute/path/to/document.pdf
 The CLI sends each request to the running server (`INFOSCRY_URL`, default
 <http://127.0.0.1:8080>) and uploads the files it imports.
 
-To let editors import from directories on the server itself, add them under
-**Admin → Server folders** with each folder's full path on the server; editors
-can then browse and pick files there, and `infoscry import --server-path` names
-paths inside them. A path outside these folders, also through a symbolic link,
-is refused. Folders can also be listed in `INFOSCRY_IMPORT_ROOTS` (separated by
-`:`) before starting the server; those are shown under Admin but changed only
-there. Uploaded files wait in `<data directory>/uploads` and are
-removed a week later; an upload may be at most `INFOSCRY_UPLOAD_MAX_BYTES`
-(default 4 GiB). Back up both the Postgres database and the data directory's
-`library/`.
+Imports come only from the person's own computer: the web reader and the CLI
+upload each file, and the server never reads its own folders. Uploaded files
+wait in `<data directory>/uploads` and are removed a week later; an upload may
+be at most `INFOSCRY_UPLOAD_MAX_BYTES` (default 4 GiB).
+
+### Choose where imported documents are kept
+
+Imported documents are kept in the library, one directory per collection
+(`<library>/<collection id>/`). The library is `<data directory>/library`
+unless `INFOSCRY_LIBRARY_DIR` names another absolute directory on the server,
+such as a larger disk. Set it in `.env` before the first import:
+
+```bash
+INFOSCRY_LIBRARY_DIR=/Volumes/Archive/InfoScry
+```
+
+The folder that holds it must exist; the server refuses to start rather than
+write elsewhere when the disk is not connected. Changing the variable later
+does not move documents already imported: move the library's contents to the
+new place while the server is stopped. Back up both the Postgres database and
+the library.
 For a disposable sample, use `src/test/resources/fixtures/sample.txt` from the
 repository root. Import keeps an immutable managed copy and leaves the original
 unchanged.
@@ -422,6 +433,3 @@ The CLI profile commands go through the running server, like Admin does.
 - **E-book converter unavailable:** check `command -v ebook-convert` and
   `ebook-convert --version` in the server's launch terminal. See
   [Calibre setup](#calibre-for-e-book-conversion), then restart the server and retry.
-- **No graphical session:** the server's own pick dialog, which only
-  administrators see, falls back to entering paths by hand. Everyone else uploads
-  files or picks them under **Server folders…**.

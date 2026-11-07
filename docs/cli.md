@@ -201,9 +201,7 @@ exist; create it with `infoscry collection create` first. The paths are on this
 machine: each file is uploaded to the server (a folder's files, its whole tree
 with `--recursive`; hidden files are left out), and a file whose bytes are
 already a document of the collection is reported as a duplicate without being
-sent. With `--server-path` the paths are instead on the server, inside one of
-its import roots (**Admin → Server folders**); a directory is read at its top level
-unless `--recursive` is given. With `--wait`, the command blocks until the
+sent. The server never reads its own folders. With `--wait`, the command blocks until the
 import finishes and reports every document (and exits nonzero if any failed).
 
 `--method none|tesseract|surya|llm:<profileId>` selects the reading method; without it
@@ -235,7 +233,7 @@ infoscry import --collection Notes --recursive --include=pdf,docx /path/to/dir
 infoscry import --collection Notes --recursive --exclude=tmp,log /path/to/dir
 ```
 
-Options: `--collection`, `--server-path`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`.
+Options: `--collection`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`.
 
 ## search
 

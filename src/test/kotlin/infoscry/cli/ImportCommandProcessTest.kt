@@ -56,19 +56,19 @@ class ImportCommandProcessTest {
     }
 
     @Test
-    fun `method selection prints the preview and an identical server-path command returns the same job`() {
+    fun `method selection prints the preview and the same command again changes nothing`() {
         val source = writeSource("repeat.txt", "Read once.\n")
         val args = arrayOf("import", "--collection", "Default",
-            "--method", "tesseract", "--yes", "--json", "--wait", "--server-path", source.toRealPath().toString())
+            "--method", "tesseract", "--yes", "--json", "--wait", source.toString())
         val first = cli.run(*args)
         assertEquals(0, first.exitCode, first.stderr)
         assertContains(first.stderr, "this machine")
+        val jobs = cli.context.jobs.list(100).size
         val again = cli.run(*args)
         assertEquals(0, again.exitCode, again.stderr)
-        val one = ApiJson.decodeFromString<ImportResult>(first.stdout.lines().last { it.isNotBlank() })
-        val two = ApiJson.decodeFromString<ImportResult>(again.stdout.lines().last { it.isNotBlank() })
-        assertEquals(one.jobId, two.jobId)
-        assertEquals(1, two.imported)
+        assertEquals(1, ApiJson.decodeFromString<ImportResult>(first.stdout.lines().last { it.isNotBlank() }).imported)
+        assertEquals(1, ApiJson.decodeFromString<ImportResult>(again.stdout.lines().last { it.isNotBlank() }).duplicates)
+        assertEquals(jobs, cli.context.jobs.list(100).size)
     }
 
     @Test
@@ -87,12 +87,12 @@ class ImportCommandProcessTest {
     }
 
     @Test
-    fun `a server path outside the import roots is refused`() {
+    fun `there is no server path to import from`() {
         ImportProcessHarness.gate = null
         val result = cli.run("import", "--collection", "Default", "--method", "none", "--server-path", "/etc/hosts")
 
         assertNotEquals(0, result.exitCode)
-        assertContains(result.stderr, "IMPORT_PATH_NOT_ALLOWED")
+        assertContains(result.stderr, "no such option --server-path")
     }
 
     @Test

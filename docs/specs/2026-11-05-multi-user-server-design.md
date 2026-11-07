@@ -142,10 +142,10 @@ Users no longer import from paths on their own machine. Two sources:
 - **Upload.** The browser uploads files (multipart, one request per file, streamed to a temporary blob and
   hashed). A repeated upload of the same bytes to the same collection answers with the existing document.
   The import start dialog follows the upload, as today.
-- **Import roots.** An administrator adds host directories under Admin → Server folders (amended
-  2026-11-06; `INFOSCRY_IMPORT_ROOTS` still adds roots that are changed only there). Users with
-  `EDITOR` on a collection may browse those roots and pick files or folders; a path outside a root,
-  including through a symbolic link, is refused. Originals are never modified, as today.
+- **No import roots** (amended 2026-11-06). Imports come only from the client's computer: a folder is
+  uploaded file by file. The server never reads its own folders, so there is no import root to browse.
+- **Library location.** Imported documents are kept in one directory per collection under the server's
+  library: `<data>/library`, or the directory `INFOSCRY_LIBRARY_DIR` names (set in `.env`).
 
 ### Jobs
 
@@ -201,7 +201,7 @@ Users no longer import from paths on their own machine. Two sources:
 | Edit corrections, glossary and collection prompts | | yes | yes | yes |
 | Change collection settings, manage members, delete the collection | | | yes | yes |
 | Create collections | any signed-in user; the creator becomes `OWNER` | | | |
-| Manage users, LLM profiles, OCR profiles, import roots | | | | yes |
+| Manage users, LLM profiles, OCR profiles | | | | yes |
 
 - `collection_members (collection_id, user_id, role, added_at, added_by)`. A collection always keeps at
   least one owner; removing the last one is refused with 409.
@@ -331,7 +331,7 @@ published images, and a single-user mode without accounts.
 5. Users, sessions, CSRF, personal access tokens, admin commands; CLI as HTTP client.
 6. Memberships and the authorization seam; private conversations.
 7. Attribution columns and UI; optimistic edits and concurrent-use rules.
-8. Uploads and import roots.
+8. Uploads (import roots were later removed; see Import sources).
 9. README, AGENTS.md, technical reference and installation docs updated; old local-mode docs removed.
 
 ## Open questions

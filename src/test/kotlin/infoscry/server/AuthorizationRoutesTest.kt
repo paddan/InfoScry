@@ -168,11 +168,11 @@ class AuthorizationRoutesTest {
         assertEquals(HttpStatusCode.Forbidden, status("editor", HttpMethod.Post, "/api/reindex", """{"collection":"$collectionId"}"""))
         assertEquals(HttpStatusCode.Accepted, status("owner", HttpMethod.Post, "/api/reindex", """{"collection":"$collectionId"}"""))
 
-        // An editor imports, but only from inside an import root; the server's own files are outside them.
-        val preview = """{"collection":"$collectionId","paths":["/etc/hosts"],"method":"none"}"""
-        val editorPreview = send("editor", HttpMethod.Post, "/api/imports/preview", preview)
-        assertEquals(HttpStatusCode.Forbidden, editorPreview.status)
-        assertContains(editorPreview.bodyAsText(), "IMPORT_PATH_NOT_ALLOWED")
+        // An editor imports what was uploaded; the server's own files cannot be named at all.
+        val preview = """{"collection":"$collectionId","uploads":["00000000-0000-0000-0000-000000000000"],"method":"none"}"""
+        assertEquals(HttpStatusCode.NotFound, status("editor", HttpMethod.Post, "/api/imports/preview", preview))
+        val serverFile = """{"collection":"$collectionId","paths":["/etc/hosts"],"uploads":[],"method":"none"}"""
+        assertEquals(HttpStatusCode.BadRequest, status("editor", HttpMethod.Post, "/api/imports/preview", serverFile), "a server path is not part of the request")
         assertEquals(HttpStatusCode.Forbidden, status("reader", HttpMethod.Post, "/api/imports/preview", preview))
     }
 

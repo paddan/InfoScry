@@ -103,12 +103,21 @@ class AttributionRoutesTest {
     }
 
     private suspend fun importAs(who: String, file: Path): HttpResponse {
-        val preview = send(who, HttpMethod.Post, "/api/imports/preview", """{"collection":"$collectionId","paths":["$file"],"method":"none"}""")
+        val uploaded = harness.client.request(harness.url + "/api/collections/$collectionId/uploads") {
+            method = HttpMethod.Post
+            header(HttpHeaders.Authorization, "Bearer ${tokens.getValue(who)}")
+            header(UPLOAD_FILENAME_HEADER, file.fileName.toString())
+            contentType(ContentType.Application.OctetStream)
+            setBody(Files.readAllBytes(file))
+        }
+        check(uploaded.status == HttpStatusCode.Created || uploaded.status == HttpStatusCode.OK) { uploaded.bodyAsText() }
+        val upload = json(uploaded.bodyAsText())["uploadId"]!!.jsonPrimitive.content
+        val preview = send(who, HttpMethod.Post, "/api/imports/preview", """{"collection":"$collectionId","uploads":["$upload"],"method":"none"}""")
         check(preview.status == HttpStatusCode.OK) { preview.bodyAsText() }
         val hash = json(preview.bodyAsText())["previewHash"]!!.jsonPrimitive.content
         return send(
             who, HttpMethod.Post, "/api/imports",
-            """{"collection":"$collectionId","paths":["$file"],"method":"none","previewHash":"$hash","requestId":"${UUID.randomUUID()}"}""",
+            """{"collection":"$collectionId","uploads":["$upload"],"method":"none","previewHash":"$hash","requestId":"${UUID.randomUUID()}"}""",
         )
     }
 

@@ -3,7 +3,7 @@
  *
  * The real built reader in Chromium is driven by `web/e2e/collections-browser-acceptance.mjs` against a
  * real InfoScry server on a temporary archive. This test owns the server, the redistributable fixtures,
- * the picker the server's route calls instead of a native dialog, and the assertions that belong to the
+ * the files and folder each scenario chooses for the browser to upload, and the assertions that belong to the
  * archive rather than to the screen: document statuses, committed progress, per-file dispositions,
  * deletion recovery, and which files outside InfoScry still exist.
  *
@@ -11,7 +11,7 @@
  *
  * - the extraction pipeline is the acceptance extractor (`CollectionsAcceptancePipeline.kt`), so nothing
  *   here proves Tesseract, a real PDF's page structure, or the pinned model. Real OCR and CoreML remain
- *   their own gates, and the native picker remains a manual one;
+ *   their own gates, and the browser's own file dialog is replaced by setting the inputs' files;
  * - the document embedder is `TestDocumentEmbedder`, because a temporary archive has no model.
  *
  * Tagged `external` because it needs Node and Chromium: the default suite stays runnable everywhere.
@@ -63,7 +63,7 @@ class CollectionsBrowserAcceptanceTest {
 
     private lateinit var tempDir: Path
     private lateinit var sourcesDir: Path
-    private lateinit var picker: AcceptancePicker
+    private lateinit var picker: AcceptanceChoice
     private lateinit var gate: AcceptanceGate
     /** Set for the scenario that has to hold a collection deletion open inside its index phase. */
     private var indexHold: AcceptanceGate? = null
@@ -75,7 +75,7 @@ class CollectionsBrowserAcceptanceTest {
     fun setUp() {
         tempDir = Files.createTempDirectory("infoscry-collections-acceptance")
         sourcesDir = AcceptanceFixtures.write(tempDir.resolve("sources"))
-        picker = AcceptancePicker(sourcesDir)
+        picker = AcceptanceChoice()
         gate = AcceptanceGate()
     }
 
@@ -180,12 +180,8 @@ class CollectionsBrowserAcceptanceTest {
         val imports = context().jobs.listImports(collectionId, limit = 10)
         assertEquals(2, imports.size, "both imports must be recorded")
         val duplicateItems = context().importItems.listForJob(imports.first().id)
-        assertEquals(3, duplicateItems.size, "the duplicate import has three files")
-        assertEquals(
-            2,
-            duplicateItems.count { it.outcome == ImportItemOutcome.DUPLICATE },
-            "the two later identical files must be dispositions, not documents",
-        )
+        // Identical files are one upload, so the import reads the bytes once and records one file.
+        assertEquals(1, duplicateItems.size, "the three identical files are one upload")
         assertEquals(1, duplicateItems.count { it.outcome == ImportItemOutcome.IMPORTED })
     }
 
@@ -468,7 +464,6 @@ class CollectionsBrowserAcceptanceTest {
                 indexHold?.await()
                 harness!!.context.index().deleteCollection(collectionId)
             },
-            picker = picker::choose,
             // A chosen engine is admitted like a rescan, which needs an embedder this archive has no model for.
             rescanEmbedder = { true },
             // A retry asks this machine what it can do. The acceptance archive has no pinned model and the
@@ -523,6 +518,8 @@ class CollectionsBrowserAcceptanceTest {
                 environment()["INFOSCRY_SESSION_COOKIE"] = harness!!.sessionCookie
                 environment()["SCENARIO"] = name
                 environment()["FIXTURES"] = sourcesDir.toString()
+                environment()["CHOSEN_FILES"] = ApiJson.encodeToString(picker.files)
+                environment()["CHOSEN_FOLDER"] = picker.folder.singleOrNull().orEmpty()
                 environment()["SCREENSHOT_DIR"] = Paths.get(System.getProperty("user.dir"), "build", "c04-browser-evidence").toString()
             }
             .start()
@@ -584,12 +581,13 @@ class CollectionsBrowserAcceptanceTest {
      */
     private fun importThroughTheRoute(collectionName: String, paths: List<String>) = runBlocking {
         val collection = context().collectionService.requireActiveByNameOrId(collectionName)
-        val previewRequest = infoscry.jobs.ImportPreviewRequest(collection.id, paths,
-            method = collection.ocrSettings().defaultMethod)
-        val preview = context().importPreviewService.preview(previewRequest)
-        val body = ApiJson.encodeToString(ImportRequest(collection = collection.id.value, paths = paths,
-            method = previewRequest.method.id, previewHash = preview.previewHash, requestId = UUID.randomUUID().toString()))
-        val response = harness!!.request(HttpMethod.Post, "/api/imports", body, Credential.BEARER)
+        // A folder is uploaded file by file, as the browser does with one the person chose.
+        val files = paths.flatMap { path ->
+            val source = java.nio.file.Path.of(path)
+            if (!java.nio.file.Files.isDirectory(source)) listOf(path)
+            else java.nio.file.Files.list(source).use { entries -> entries.filter { java.nio.file.Files.isRegularFile(it) }.map { it.toString() }.sorted().toList() }
+        }
+        val response = harness!!.previewAndStartImport(collection.id.value, files, method = collection.ocrSettings().defaultMethod.id)
         check(response.status == HttpStatusCode.Accepted) {
             "the acceptance import must be accepted, was ${response.status}: ${response.bodyAsText()}"
         }

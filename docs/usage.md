@@ -32,13 +32,12 @@ version. The first person to approve or reject a new reading decides.
 
 1. Open **Admin → Collections** and create a collection.
 2. Select the destination collection and choose **Add documents**.
-3. Use **Upload files…** to send files from your own computer, or **Server
-   folders…** to pick files and folders in the folders an administrator opened
-   on the server under **Admin → Server folders**. Enable **Include subfolders** to import a server folder
-   recursively. A file that is already in the collection is not uploaded again.
-   Administrators also have **Choose files…** and **Choose folder…**, which open
-   a dialog on the server's own screen.
-4. Press **Import** to open the reading dialog. Choose Tesseract, Surya or an
+3. Use **Upload files…** or **Upload folder…** to choose files or a folder on
+   your own computer. A folder imports its top level; enable **Include
+   subfolders** for everything under it. Hidden files are left out, and the
+   file types decide which files are imported.
+4. Press **Import**. The chosen files are uploaded first; a file that is
+   already in the collection is not uploaded again. The reading dialog opens next. Choose Tesseract, Surya or an
    enabled image-capable LLM profile. The collection default only pre-selects it.
 5. Check the page count, destination and estimated cost, then confirm **Read …**
    or **Send …**. Unavailable methods show their reason.
@@ -49,15 +48,16 @@ version. The first person to approve or reject a new reading decides.
    Saved page progress survives reloading and resuming an interrupted import.
 7. Press **Stop importing** to cancel a running import. It stops at the next
    file or page boundary and keeps the files and pages already saved. Importing
-   the same paths again skips the finished files and resumes the rest.
+   the same files again skips the finished ones and resumes the rest.
 
 An import continues after a reload or a server restart. When the collection has
 an unfinished import, Admin opens its import panel with the same progress bars
 and **Stop importing** button as when the import was started.
 
-The picker opens on the Mac running the server and requires a graphical session.
-When that is unavailable, enter paths manually. Imports use immutable managed
-copies and detect duplicates within each collection; originals are unchanged.
+Imports come only from your computer; the server never reads its own folders.
+Each imported file becomes an immutable managed copy in the collection's own
+directory of the server's library, duplicates are detected within each
+collection, and the files on your computer are unchanged.
 
 A new archive starts empty. Older archives retain an existing automatic
 `Default` collection, which you can rename or delete. You may also create a

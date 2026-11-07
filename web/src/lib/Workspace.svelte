@@ -59,7 +59,6 @@
   } from './api';
   import AccountPanel from './AccountPanel.svelte';
   import UsersPanel from './UsersPanel.svelte';
-  import ImportRootsPanel from './ImportRootsPanel.svelte';
 
   /** The signed-in user; administrators also see the Users tab. */
   export let user: User;
@@ -94,7 +93,7 @@
   function updateDocumentListView(collectionId: string, state: DocumentListViewState): void {
     documentListViews = new Map(documentListViews).set(collectionId, state);
   }
-  let adminTab: 'COLLECTIONS' | 'JOBS' | 'LLM' | 'ACCOUNT' | 'USERS' | 'FOLDERS' = 'COLLECTIONS';
+  let adminTab: 'COLLECTIONS' | 'JOBS' | 'LLM' | 'ACCOUNT' | 'USERS' = 'COLLECTIONS';
   let mediaType = '';
   let pathContains = '';
   let textContains = '';
@@ -681,8 +680,8 @@
   }
 
   function handleAdminTabKeydown(event: KeyboardEvent): void {
-    const tabs: ('COLLECTIONS' | 'JOBS' | 'LLM' | 'ACCOUNT' | 'USERS' | 'FOLDERS')[] = user.role === 'ADMIN'
-      ? ['COLLECTIONS', 'JOBS', 'LLM', 'ACCOUNT', 'USERS', 'FOLDERS']
+    const tabs: ('COLLECTIONS' | 'JOBS' | 'LLM' | 'ACCOUNT' | 'USERS')[] = user.role === 'ADMIN'
+      ? ['COLLECTIONS', 'JOBS', 'LLM', 'ACCOUNT', 'USERS']
       : ['COLLECTIONS', 'JOBS', 'ACCOUNT'];
     const current = tabs.indexOf(adminTab);
     let next = current;
@@ -1212,14 +1211,6 @@
               tabindex={adminTab === 'USERS' ? 0 : -1}
               onclick={() => (adminTab = 'USERS')}
             >Users</button>
-            <button
-              id="admin-tab-folders"
-              role="tab"
-              aria-selected={adminTab === 'FOLDERS'}
-              aria-controls="admin-panel-folders"
-              tabindex={adminTab === 'FOLDERS' ? 0 : -1}
-              onclick={() => (adminTab = 'FOLDERS')}
-            >Server folders</button>
           {/if}
         </div>
         <div class="admin-panels">
@@ -1266,9 +1257,6 @@
           {#if user.role === 'ADMIN'}
             <div id="admin-panel-users" role="tabpanel" aria-labelledby="admin-tab-users" hidden={adminTab !== 'USERS'}>
               {#if activeMode === 'ADMIN' && adminTab === 'USERS'}<UsersPanel currentUserId={user.id} />{/if}
-            </div>
-            <div id="admin-panel-folders" role="tabpanel" aria-labelledby="admin-tab-folders" hidden={adminTab !== 'FOLDERS'}>
-              {#if activeMode === 'ADMIN' && adminTab === 'FOLDERS'}<ImportRootsPanel />{/if}
             </div>
           {/if}
         </div>

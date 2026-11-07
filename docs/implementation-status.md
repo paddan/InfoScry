@@ -13,7 +13,7 @@ application suites.
 
 | Area | Current behavior |
 |---|---|
-| Server | One process with backend, job lanes and static web reader; PostgreSQL in Docker; local accounts, collection members, attribution and optimistic edits; uploads and import roots; the CLI as an HTTP client with a personal access token |
+| Server | One process with backend, job lanes and static web reader; PostgreSQL in Docker; local accounts, collection members, attribution and optimistic edits; imports only from the client's computer (files and folders uploaded); a configurable library location; the CLI as an HTTP client with a personal access token |
 | Import | Managed copies, per-collection deduplication, extraction/OCR checkpoints and persistent jobs; separate file and current-document page progress bars backed by saved results; unsupported files are skipped and not shown; include/exclude extensions and per-collection ignore patterns |
 | Search | Keyword, semantic and hybrid retrieval, live as the reader types; advanced filters rerun the current query; validated retrieval refills stale or artifact-heavy results; inclusive import dates and safe excerpt highlighting; recoverable reindexing |
 | Collections | Creation, settings (including OCR defaults and ignore patterns), paged document browsing, progress, durable import history, retries (optionally with a chosen OCR method) and recoverable deletion |
@@ -325,8 +325,7 @@ multipart.
   container and the real CoreML model: sign-in and forced password change,
   personal access tokens for the CLI, members and roles (404 for non-members),
   attribution and a stale edit refused with `EDIT_CONFLICT` naming the other
-  person, uploads and `--server-path` imports with a link out of an import
-  root refused, and a browser session surviving a server restart.
+  person, uploads, and a browser session surviving a server restart.
 - **After ticket 9 (2026-11-06):** `./gradlew externalTest` ran 52 tests and 51
   passed: every Playwright suite signed in, the Tesseract and Surya real-tool
   tests, and the new `MultiUserBrowserAcceptanceTest` (an administrator adds a user and
@@ -342,15 +341,16 @@ multipart.
   loopback; the installed server created an administrator and served against it,
   and the account survived `down` and `up`.
 
-### Server folders under Admin (2026-11-06)
+### Imports from the client's computer only (2026-11-06)
 
-Administrators add and remove import roots under **Admin → Server folders**
-instead of only through `INFOSCRY_IMPORT_ROOTS`. Roots are rows of
-`import_roots`, added by schema version 2 (`002_import_roots.sql`); the
-migrator now applies numbered scripts in order, so an existing version-1
-database gains the table on the next start and keeps its data. Covered by
-`SchemaMigratorTest`, `ImportSourcesRoutesTest`, `ImportRootsPanel.test.ts` and
-the server-folder steps of `MultiUserBrowserAcceptanceTest`.
+Imports come only from files and folders uploaded from the person's computer:
+**Upload files…** and **Upload folder…** choose them, and they are uploaded when
+Import is pressed, after the file types and **Include subfolders** chose them.
+Server import roots (briefly managed under Admin as schema version 2), the
+server's own pick dialog and `infoscry import --server-path` are removed; schema
+version 3 drops `import_roots`, so a database at any version converges and keeps
+its documents. Imported documents are kept in one directory per collection under
+the library, which `INFOSCRY_LIBRARY_DIR` can place on another disk.
 
 ## Recorded verification
 

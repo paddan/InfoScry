@@ -131,7 +131,12 @@ class ImportPreviewService internal constructor(
         val extensions = ExtensionFilter.of(request.include, request.exclude)
         return enumerate(request.paths, request.recursive, ignore)
             .filter { source -> selection.admits(source.path, source.relativePath, source.exists, ignore, extensions) }
-            .sortedWith { left, right -> compareUtf8(left.path.toString(), right.path.toString()) }
+            // By file name first: an upload's path starts with its random id, so path order alone would shuffle
+            // a chosen folder. The full path breaks ties, so the order stays the same for the same files.
+            .sortedWith { left, right ->
+                compareUtf8(left.path.fileName?.toString().orEmpty(), right.path.fileName?.toString().orEmpty())
+                    .takeIf { it != 0 } ?: compareUtf8(left.path.toString(), right.path.toString())
+            }
     }
 
     private fun hashOfSelected(language: String, method: ReadingMethod, files: List<ImportSource>): String {

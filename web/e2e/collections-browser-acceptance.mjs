@@ -4,7 +4,7 @@
  * It drives the actual built SvelteKit reader in Chromium against a local InfoScry server whose import
  * pipeline is the acceptance extractor and whose embedder is the deterministic test fake.
  * `CollectionsBrowserAcceptanceTest` owns the server, the temporary archive, the fixture files and the
- * picker, and sets BASE_URL, SCENARIO and FIXTURES for this script.
+ * files a scenario chooses (CHOSEN_FILES, CHOSEN_FOLDER), and sets BASE_URL, SCENARIO and FIXTURES for this script.
  *
  * Every scenario asserts on what the reader shows and exits non-zero on failure, so the Kotlin test only
  * has to check the process result, its own database facts, and the `MARK:` lines this script prints. A
@@ -168,10 +168,19 @@ async function confirmReading(page) {
   await dialog.waitFor({ state: 'detached', timeout: 20_000 });
 }
 
+const CHOSEN_FILES = JSON.parse(process.env.CHOSEN_FILES || '[]');
+const CHOSEN_FOLDER = process.env.CHOSEN_FOLDER || '';
+
+/** Chooses the scenario's files or folder in the import panel, as a person does in the browser's own dialog. */
+async function chooseOnComputer(page, kind) {
+  if (kind === 'folder') await page.locator('.import-panel input[aria-label="Folder to upload"]').setInputFiles(CHOSEN_FOLDER);
+  else await page.locator('.import-panel input[aria-label="Files to upload"]').setInputFiles(CHOSEN_FILES);
+}
+
 async function chooseAndImport(page, kind) {
   await page.locator(`${PANEL} button`, { hasText: 'Add documents' }).first().click();
   await page.waitForSelector('.import-panel', { timeout: 20_000 });
-  await page.locator('.import-panel button', { hasText: kind === 'folder' ? 'Choose folder' : 'Choose files' }).first().click();
+  await chooseOnComputer(page, kind);
   await page.waitForSelector('.import-panel .paths li', { timeout: 20_000 });
   await page.locator('.import-panel button', { hasText: 'Import' }).first().click();
   await confirmReading(page);
@@ -623,7 +632,7 @@ const scenarios = {
     const { page, consoleErrors } = await openAdmin(browser);
     await selectCollection(page, 'Notes');
     await page.locator(`${PANEL} button`, { hasText: 'Add documents' }).first().click();
-    await page.locator('.import-panel button', { hasText: 'Choose files' }).click();
+    await chooseOnComputer(page, 'files');
     await page.locator('.import-panel button', { hasText: 'Import' }).first().click();
     const dialog = page.getByTestId('start-reading-dialog');
     await dialog.waitFor({ timeout: 20_000 });
@@ -733,6 +742,8 @@ const scenarios = {
     await waitForRow(page, 'legacy-document.txt');
 
     await deleteCollection(page, 'Old notes');
+    // The deletion runs on the server; the list drops the collection once it has finished.
+    for (let tries = 0; tries < 100 && (await collectionNames(page)).includes('Old notes'); tries += 1) await page.waitForTimeout(200);
     assert(!(await collectionNames(page)).includes('Old notes'), 'the legacy collection must be removable by choice');
 
     // A collection the reader names Default themselves is not the old seed: it has its own id, and that
@@ -816,9 +827,10 @@ const scenarios = {
     await chooseAndImport(page, 'files');
     const duplicatesFinished = await waitForImportFinished(page);
     assert(/Import complete/.test(duplicatesFinished), `the duplicate import must finish, panel said ${JSON.stringify(duplicatesFinished)}`);
+    // Identical files are one upload: the panel says so, and the import reads the bytes once.
+    assert(duplicatesFinished.includes('2 files are identical to another chosen file and are imported once.'), `the panel must name the identical files, said ${JSON.stringify(duplicatesFinished)}`);
     const duplicateResults = await importResults(page);
-    assert(duplicateResults.length === 3, `three files were selected, got ${duplicateResults.length} results`);
-    assert(duplicateResults.filter((item) => item.outcome === 'Duplicate').length === 2, 'two of the identical files must be duplicates');
+    assert(duplicateResults.length === 1, `the three identical files are one import, got ${duplicateResults.length} results`);
     await reloadAndSelect(page, 'Notes');
     await refreshRows(page);
     assert((await pagingText(page)).includes('of 56 documents'), 'only one of the three identical files may become a document');
@@ -829,16 +841,15 @@ const scenarios = {
     const history = await importHistory(page);
     assert(history.length === 2, `two imports must be listed, got ${history.length}`);
     assert(history[0].state === 'Complete', `the newest import must read Complete, got ${history[0].state}`);
-    assert(history[0].files === '3 of 3 files', `file counters are files, got ${history[0].files}`);
+    assert(history[0].files === '1 of 1 files', `the identical files are one file, got ${history[0].files}`);
     assert(history[1].files === '55 of 55 files', `the folder import must count 55 files, got ${history[1].files}`);
     const perFile = await showFiles(page, 0);
-    assert(perFile.filter((item) => item.outcome === 'Duplicate').length === 2, 'the per-file results must report duplicates in words');
 
     await reloadAndSelect(page, 'Notes');
     await waitForRow(page, 'dup-a.txt');
     assert((await importHistory(page)).length === 2, 'reloading must not lose an import');
     const perFileAfterReload = await showFiles(page, 0);
-    assert(perFileAfterReload.filter((item) => item.outcome === 'Duplicate').length === 2, 'the duplicate outcomes must survive a reload');
+    assert(perFileAfterReload.length === 1 && JSON.stringify(perFileAfterReload) === JSON.stringify(perFile), 'the per-file outcome must survive a reload');
     assert((await pagingText(page)).includes('of 56 documents'), 'the document count must survive a reload');
 
     // A narrow window scrolls the wide table inside the panel rather than pushing the page sideways.
@@ -1233,7 +1244,7 @@ const scenarios = {
     await page.locator(`${PANEL} button`, { hasText: 'Add documents' }).first().click();
     await page.waitForSelector('.import-panel', { timeout: 20_000 });
     await page.check('.import-panel input[name="file-types"][value="include"]');
-    await page.locator('.import-panel button', { hasText: 'Choose folder' }).first().click();
+    await chooseOnComputer(page, 'folder');
     await page.waitForSelector('.import-panel .paths li', { timeout: 20_000 });
     // An empty list never silently means "no filter": the import is not offered until one is named.
     assert(
@@ -1261,7 +1272,7 @@ const scenarios = {
     await page.waitForSelector('.import-panel', { timeout: 20_000 });
     await page.check('.import-panel input[name="file-types"][value="exclude"]');
     await page.fill('#extension-list', 'log');
-    await page.locator('.import-panel button', { hasText: 'Choose folder' }).first().click();
+    await chooseOnComputer(page, 'folder');
     await page.waitForSelector('.import-panel .paths li', { timeout: 20_000 });
     await page.locator('.import-panel button.primary', { hasText: 'Import' }).click();
   await confirmReading(page);
