@@ -261,7 +261,7 @@ class SuryaStructureParserTest {
     fun `parserNameAndNoDegradationForCleanPage`() {
         val result = parse(block("<h1>Title</h1>", "SectionHeader"), block("body", "Text"))
         assertEquals(SuryaStructureParser.PARSER, result.parser)
-        assertEquals("surya-html/1", result.parser)
+        assertEquals("surya-html/2", result.parser)
         assertFalse(result.degraded)
     }
 }

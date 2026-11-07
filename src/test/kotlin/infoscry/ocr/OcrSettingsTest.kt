@@ -284,7 +284,7 @@ class OcrSettingsTest {
             OcrTranscriptionFingerprint.of("doc-1", "unit-1", 0, newer),
             "a page read into another structure format was treated as the same reading",
         )
-        assertEquals("surya-html/1", current.copy(engine = OcrEngine.SURYA).structureParser)
+        assertEquals("surya-html/2", current.copy(engine = OcrEngine.SURYA).structureParser)
         assertEquals("tesseract-tsv/1", current.copy(engine = OcrEngine.TESSERACT).structureParser)
         assertEquals("markdown/1", current.copy(engine = OcrEngine.LLM, profileRevisionId = "rev-1").structureParser)
         assertFailsWith<IllegalArgumentException> { current.copy(structureVersion = 0) }

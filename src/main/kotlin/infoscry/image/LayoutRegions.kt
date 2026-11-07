@@ -14,6 +14,7 @@ import infoscry.ocr.PageStructure
 import infoscry.ocr.PixelBox
 import infoscry.ocr.StructureBlock
 import infoscry.ocr.SuryaOcr
+import infoscry.ocr.SuryaStructureParser
 import infoscry.ocr.SuryaWorkerException
 import infoscry.storage.CaptionSource
 import java.awt.image.BufferedImage
@@ -87,10 +88,14 @@ class LayoutRegions(
         settings: OcrSettingsSnapshot,
     ): ParentImages {
         require(structure == null || pageText != null) { "a known page structure needs the text it was derived into" }
-        if (structure != null) {
+        // A stored structure is used only when it can place regions on this very raster: it was made by a parser that
+        // keeps word-less figures, and from the same page image (its boxes are that image's pixels). Anything else is
+        // treated as absent, and the page is read for its layout again.
+        val known = structure?.takeIf { it.parser != SuryaStructureParser.LEGACY_PARSER && it.imageSha256 == page.sha256 }
+        if (known != null) {
             // A page without figures has no regions to cut, so its size is never read.
-            if (figuresOf(structure).isEmpty()) return ParentImages.NONE
-            return withPage(page) { reader -> regionsIn(parent, reader, structure, requireNotNull(pageText)) }
+            if (figuresOf(known).isEmpty()) return ParentImages.NONE
+            return withPage(page) { reader -> regionsIn(parent, reader, known, requireNotNull(pageText)) }
         }
 
         // The engine is checked first, then the header is read once before Surya is called, so a page that is

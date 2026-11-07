@@ -17,6 +17,7 @@ import infoscry.ocr.PageStructure
 import infoscry.ocr.PixelBox
 import infoscry.ocr.STRUCTURE_VERSION
 import infoscry.ocr.StructureBlock
+import infoscry.ocr.SuryaStructureParser
 import infoscry.ocr.SuryaOcr
 import infoscry.ocr.SuryaWorkerException
 import infoscry.ocr.TextRange
@@ -102,11 +103,42 @@ class LayoutRegionsTest {
         val engine = FakeSurya { error("the engine must not read a page with a stored structure") }
         val page = page()
 
-        val result = regions(engine, page, structure = structureOf(figureAWithCaption()))
+        val result = regions(
+            engine, page,
+            structure = structureOf(figureAWithCaption(), imageSha256 = page.sha256, parser = SuryaStructureParser.PARSER),
+        )
 
         assertEquals(2, result.images.size)
         assertEquals("Caption one.", result.images.first().caption)
         assertEquals(0, engine.calls)
+    }
+
+    @Test
+    fun `a structure from the older parser is treated as absent and the page is read for its layout`() {
+        val page = page()
+        val engine = FakeSurya { reading(page, PAGE_TEXT, figureAWithCaption()) }
+
+        val result = regions(
+            engine, page,
+            structure = structureOf(figureAWithCaption(), imageSha256 = page.sha256, parser = SuryaStructureParser.LEGACY_PARSER),
+        )
+
+        assertEquals(1, engine.calls)
+        assertEquals(2, result.images.size)
+    }
+
+    @Test
+    fun `a structure made from another page image is treated as absent, never cropped from this raster`() {
+        val page = page()
+        val engine = FakeSurya { reading(page, PAGE_TEXT, figureAWithCaption()) }
+
+        val result = regions(
+            engine, page,
+            structure = structureOf(figureAWithCaption(), imageSha256 = "b".repeat(64), parser = SuryaStructureParser.PARSER),
+        )
+
+        assertEquals(1, engine.calls)
+        assertEquals(2, result.images.size)
     }
 
     @Test
@@ -222,7 +254,8 @@ class LayoutRegionsTest {
         val small = LayoutRegions(PageOcrEngines(emptyList()), maxRenderedPixels = 1_000L)
 
         val result = runBlocking {
-            small.regionsOf(parent, page(), structureOf(listOf(paragraph())), PAGE_TEXT, settings)
+            val page = page()
+            small.regionsOf(parent, page, structureOf(listOf(paragraph()), imageSha256 = page.sha256), PAGE_TEXT, settings)
         }
 
         assertEquals(ParentImages.NONE, result)
@@ -254,11 +287,16 @@ class LayoutRegionsTest {
             structure = structureOf(blocks, text),
         )
 
-    private fun structureOf(blocks: List<StructureBlock>, text: String = PAGE_TEXT): PageStructure = PageStructure(
+    private fun structureOf(
+        blocks: List<StructureBlock>,
+        text: String = PAGE_TEXT,
+        imageSha256: String = "a".repeat(64),
+        parser: String = "surya",
+    ): PageStructure = PageStructure(
         version = STRUCTURE_VERSION,
         textSha256 = PdfModelRules.sha256Of(text),
-        imageSha256 = "a".repeat(64),
-        parser = "surya",
+        imageSha256 = imageSha256,
+        parser = parser,
         blocks = blocks,
     )
 
