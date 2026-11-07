@@ -3,6 +3,7 @@ package infoscry.storage
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.NormalizedBox
+import infoscry.domain.SourceLocation
 import infoscry.image.ImageExtractionMode
 import infoscry.image.ImageSourceKind
 import java.sql.ResultSet
@@ -128,6 +129,35 @@ class ImageStore(private val database: Database) {
         }
     }
 
+    /** An image of a revision with the locator of its page row. */
+    class LocatedImage(val image: StoredImage, val locator: SourceLocation.ImageRegion)
+
+    /**
+     * The images of one revision with their page locators, in reading order, in one query; or, with [unitId], the
+     * one image of that unit (an empty list when the revision holds no such image). Same join as [imagesOf].
+     */
+    fun locatedImagesOf(revisionId: String, unitId: ContentUnitId? = null): List<LocatedImage> = database.read { connection ->
+        connection.prepareStatement(
+            SELECT_IMAGES.replaceFirst("SELECT ", "SELECT p.locator AS page_locator, ") + " " +
+                "JOIN document_revisions r ON r.document_id = i.document_id " +
+                "JOIN page_text_revisions p ON p.revision_id = r.id AND p.unit_id = i.unit_id " +
+                "AND p.source_image_sha256 = i.artifact_sha256 " +
+                "WHERE r.id = ? AND (p.locator::jsonb ->> 'type') = 'image_region'" +
+                (if (unitId != null) " AND i.unit_id = ?" else "") + " ORDER BY p.ordinal",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            if (unitId != null) statement.setString(2, unitId.value)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        val locator = LOCATOR_JSON.decodeFromString(SourceLocation.serializer(), rows.getString("page_locator"))
+                        if (locator is SourceLocation.ImageRegion) add(LocatedImage(rows.toImage(), locator))
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * The checkpoints committed for [documentId] under [target] and [mode] by an extractor of
      * [extractorVersion], by parent unit. A checkpoint of another extractor version is not returned, so a new
@@ -228,6 +258,8 @@ class ImageStore(private val database: Database) {
     }
 
     private companion object {
+        val LOCATOR_JSON = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
         const val SELECT_IMAGES =
             "SELECT i.document_id, i.unit_id, i.artifact_sha256, i.parent_unit_id, i.source_kind, " +
                 "i.artifact_relative_path, i.thumbnail_relative_path, i.media_type, i.width_px, i.height_px, " +

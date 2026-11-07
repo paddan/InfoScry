@@ -152,6 +152,23 @@ class ImageStoreTest {
     }
 
     @Test
+    fun `locatedImagesOf answers the images with their page locators in one query, or the one unit asked for`() {
+        store.record(image("u1"))
+        store.record(image("u2", hash = otherSha))
+        revision("rev-1", Triple(1_000_000_001, "u2", otherSha), Triple(1_000_000_000, "u1", sha))
+
+        val all = store.locatedImagesOf("rev-1")
+        assertEquals(listOf("u1", "u2"), all.map { it.image.unitId.value })
+        assertEquals(store.imagesOf("rev-1"), all.map { it.image })
+        assertEquals(SourceLocation.ImageRegion(SourceLocation.PdfPage(1), 1, null), all.first().locator)
+
+        val one = store.locatedImagesOf("rev-1", ContentUnitId("u2")).single()
+        assertEquals("u2", one.image.unitId.value)
+        assertEquals(emptyList(), store.locatedImagesOf("rev-1", ContentUnitId("u3")))
+        assertEquals(emptyList(), store.locatedImagesOf("no-such-revision"))
+    }
+
+    @Test
     fun `deleting the document removes its images and checkpoints`() {
         store.record(image("u1"))
         store.commitCheckpoint(

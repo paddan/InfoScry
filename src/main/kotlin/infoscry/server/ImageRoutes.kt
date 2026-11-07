@@ -6,6 +6,7 @@ import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
 import infoscry.image.ImageSourceKind
+import infoscry.storage.ImageStore
 import infoscry.storage.RevisionState
 import infoscry.storage.StoredImage
 import io.ktor.http.ContentType
@@ -120,29 +121,29 @@ private fun ApplicationCall.imageScope(context: AppContext): Pair<Document, Stri
     return document to revision.id
 }
 
-/** The revision's images with their metadata, in reading order. */
+/** The revision's images with their metadata, in reading order: one query, however many images it holds. */
 private fun imageViews(context: AppContext, revisionId: String): List<Pair<ImageView, StoredImage>> =
-    context.imageStore.imagesOf(revisionId).mapNotNull { image ->
-        val locator = context.revisions.pageForUnit(revisionId, image.unitId)?.locator as? SourceLocation.ImageRegion
-            ?: return@mapNotNull null
-        ImageView(
-            unitId = image.unitId.value,
-            locator = locator,
-            label = locator.describe(),
-            parentUnitId = image.parentUnitId.value,
-            kind = image.kind.name,
-            mediaType = image.mediaType,
-            widthPx = image.widthPx,
-            heightPx = image.heightPx,
-            caption = image.caption,
-            captionSource = image.captionSource?.name,
-        ) to image
-    }
+    context.imageStore.locatedImagesOf(revisionId).map { it.toView() }
 
+private fun ImageStore.LocatedImage.toView(): Pair<ImageView, StoredImage> = ImageView(
+    unitId = image.unitId.value,
+    locator = locator,
+    label = locator.describe(),
+    parentUnitId = image.parentUnitId.value,
+    kind = image.kind.name,
+    mediaType = image.mediaType,
+    widthPx = image.widthPx,
+    heightPx = image.heightPx,
+    caption = image.caption,
+    captionSource = image.captionSource?.name,
+) to image
+
+/** The one image a request names, looked up directly rather than by walking the revision's images. */
 private fun ApplicationCall.findImage(context: AppContext, revisionId: String?): Pair<ImageView, StoredImage> {
     val unitId = parameters["unitId"]?.takeIf(String::isNotBlank) ?: throw BadRequestException("an image needs an id")
-    return revisionId?.let { revision -> imageViews(context, revision).firstOrNull { it.second.unitId == ContentUnitId(unitId) } }
-        ?: throw missingImage()
+    return revisionId?.let { revision ->
+        context.imageStore.locatedImagesOf(revision, ContentUnitId(unitId)).firstOrNull()?.toView()
+    } ?: throw missingImage()
 }
 
 /** The media type to send for stored [raw], or null when it is not a raster image that is safe to show inline. */
