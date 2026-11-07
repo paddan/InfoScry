@@ -662,7 +662,7 @@ private fun declaredExpansion(path: Path): Long? = try {
 }
 
 /** One block of a Word document: a paragraph or a table row, and the paragraphs it covers. */
-private data class WordBlock(
+internal data class WordBlock(
     val startParagraph: Int,
     val endParagraph: Int,
     val text: String,
@@ -676,7 +676,7 @@ private data class WordBlock(
  * Sections close on the next heading of any level, so each block belongs to exactly one unit: a citation
  * names one place rather than the two that nesting would produce.
  */
-private fun wordUnits(blocks: List<WordBlock>): List<OfficeUnit> {
+internal fun wordUnits(blocks: List<WordBlock>): List<OfficeUnit> {
     val units = mutableListOf<OfficeUnit>()
     val stack = ArrayDeque<Pair<Int, String>>()
     var headingPath: List<String> = emptyList()
@@ -723,7 +723,7 @@ private fun wordUnits(blocks: List<WordBlock>): List<OfficeUnit> {
  * A table row counts the paragraphs inside its cells, because that is how Word numbers them; the row is
  * cited as one block whose text keeps the cells in reading order.
  */
-private fun ooxmlBlocks(document: XWPFDocument): List<WordBlock> {
+internal fun ooxmlBlocks(document: XWPFDocument): List<WordBlock> {
     val blocks = mutableListOf<WordBlock>()
     var paragraphNumber = 0
     document.bodyElements.forEach { element ->
