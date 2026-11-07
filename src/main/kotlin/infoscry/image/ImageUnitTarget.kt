@@ -9,7 +9,8 @@ import infoscry.domain.SourceLocation
  * or rescan's sink, which turns it into a unit with the caption as its text.
  *
  * [deliver] runs inside the parent unit's boundary and may run again for the same image after an interruption,
- * so it must be idempotent: the same [unitId] and [image] leave one unit.
+ * so it must be idempotent: the same [unitId] and [image] leave one unit, and a repeat with a different [ordinal]
+ * for an existing [unitId] (an earlier image of the parent was filtered differently) moves that unit rather than failing.
  */
 interface ImageUnitTarget {
 

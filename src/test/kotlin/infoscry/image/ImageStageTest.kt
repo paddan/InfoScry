@@ -292,6 +292,57 @@ class ImageStageTest {
     }
 
     @Test
+    fun `a standalone picture that is tiny or one colour is still kept`() {
+        val tiny = BufferedImage(20, 20, BufferedImage.TYPE_INT_RGB)
+        val bytes = FinderFixtures.encode(tiny, "png")
+        val picture = directory.resolve("tiny.png")
+        Files.write(picture, bytes)
+        val owner = documentStore.insert(
+            newDocument(document.collectionId, "doc-tiny").copy(
+                mediaType = "image/png",
+                sha256 = infoscry.storage.ContentAddressedFile.sha256Of(bytes),
+            ),
+        )
+        val parent = ParentUnit(ContentUnitId.new(), 0, SourceLocation.Image("tiny.png"))
+        val found = FoundImage(parent, ImageSourceKind.STANDALONE, ImageProbe.candidateOf(bytes, null)!!, null, null)
+        val finder = FakeFinder(mapOf(parent.unitId to ParentImages(listOf(found), emptyList(), false)), "image/png")
+
+        val result = runBlocking {
+            stage(finder, LayoutRegions(PageOcrEngines(emptyList()))).run(
+                owner, picture, artifactRoot, listOf(ParentUnitContext(parent, "", null) { null }),
+                ImageExtractionMode.EMBEDDED, RecordingTarget(), Direct, settings,
+            )
+        }
+
+        assertEquals(1, result.images)
+        assertTrue(result.skipped.isEmpty())
+    }
+
+    @Test
+    fun `a retried middle parent counts only the parents before it toward the limit`() {
+        // Parents 0 and 2 hold 200 images each and are committed; the retried parent 1 holds 150. Counting the later
+        // parent's 200 would put it at 400 + 150 and drop images; only the 200 before it count, so all 150 are kept.
+        val parents = pages(3) { page ->
+            val size = if (page == 1) 150 else 200
+            (0 until size).map { picture(96 + page * 300 + it, 100) }
+        }
+        val finder = FakeFinder(parents)
+        val target = RecordingTarget()
+        // Commit parents 0 and 2 as DONE and parent 1 as FAILED, as an earlier run with an unreadable middle would.
+        run(finder, parents.filterKeys { it != ContentUnitId("page-1") }, target)
+        store.commitCheckpoint(
+            document.id, target.target, ImageExtractionMode.EMBEDDED, IMAGE_EXTRACTOR_VERSION,
+            infoscry.storage.ImageCheckpoint(ContentUnitId("page-1"), ImageCheckpointOutcome.FAILED, 0, null),
+        )
+
+        val result = run(finder, parents, target)
+
+        assertEquals(550, result.images)
+        assertEquals(null, result.skipped[SkipReason.LIMIT])
+        assertTrue(ImageStage.LIMIT_REACHED !in result.warnings)
+    }
+
+    @Test
     fun `a document marked for deletion mid-run delivers nothing further`() {
         val parents = pages(3) { page -> listOf(picture(100 + page, 120)) }
         val target = RecordingTarget(after = { markForDeletion() })

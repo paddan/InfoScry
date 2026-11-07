@@ -107,10 +107,14 @@ class ImageStage(
         }
         source.use {
             val repeated = repeatedHashes(source, parents)
-            var total = parents.sumOf { committed[it.parent.unitId]?.imageCount ?: 0 }
+            // Only parents before the current one count toward the limit, so a retried parent sees what a first run saw.
+            var total = 0
             var regionsAvailable = true
             for (context in parents) {
-                if (context.parent.unitId in committed) continue
+                committed[context.parent.unitId]?.let {
+                    total += it.imageCount
+                    continue
+                }
                 if (documents.isDeletionTarget(document.id)) throw DocumentBeingDeletedException(document.id)
                 val run = ParentRun(document, managedPath, artifactRoot, context, mode, target, boundary, settings)
                 val outcome = extractParent(run, source, repeated, total, regionsAvailable, summary)
@@ -167,7 +171,10 @@ class ImageStage(
 
         if (parent.ordinal > ImageIdentity.MAX_PARENT_ORDINAL) {
             counts.warn(PARENT_TOO_LATE)
-            run.boundary.unit { commit(run, counts, ImageCheckpointOutcome.DONE, 0) }
+            run.boundary.unit {
+                checkNotDeleting(run)
+                commit(run, counts, ImageCheckpointOutcome.DONE, 0)
+            }
             summary.addRun(counts, 0)
             return ParentOutcome(0, false)
         }
@@ -222,6 +229,7 @@ class ImageStage(
         counts: Counts,
         outcome: ImageCheckpointOutcome,
     ): Int {
+        checkNotDeleting(run)
         val parent = run.context.parent
         val occurrences = HashMap<String, Int>()
         var delivered = 0
@@ -231,7 +239,9 @@ class ImageStage(
             val occurrence = occurrences.merge(key, 1, Int::plus)!!
             val candidate = found.candidate
 
-            val early = ImageFilter.skipReason(candidate, null)
+            // An imported picture is the document itself: the person chose it, so size and colour never drop it.
+            val exempt = found.kind == ImageSourceKind.STANDALONE
+            val early = (if (exempt) null else ImageFilter.skipReason(candidate, null))
                 ?: SkipReason.REPEATED.takeIf {
                     found.kind == ImageSourceKind.EMBEDDED && contentHash(candidate) in repeated
                 }
@@ -248,14 +258,16 @@ class ImageStage(
                 counts.warn(ImageFindFailure.TOO_MANY_IMAGES)
                 continue
             }
-            val decoded = decodeForUniformity(candidate)
-            if (decoded == null) {
-                counts.warn(ImageRejectedException.IMAGE_DECODE_FAILED)
-                continue
-            }
-            if (ImageFilter.skipReason(candidate, decoded) != null) {
-                counts.skip(SkipReason.UNIFORM)
-                continue
+            if (!exempt) {
+                val decoded = decodeForUniformity(candidate)
+                if (decoded == null) {
+                    counts.warn(ImageRejectedException.IMAGE_DECODE_FAILED)
+                    continue
+                }
+                if (ImageFilter.skipReason(candidate, decoded) != null) {
+                    counts.skip(SkipReason.UNIFORM)
+                    continue
+                }
             }
 
             val index = delivered + 1
@@ -323,6 +335,10 @@ class ImageStage(
         }
         commit(run, counts, outcome, delivered)
         return delivered
+    }
+
+    private fun checkNotDeleting(run: ParentRun) {
+        if (documents.isDeletionTarget(run.document.id)) throw DocumentBeingDeletedException(run.document.id)
     }
 
     private fun commit(run: ParentRun, counts: Counts, outcome: ImageCheckpointOutcome, delivered: Int) {
