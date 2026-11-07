@@ -321,9 +321,13 @@ be at most `INFOSCRY_UPLOAD_MAX_BYTES` (default 4 GiB).
 ### Choose where imported documents are kept
 
 Imported documents are kept in the library, one directory per collection
-(`<library>/<collection id>/`). The library is `<data directory>/library`
-unless `INFOSCRY_LIBRARY_DIR` names another absolute directory on the server,
-such as a larger disk. Set it in `.env` before the first import:
+(`<library>/<collection id>/`). The data directory is `~/.infoscry` unless
+`INFOSCRY_DATA_DIR` (or `--data-dir`) names another absolute directory, and the
+library is `<data directory>/library` unless `INFOSCRY_LIBRARY_DIR` names
+another absolute directory on the server, such as a larger disk.
+`INFOSCRY_LIBRARY_DIR` is the library itself, never the data directory: the
+server refuses to start when the two are the same. Set it in `.env` before the
+first import:
 
 ```bash
 INFOSCRY_LIBRARY_DIR=/Volumes/Archive/InfoScry

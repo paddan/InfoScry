@@ -64,6 +64,43 @@ class AppPathsTest {
     }
 
     @Test
+    fun `INFOSCRY_DATA_DIR sets the default data directory and the library follows it`() {
+        AppPaths.dataDirFromEnvironment = { dataDir.toString() }
+        try {
+            assertEquals(dataDir.toAbsolutePath().normalize(), AppPaths.defaultDataDir())
+            assertEquals(dataDir.toAbsolutePath().normalize().resolve("library"), AppPaths.from(AppPaths.defaultDataDir()).libraryDir)
+        } finally {
+            AppPaths.dataDirFromEnvironment = { null }
+        }
+        assertEquals(Path.of(System.getProperty("user.home"), ".infoscry"), AppPaths.defaultDataDir())
+    }
+
+    @Test
+    fun `INFOSCRY_DATA_DIR must be absolute`() {
+        AppPaths.dataDirFromEnvironment = { "relative/data" }
+        try {
+            val failure = kotlin.test.assertFailsWith<IllegalStateException> { AppPaths.defaultDataDir() }
+            assertTrue(failure.message!!.contains("INFOSCRY_DATA_DIR"), failure.message)
+        } finally {
+            AppPaths.dataDirFromEnvironment = { null }
+        }
+    }
+
+    @Test
+    fun `a library that is the data directory itself is refused`() {
+        AppPaths.libraryFromEnvironment = { dataDir.toString() }
+        try {
+            val failure = kotlin.test.assertFailsWith<IllegalStateException> { AppPaths.from(dataDir) }
+            assertEquals(
+                "INFOSCRY_LIBRARY_DIR names the data directory itself; leave it unset for <data>/library or point it at another folder",
+                failure.message,
+            )
+        } finally {
+            AppPaths.libraryFromEnvironment = { null }
+        }
+    }
+
+    @Test
     fun `data directories are private on posix filesystems`() {
         val paths = AppPaths.from(dataDir)
 

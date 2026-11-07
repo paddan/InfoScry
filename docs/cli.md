@@ -15,7 +15,7 @@ export INFOSCRY_TOKEN=isc_...
 Commands expose `--json` where supported for machine-readable output; it works
 before or after the subcommand name, so `infoscry --json collection list` and
 `infoscry collection list --json` are equivalent. `serve`, `logs` and `admin`
-also take `--data-dir /path` (default `~/.infoscry`), the directory for
+also take `--data-dir /path` (default `INFOSCRY_DATA_DIR`, else `~/.infoscry`), the directory for
 managed files, models and logs. `infoscry --help` and `infoscry <command>
 --help` print usage. Import paths are paths on the server's machine.
 
