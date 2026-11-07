@@ -367,7 +367,7 @@ any page. Contracts: [technical reference](technical-reference.md#images),
 
 **Verified (2026-11-07):**
 
-- `./gradlew check` with Podman and the compiled frontend: 2,387 JVM tests and 606 Vitest tests, no
+- `./gradlew check` with Podman and the compiled frontend: 2,417 JVM tests and 612 Vitest tests, no
   failures (`npm run check` clean).
 - `ImagesBrowserAcceptanceTest` (`externalTest`, Chromium, signed in, test embedder, fake Surya layout engine,
   local fake provider) passed three consecutive runs (an earlier question that also matched another page's words ranked the
