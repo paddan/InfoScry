@@ -478,6 +478,29 @@ class ImageStageTest {
         assertEquals(1, target.held.size)
     }
 
+    @Test
+    fun `vector drawings are counted as skipped without a warning`() {
+        val parent = ParentUnit(ContentUnitId("page-0"), 0, SourceLocation.PdfPage(1))
+        orderedParents[parent.unitId] = parent
+        val answers = mapOf(parent.unitId to ParentImages(listOf(picture(100, 120).copy(parent = parent)), emptyList(), false, vectorSkipped = 2))
+
+        val result = run(FakeFinder(answers), answers, RecordingTarget())
+
+        assertEquals(1, result.images)
+        assertEquals(2, result.skipped[SkipReason.VECTOR])
+        assertEquals(emptyList(), result.warnings)
+    }
+
+    @Test
+    fun `the repetition pass and the delivery pass each open their own source`() {
+        val parents = pages(5) { page -> listOf(picture(100 + page, 120)) }
+        val finder = FakeFinder(parents)
+
+        run(finder, parents, RecordingTarget())
+
+        assertEquals(2, finder.opens)
+    }
+
     private enum class Step { RECORD, DELIVER, CHECKPOINT }
 
     /** Interrupts the first run at [step], runs again, and expects the rows a clean run leaves. */
@@ -705,8 +728,12 @@ class ImageStageTest {
     ) : ImageFinder {
         override val mediaTypes: Set<String> = setOf(mediaType)
         val calls = mutableListOf<ContentUnitId>()
+        var opens = 0
+            private set
 
         override fun open(managedPath: Path): OpenedSource = object : OpenedSource {
+            init { opens++ }
+
             override fun imagesOf(parent: ParentUnit): ParentImages {
                 calls += parent.unitId
                 return answers[parent.unitId] ?: ParentImages.NONE

@@ -33,11 +33,14 @@ data class FoundImage(
  *
  * @param failures codes of images that could not be read, one per image; the parent's other images are still in [images].
  * @param scanned whether the parent has an image covering the page, which is the scan itself and is not returned (PDF only).
+ * @param vectorSkipped how many vector drawings (EMF, WMF, SVG, PICT) the parent holds; they are out of scope and are
+ *   counted as skipped, never reported as failures.
  */
 data class ParentImages(
     val images: List<FoundImage>,
     val failures: List<String>,
     val scanned: Boolean,
+    val vectorSkipped: Int = 0,
 ) {
     companion object {
         /** A parent without images. */

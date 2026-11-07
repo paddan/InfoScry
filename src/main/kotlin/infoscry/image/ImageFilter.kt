@@ -34,6 +34,9 @@ enum class SkipReason {
     /** An image of one uniform colour. */
     UNIFORM,
 
+    /** A vector drawing (EMF, WMF, SVG, PICT) in an Office or EPUB document, which is out of scope. Counted, never a warning. */
+    VECTOR,
+
     /** The document already holds the most images it may. Decided by the extraction stage. */
     LIMIT,
 }

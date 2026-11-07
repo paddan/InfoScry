@@ -4,7 +4,6 @@ import infoscry.domain.NormalizedBox
 import infoscry.domain.SourceLocation
 import infoscry.extract.ImageExtractor
 import infoscry.extract.PdfExtractor
-import java.awt.Color
 import java.awt.geom.AffineTransform
 import java.awt.geom.Point2D
 import java.awt.image.BufferedImage
@@ -143,8 +142,13 @@ class PdfImageFinder(private val maxParentBytes: Long = ImageProbe.MAX_PARENT_BY
         /** The image as a candidate, or null when it cannot be decoded. */
         private fun candidateOf(image: PDImage, box: NormalizedBox): ImageCandidate? {
             val isMask = image.isStencil
+            // A stencil mask is skipped whatever it holds, so its pixels are never decoded: the declared size and the
+            // XObject's flag are all the filter needs, and a placeholder keeps the candidate's shape.
+            if (isMask) {
+                return ImageCandidate(ImageBytes.Raster(MASK_PLACEHOLDER), image.width, image.height, box, isMask = true)
+            }
             try {
-                val jpeg = if (!isMask && isPlainJpeg(image)) originalJpeg(image) else null
+                val jpeg = if (isPlainJpeg(image)) originalJpeg(image) else null
                 if (jpeg != null) {
                     val probed = ImageProbe.probe(jpeg)
                     if (probed == null || probed.encodedMediaType != "image/jpeg") return null
@@ -158,11 +162,10 @@ class PdfImageFinder(private val maxParentBytes: Long = ImageProbe.MAX_PARENT_BY
                 }
                 val step = ImageProbe.subsampleStep(image.width, image.height)
                 val raster: BufferedImage = when {
-                    isMask -> image.getStencilImage(Color.BLACK)
                     image is PDImageXObject -> image.getOpaqueImage(null, step)
                     else -> image.getImage(null, step)
                 }
-                return ImageCandidate(ImageBytes.Raster(raster), image.width, image.height, box, isMask)
+                return ImageCandidate(ImageBytes.Raster(raster), image.width, image.height, box, isMask = false)
             } catch (unreadable: IOException) {
                 return null
             } catch (unreadable: RuntimeException) {
@@ -213,3 +216,6 @@ class PdfImageFinder(private val maxParentBytes: Long = ImageProbe.MAX_PARENT_BY
         override fun shadingFill(shadingName: COSName) = Unit
     }
 }
+
+/** What a stencil mask is carried as: it is skipped, so its own pixels are never decoded. */
+private val MASK_PLACEHOLDER: BufferedImage = BufferedImage(1, 1, BufferedImage.TYPE_BYTE_GRAY)

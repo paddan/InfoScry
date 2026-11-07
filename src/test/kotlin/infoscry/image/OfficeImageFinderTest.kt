@@ -266,4 +266,25 @@ class OfficeImageFinderTest {
 
         assertEquals(1, opens)
     }
+
+    @Test
+    fun `a vector drawing is counted as skipped and is neither an image nor a failure`() {
+        val emf = ByteArray(120).also {
+            it[0] = 1
+            it[40] = 0x20; it[41] = 0x45; it[42] = 0x4D; it[43] = 0x46
+        }
+        val file = docx { document ->
+            document.createParagraph().createRun().setText("Text")
+            document.picture(1, "A photo")
+            document.createParagraph().createRun().addPicture(
+                ByteArrayInputStream(emf), XWPFDocument.PICTURE_TYPE_EMF, "drawing.emf", 3_000_000, 2_000_000,
+            )
+        }
+
+        val result = imagesOf(file, FinderFixtures.parent(sectionLocators(file).single()))
+
+        assertEquals(1, result.images.size)
+        assertEquals(1, result.vectorSkipped)
+        assertEquals(emptyList(), result.failures)
+    }
 }

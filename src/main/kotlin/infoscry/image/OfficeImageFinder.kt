@@ -99,6 +99,7 @@ class OfficeImageFinder internal constructor(
         private fun build(parent: ParentUnit, raw: List<RawPicture>): ParentImages {
             val images = mutableListOf<FoundImage>()
             val failures = mutableListOf<String>()
+            var vector = 0
             for (picture in raw) {
                 if (images.size + failures.size >= ImageIdentity.MAX_PER_PARENT) {
                     failures += ImageFindFailure.TOO_MANY_IMAGES
@@ -111,6 +112,10 @@ class OfficeImageFinder internal constructor(
                     null
                 } catch (unreadable: RuntimeException) {
                     null
+                }
+                if (bytes != null && ImageProbe.isVector(bytes)) {
+                    vector++
+                    continue
                 }
                 val candidate = bytes?.let { ImageProbe.candidateOf(it, picture.box) }
                 if (candidate == null) {
@@ -126,7 +131,7 @@ class OfficeImageFinder internal constructor(
                     if (caption == null) null else CaptionSource.ALT_TEXT,
                 )
             }
-            return ParentImages(images, failures, scanned = false)
+            return ParentImages(images, failures, scanned = false, vectorSkipped = vector)
         }
 
         private fun wordPictures(): Map<SourceLocation.WordSection, List<RawPicture>> {

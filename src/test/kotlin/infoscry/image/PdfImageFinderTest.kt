@@ -297,4 +297,23 @@ class PdfImageFinderTest {
         assertEquals(listOf(ImageRejectedException.IMAGE_DECODE_FAILED), result.failures)
         assertEquals(1, result.images.size)
     }
+
+    @Test
+    fun `a stencil mask is counted as a mask without decoding its pixels`() {
+        val file = pdf { document, page ->
+            val bits = BufferedImage(600, 400, BufferedImage.TYPE_BYTE_BINARY)
+            val stencil = LosslessFactory.createFromImage(document, bits)
+            stencil.cosObject.setBoolean(COSName.IMAGE_MASK, true)
+            assertTrue(stencil.isStencil)
+            PDPageContentStream(document, page).use { it.drawImage(stencil, 100f, 100f, 300f, 200f) }
+        }
+
+        val found = imagesOf(file, page()).images.single()
+
+        assertTrue(found.candidate.isMask)
+        assertEquals(SkipReason.MASK, ImageFilter.skipReason(found.candidate, null))
+        assertEquals(600, found.candidate.widthPx)
+        // A decoded stencil would be a 600 by 400 raster; the placeholder is one pixel.
+        assertEquals(1, assertIs<ImageBytes.Raster>(found.candidate.bytes).image.width)
+    }
 }

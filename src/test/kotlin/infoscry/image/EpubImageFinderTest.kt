@@ -167,4 +167,44 @@ class EpubImageFinderTest {
 
         assertEquals(ParentImages.NONE, imagesOf(file, FinderFixtures.parent(SourceLocation.Slide(1))))
     }
+
+    @Test
+    fun `an svg is counted as a vector skip and is neither an image nor a failure`() {
+        val file = epub(
+            """<p>Text</p><img src="images/chart.svg" alt="chart"/><img src="images/harbour.png" alt="ok"/>""",
+            extra = mapOf("OEBPS/images/chart.svg" to """<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>""".toByteArray()),
+        )
+
+        val result = imagesOf(file, section(0))
+
+        assertEquals(listOf("ok"), result.images.map { it.caption })
+        assertEquals(1, result.vectorSkipped)
+        assertEquals(emptyList(), result.failures)
+    }
+
+    @Test
+    fun `a chapter with many sections is read once, so the archive budget is not spent per section`() {
+        val sections = 12
+        val body = (1..sections).joinToString("") { n ->
+            """<h1>Part $n</h1><p>${"words ".repeat(400)}</p><img src="images/harbour.png" alt="a$n"/>"""
+        }
+        val file = epub(body)
+        val chapter = java.util.zip.ZipFile(file.toFile()).use { it.getEntry("OEBPS/chapter0.xhtml").size }
+        val image = java.util.zip.ZipFile(file.toFile()).use { it.getEntry("OEBPS/images/harbour.png").size }
+        val meta = java.util.zip.ZipFile(file.toFile()).use {
+            it.getEntry("OEBPS/content.opf").size + it.getEntry("META-INF/container.xml").size
+        }
+        // One chapter read, every image read, and room for a single extra read of the chapter - not twelve.
+        val budget = meta + 2 * chapter + sections * image
+        val bounded = EpubImageFinder(infoscry.extract.ArchiveLimits(maxTotalBytes = budget))
+
+        val results = bounded.open(file).use { source ->
+            (1..sections).map { n -> source.imagesOf(section(0, listOf("Part $n"))) }
+        }
+
+        results.forEachIndexed { index, result ->
+            assertEquals(emptyList(), result.failures, "section ${index + 1}")
+            assertEquals(listOf("a${index + 1}"), result.images.map { it.caption })
+        }
+    }
 }

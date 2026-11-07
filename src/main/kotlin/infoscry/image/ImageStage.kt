@@ -111,7 +111,7 @@ class ImageStage(
             return summary.result()
         }
         source.use {
-            val repeated = repeatedHashes(source, parents)
+            val repeated = repeatedHashes(finder, managedPath, parents)
             // Every committed parent counts, before or after the current one, so the document never exceeds its cap.
             var total = parents.sumOf { committed[it.parent.unitId]?.imageCount ?: 0 }
             var regionsAvailable = true
@@ -127,22 +127,36 @@ class ImageStage(
         return summary.result()
     }
 
-    /** The hashes of embedded images that appear on more pages than [ImageFilter.MAX_REPEAT_PAGES] allows. */
-    private fun repeatedHashes(source: OpenedSource, parents: List<ParentUnitContext>): Set<String> {
+    /**
+     * The hashes of embedded images that appear on more pages than [ImageFilter.MAX_REPEAT_PAGES] allows.
+     *
+     * The pass opens its own source: a format that bounds what one open document may read (an archive's cumulative
+     * budget) is charged once per pass, not once for both.
+     */
+    private fun repeatedHashes(finder: ImageFinder, managedPath: Path, parents: List<ParentUnitContext>): Set<String> {
         if (parents.size <= ImageFilter.MAX_REPEAT_PAGES) return emptySet()
+        val source = try {
+            finder.open(managedPath)
+        } catch (unreadable: IOException) {
+            return emptySet()
+        } catch (unreadable: RuntimeException) {
+            return emptySet()
+        }
         val pages = HashMap<String, Int>()
-        for (context in parents) {
-            val found = try {
-                source.imagesOf(context.parent)
-            } catch (unreadable: RuntimeException) {
-                // The second pass reports the failure; here the parent just adds no hashes.
-                continue
+        source.use {
+            for (context in parents) {
+                val found = try {
+                    source.imagesOf(context.parent)
+                } catch (unreadable: RuntimeException) {
+                    // The second pass reports the failure; here the parent just adds no hashes.
+                    continue
+                }
+                // A page counts once however many times it draws the image.
+                found.images.filter { it.kind == ImageSourceKind.EMBEDDED }
+                    .map { contentHash(it.candidate) }
+                    .toSet()
+                    .forEach { pages.merge(it, 1, Int::plus) }
             }
-            // A page counts once however many times it draws the image.
-            found.images.filter { it.kind == ImageSourceKind.EMBEDDED }
-                .map { contentHash(it.candidate) }
-                .toSet()
-                .forEach { pages.merge(it, 1, Int::plus) }
         }
         return pages.filterValues { it > ImageFilter.MAX_REPEAT_PAGES }.keys
     }
@@ -187,6 +201,7 @@ class ImageStage(
             ParentImages(emptyList(), listOf(ImageFindFailure.PARENT_UNREADABLE), scanned = false)
         }
         var images = found.images
+        repeat(found.vectorSkipped) { counts.skip(SkipReason.VECTOR) }
         var failed = false
         found.failures.forEach { code ->
             counts.warn(code)

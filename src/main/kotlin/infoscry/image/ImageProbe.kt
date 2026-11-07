@@ -28,6 +28,25 @@ internal object ImageProbe {
         "gif" to "image/gif",
     )
 
+    /**
+     * Whether [bytes] are a vector drawing: EMF, WMF (placeable or standard), SVG or PICT. Vector drawings are not
+     * extracted, so a finder asks this before it tries to decode a picture. Only the first bytes are read.
+     */
+    fun isVector(bytes: ByteArray): Boolean {
+        fun at(offset: Int, vararg expected: Int) =
+            bytes.size >= offset + expected.size && expected.indices.all { (bytes[offset + it].toInt() and 0xFF) == expected[it] }
+        // EMF: record type 1 (little endian) and the " EMF" signature at offset 40.
+        if (at(0, 1, 0, 0, 0) && at(40, 0x20, 0x45, 0x4D, 0x46)) return true
+        // WMF: the placeable key, or a standard header (type 1 or 2, header size 9 words).
+        if (at(0, 0xD7, 0xCD, 0xC6, 0x9A)) return true
+        if ((at(0, 1, 0, 9, 0) || at(0, 2, 0, 9, 0)) && at(4, 0, 3)) return true
+        // PICT: version opcode 0x0011 0x02FF after the size and frame, with or without the 512-byte header.
+        if (at(10, 0x00, 0x11, 0x02, 0xFF) || at(522, 0x00, 0x11, 0x02, 0xFF)) return true
+        // SVG: markup that opens with an svg element, possibly after an XML declaration.
+        val head = String(bytes, 0, minOf(bytes.size, 1024), Charsets.UTF_8).trimStart('\uFEFF', ' ', '\t', '\r', '\n')
+        return head.startsWith("<svg") || (head.startsWith("<?xml") && "<svg" in head)
+    }
+
     /** The header of [bytes], or null when no reader takes it. Only the header is read. */
     fun probe(bytes: ByteArray): Probed? = try {
         ImageIO.createImageInputStream(ByteArrayInputStream(bytes))?.use { stream ->

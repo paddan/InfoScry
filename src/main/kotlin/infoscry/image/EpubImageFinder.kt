@@ -1,6 +1,7 @@
 package infoscry.image
 
 import infoscry.domain.SourceLocation
+import infoscry.extract.ArchiveLimits
 import infoscry.extract.ArchiveRefusedException
 import infoscry.extract.DOCUMENT_TOO_LARGE_CODE
 import infoscry.extract.EPUB_MEDIA_TYPE
@@ -29,28 +30,40 @@ import org.jsoup.nodes.Element
  * nothing was read. The caption is the `alt`, else the enclosing `<figure>`'s `<figcaption>`. An EPUB image has
  * no box.
  */
-class EpubImageFinder : ImageFinder {
+class EpubImageFinder(private val limits: ArchiveLimits = ArchiveLimits.DEFAULT) : ImageFinder {
 
     override val mediaTypes: Set<String> = setOf(EPUB_MEDIA_TYPE, IBOOKS_MEDIA_TYPE)
 
+    /**
+     * Each call opens its own archive, so the cumulative read budget of one pass over the book is not shared with
+     * another pass or another run; a chapter is parsed once per spine item, not once per section.
+     */
     override fun open(managedPath: Path): OpenedSource {
-        val archive = SafeArchive.open(managedPath)
+        val archive = SafeArchive.open(managedPath, limits)
         return try {
             Opened(archive, EpubPackage.read(archive))
-        } catch (refused: ArchiveRefusedException) {
-            archive.close()
-            throw refused
+        } catch (failure: Throwable) {
+            // Whatever the package reader fails with, the archive it was given must not stay open.
+            runCatching { archive.close() }
+            throw failure
         }
     }
 
+    /** A chapter read and walked once: the heading paths of its text sections and every image with its heading path. */
+    private class Chapter(val sectionPaths: List<List<String>>, val images: List<Pair<Element, List<String>>>)
+
     private class Opened(private val archive: SafeArchive, private val book: EpubPackage.Book) : OpenedSource {
+
+        /** The chapter last served, by spine index: parents arrive in reading order, so one is enough. */
+        private var cachedIndex: Int = -1
+        private var cached: Chapter? = null
 
         @Synchronized
         override fun imagesOf(parent: ParentUnit): ParentImages {
             val locator = parent.locator as? SourceLocation.EbookSection ?: return ParentImages.NONE
             val chapterPath = book.spine.getOrNull(locator.spineIndex)?.path ?: return ParentImages.NONE
             return try {
-                find(parent, locator, chapterPath)
+                find(parent, locator, chapterPath, locator.spineIndex)
             } catch (unreadable: IOException) {
                 ParentImages(emptyList(), listOf(ImageFindFailure.PARENT_UNREADABLE), scanned = false)
             } catch (unreadable: RuntimeException) {
@@ -60,13 +73,31 @@ class EpubImageFinder : ImageFinder {
 
         override fun close() = archive.close()
 
-        private fun find(parent: ParentUnit, locator: SourceLocation.EbookSection, chapterPath: String): ParentImages {
-            val entry = archive.entry(chapterPath) ?: return ParentImages.NONE
-            val chapter = Jsoup.parse(archive.readText(entry))
-            val sectionPaths = HtmlSections.sectionsOf(HtmlSanitizer.sanitize(chapter))
-                .filter { it.text.isNotBlank() }
-                .map { it.headingPath }
-            val mine = imagesWithPaths(chapter).filter { (_, path) ->
+        private fun chapterAt(spineIndex: Int, chapterPath: String): Chapter? {
+            if (cachedIndex == spineIndex) return cached
+            val entry = archive.entry(chapterPath)
+            val chapter = entry?.let {
+                val parsed = Jsoup.parse(archive.readText(it))
+                Chapter(
+                    HtmlSections.sectionsOf(HtmlSanitizer.sanitize(parsed)).filter { section -> section.text.isNotBlank() }
+                        .map { section -> section.headingPath },
+                    imagesWithPaths(parsed),
+                )
+            }
+            cachedIndex = spineIndex
+            cached = chapter
+            return chapter
+        }
+
+        private fun find(
+            parent: ParentUnit,
+            locator: SourceLocation.EbookSection,
+            chapterPath: String,
+            spineIndex: Int,
+        ): ParentImages {
+            val chapter = chapterAt(spineIndex, chapterPath) ?: return ParentImages.NONE
+            val sectionPaths = chapter.sectionPaths
+            val mine = chapter.images.filter { (_, path) ->
                 if (sectionPaths.isEmpty()) {
                     locator.headingPath.isEmpty()
                 } else {
@@ -75,6 +106,7 @@ class EpubImageFinder : ImageFinder {
             }
             val images = mutableListOf<FoundImage>()
             val failures = mutableListOf<String>()
+            var vector = 0
             for ((element, _) in mine) {
                 if (images.size + failures.size >= ImageIdentity.MAX_PER_PARENT) {
                     failures += ImageFindFailure.TOO_MANY_IMAGES
@@ -88,6 +120,10 @@ class EpubImageFinder : ImageFinder {
                     } else {
                         ImageRejectedException.IMAGE_DECODE_FAILED
                     }
+                    continue
+                }
+                if (ImageProbe.isVector(bytes)) {
+                    vector++
                     continue
                 }
                 val candidate = ImageProbe.candidateOf(bytes, box = null)
@@ -104,7 +140,7 @@ class EpubImageFinder : ImageFinder {
                 }
                 images += FoundImage(parent, ImageSourceKind.EMBEDDED, candidate, caption, source)
             }
-            return ParentImages(images, failures, scanned = false)
+            return ParentImages(images, failures, scanned = false, vectorSkipped = vector)
         }
 
         /** Every `<img src>` in document order with the heading path in force at it. */
