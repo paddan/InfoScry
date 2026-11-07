@@ -222,6 +222,51 @@ class LayoutRegionsTest {
     }
 
     @Test
+    fun `a region with no layout caption takes the paragraph under it as its page-text caption and the rest as context`() {
+        val figure = block(BlockKind.FIGURE, 0, FIGURE_A, FIGURE_A_RANGE)
+        val under = block(BlockKind.PARAGRAPH, 1, PixelBox(100, 410, 500, 450), CAPTION_ONE_RANGE)
+        val elsewhere = block(BlockKind.PARAGRAPH, 2, PixelBox(100, 600, 500, 640), FIGURE_B_RANGE)
+        val engine = FakeSurya { page -> reading(page, PAGE_TEXT, listOf(figure, under, elsewhere)) }
+
+        val image = regions(engine, page(), structure = null).images.single()
+
+        assertEquals("Caption one.", image.caption)
+        assertEquals(CaptionSource.PAGE_TEXT, image.captionSource)
+        assertEquals("Figure two.", image.context)
+    }
+
+    @Test
+    fun `a layout caption wins over the page text and is not repeated in the context`() {
+        val figure = block(BlockKind.FIGURE, 0, FIGURE_A, FIGURE_A_RANGE)
+        val caption = block(BlockKind.CAPTION, 1, PixelBox(100, 410, 500, 450), CAPTION_ONE_RANGE)
+        val elsewhere = block(BlockKind.PARAGRAPH, 2, PixelBox(100, 600, 500, 640), FIGURE_B_RANGE)
+        val engine = FakeSurya { page -> reading(page, PAGE_TEXT, listOf(figure, caption, elsewhere)) }
+
+        val image = regions(engine, page(), structure = null).images.single()
+
+        assertEquals("Caption one.", image.caption)
+        assertEquals(CaptionSource.LAYOUT_CAPTION, image.captionSource)
+        assertEquals("Figure two.", image.context)
+    }
+
+    @Test
+    fun `a stored structure gives the same page-text caption without calling the engine`() {
+        val figure = block(BlockKind.FIGURE, 0, FIGURE_A, FIGURE_A_RANGE)
+        val under = block(BlockKind.PARAGRAPH, 1, PixelBox(100, 410, 500, 450), CAPTION_ONE_RANGE)
+        val engine = FakeSurya { error("the engine must not read a page with a stored structure") }
+        val page = page()
+
+        val image = regions(
+            engine, page,
+            structure = structureOf(listOf(figure, under), imageSha256 = page.sha256, parser = SuryaStructureParser.PARSER),
+        ).images.single()
+
+        assertEquals("Caption one.", image.caption)
+        assertEquals(CaptionSource.PAGE_TEXT, image.captionSource)
+        assertEquals(0, engine.calls)
+    }
+
+    @Test
     fun `a page that Surya cannot read is an empty result with its code, not a throw`() {
         val engine = FakeSurya { throw SuryaWorkerException(SuryaWorkerException.EXITED, "the worker ended") }
 

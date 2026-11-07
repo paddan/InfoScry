@@ -11,7 +11,8 @@ them, see them beside the page they came from and cite them. This spec makes eve
 stable unit of its document. It is the first of three sub-projects:
 
 1. **Image foundation (this spec).** Find, store, show and cite images, at import and rescan. A picture's
-   only searchable text is its caption or alt text.
+   only searchable text is its caption (alt text, figcaption, a layout caption, or the page text next to it) and a
+   bounded excerpt of the page text around it.
 2. **Image content tagging (later spec).** An image-analysis reading method, chosen in the start dialog like
    the OCR method (a local vision model or a configured image-LLM profile), writes a description and tags
    in three categories (person, object, animal). The text is indexed in `search_chunks`; Ask and
@@ -31,7 +32,7 @@ The foundation is designed so that 2 and 3 can attach to an image by its stable 
 | Which images | Embedded image objects (PDF, docx/pptx/xlsx, EPUB), picture regions cut out of scanned PDF pages, and imported pictures |
 | Scanned regions | Surya layout `FIGURE` blocks; reused when Surya reads the page, otherwise a layout-only Surya pass |
 | Control | *Extract images* in the import and rescan start dialog: Off, Embedded images, Embedded + regions from scanned pages; the collection default pre-fills it |
-| Searchable text in v1 | Caption and alt text only; an image without either is shown and citable but not indexed |
+| Searchable text in v1 | The caption (alt text, figcaption, layout caption, else the page text next to the image) and, for PDF images and scanned-page regions, a bounded excerpt of the surrounding page text; an image with neither is shown and citable but not indexed |
 | Re-reading | Image extraction has its own checkpoint, outside the text fingerprint. A rescan with the rescan-only method *Keep current text* runs only the image step: turning images on for an existing document never repeats OCR |
 | Filtering | Fixed rules in v1 (size, repetition, masks, uniform colour); no settings |
 
@@ -80,10 +81,11 @@ The foundation is designed so that 2 and 3 can attach to an image by its stable 
 - `document_images` (immutable image metadata): `document_id`, `unit_id`, `artifact_sha256`,
   `parent_unit_id`, `source_kind` (`EMBEDDED`, `PAGE_REGION`, `STANDALONE`), `artifact_relative_path`,
   `artifact_sha256`, `thumbnail_relative_path`, `media_type`, `width_px`, `height_px`, the normalized box
-  (four nullable columns, all or none), `caption`, `caption_source` (`ALT_TEXT`, `FIGCAPTION`,
-  `LAYOUT_CAPTION`, null), `created_at`. Primary key `(document_id, unit_id, artifact_sha256)`; deleted with
+  (four nullable columns, all or none), `caption` (the caption only, never the context), `caption_source`
+  (`ALT_TEXT`, `FIGCAPTION`, `LAYOUT_CAPTION`, `PAGE_TEXT`, null; `PAGE_TEXT` was added by schema version 5),
+  `created_at`. Primary key `(document_id, unit_id, artifact_sha256)`; deleted with
   its document. Revision binding comes from the revision's page rows: each image unit has a
-  `page_text_revisions` row (text = caption, approval `APPROVED`) whose `source_image_*` names the image
+  `page_text_revisions` row (text = the unit text below, approval `APPROVED`) whose `source_image_*` names the image
   file, so a revision's images are its `image_region` rows joined on `(document_id, unit_id,
   source_image_sha256)`, and history and Restore work unchanged.
 - An image unit's ordinal is `1_000_000_000 + parentOrdinal * 1_000 + (index - 1)`, after every text unit
@@ -93,15 +95,16 @@ The foundation is designed so that 2 and 3 can attach to an image by its stable 
   an import and the candidate revision for a rescan. One row per target, parent unit and mode.
 - `collections.default_image_extraction` (`OFF`, `EMBEDDED`, `ALL`, default `OFF`), changed with the
   collection's version and answering 409 `EDIT_CONFLICT` when stale.
-- The image unit's text is its caption, or empty. An empty unit is not chunked or indexed, as blank pages
-  are not today.
+- The image unit's text is its caption, a blank line and the page-text context; either part may be absent, and a
+  unit with neither is empty. An empty unit is not chunked or indexed, as blank pages are not today. The chunker
+  splits a unit that does not fit one passage; nothing is truncated.
 
 ### Extraction by format
 
 | Source | Rule |
 |---|---|
-| PDF page with a text layer | PDFBox walks the page's image XObjects, including nested forms and inline images; the box comes from the current transformation matrix |
-| Scanned PDF page | The full-page image is the scan and is not an image unit. In `ALL` mode, Surya layout `FIGURE` blocks (`Picture`, `Figure`, `Diagram`, `ChemicalBlock`) are cropped from the page raster; an adjacent `CAPTION` block is the caption |
+| PDF page with a text layer | PDFBox walks the page's image XObjects, including nested forms and inline images; the box comes from the current transformation matrix. The caption and context come from the page's text layer (see *Captions and page context*) |
+| Scanned PDF page | The full-page image is the scan and is not an image unit. In `ALL` mode, Surya layout `FIGURE` blocks (`Picture`, `Figure`, `Diagram`, `ChemicalBlock`) are cropped from the page raster; an adjacent `CAPTION` block is the caption, else the page text next to the region (the page's structure blocks) |
 | docx, pptx, xlsx | POI picture relations in document order, with the shape's `descr` as alt text; parent is the section, slide or sheet range |
 | EPUB | `<img>` in spine order; `alt`, else the enclosing `<figcaption>`, is the caption |
 | Imported picture | One `STANDALONE` image unit for the whole picture; no layout pass |
@@ -112,6 +115,37 @@ images are still extracted.
 The layout pass reuses the page's structure when Surya read the page in this attempt. Otherwise, in `ALL`
 mode, Surya is run on the page raster for layout only; its text output is discarded and the page's reading
 is unchanged. Tesseract and No OCR pages therefore get regions too.
+
+### Captions and page context
+
+Added 2026-11-07 at the owner's request; it supersedes the earlier rule that a PDF's embedded images carry no
+caption. An embedded PDF image and a scanned-page region get a caption derived from the page text nearest the
+image, and a bounded excerpt of the surrounding page text; both are indexed with the image unit, so a search on
+either finds the image.
+
+- **Caption source order.** A caption that exists wins: alt text, a figcaption, or a layout `CAPTION` block. The page
+  text is the fallback, recorded as `PAGE_TEXT`. `document_images.caption` is the caption only.
+- **The unit's text** is the caption, a blank line, then the context; either may be absent. A caption from alt
+  text with no context is unchanged.
+- **Text source.** For a PDF page, the text layer with positions (PDFBox `PDFTextStripper` text positions grouped
+  into lines), with each line's box in the same normalized coordinates as the image's box: the crop box, y flipped to
+  a top-left origin, and the page rotation applied. Text that is not upright in the displayed page is not used.
+  For a scanned-page region, the page's structure blocks (heading, paragraph, list item, caption and footnote
+  blocks, each with a pixel box over the page raster); a stored structure keeps block boxes and no word boxes, so
+  a block is the finest unit there. Page headers, footers, tables, formulas and code are not used.
+- **Caption rule** (`PageTextContext.captionFor`). The contiguous lines directly below the image, else directly
+  above, at most 3, each within 3 % of the page height of the image or of the previous line and sharing at least
+  half of the narrower width with the image. A block starting with `Fig`, `Figur`, `Figure`, `Bild`, `Foto`,
+  `Photo` or `Tab` followed by a number or punctuation wins over a plain adjacent block; with no such label the
+  block below is used, else the block above. A line longer than 400 characters is body text, not a caption.
+- **Context rule** (`PageTextContext.contextFor`). The page's other lines, nearest to the image first (vertical
+  distance, then horizontal), without the caption, joined with spaces until 600 characters and cut at a word
+  boundary.
+- **Refreshing.** The text of an image unit changes only when the image is delivered again. The image
+  extractor version is now `2`, so an import that resumes or is retried looks at its pictures again, and any
+  rescan (including *Keep current text*, which reads no page) delivers the pictures into its new revision with
+  the caption and context. A document already complete keeps its old unit text until it is rescanned.
+- No document text is logged.
 
 ### Filtering
 
@@ -264,9 +298,9 @@ Rulings made while implementing; they take precedence over the sections above.
   is not the page raster being cropped, whose boxes would not fit. Two real
   Surya runs on synthetic pictures returned no `Picture` block even after the fix, so region extraction from
   scanned pages remains not verified against real Surya; it needs a run on a real photograph.
-- A PDF's embedded images have no caption source (the spec's caption sources are alt text, figcaption and layout
-  captions), so they carry no caption; a caption comes from a scanned page's layout, Office alt text or an EPUB
-  `alt` or `figcaption`.
+- ~~A PDF's embedded images have no caption source.~~ Superseded 2026-11-07 (Task 12): a PDF image and a scanned-page
+  region take a `PAGE_TEXT` caption and a context from the page text (see *Captions and page context*). Schema
+  version 5 (`005_caption_source_page_text.sql`) allows the new `caption_source`.
 
 ## Out of scope
 

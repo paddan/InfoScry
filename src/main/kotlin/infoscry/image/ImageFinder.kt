@@ -20,6 +20,8 @@ data class FoundImage(
     val candidate: ImageCandidate,
     val caption: String?,
     val captionSource: CaptionSource?,
+    /** A bounded excerpt of the page text around the image (PDF pages and scanned-page regions), or null. */
+    val context: String? = null,
 ) {
     init {
         require((caption == null) == (captionSource == null)) {
@@ -67,6 +69,12 @@ interface OpenedSource : AutoCloseable {
      * [ParentImages.failures] and never stops the others.
      */
     fun imagesOf(parent: ParentUnit): ParentImages
+
+    /**
+     * Like [imagesOf], saying whether the page text around each image is wanted. A pass that only counts or hashes
+     * images passes `false`, so a format that reads a page's text for captions and context does not read it for nothing.
+     */
+    fun imagesOf(parent: ParentUnit, withPageText: Boolean): ParentImages = imagesOf(parent)
 }
 
 /** The codes an image finder reports besides [ImageRejectedException.IMAGE_DECODE_FAILED]. */

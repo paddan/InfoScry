@@ -4,6 +4,7 @@ import infoscry.domain.NormalizedBox
 import infoscry.domain.SourceLocation
 import infoscry.extract.ImageExtractor
 import infoscry.extract.PdfExtractor
+import infoscry.storage.CaptionSource
 import java.awt.geom.AffineTransform
 import java.awt.geom.Point2D
 import java.awt.image.BufferedImage
@@ -39,8 +40,10 @@ class PdfImageFinder(private val maxParentBytes: Long = ImageProbe.MAX_PARENT_BY
 
     private class Opened(private val document: PDDocument, private val maxParentBytes: Long) : OpenedSource {
 
+        override fun imagesOf(parent: ParentUnit): ParentImages = imagesOf(parent, withPageText = true)
+
         @Synchronized
-        override fun imagesOf(parent: ParentUnit): ParentImages {
+        override fun imagesOf(parent: ParentUnit, withPageText: Boolean): ParentImages {
             val locator = parent.locator as? SourceLocation.PdfPage ?: return ParentImages.NONE
             if (locator.page > document.numberOfPages) return ParentImages.NONE
             val page = document.getPage(locator.page - 1)
@@ -53,7 +56,29 @@ class PdfImageFinder(private val maxParentBytes: Long = ImageProbe.MAX_PARENT_BY
                 // A content stream is untrusted; no failure of walking it may escape.
                 engine.failures += ImageFindFailure.PARENT_UNREADABLE
             }
-            return ParentImages(engine.images, engine.failures, engine.scanned)
+            val images = if (withPageText && engine.images.isNotEmpty()) {
+                withPageText(engine.images, PdfPageText.linesOf(document, locator.page - 1))
+            } else {
+                engine.images
+            }
+            return ParentImages(images, engine.failures, engine.scanned)
+        }
+
+        /**
+         * Gives each image the caption and context the page's text layer offers. A picture on a page with no text
+         * layer (a scan with a small logo, a figure-only page) keeps none.
+         */
+        private fun withPageText(images: List<FoundImage>, lines: List<TextLine>): List<FoundImage> {
+            if (lines.isEmpty()) return images
+            return images.map { found ->
+                val box = found.candidate.box ?: return@map found
+                val caption = PageTextContext.captionFor(box, lines)
+                found.copy(
+                    caption = caption,
+                    captionSource = caption?.let { CaptionSource.PAGE_TEXT },
+                    context = PageTextContext.contextFor(box, lines, caption),
+                )
+            }
         }
 
         @Synchronized

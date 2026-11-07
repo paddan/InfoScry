@@ -389,6 +389,36 @@ class ImportImagesTest {
     }
 
     @Test
+    fun `a word of the page text near a picture finds the picture, and the caption alone is what is stored`() {
+        withHarness { harness ->
+            val source = harness.writeText("album.txt", "scanned album\n")
+            val finder = TableFinder(
+                mapOf(
+                    2 to listOf(
+                        embedded("Figur 3. Anna Svensson 1923", seed = 1, context = "The steamship company ran ferries.")
+                            .let { it.copy(captionSource = CaptionSource.PAGE_TEXT) },
+                    ),
+                ),
+            )
+            val run = runImport(harness, source, snapshot(ImageExtractionMode.EMBEDDED), Pages(pages = 3), finder)
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            AppContext.open(harness.dataDir).use { context ->
+                val image = context.content.listUnits(run.documentId, afterOrdinal = -1, limit = 50)
+                    .single { ImageIdentity.isImageOrdinal(it.ordinal) }
+                assertEquals("Figur 3. Anna Svensson 1923\n\nThe steamship company ran ferries.", image.extractedText)
+                val byContext = context.index().searchKeyword(CollectionId("default"), "steamship", limit = 10).single()
+                assertEquals(image.id.value, byContext.unitId)
+                val byCaption = context.index().searchKeyword(CollectionId("default"), "Svensson", limit = 10).single()
+                assertEquals(image.id.value, byCaption.unitId)
+                val stored = context.imageStore.imagesOf(assertNotNull(context.revisions.activeRevisionId(run.documentId))).single()
+                assertEquals("Figur 3. Anna Svensson 1923", stored.caption)
+                assertEquals(CaptionSource.PAGE_TEXT, stored.captionSource)
+            }
+        }
+    }
+
+    @Test
     fun `an image warning completes the document with a warning and keeps its text`() {
         withHarness { harness ->
             val source = harness.writeText("album.txt", "scanned album\n")
@@ -607,7 +637,7 @@ class ImportImagesTest {
         ),
     )
 
-    private fun embedded(caption: String?, seed: Int) = FoundImage(
+    private fun embedded(caption: String?, seed: Int, context: String? = null) = FoundImage(
         ParentUnit(ContentUnitId("unused"), 0, SourceLocation.PdfPage(1)),
         ImageSourceKind.EMBEDDED,
         ImageCandidate(
@@ -616,6 +646,7 @@ class ImportImagesTest {
         ),
         caption,
         caption?.let { CaptionSource.ALT_TEXT },
+        context,
     )
 
     private fun writtenImage(): WrittenImage {

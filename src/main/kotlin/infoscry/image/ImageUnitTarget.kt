@@ -21,7 +21,8 @@ interface ImageUnitTarget {
     val target: String
 
     /**
-     * @param caption the image's caption, or an empty string when it has none; an empty unit is not indexed.
+     * @param text the unit's text: the image's caption, a blank line, then a bounded excerpt of the page text around it
+     *   (either part may be absent), or an empty string when there is neither; an empty unit is not indexed.
      * @param provenanceRoot where [image]'s path resolves: the managed copy for a standalone picture, the
      *   document's artifacts otherwise.
      */
@@ -29,7 +30,7 @@ interface ImageUnitTarget {
         ordinal: Int,
         unitId: ContentUnitId,
         locator: SourceLocation.ImageRegion,
-        caption: String,
+        text: String,
         image: WrittenImage,
         provenanceRoot: SourceImageRoot,
     )

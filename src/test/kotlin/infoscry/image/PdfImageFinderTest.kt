@@ -24,6 +24,9 @@ import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject
 import org.apache.pdfbox.pdmodel.graphics.image.JPEGFactory
 import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
+import infoscry.storage.CaptionSource
 import org.apache.pdfbox.util.Matrix
 
 class PdfImageFinderTest {
@@ -315,5 +318,90 @@ class PdfImageFinderTest {
         assertEquals(600, found.candidate.widthPx)
         // A decoded stencil would be a 600 by 400 raster; the placeholder is one pixel.
         assertEquals(1, assertIs<ImageBytes.Raster>(found.candidate.bytes).image.width)
+    }
+
+    private val helvetica = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+
+    private fun PDPageContentStream.line(text: String, x: Float, y: Float, size: Float = 12f) {
+        beginText()
+        setFont(helvetica, size)
+        newLineAtOffset(x, y)
+        showText(text)
+        endText()
+    }
+
+    @Test
+    fun `the text line under an image is its page-text caption and the nearby text is its context`() {
+        val file = pdf { document, page ->
+            val image = jpegImage(document)
+            PDPageContentStream(document, page).use {
+                it.drawImage(image, 100f, 400f, 200f, 150f)
+                it.line("Figure 2. The harbour in 1923", 100f, 384f)
+                it.line("The steamship company ran three ferries from the harbour.", 100f, 580f)
+                it.line("A paragraph far away about something else entirely.", 100f, 100f)
+            }
+        }
+
+        val found = imagesOf(file, page()).images.single()
+
+        assertEquals("Figure 2. The harbour in 1923", found.caption)
+        assertEquals(CaptionSource.PAGE_TEXT, found.captionSource)
+        val context = checkNotNull(found.context)
+        assertTrue(context.startsWith("The steamship company ran three ferries"), context)
+        assertTrue("something else entirely" in context)
+        assertFalse("harbour in 1923" in context, "the caption is not repeated in the context")
+        assertTrue(context.length <= PageTextContext.MAX_CONTEXT_CHARS)
+    }
+
+    @Test
+    fun `an image on a page with no text has no caption and no context`() {
+        val file = pdf { document, page ->
+            PDPageContentStream(document, page).use { it.drawImage(jpegImage(document), 100f, 400f, 200f, 150f) }
+        }
+
+        val found = imagesOf(file, page()).images.single()
+
+        assertEquals(null, found.caption)
+        assertEquals(null, found.captionSource)
+        assertEquals(null, found.context)
+    }
+
+    @Test
+    fun `a caption under a picture is found on a page displayed rotated by ninety degrees`() {
+        // Displayed 792 wide and 612 tall. The picture covers display x 100..300 and y 100..250; the caption sits
+        // below it, upright in the display, which the content stream draws with a rotated text matrix.
+        val file = pdf { document, page ->
+            page.rotation = 90
+            val image = jpegImage(document)
+            PDPageContentStream(document, page).use {
+                it.drawImage(image, 100f, 100f, 150f, 200f)
+                it.beginText()
+                it.setFont(helvetica, 12f)
+                it.setTextMatrix(Matrix.getRotateInstance(Math.PI / 2, 264f, 100f))
+                it.showText("Fig. 7 Rotated page caption")
+                it.endText()
+            }
+        }
+
+        val found = imagesOf(file, page()).images.single()
+
+        val box = checkNotNull(found.candidate.box)
+        assertEquals(100.0 / 792, box.left, 0.002)
+        assertEquals(250.0 / 612, box.bottom, 0.002)
+        assertEquals("Fig. 7 Rotated page caption", found.caption)
+    }
+
+    @Test
+    fun `a caption is found on a page with a crop box that does not start at the origin`() {
+        val file = pdf { document, page ->
+            page.cropBox = PDRectangle(50f, 100f, 400f, 500f)
+            val image = jpegImage(document)
+            PDPageContentStream(document, page).use {
+                it.drawImage(image, 100f, 400f, 200f, 150f)
+                it.line("Photo 5. Inside a cropped page", 100f, 384f)
+            }
+        }
+
+        assertEquals("Photo 5. Inside a cropped page", imagesOf(file, page()).images.single().caption)
     }
 }

@@ -10,7 +10,7 @@ import java.sql.ResultSet
 import java.sql.Types
 
 /** Where an image's caption came from. */
-enum class CaptionSource { ALT_TEXT, FIGCAPTION, LAYOUT_CAPTION }
+enum class CaptionSource { ALT_TEXT, FIGCAPTION, LAYOUT_CAPTION, PAGE_TEXT }
 
 /**
  * The immutable metadata of one image unit: the managed file and its thumbnail (paths relative to the document's

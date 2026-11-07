@@ -40,19 +40,19 @@ class CandidateImageTarget(
         ordinal: Int,
         unitId: ContentUnitId,
         locator: SourceLocation.ImageRegion,
-        caption: String,
+        text: String,
         image: WrittenImage,
         provenanceRoot: SourceImageRoot,
     ) {
-        val text = TextNormalizer.normalize(caption)
+        val normalized = TextNormalizer.normalize(text)
         revisions.appendPage(
             candidate,
             RevisionPageDraft(
                 ordinal = ordinal,
                 unitId = unitId,
                 locator = locator,
-                extractedText = text.extracted,
-                searchText = text.search,
+                extractedText = normalized.extracted,
+                searchText = normalized.search,
                 extractionMethod = ExtractionMethod.DIRECT_TEXT,
                 sourceImage = SourceImageProvenance(
                     root = provenanceRoot,

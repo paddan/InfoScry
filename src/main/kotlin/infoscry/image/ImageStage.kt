@@ -27,7 +27,7 @@ import java.util.HexFormat
 import javax.imageio.ImageIO
 
 /** The version of the rules that decide which images are kept; a checkpoint of another version is looked at again. */
-const val IMAGE_EXTRACTOR_VERSION: String = "1"
+const val IMAGE_EXTRACTOR_VERSION: String = "2"
 
 /**
  * A parent unit the text stage emitted, with what the image stage needs from it.
@@ -154,7 +154,7 @@ class ImageStage(
         source.use {
             for (context in parents) {
                 val found = try {
-                    source.imagesOf(context.parent)
+                    source.imagesOf(context.parent, withPageText = false)
                 } catch (unreadable: RuntimeException) {
                     // The second pass reports the failure; here the parent just adds no hashes.
                     continue
@@ -369,7 +369,7 @@ class ImageStage(
                 ordinal,
                 unitId,
                 SourceLocation.ImageRegion(parent.locator, index, candidate.box),
-                found.caption ?: "",
+                unitTextOf(found.caption, found.context),
                 written,
                 root,
             )
@@ -386,6 +386,10 @@ class ImageStage(
         commit(run, counts, outcome, delivered)
         return delivered
     }
+
+    /** The unit's indexed text: the caption, a blank line, then the page-text context; either part may be absent. */
+    private fun unitTextOf(caption: String?, context: String?): String =
+        listOfNotNull(caption?.takeIf { it.isNotBlank() }, context?.takeIf { it.isNotBlank() }).joinToString("\n\n")
 
     private fun checkNotDeleting(run: ParentRun) {
         if (documents.isDeletionTarget(run.document.id)) throw DocumentBeingDeletedException(run.document.id)

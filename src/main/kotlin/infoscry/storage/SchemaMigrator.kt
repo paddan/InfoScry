@@ -65,6 +65,7 @@ class SchemaMigrator(private val database: Database) {
             "db/migration/002_import_roots.sql",
             "db/migration/003_drop_import_roots.sql",
             "db/migration/004_images.sql",
+            "db/migration/005_caption_source_page_text.sql",
         )
 
         /** The schema version this build writes and understands. */

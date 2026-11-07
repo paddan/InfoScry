@@ -59,7 +59,8 @@ database at the version before it and keeps its rows: `002_import_roots.sql`
 (version 2) and `003_drop_import_roots.sql` (version 3), which removes what
 version 2 added once imports came only from uploads. `004_images.sql` (version 4)
 adds `document_images`, `image_extraction_checkpoints`, `collections.default_image_extraction`
-and the `source_image_*` columns of `content_units` (written only for image units). [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
+and the `source_image_*` columns of `content_units` (written only for image units). `005_caption_source_page_text.sql`
+(version 5) lets `document_images.caption_source` be `PAGE_TEXT`. [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
 applies every script above the database's version in one transaction, recording
 each version in `schema_version`, so a crash leaves the version it started from
 and starting again resumes. Values keep their
@@ -101,7 +102,9 @@ Design: [image foundation](specs/2026-11-07-image-foundation-design.md), with it
   SHA-256 (or a region's rounded box), so a rerun or rescan keeps IDs. Progress, page counts, neighbours
   and rescan baselines count text units only.
 - **Tables.** `document_images` holds immutable metadata (kind `EMBEDDED`, `PAGE_REGION` or
-  `STANDALONE`, paths, size, box, caption and its source). A revision's images are its `image_region`
+  `STANDALONE`, paths, size, box, caption and its source: `ALT_TEXT`, `FIGCAPTION`, `LAYOUT_CAPTION` or `PAGE_TEXT`;
+  the unit's indexed text is the caption, a blank line and a page-text context of at most 600 characters, see the
+  spec's *Captions and page context*). A revision's images are its `image_region`
   page rows joined on `(document_id, unit_id, source_image_sha256)`, so history and Restore carry them.
   `image_extraction_checkpoints` has one row per target, parent unit and mode (`EMBEDDED` or `ALL`; `OFF`
   writes none); the target is the text fingerprint for an import and the candidate revision for a rescan.

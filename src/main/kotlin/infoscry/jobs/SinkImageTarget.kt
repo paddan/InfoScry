@@ -36,15 +36,15 @@ class SinkImageTarget(
         ordinal: Int,
         unitId: ContentUnitId,
         locator: SourceLocation.ImageRegion,
-        caption: String,
+        text: String,
         image: WrittenImage,
         provenanceRoot: SourceImageRoot,
     ) {
-        val text = TextNormalizer.normalize(caption)
+        val normalized = TextNormalizer.normalize(text)
         val draft = ContentUnitDraft(
             locator = locator,
-            extractedText = text.extracted,
-            searchText = text.search,
+            extractedText = normalized.extracted,
+            searchText = normalized.search,
             method = ExtractionMethod.DIRECT_TEXT,
             sourceImage = SourceImageProvenance(
                 root = provenanceRoot,

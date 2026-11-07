@@ -588,6 +588,32 @@ class ImageStageTest {
     }
 
     @Test
+    fun `the unit text is the caption, a blank line and the context, and the stored caption is the caption alone`() {
+        val parent = ParentUnit(ContentUnitId("page-0"), 0, SourceLocation.PdfPage(1))
+        orderedParents[parent.unitId] = parent
+        val base = picture(100, 120).copy(parent = parent)
+        val both = base.copy(caption = "Figur 3. Anna Svensson 1923", captionSource = infoscry.storage.CaptionSource.PAGE_TEXT, context = "The ferry company opened in 1921.")
+        val contextOnly = picture(110, 120).copy(parent = parent, context = "Only nearby text.")
+        val captionOnly = picture(120, 120).copy(parent = parent, caption = "Alt text", captionSource = infoscry.storage.CaptionSource.ALT_TEXT)
+        val neither = picture(130, 120).copy(parent = parent)
+        val answers = mapOf(parent.unitId to ParentImages(listOf(both, contextOnly, captionOnly, neither), emptyList(), false))
+        val target = RecordingTarget()
+
+        run(FakeFinder(answers), answers, target)
+
+        assertEquals(
+            listOf("Figur 3. Anna Svensson 1923\n\nThe ferry company opened in 1921.", "Only nearby text.", "Alt text", ""),
+            target.delivered.map { it.caption },
+        )
+        val stored = target.delivered.map { store.image(document.id, it.unitId, it.image.sha256)!! }
+        assertEquals(listOf("Figur 3. Anna Svensson 1923", null, "Alt text", null), stored.map { it.caption })
+        assertEquals(
+            listOf(infoscry.storage.CaptionSource.PAGE_TEXT, null, infoscry.storage.CaptionSource.ALT_TEXT, null),
+            stored.map { it.captionSource },
+        )
+    }
+
+    @Test
     fun `a retry that delivers fewer images leaves no stale unit, and repeating it changes nothing`() {
         val target = RecordingTarget()
         val before = pages(2) { listOf(picture(100, 120), picture(110, 120)) }
@@ -887,11 +913,11 @@ class ImageStageTest {
             ordinal: Int,
             unitId: ContentUnitId,
             locator: SourceLocation.ImageRegion,
-            caption: String,
+            text: String,
             image: WrittenImage,
             provenanceRoot: SourceImageRoot,
         ) {
-            delivered += Delivery(ordinal, unitId, locator, caption, image, provenanceRoot)
+            delivered += Delivery(ordinal, unitId, locator, text, image, provenanceRoot)
             held[unitId] = ordinal
             after()
         }

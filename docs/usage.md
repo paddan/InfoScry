@@ -295,9 +295,12 @@ retrieval require the local embedding model and supported GPU runtime.
 Images appear as a strip of thumbnails under the page, slide or section they
 belong to. Select one to see it full size with its caption and *from page N*; for
 a picture cut out of a scanned page, its position is outlined on the page.
-Escape closes the viewer. A picture's only searchable text is its caption or
-alt text, so a picture without one is shown and citable but not found by
-search. A search result or an Ask citation on a picture opens it with its page
+Escape closes the viewer. A picture is found by its caption (alt text, a
+figcaption, a caption on a scanned page, or for a PDF image or a picture on a scanned page the text next to
+it, such as "Figur 3. Anna Svensson 1923" under it) and by a short excerpt of the page text around it, so
+searching for a nearby word finds the picture. A picture with no caption and no text around it
+is shown and citable but not found by search. A document read before this existed keeps its old picture
+text until it is rescanned; *Keep current text* refreshes it without reading any page. A search result or an Ask citation on a picture opens it with its page
 behind it, and a citation from an older version opens that version's picture.
 Document details show the number of images. Picture regions on scanned pages are not yet verified against real Surya: its layout reading did not mark synthetic test pictures, so they may not be found until checked on a real photograph. From the command line,
 `infoscry import … --images off|embedded|all` chooses the same setting.

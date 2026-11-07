@@ -358,7 +358,8 @@ the library, which `INFOSCRY_LIBRARY_DIR` can place on another disk.
 The [image foundation](specs/2026-11-07-image-foundation-design.md) is implemented: pictures are content units
 of their document, extracted at import and rescan, stored once by hash with thumbnails, published in the same
 revision as the page text, shown as a thumbnail strip and a viewer in the source reader, searchable and
-citable by their caption or alt text, and chosen with **Extract images** (Off, Embedded images, Embedded +
+citable by their caption or alt text (a PDF image or a scanned-page picture without one takes the page text next to
+it, and carries a short excerpt of the page text around it, so a nearby word finds it), and chosen with **Extract images** (Off, Embedded images, Embedded +
 regions from scanned pages) in the import and rescan dialogs, the collection default and
 `infoscry import --images`. **Keep current text** is the rescan-only method that adds images without reading
 any page. Contracts: [technical reference](technical-reference.md#images),

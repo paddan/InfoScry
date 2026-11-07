@@ -152,8 +152,9 @@ class LayoutRegions(
 
         val raster = decode(reader) ?: return failedWith(ImageRejectedException.IMAGE_DECODE_FAILED)
         val captions = captionsByFigure(figures, structure.blocks, text, raster.height)
+        val lines = pageLines(structure.blocks, text, raster.width, raster.height)
         val images = figures.mapNotNull { figure ->
-            regionOf(parent, raster, figure.bbox!!, captions[figure.order])
+            regionOf(parent, raster, figure.bbox!!, captions[figure.order], lines)
         }
         return ParentImages(images, failures = emptyList(), scanned = false)
     }
@@ -182,6 +183,33 @@ class LayoutRegions(
             result[figure.order] = captions.getValue(nearest.first).second
         }
         return result
+    }
+
+    /**
+     * The text of the page's blocks with their boxes, as the text source for a picture's page-text caption and context.
+     *
+     * A stored structure keeps block boxes and no word boxes, so a "line" here is a whole block (a heading, a paragraph, a
+     * list item, a caption or a footnote). Page headers and footers, tables, formulas and code are left out: they say
+     * nothing about a picture beside them.
+     */
+    private fun pageLines(blocks: List<StructureBlock>, text: String, width: Int, height: Int): List<TextLine> =
+        blocks.filter { it.kind in TEXT_BLOCKS && it.bbox != null }
+            .sortedBy { it.order }
+            .mapNotNull { block ->
+                val label = textOf(block, text) ?: return@mapNotNull null
+                val box = normalized(block.bbox!!, width, height) ?: return@mapNotNull null
+                TextLine(label, box)
+            }
+
+    private fun normalized(box: PixelBox, width: Int, height: Int): NormalizedBox? {
+        val left = box.left.coerceIn(0, width)
+        val right = box.right.coerceIn(0, width)
+        val top = box.top.coerceIn(0, height)
+        val bottom = box.bottom.coerceIn(0, height)
+        if (right <= left || bottom <= top) return null
+        return NormalizedBox(
+            left.toDouble() / width, top.toDouble() / height, right.toDouble() / width, bottom.toDouble() / height,
+        )
     }
 
     /** The caption text of [block], trimmed, or null when the block is empty or its range is not in [text]. */
@@ -213,7 +241,8 @@ class LayoutRegions(
         parent: ParentUnit,
         raster: BufferedImage,
         box: PixelBox,
-        caption: String?,
+        layoutCaption: String?,
+        lines: List<TextLine>,
     ): FoundImage? {
         val left = box.left.coerceIn(0, raster.width)
         val right = box.right.coerceIn(0, raster.width)
@@ -228,24 +257,33 @@ class LayoutRegions(
         } finally {
             graphics.dispose()
         }
+        val normalizedBox = NormalizedBox(
+            left = left.toDouble() / raster.width,
+            top = top.toDouble() / raster.height,
+            right = right.toDouble() / raster.width,
+            bottom = bottom.toDouble() / raster.height,
+        )
         val candidate = ImageCandidate(
             bytes = ImageBytes.Raster(region),
             widthPx = region.width,
             heightPx = region.height,
-            box = NormalizedBox(
-                left = left.toDouble() / raster.width,
-                top = top.toDouble() / raster.height,
-                right = right.toDouble() / raster.width,
-                bottom = bottom.toDouble() / raster.height,
-            ),
+            box = normalizedBox,
             isMask = false,
         )
+        // A caption the layout found wins; the text next to the picture is the fallback.
+        val pageCaption = if (layoutCaption == null) PageTextContext.captionFor(normalizedBox, lines) else null
+        val caption = layoutCaption ?: pageCaption
         return FoundImage(
             parent = parent,
             kind = ImageSourceKind.PAGE_REGION,
             candidate = candidate,
             caption = caption,
-            captionSource = if (caption != null) CaptionSource.LAYOUT_CAPTION else null,
+            captionSource = when {
+                layoutCaption != null -> CaptionSource.LAYOUT_CAPTION
+                pageCaption != null -> CaptionSource.PAGE_TEXT
+                else -> null
+            },
+            context = PageTextContext.contextFor(normalizedBox, lines, caption),
         )
     }
 
@@ -334,5 +372,10 @@ class LayoutRegions(
 
         /** How far a caption may sit from its figure, as a share of the page height. */
         const val CAPTION_GAP_SHARE: Double = 0.03
+
+        /** The block kinds whose text says something about a picture near them. */
+        val TEXT_BLOCKS: Set<BlockKind> = setOf(
+            BlockKind.HEADING, BlockKind.PARAGRAPH, BlockKind.LIST_ITEM, BlockKind.CAPTION, BlockKind.FOOTNOTE,
+        )
     }
 }

@@ -135,6 +135,41 @@ class RescanImagesTest {
     }
 
     @Test
+    fun `a keep current text rescan gives an image already delivered the caption and context of the page text`() {
+        withHarness { harness ->
+            val picture = harness.importCleanAndScannedPdf("clean", "scanned")
+            val finder = TableFinder(mapOf(1 to listOf(embedded(null, 1))))
+            harness.useImages(finder, ImageExtractionMode.EMBEDDED)
+            val first = harness.rescan(picture, FakePageEngine(), method = ReadingMethod.KeepText)
+            assertNull(first.failure)
+            AppContext.open(harness.archiveDir).use { context ->
+                val image = context.revisions.pages(assertNotNull(first.activeRevisionId)).single { isImage(it) }
+                assertEquals("", image.extractedText, "the first delivery had neither caption nor context")
+                assertEquals(0, context.index().searchKeyword(CollectionId("default"), "steamship", limit = 10).size)
+            }
+
+            // The finder now reads page text beside the same picture; a later rescan delivers it again with that text.
+            finder.byPage[1] = listOf(
+                embedded("Figur 3. Anna Svensson 1923", 1, context = "The steamship company ran ferries.")
+                    .let { it.copy(captionSource = CaptionSource.PAGE_TEXT) },
+            )
+            val second = harness.rescan(picture, FakePageEngine(), method = ReadingMethod.KeepText)
+
+            assertNull(second.failure)
+            assertNotEquals(first.activeRevisionId, second.activeRevisionId)
+            AppContext.open(harness.archiveDir).use { context ->
+                val revisionId = assertNotNull(second.activeRevisionId)
+                val image = context.revisions.pages(revisionId).single { isImage(it) }
+                assertEquals("Figur 3. Anna Svensson 1923\n\nThe steamship company ran ferries.", image.extractedText)
+                assertEquals(image.unitId.value, context.index().searchKeyword(CollectionId("default"), "steamship", limit = 10).single().unitId)
+                val stored = context.imageStore.imagesOf(revisionId).single()
+                assertEquals("Figur 3. Anna Svensson 1923", stored.caption)
+                assertEquals(CaptionSource.PAGE_TEXT, stored.captionSource)
+            }
+        }
+    }
+
+    @Test
     fun `keep current text is refused at preview while images are off`() {
         withHarness { harness ->
             val picture = harness.importCleanAndScannedPdf("clean", "scanned")
@@ -327,7 +362,7 @@ class RescanImagesTest {
         }
     }
 
-    private fun embedded(caption: String?, seed: Int) = FoundImage(
+    private fun embedded(caption: String?, seed: Int, context: String? = null) = FoundImage(
         ParentUnit(ContentUnitId("unused"), 0, SourceLocation.PdfPage(1)),
         ImageSourceKind.EMBEDDED,
         ImageCandidate(
@@ -336,6 +371,7 @@ class RescanImagesTest {
         ),
         caption,
         caption?.let { CaptionSource.ALT_TEXT },
+        context,
     )
 
     private fun contentUnitImageRows(context: AppContext, documentId: DocumentId): Int = count(
