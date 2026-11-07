@@ -27,6 +27,12 @@ describe('ImageStrip', () => {
     expect(thumbnails[0].getAttribute('src')).toBe('/api/collections/c%201/documents/d1/images/i1/thumbnail');
   });
 
+  it('asks for the thumbnails of an older revision by name', () => {
+    render(ImageStrip, { collectionId: 'c', documentId: 'd1', revisionId: 'rev 1', images: [image()], onOpen: vi.fn() });
+    expect((screen.getAllByRole('img')[0] as HTMLImageElement).getAttribute('src'))
+      .toBe('/api/collections/c/documents/d1/images/i1/thumbnail?revision=rev%201');
+  });
+
   it('opens an image with a click or the Enter key', async () => {
     const onOpen = vi.fn();
     render(ImageStrip, { collectionId: 'c', documentId: 'd1', images: [image()], onOpen });

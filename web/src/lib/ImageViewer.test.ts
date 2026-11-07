@@ -28,6 +28,11 @@ describe('ImageViewer', () => {
     expect(screen.getByAltText('A harbour at dusk').getAttribute('src')).toBe('/api/collections/c/documents/d1/images/i1/file');
   });
 
+  it('shows the full-size file of the revision it belongs to', () => {
+    render(ImageViewer, { collectionId: 'c', documentId: 'd1', image: region, open: true, revisionId: 'r1', onClose: vi.fn() });
+    expect(screen.getByAltText('A harbour at dusk').getAttribute('src')).toBe('/api/collections/c/documents/d1/images/i1/file?revision=r1');
+  });
+
   it('outlines a page region on the page image with percentages of the page', () => {
     render(ImageViewer, { collectionId: 'c', documentId: 'd1', image: region, open: true, revisionId: 'r1', onClose: vi.fn() });
     const outline = screen.getByTestId('image-box');

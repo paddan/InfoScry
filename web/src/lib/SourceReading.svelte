@@ -155,7 +155,7 @@
     {/if}
   </div>
   {#if documentId !== null && unitImages.length > 0}
-    <ImageStrip {collectionId} {documentId} images={unitImages} onOpen={openImage} />
+    <ImageStrip {collectionId} {documentId} {revisionId} images={unitImages} onOpen={openImage} />
   {/if}
 </div>
 

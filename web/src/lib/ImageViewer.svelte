@@ -65,7 +65,7 @@
         <h2 id="image-viewer-title" tabindex="-1" bind:this={heading}>{title}</h2>
         {#if image.caption}<p class="caption">{image.caption}</p>{/if}
         {#if page !== null}<p class="meta">from page {page}</p>{/if}
-        <img class="full" src={imageFileUrl(collectionId, documentId, image.unitId)} {alt} width={image.widthPx} height={image.heightPx} />
+        <img class="full" src={imageFileUrl(collectionId, documentId, image.unitId, revisionId)} {alt} width={image.widthPx} height={image.heightPx} />
         {#if pageUrl !== null && box !== null}
           <figure class="page">
             <div class="page-frame">

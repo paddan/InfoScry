@@ -4,6 +4,8 @@
   export let collectionId: string;
   export let documentId: string;
   export let images: ImageView[];
+  /** The revision the images belong to; an older reading's thumbnails are that reading's, not the current one's. */
+  export let revisionId: string | null = null;
   export let onOpen: (image: ImageView, opener: HTMLElement | null) => void;
 
   function open(event: Event, image: ImageView): void {
@@ -22,7 +24,7 @@
     {#each images as image (image.unitId)}
       <li>
         <button type="button" onclick={(event) => open(event, image)} onkeydown={(event) => openOnEnter(event, image)} title={imageAltText(image)}>
-          <img src={imageThumbnailUrl(collectionId, documentId, image.unitId)} alt={imageAltText(image)} loading="lazy" />
+          <img src={imageThumbnailUrl(collectionId, documentId, image.unitId, revisionId)} alt={imageAltText(image)} loading="lazy" />
         </button>
       </li>
     {/each}

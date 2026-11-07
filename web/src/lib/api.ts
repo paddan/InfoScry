@@ -1113,12 +1113,17 @@ export async function listImages(collectionId: string, documentId: string, revis
   return (await readJson(await fetch(`${imagesPath(collectionId, documentId)}${query}`))) as ImageView[];
 }
 
-export function imageFileUrl(collectionId: string, documentId: string, unitId: string): string {
-  return `${imagesPath(collectionId, documentId)}/${encodeURIComponent(unitId)}/file`;
+/** The query that names a revision, so an older reading shows its own pictures and not the current reading's. */
+function revisionQuery(revisionId?: string | null): string {
+  return revisionId ? `?revision=${encodeURIComponent(revisionId)}` : '';
 }
 
-export function imageThumbnailUrl(collectionId: string, documentId: string, unitId: string): string {
-  return `${imagesPath(collectionId, documentId)}/${encodeURIComponent(unitId)}/thumbnail`;
+export function imageFileUrl(collectionId: string, documentId: string, unitId: string, revisionId?: string | null): string {
+  return `${imagesPath(collectionId, documentId)}/${encodeURIComponent(unitId)}/file${revisionQuery(revisionId)}`;
+}
+
+export function imageThumbnailUrl(collectionId: string, documentId: string, unitId: string, revisionId?: string | null): string {
+  return `${imagesPath(collectionId, documentId)}/${encodeURIComponent(unitId)}/thumbnail${revisionQuery(revisionId)}`;
 }
 
 /** The text a reader sees for an image: its caption, else the locator's own description with a capital. */
