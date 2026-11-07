@@ -1437,6 +1437,7 @@ class ContentStore(private val database: Database) {
             is SourceLocation.TextLines -> "text_lines"
             is SourceLocation.HtmlSection -> "html_section"
             is SourceLocation.EbookSection -> "ebook_section"
+            is SourceLocation.ImageRegion -> "image_region"
         }
 
         private fun encodeLocator(locator: SourceLocation): String =

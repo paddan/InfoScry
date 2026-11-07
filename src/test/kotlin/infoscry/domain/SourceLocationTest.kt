@@ -129,4 +129,43 @@ class SourceLocationTest {
         )
         locations.forEach { assertRoundTrips(it) }
     }
+
+    @Test
+    fun `image region describes its parent and an imported picture by name`() {
+        val box = NormalizedBox(0.1, 0.2, 0.5, 0.6)
+        assertEquals("image 2 on page 14", SourceLocation.ImageRegion(SourceLocation.PdfPage(14), 2, null).describe())
+        assertEquals("image 1 on slide 3", SourceLocation.ImageRegion(SourceLocation.Slide(3), 1, box).describe())
+        assertEquals("image a.png", SourceLocation.ImageRegion(SourceLocation.Image("a.png"), 1, null).describe())
+        assertEquals(UnitKind.IMAGE, SourceLocation.ImageRegion(SourceLocation.PdfPage(1), 1, null).unitKind)
+    }
+
+    @Test
+    fun `image region round trips parent and box and uses a stable discriminator`() {
+        val location = SourceLocation.ImageRegion(
+            parent = SourceLocation.PdfPage(14),
+            index = 2,
+            box = NormalizedBox(0.1, 0.2, 0.5, 0.6),
+        )
+        val encoded = assertRoundTrips(location)
+        assertTrue(encoded.contains("\"type\":\"image_region\""))
+        assertTrue(encoded.contains("\"pdf_page\""))
+    }
+
+    @Test
+    fun `image region rejects a nested region, a non positive index and an invalid box`() {
+        val page = SourceLocation.PdfPage(1)
+        assertFailsWith<IllegalArgumentException> {
+            SourceLocation.ImageRegion(SourceLocation.ImageRegion(page, 1, null), 1, null)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SourceLocation.ImageRegion(page, index = 0, box = null)
+        }
+        assertFailsWith<IllegalArgumentException> { NormalizedBox(0.5, 0.0, 0.4, 0.5) }
+        assertFailsWith<IllegalArgumentException> { NormalizedBox(0.0, 0.0, 1.2, 0.5) }
+    }
+
+    @Test
+    fun `normalized box rounds to three decimals`() {
+        assertEquals(NormalizedBox(0.123, 0.5, 0.124, 1.0), NormalizedBox(0.12341, 0.5, 0.12394, 1.0).rounded())
+    }
 }
