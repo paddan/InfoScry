@@ -2,6 +2,7 @@ package infoscry.image
 
 import infoscry.domain.NormalizedBox
 import infoscry.extract.OcrUnavailableException
+import infoscry.extract.PdfExtractor
 import infoscry.ocr.BlockKind
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrPageResult
@@ -22,6 +23,7 @@ import kotlin.math.min
 
 /**
  * Surya's layout runtime is missing or cannot start, so no picture regions can be found on scanned pages.
+ * That includes a missing llama.cpp or Surya model, because the runtime cannot start without them.
  *
  * It is a document-level answer: every scanned page would fail the same way, so the caller reports it once per
  * document with [code] and carries on with the text and the embedded images.
@@ -49,8 +51,19 @@ class SuryaLayoutUnavailableException(message: String, cause: Throwable? = null)
  * the engine is not called, and the structure is used as it is.
  *
  * The caller renders the page image; this class does not render.
+ *
+ * @param maxRenderedPixels the most pixels a page raster may hold to be decoded. A larger page is refused as
+ *   [ImageRejectedException.IMAGE_TOO_LARGE] before any pixel is read: the crops must keep the raster's own
+ *   coordinates, so the raster is never subsampled to fit.
  */
-class LayoutRegions(private val engines: PageOcrEngines) {
+class LayoutRegions(
+    private val engines: PageOcrEngines,
+    private val maxRenderedPixels: Long = PdfExtractor.MAX_RENDERED_PIXELS,
+) {
+
+    init {
+        require(maxRenderedPixels >= 1) { "a page raster bound must allow at least one pixel, was $maxRenderedPixels" }
+    }
 
     /**
      * The picture regions of one scanned page, in reading order.
@@ -103,7 +116,10 @@ class LayoutRegions(private val engines: PageOcrEngines) {
             .sortedBy { it.order }
         if (figures.isEmpty()) return ParentImages.NONE
 
-        val raster = readRaster(page) ?: return failedWith(ImageRejectedException.IMAGE_DECODE_FAILED)
+        val raster = when (val read = readRaster(page)) {
+            is PageRaster.Read -> read.image
+            is PageRaster.Refused -> return failedWith(read.code)
+        }
         val captions = captionsByFigure(figures, structure.blocks, text, raster.height)
         val images = figures.mapNotNull { figure ->
             regionOf(parent, raster, figure.bbox!!, captions[figure.order])
@@ -202,10 +218,38 @@ class LayoutRegions(private val engines: PageOcrEngines) {
         )
     }
 
-    private fun readRaster(page: PageImage): BufferedImage? = try {
-        ImageIO.read(page.imagePath.toFile())
-    } catch (unreadable: IOException) {
-        null
+    /**
+     * Decodes the page raster after its header is read, so a page over [maxRenderedPixels] is refused without
+     * allocating its pixels. The raster is never subsampled: the structure's boxes are in its own coordinates.
+     */
+    private fun readRaster(page: PageImage): PageRaster {
+        val decodeFailed = PageRaster.Refused(ImageRejectedException.IMAGE_DECODE_FAILED)
+        return try {
+            ImageIO.createImageInputStream(page.imagePath.toFile())?.use { stream ->
+                val reader = ImageIO.getImageReaders(stream).takeIf { it.hasNext() }?.next()
+                    ?: return decodeFailed
+                try {
+                    reader.input = stream
+                    if (reader.getWidth(0).toLong() * reader.getHeight(0) > maxRenderedPixels) {
+                        return PageRaster.Refused(ImageRejectedException.IMAGE_TOO_LARGE)
+                    }
+                    reader.read(0)?.let { PageRaster.Read(it) } ?: decodeFailed
+                } finally {
+                    reader.dispose()
+                }
+            } ?: decodeFailed
+        } catch (unreadable: IOException) {
+            decodeFailed
+        } catch (unreadable: RuntimeException) {
+            // A decoder given untrusted bytes can fail with any runtime exception; none of them may escape.
+            decodeFailed
+        }
+    }
+
+    /** The outcome of reading a page raster: its pixels, or the code that refused it. */
+    private sealed interface PageRaster {
+        class Read(val image: BufferedImage) : PageRaster
+        class Refused(val code: String) : PageRaster
     }
 
     private fun failedWith(code: String): ParentImages =

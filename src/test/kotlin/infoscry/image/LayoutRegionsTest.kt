@@ -199,6 +199,24 @@ class LayoutRegionsTest {
         assertEquals(listOf(SuryaWorkerException.EXITED), result.failures)
     }
 
+    @Test
+    fun `a page larger than the pixel bound is refused before it is decoded, on both paths`() {
+        val engine = FakeSurya { page -> reading(page, PAGE_TEXT, figureAWithCaption()) }
+        val page = page()
+        val small = LayoutRegions(PageOcrEngines(listOf(engine)), maxRenderedPixels = 1_000L)
+
+        val stored = runBlocking {
+            small.regionsOf(parent, page, structureOf(figureAWithCaption()), PAGE_TEXT, settings)
+        }
+        val fresh = runBlocking { small.regionsOf(parent, page, structure = null, pageText = null, settings = settings) }
+
+        assertTrue(stored.images.isEmpty())
+        assertEquals(listOf(ImageRejectedException.IMAGE_TOO_LARGE), stored.failures)
+        assertTrue(fresh.images.isEmpty())
+        assertEquals(listOf(ImageRejectedException.IMAGE_TOO_LARGE), fresh.failures)
+        assertEquals(1, engine.calls)
+    }
+
     private fun regions(engine: PageOcrEngine, page: PageImage, structure: PageStructure?): ParentImages =
         regionsWith(PageOcrEngines(listOf(engine)), page, structure)
 
