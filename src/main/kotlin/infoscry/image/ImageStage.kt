@@ -1,0 +1,445 @@
+package infoscry.image
+
+import infoscry.domain.Document
+import infoscry.domain.SourceImageRoot
+import infoscry.domain.SourceLocation
+import infoscry.extract.UnitBoundary
+import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.ocr.PageImage
+import infoscry.ocr.PageStructure
+import infoscry.storage.ContentAddressedFile
+import infoscry.storage.DocumentBeingDeletedException
+import infoscry.storage.DocumentStore
+import infoscry.storage.ImageCheckpoint
+import infoscry.storage.ImageCheckpointOutcome
+import infoscry.storage.ImageStore
+import infoscry.storage.StoredImage
+import java.awt.image.BufferedImage
+import java.io.ByteArrayInputStream
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.EnumMap
+import java.util.HexFormat
+import javax.imageio.ImageIO
+
+/** The version of the rules that decide which images are kept; a checkpoint of another version is looked at again. */
+const val IMAGE_EXTRACTOR_VERSION: String = "1"
+
+/**
+ * A parent unit the text stage emitted, with what the image stage needs from it.
+ *
+ * @param text the parent's extracted text, which a known [structure] was derived into.
+ * @param page renders the parent's page raster; called only when a region pass is needed, and returns null when the
+ *   parent has no page.
+ */
+data class ParentUnitContext(
+    val parent: ParentUnit,
+    val text: String,
+    val structure: PageStructure?,
+    val page: suspend () -> PageImage?,
+)
+
+/**
+ * What a stage run holds for the whole document, whether this run or an earlier one committed it.
+ *
+ * @param warnings distinct codes only, never captions or text.
+ */
+data class ImageStageResult(val images: Int, val skipped: Map<SkipReason, Int>, val warnings: List<String>) {
+    companion object {
+        val NONE = ImageStageResult(0, emptyMap(), emptyList())
+    }
+}
+
+/**
+ * Extracts the images of a document one parent unit at a time, each parent with its own checkpoint.
+ *
+ * Per parent the artifact is written, its metadata recorded, the unit delivered to the target and the checkpoint
+ * committed, all in one unit boundary. Unit IDs, ordinals and artifact names depend only on the document, so a run
+ * interrupted anywhere converges on the same rows when it runs again, and a parent with a committed checkpoint is
+ * not looked at again.
+ *
+ * Repetition across pages is decided in a first pass that hashes each parent's embedded images and keeps only the
+ * hashes found on too many pages, so the bytes of the whole document are never held at once; the second pass asks
+ * the finder again (it is deterministic). A resumed run hashes the already committed parents again whenever another
+ * parent is still to do, so a logo is judged by the same count however often the run was interrupted. The first pass
+ * is skipped when the document has no more parents than an image may repeat on.
+ *
+ * A parent whose regions could not be located because Surya is unavailable commits a `FAILED` checkpoint after its
+ * embedded images, so the next run tries it again.
+ */
+class ImageStage(
+    private val finders: ImageFinders,
+    private val regions: LayoutRegions,
+    private val artifacts: ImageArtifacts,
+    private val store: ImageStore,
+    private val documents: DocumentStore,
+) {
+
+    suspend fun run(
+        document: Document,
+        managedPath: Path,
+        artifactRoot: Path,
+        parents: List<ParentUnitContext>,
+        mode: ImageExtractionMode,
+        target: ImageUnitTarget,
+        boundary: UnitBoundary,
+        settings: OcrSettingsSnapshot,
+    ): ImageStageResult {
+        if (mode == ImageExtractionMode.OFF || parents.isEmpty()) return ImageStageResult.NONE
+        val committed = store.checkpoints(document.id, target.target, mode, IMAGE_EXTRACTOR_VERSION)
+            .filterValues { it.outcome == ImageCheckpointOutcome.DONE }
+        val summary = Summary()
+        // Committed parents contribute their stored counts, so a rerun reports the whole document.
+        parents.mapNotNull { committed[it.parent.unitId] }.forEach(summary::addCommitted)
+        if (parents.all { it.parent.unitId in committed }) return summary.result()
+
+        val finder = finders.forMediaType(document.mediaType) ?: return summary.result()
+        val source = try {
+            finder.open(managedPath)
+        } catch (unreadable: IOException) {
+            summary.warn(SOURCE_UNREADABLE)
+            return summary.result()
+        } catch (unreadable: RuntimeException) {
+            summary.warn(SOURCE_UNREADABLE)
+            return summary.result()
+        }
+        source.use {
+            val repeated = repeatedHashes(source, parents)
+            var total = parents.sumOf { committed[it.parent.unitId]?.imageCount ?: 0 }
+            var regionsAvailable = true
+            for (context in parents) {
+                if (context.parent.unitId in committed) continue
+                if (documents.isDeletionTarget(document.id)) throw DocumentBeingDeletedException(document.id)
+                val run = ParentRun(document, managedPath, artifactRoot, context, mode, target, boundary, settings)
+                val outcome = extractParent(run, source, repeated, total, regionsAvailable, summary)
+                total += outcome.delivered
+                if (outcome.regionsUnavailable) regionsAvailable = false
+            }
+        }
+        return summary.result()
+    }
+
+    /** The hashes of embedded images that appear on more pages than [ImageFilter.MAX_REPEAT_PAGES] allows. */
+    private fun repeatedHashes(source: OpenedSource, parents: List<ParentUnitContext>): Set<String> {
+        if (parents.size <= ImageFilter.MAX_REPEAT_PAGES) return emptySet()
+        val pages = HashMap<String, Int>()
+        for (context in parents) {
+            val found = try {
+                source.imagesOf(context.parent)
+            } catch (unreadable: RuntimeException) {
+                // The second pass reports the failure; here the parent just adds no hashes.
+                continue
+            }
+            // A page counts once however many times it draws the image.
+            found.images.filter { it.kind == ImageSourceKind.EMBEDDED }
+                .map { contentHash(it.candidate) }
+                .toSet()
+                .forEach { pages.merge(it, 1, Int::plus) }
+        }
+        return pages.filterValues { it > ImageFilter.MAX_REPEAT_PAGES }.keys
+    }
+
+    private class ParentRun(
+        val document: Document,
+        val managedPath: Path,
+        val artifactRoot: Path,
+        val context: ParentUnitContext,
+        val mode: ImageExtractionMode,
+        val target: ImageUnitTarget,
+        val boundary: UnitBoundary,
+        val settings: OcrSettingsSnapshot,
+    )
+
+    private class ParentOutcome(val delivered: Int, val regionsUnavailable: Boolean)
+
+    private suspend fun extractParent(
+        run: ParentRun,
+        source: OpenedSource,
+        repeated: Set<String>,
+        totalBefore: Int,
+        regionsAvailable: Boolean,
+        summary: Summary,
+    ): ParentOutcome {
+        val parent = run.context.parent
+        val counts = Counts()
+
+        if (parent.ordinal > ImageIdentity.MAX_PARENT_ORDINAL) {
+            counts.warn(PARENT_TOO_LATE)
+            run.boundary.unit { commit(run, counts, ImageCheckpointOutcome.DONE, 0) }
+            summary.addRun(counts, 0)
+            return ParentOutcome(0, false)
+        }
+
+        val found = try {
+            source.imagesOf(parent)
+        } catch (unreadable: RuntimeException) {
+            ParentImages(emptyList(), listOf(ImageFindFailure.PARENT_UNREADABLE), scanned = false)
+        }
+        var images = found.images
+        var failed = false
+        found.failures.forEach { code ->
+            counts.warn(code)
+            if (code == ImageFindFailure.PARENT_UNREADABLE) failed = true
+        }
+
+        var regionsUnavailable = false
+        if (run.mode == ImageExtractionMode.ALL && found.scanned) {
+            if (!regionsAvailable) {
+                regionsUnavailable = true
+            } else {
+                try {
+                    val page = run.context.page()
+                    if (page != null) {
+                        val structure = run.context.structure
+                        val pageText = if (structure != null) run.context.text else null
+                        val located = regions.regionsOf(parent, page, structure, pageText, run.settings)
+                        images = images + located.images
+                        located.failures.forEach(counts::warn)
+                    }
+                } catch (unavailable: SuryaLayoutUnavailableException) {
+                    regionsUnavailable = true
+                }
+            }
+            if (regionsUnavailable) {
+                counts.warn(SuryaLayoutUnavailableException.NEEDS_SURYA_LAYOUT)
+                summary.warn(SuryaLayoutUnavailableException.NEEDS_SURYA_LAYOUT)
+            }
+        }
+
+        val outcome = if (failed || regionsUnavailable) ImageCheckpointOutcome.FAILED else ImageCheckpointOutcome.DONE
+        val delivered = run.boundary.unit { deliverParent(run, images, repeated, totalBefore, counts, outcome) }
+        summary.addRun(counts, delivered)
+        return ParentOutcome(delivered, regionsUnavailable)
+    }
+
+    private suspend fun deliverParent(
+        run: ParentRun,
+        images: List<FoundImage>,
+        repeated: Set<String>,
+        totalBefore: Int,
+        counts: Counts,
+        outcome: ImageCheckpointOutcome,
+    ): Int {
+        val parent = run.context.parent
+        val occurrences = HashMap<String, Int>()
+        var delivered = 0
+        for (found in images) {
+            // Equal images in one parent are told apart in finder order, whether or not each is kept.
+            val key = identityKey(found)
+            val occurrence = occurrences.merge(key, 1, Int::plus)!!
+            val candidate = found.candidate
+
+            val early = ImageFilter.skipReason(candidate, null)
+                ?: SkipReason.REPEATED.takeIf {
+                    found.kind == ImageSourceKind.EMBEDDED && contentHash(candidate) in repeated
+                }
+            if (early != null) {
+                counts.skip(early)
+                continue
+            }
+            if (totalBefore + delivered >= ImageFilter.MAX_PER_DOCUMENT) {
+                counts.skip(SkipReason.LIMIT)
+                counts.warn(LIMIT_REACHED)
+                continue
+            }
+            if (delivered >= ImageIdentity.MAX_PER_PARENT) {
+                counts.warn(ImageFindFailure.TOO_MANY_IMAGES)
+                continue
+            }
+            val decoded = decodeForUniformity(candidate)
+            if (decoded == null) {
+                counts.warn(ImageRejectedException.IMAGE_DECODE_FAILED)
+                continue
+            }
+            if (ImageFilter.skipReason(candidate, decoded) != null) {
+                counts.skip(SkipReason.UNIFORM)
+                continue
+            }
+
+            val index = delivered + 1
+            val ordinal = checkNotNull(ImageIdentity.ordinal(parent.ordinal, index)) {
+                "a parent ordinal beyond the bound was admitted"
+            }
+            val standalone = found.kind == ImageSourceKind.STANDALONE
+            val region = found.kind == ImageSourceKind.PAGE_REGION
+            val sha = if (standalone) run.document.sha256 else contentHash(candidate)
+            val unitId = ImageIdentity.unitId(
+                run.document.id, parent.unitId, found.kind,
+                sha256 = sha.takeIf { !region },
+                box = candidate.box.takeIf { region },
+                occurrence = occurrence,
+            )
+            val written: WrittenImage
+            val root: SourceImageRoot
+            try {
+                if (standalone) {
+                    // The managed copy is the artifact: only its thumbnail is written.
+                    written = WrittenImage(
+                        sha256 = run.document.sha256,
+                        relativePath = run.managedPath.fileName.toString(),
+                        thumbnailRelativePath =
+                            artifacts.thumbnailFor(run.artifactRoot, run.managedPath, run.document.sha256),
+                        mediaType = run.document.mediaType,
+                        widthPx = candidate.widthPx,
+                        heightPx = candidate.heightPx,
+                    )
+                    root = SourceImageRoot.MANAGED_COPY
+                } else {
+                    written = artifacts.write(run.artifactRoot, candidate.bytes)
+                    root = SourceImageRoot.ARTIFACTS
+                }
+            } catch (rejected: ImageRejectedException) {
+                counts.warn(rejected.code)
+                continue
+            }
+            store.record(
+                StoredImage(
+                    documentId = run.document.id,
+                    unitId = unitId,
+                    sha256 = written.sha256,
+                    parentUnitId = parent.unitId,
+                    kind = found.kind,
+                    relativePath = written.relativePath,
+                    thumbnailRelativePath = written.thumbnailRelativePath,
+                    mediaType = written.mediaType,
+                    widthPx = written.widthPx,
+                    heightPx = written.heightPx,
+                    box = candidate.box,
+                    caption = found.caption,
+                    captionSource = found.captionSource,
+                ),
+            )
+            run.target.deliver(
+                ordinal,
+                unitId,
+                SourceLocation.ImageRegion(parent.locator, index, candidate.box),
+                found.caption ?: "",
+                written,
+                root,
+            )
+            delivered++
+        }
+        commit(run, counts, outcome, delivered)
+        return delivered
+    }
+
+    private fun commit(run: ParentRun, counts: Counts, outcome: ImageCheckpointOutcome, delivered: Int) {
+        store.commitCheckpoint(
+            run.document.id, run.target.target, run.mode, IMAGE_EXTRACTOR_VERSION,
+            ImageCheckpoint(run.context.parent.unitId, outcome, delivered, counts.encode()),
+        )
+    }
+
+    /** The pixels to judge uniformity by, bounded like a rendered page, or null when the image cannot be decoded. */
+    private fun decodeForUniformity(candidate: ImageCandidate): BufferedImage? = when (val bytes = candidate.bytes) {
+        is ImageBytes.Raster -> bytes.image
+        is ImageBytes.Encoded -> try {
+            ImageIO.createImageInputStream(ByteArrayInputStream(bytes.bytes))?.use { stream ->
+                val reader = ImageIO.getImageReaders(stream).next()
+                try {
+                    reader.input = stream
+                    val parameter = reader.defaultReadParam
+                    val step = ImageProbe.subsampleStep(reader.getWidth(0), reader.getHeight(0))
+                    if (step > 1) parameter.setSourceSubsampling(step, step, 0, 0)
+                    reader.read(0, parameter)
+                } finally {
+                    reader.dispose()
+                }
+            }
+        } catch (unreadable: IOException) {
+            null
+        } catch (unreadable: RuntimeException) {
+            null
+        }
+    }
+
+    /** What tells equal images in one parent apart from different ones, in the terms identity uses. */
+    private fun identityKey(found: FoundImage): String = when (found.kind) {
+        ImageSourceKind.PAGE_REGION -> {
+            val box = found.candidate.box
+            "box:" + box?.let { listOf(it.left, it.top, it.right, it.bottom).joinToString(",") { v -> "${round3(v)}" } }
+        }
+        else -> "sha:" + contentHash(found.candidate)
+    }
+
+    private fun round3(value: Double): Double = Math.round(value * 1000.0) / 1000.0
+
+    /** SHA-256 of what the candidate carries: its encoded bytes, or its pixels. Stable across passes. */
+    private fun contentHash(candidate: ImageCandidate): String = when (val bytes = candidate.bytes) {
+        is ImageBytes.Encoded -> ContentAddressedFile.sha256Of(bytes.bytes)
+        is ImageBytes.Raster -> {
+            val image = bytes.image
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update("${image.width}x${image.height}".toByteArray())
+            val row = IntArray(image.width)
+            val buffer = ByteBuffer.allocate(image.width * 4)
+            for (y in 0 until image.height) {
+                image.getRGB(0, y, image.width, 1, row, 0, image.width)
+                buffer.clear()
+                buffer.asIntBuffer().put(row)
+                digest.update(buffer.array())
+            }
+            HexFormat.of().formatHex(digest.digest())
+        }
+    }
+
+    /** Skip and warning counts of one parent, kept in its checkpoint as `CODE:count` pairs. */
+    private class Counts {
+        val skipped = EnumMap<SkipReason, Int>(SkipReason::class.java)
+        val warnings = LinkedHashMap<String, Int>()
+
+        fun skip(reason: SkipReason) {
+            skipped.merge(reason, 1, Int::plus)
+        }
+
+        fun warn(code: String) {
+            warnings.merge(code, 1, Int::plus)
+        }
+
+        fun encode(): String? {
+            val parts = skipped.map { "${it.key.name}:${it.value}" } + warnings.map { "${it.key}:${it.value}" }
+            return parts.takeIf { it.isNotEmpty() }?.joinToString(",")
+        }
+    }
+
+    private class Summary {
+        var images = 0
+        val skipped = EnumMap<SkipReason, Int>(SkipReason::class.java)
+        val warnings = LinkedHashSet<String>()
+
+        fun warn(code: String) {
+            warnings += code
+        }
+
+        fun addRun(counts: Counts, delivered: Int) {
+            images += delivered
+            counts.skipped.forEach { (reason, n) -> skipped.merge(reason, n, Int::plus) }
+            warnings += counts.warnings.keys
+        }
+
+        fun addCommitted(checkpoint: ImageCheckpoint) {
+            images += checkpoint.imageCount
+            checkpoint.warning?.split(',')?.forEach { part ->
+                val code = part.substringBefore(':')
+                val count = part.substringAfter(':', "1").toIntOrNull() ?: 1
+                val reason = SkipReason.entries.firstOrNull { it.name == code }
+                if (reason != null) skipped.merge(reason, count, Int::plus) else if (code.isNotEmpty()) warnings += code
+            }
+        }
+
+        fun result(): ImageStageResult = ImageStageResult(images, skipped.toMap(), warnings.toList())
+    }
+
+    companion object {
+        /** The document holds more images than [ImageFilter.MAX_PER_DOCUMENT]; the rest are not delivered. */
+        const val LIMIT_REACHED: String = "IMAGE_LIMIT_REACHED"
+
+        /** A parent too late in the reading order for its images to have ordinals. */
+        const val PARENT_TOO_LATE: String = "IMAGE_PARENT_ORDINAL_TOO_LATE"
+
+        /** The document could not be opened to look for images. */
+        const val SOURCE_UNREADABLE: String = "IMAGE_SOURCE_UNREADABLE"
+    }
+}
