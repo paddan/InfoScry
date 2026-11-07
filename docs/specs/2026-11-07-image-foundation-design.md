@@ -31,7 +31,7 @@ The foundation is designed so that 2 and 3 can attach to an image by its stable 
 | Scanned regions | Surya layout `FIGURE` blocks; reused when Surya reads the page, otherwise a layout-only Surya pass |
 | Control | *Extract images* in the import and rescan start dialog: Off, Embedded images, Embedded + regions from scanned pages; the collection default pre-fills it |
 | Searchable text in v1 | Caption and alt text only; an image without either is shown and citable but not indexed |
-| Re-reading | Image extraction has its own checkpoint, outside the text fingerprint: turning images on never repeats OCR |
+| Re-reading | Image extraction has its own checkpoint, outside the text fingerprint. A rescan with the rescan-only method *Keep current text* runs only the image step: turning images on for an existing document never repeats OCR |
 | Filtering | Fixed rules in v1 (size, repetition, masks, uniform colour); no settings |
 
 ### Approaches considered
@@ -76,13 +76,20 @@ The foundation is designed so that 2 and 3 can attach to an image by its stable 
 
 ### Storage
 
-- `document_images` (revision-bound, like `page_text_revisions`): `revision_id`, `unit_id`,
+- `document_images` (immutable image metadata): `document_id`, `unit_id`, `artifact_sha256`,
   `parent_unit_id`, `source_kind` (`EMBEDDED`, `PAGE_REGION`, `STANDALONE`), `artifact_relative_path`,
   `artifact_sha256`, `thumbnail_relative_path`, `media_type`, `width_px`, `height_px`, the normalized box
   (four nullable columns, all or none), `caption`, `caption_source` (`ALT_TEXT`, `FIGCAPTION`,
-  `LAYOUT_CAPTION`, null), `created_at`. Primary key `(revision_id, unit_id)`; deleted with its revision.
-- `image_extraction_checkpoints`: `document_id`, `parent_unit_id`, `extractor_version`, `mode`, `outcome`
-  (`DONE`, `FAILED`), `image_count`, `warning`, `committed_at`. One row per parent unit and mode.
+  `LAYOUT_CAPTION`, null), `created_at`. Primary key `(document_id, unit_id, artifact_sha256)`; deleted with
+  its document. Revision binding comes from the revision's page rows: each image unit has a
+  `page_text_revisions` row (text = caption, approval `APPROVED`) whose `source_image_*` names the image
+  file, so a revision's images are its `image_region` rows joined on `(document_id, unit_id,
+  source_image_sha256)`, and history and Restore work unchanged.
+- An image unit's ordinal is `1_000_000_000 + parentOrdinal * 1_000 + (index - 1)`, after every text unit
+  and stable for its parent and index. A parent ordinal above `1_147_482` gets no images, with a warning.
+- `image_extraction_checkpoints`: `document_id`, `target`, `parent_unit_id`, `extractor_version`, `mode`,
+  `outcome` (`DONE`, `FAILED`), `image_count`, `warning`, `committed_at`. `target` is the text fingerprint for
+  an import and the candidate revision for a rescan. One row per target, parent unit and mode.
 - `collections.default_image_extraction` (`OFF`, `EMBEDDED`, `ALL`, default `OFF`), changed with the
   collection's version and answering 409 `EDIT_CONFLICT` when stale.
 - The image unit's text is its caption, or empty. An empty unit is not chunked or indexed, as blank pages
@@ -123,8 +130,10 @@ as `ImageExtractor` does today; an encoded size beyond `maxImageBytes` is skippe
   value is not part of the text extraction fingerprint.
 - Per parent unit: the text is read and committed as today, then images are extracted and committed with
   their checkpoint. A resumed attempt skips committed text and committed image checkpoints separately.
-- A rescan that turns images on runs only the image step on pages whose text is carried forward unchanged;
-  no OCR is repeated. A rescan with images off produces a revision without image units; earlier revisions
+- Rescan supports PDFs and pictures, as today; images in Office files and e-books come from their import.
+- The rescan dialog offers the reading method **Keep current text** (id `keep`, rescan only). It carries
+  every page's published text forward unchanged and runs only the image step on the selected pages; no OCR
+  and no text layer is read. A rescan with images off produces a revision without image units; earlier revisions
   keep theirs. A selected-page rescan extracts images only for the selected pages and carries the others'
   image units forward.
 - Publication adds the image units, their `document_images` rows and their caption chunks in the same
