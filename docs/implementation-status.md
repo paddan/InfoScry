@@ -20,6 +20,7 @@ application suites.
 | LLM profiles | CLI/Admin management, role defaults, provider presets and model catalog; new Admin profiles suggest a provider/model name until manually edited; tool calling measured from Admin or the CLI |
 | Ask | Streaming answers with validated citations and saved answer history |
 | Investigate | Four effort levels with server-resolved profile overrides and opt-in research-only native reasoning; bounded research, retained-evidence follow-ups, one adopted answer per turn and saved conversations; an unmeasured profile is marked and refused with the remedy |
+| Images | *Extract images* at import and rescan (embedded images; scanned-page regions need Surya layout, unverified against real Surya), Keep current text, thumbnails and viewer in the source reader, captions searchable and citable, `--images` in the CLI |
 | Sources | Bounded extracted-source viewer, managed-original link and selectable-text PDF copies (durable generation, repeat/retry, rescan/Restore identity; automated fake-provider coverage plus owner-confirmed OCR/PDF checks on 2026-10-11) |
 
 ## OCR engines and document rescanning
@@ -351,6 +352,49 @@ server's own pick dialog and `infoscry import --server-path` are removed; schema
 version 3 drops `import_roots`, so a database at any version converges and keeps
 its documents. Imported documents are kept in one directory per collection under
 the library, which `INFOSCRY_LIBRARY_DIR` can place on another disk.
+
+## Image foundation (2026-11-07)
+
+The [image foundation](specs/2026-11-07-image-foundation-design.md) is implemented: pictures are content units
+of their document, extracted at import and rescan, stored once by hash with thumbnails, published in the same
+revision as the page text, shown as a thumbnail strip and a viewer in the source reader, searchable and
+citable by their caption or alt text, and chosen with **Extract images** (Off, Embedded images, Embedded +
+regions from scanned pages) in the import and rescan dialogs, the collection default and
+`infoscry import --images`. **Keep current text** is the rescan-only method that adds images without reading
+any page. Contracts: [technical reference](technical-reference.md#images),
+[usage](usage.md#create-a-collection-and-import-files) and
+[OCR workflow](ocr-workflow.md#reading-methods).
+
+**Verified (2026-11-07):**
+
+- `./gradlew check` with Podman and the compiled frontend: 2,384 JVM tests and 606 Vitest tests, no
+  failures (`npm run check` clean).
+- `ImagesBrowserAcceptanceTest` (`externalTest`, Chromium, signed in, test embedder, fake Surya layout engine,
+  local fake provider) passed three consecutive runs (an earlier question that also matched another page's words ranked the
+  caption second in one run, so the question now uses only the caption's own words). The scenario sequence: a generated three-page PDF is
+  added with *Embedded images* and *No OCR* through the dialog; page 2 shows two thumbnails, one opens in the
+  viewer ("from page 2", no caption, outlined on its page) and Escape returns focus; document details count 2
+  images; **Scan again** with *Keep current text* (refused while images are Off) and *Embedded + regions*
+  extracts a region on scanned page 3 with its layout caption, makes zero text changes, and leaves 3 images;
+  searching the caption opens the viewer with the caption, "from page 3" and the box outlined at the
+  fake layout's position; Ask cites the caption's image as `[S1]` and the citation opens the viewer. The fake
+  layout engine was asked once (the scanned page), and not at all by the Embedded import.
+- Before this task: unit and route coverage for finders, filters, stage idempotence and interruption, rescan with
+  Keep current text, the four routes and the CLI flag (focused suites per task, all green).
+
+**Not verified: region extraction from scanned pages against real Surya.** On 2026-11-07 the real Surya
+runtime (`surya-ocr` 0.22.1 in `~/.local/share/infoscry/surya-venv`, the cached GGUF weights, Homebrew
+`llama-server`) was run through `LayoutRegions` on rendered 1240x1754 pages, with a heading, a paragraph, a
+synthetic photograph-like picture (a gradient scene with noise, then a second, more textured one) and a caption
+beneath it. Each read took about 7 to 9 seconds and returned a heading, two paragraphs and the caption
+(`CAPTION` box 151,1117 to 859,1156), but no `FIGURE` block, so `LayoutRegions` returned zero regions for both
+pages. Whether Surya recognises synthetic pictures as `Picture` blocks at all was not established, and a
+temporary experiment that kept textless figure blocks in the parser and in structure derivation also produced
+no figure, so the cause is the model not marking the synthetic picture, not only the parser. Separately, the
+parser and `StructureDerivation` drop any block without words, which a real `Picture` block (markup, no text)
+would be; if Surya does emit one, it never reaches `LayoutRegions`. Region extraction therefore remains
+unverified against real Surya, and needs a run on a page with a real photograph and a decision on textless
+figure blocks.
 
 ## Recorded verification
 

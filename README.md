@@ -65,6 +65,10 @@ under the server's library (`INFOSCRY_LIBRARY_DIR`). The CLI
 is a client of the server with a personal access token. Earlier single-user
 archives are not migrated; collections are imported again.
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
+Images are implemented: *Extract images* in the import and rescan dialogs finds pictures embedded in PDFs,
+Office files and EPUBs and, with Surya layout, pictures on scanned pages; they are shown, searchable by
+caption and citable. Browser coverage is `ImagesBrowserAcceptanceTest`; region extraction is not yet verified
+against real Surya ([status](docs/implementation-status.md#image-foundation-2026-11-07)).
 The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan (including No OCR, which uses the
 document's own text), reads selected pages and publishes

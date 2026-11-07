@@ -1,6 +1,7 @@
 # Image foundation
 
-Status: design approved 2026-11-07; not implemented.
+Status: implemented 2026-11-07 (see "Amendments during implementation"). Region extraction from scanned
+pages is not verified against real Surya; see [implementation status](../implementation-status.md#image-foundation-2026-11-07).
 
 ## Goal
 
@@ -176,7 +177,8 @@ has no rescan or collection-settings command; rescans and the collection default
 ## Errors and logging
 
 Logs carry counts, codes and IDs, never image bytes, captions or document text. New codes:
-`NEEDS_SURYA_LAYOUT`, `IMAGE_DECODE_FAILED`, `IMAGE_TOO_LARGE`, `IMAGE_LIMIT_REACHED`.
+`NEEDS_SURYA_LAYOUT`, `IMAGE_DECODE_FAILED`, `IMAGE_TOO_LARGE`, `IMAGE_LIMIT_REACHED`, `TOO_MANY_IMAGES`,
+`IMAGE_PARENT_UNREADABLE`, `IMAGE_EXTRACTION_FAILED` (amended 2026-11-07).
 
 ## Schema
 
@@ -200,6 +202,34 @@ their next rescan with images on.
   it by its caption, open a citation.
 - Before region extraction is reported as working: one real Surya layout run on this Mac on a rendered
   page with a photograph.
+
+## Amendments during implementation (2026-11-07)
+
+Rulings made while implementing; they take precedence over the sections above.
+
+- Codes `TOO_MANY_IMAGES` (a parent holds more images than one parent may deliver), `IMAGE_PARENT_UNREADABLE`
+  (the finder could not read the parent; its checkpoint is `FAILED` so the next run tries again) and
+  `IMAGE_EXTRACTION_FAILED` (the stage failed for a reason of its own; the text is kept, no checkpoint is
+  written) join the code list.
+- Image checkpoints exist only for `EMBEDDED` and `ALL`; `OFF` writes none.
+- An xlsx picture anchored outside every emitted range is not found. Legacy `.doc`, `.xls` and `.ppt` files and
+  e-books other than EPUB have no image finder in v1.
+- `STANDALONE` images are exempt from the size and one-colour filters.
+- The 500-image cap is an invariant: a parent may deliver at most 500 minus the images in every committed
+  parent minus the images delivered earlier in the run. For a document over the cap, which images survive near
+  the cap can depend on which parent was retried.
+- A parent holds at most 512 MiB of retained image bytes (`IMAGE_TOO_LARGE` for the rest), and each PDF XObject
+  is decoded once per parent however often the page draws it.
+- A page raster over `maxRenderedPixels` gets no regions (`IMAGE_TOO_LARGE`); the raster is never subsampled,
+  because the layout boxes are in its own coordinates.
+- Migration `004_images.sql` also adds the `source_image_*` columns to `content_units`, written only for image
+  units, so an import's published revision finds its images the same way a rescan's does.
+- The Surya parser and structure derivation drop a block with no words, and a real Surya `Picture` block is
+  markup without text; whether a real run therefore ever reaches `LayoutRegions` with a `FIGURE` block is
+  unverified (two real runs on 2026-11-07 returned no `FIGURE` block for synthetic pictures). The browser
+  test's fake layout engine gives its figure placeholder text.
+- Embedded images in a PDF have no caption (the finder reads none); a caption comes from a scanned page's layout,
+  Office alt text or an EPUB `alt`/`figcaption`.
 
 ## Out of scope
 
