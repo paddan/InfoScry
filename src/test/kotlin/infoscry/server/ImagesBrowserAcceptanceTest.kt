@@ -272,7 +272,8 @@ class ImagesBrowserAcceptanceTest {
 
     /**
      * A Surya layout reading of the scanned page: a figure at 15%-85% across and 10%-55% down with its caption
-     * just below. The figure block carries placeholder text because the Surya parser drops a block with no words.
+     * just below. The figure is markup with no words, as a real Surya `Picture` block is, and goes through the real
+     * parser and structure derivation.
      */
     private class FakeLayoutSurya : PageOcrEngine {
         override val engine = OcrEngine.SURYA
@@ -288,7 +289,7 @@ class ImagesBrowserAcceptanceTest {
             val derived = StructureDerivation.derive(
                 SuryaStructureParser.parse(
                     listOf(
-                        SuryaBlockInput("<p>photograph</p>", "Picture", 0, box(0.15, 0.10, 0.85, 0.55)),
+                        SuryaBlockInput("<img>", "Picture", 0, box(0.15, 0.10, 0.85, 0.55)),
                         SuryaBlockInput("<p>$CAPTION</p>", "Caption", 1, box(0.15, 0.56, 0.85, 0.60)),
                     ),
                 ),

@@ -44,7 +44,7 @@ version. The first person to approve or reject a new reading decides.
    chooses whether pictures are kept too: **Off**, **Embedded images** (pictures
    inside PDFs, Office files and EPUBs) or **Embedded + regions from scanned
    pages** (also pictures cut out of scanned pages by Surya's layout reading,
-   which needs the Surya runtime). The collection's default only pre-fills it.
+   which needs the Surya runtime; Picture regions on scanned pages are not yet verified against real Surya: its layout reading did not mark synthetic test pictures, so they may not be found until checked on a real photograph.) The collection's default only pre-fills it.
 6. Follow file progress and the separate progress bar for pages of the current
    document, then inspect the per-file results in import history. The page count
    updates as each page is saved, including pages with direct text. If the total
@@ -299,7 +299,7 @@ Escape closes the viewer. A picture's only searchable text is its caption or
 alt text, so a picture without one is shown and citable but not found by
 search. A search result or an Ask citation on a picture opens it with its page
 behind it, and a citation from an older version opens that version's picture.
-Document details show the number of images. From the command line,
+Document details show the number of images. Picture regions on scanned pages are not yet verified against real Surya: its layout reading did not mark synthetic test pictures, so they may not be found until checked on a real photograph. From the command line,
 `infoscry import … --images off|embedded|all` chooses the same setting.
 
 A scanned page read with Surya or the LLM reader shows its layout in the source

@@ -162,8 +162,13 @@ object SuryaStructureParser {
         return ParsedBlock(listOf(formula) + restBlocks)
     }
 
+    /**
+     * A block is kept when it has words. A figure that has a box is kept without any: Surya's `Picture` block is
+     * markup with no text, and its box is what locates the picture, so it stays as a block with an empty range.
+     */
     private fun hasText(block: BlockDraft): Boolean =
-        block.rows?.any { row -> row.any { it.text.isNotBlank() } } ?: block.text.isNotBlank()
+        (block.kind == BlockKind.FIGURE && block.bbox != null) ||
+            (block.rows?.any { row -> row.any { it.text.isNotBlank() } } ?: block.text.isNotBlank())
 
     /** The label mapping from the structure spec. An unknown or missing label is a paragraph. */
     private fun kindOf(label: String?): BlockKind = when (label) {

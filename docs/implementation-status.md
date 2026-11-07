@@ -367,7 +367,7 @@ any page. Contracts: [technical reference](technical-reference.md#images),
 
 **Verified (2026-11-07):**
 
-- `./gradlew check` with Podman and the compiled frontend: 2,384 JVM tests and 606 Vitest tests, no
+- `./gradlew check` with Podman and the compiled frontend: 2,387 JVM tests and 606 Vitest tests, no
   failures (`npm run check` clean).
 - `ImagesBrowserAcceptanceTest` (`externalTest`, Chromium, signed in, test embedder, fake Surya layout engine,
   local fake provider) passed three consecutive runs (an earlier question that also matched another page's words ranked the
@@ -375,26 +375,24 @@ any page. Contracts: [technical reference](technical-reference.md#images),
   added with *Embedded images* and *No OCR* through the dialog; page 2 shows two thumbnails, one opens in the
   viewer ("from page 2", no caption, outlined on its page) and Escape returns focus; document details count 2
   images; **Scan again** with *Keep current text* (refused while images are Off) and *Embedded + regions*
-  extracts a region on scanned page 3 with its layout caption, makes zero text changes, and leaves 3 images;
+  extracts a region on scanned page 3 with its layout caption (from a fake Surya layout engine whose word-less `Picture` block
+  goes through the real parser and derivation; real Surya detection is not covered, see below), makes zero text changes, and leaves 3 images;
   searching the caption opens the viewer with the caption, "from page 3" and the box outlined at the
   fake layout's position; Ask cites the caption's image as `[S1]` and the citation opens the viewer. The fake
   layout engine was asked once (the scanned page), and not at all by the Embedded import.
 - Before this task: unit and route coverage for finders, filters, stage idempotence and interruption, rescan with
   Keep current text, the four routes and the CLI flag (focused suites per task, all green).
 
-**Not verified: region extraction from scanned pages against real Surya.** On 2026-11-07 the real Surya
-runtime (`surya-ocr` 0.22.1 in `~/.local/share/infoscry/surya-venv`, the cached GGUF weights, Homebrew
-`llama-server`) was run through `LayoutRegions` on rendered 1240x1754 pages, with a heading, a paragraph, a
-synthetic photograph-like picture (a gradient scene with noise, then a second, more textured one) and a caption
-beneath it. Each read took about 7 to 9 seconds and returned a heading, two paragraphs and the caption
-(`CAPTION` box 151,1117 to 859,1156), but no `FIGURE` block, so `LayoutRegions` returned zero regions for both
-pages. Whether Surya recognises synthetic pictures as `Picture` blocks at all was not established, and a
-temporary experiment that kept textless figure blocks in the parser and in structure derivation also produced
-no figure, so the cause is the model not marking the synthetic picture, not only the parser. Separately, the
-parser and `StructureDerivation` drop any block without words, which a real `Picture` block (markup, no text)
-would be; if Surya does emit one, it never reaches `LayoutRegions`. Region extraction therefore remains
-unverified against real Surya, and needs a run on a page with a real photograph and a decision on textless
-figure blocks.
+**Not verified: region extraction from scanned pages against real Surya.** On 2026-11-07 the real Surya runtime
+(`surya-ocr` 0.22.1 in `~/.local/share/infoscry/surya-venv`, the cached GGUF weights, Homebrew `llama-server`) was run
+through `LayoutRegions` on rendered 1240x1754 pages with a heading, a paragraph, a synthetic photograph-like picture
+(a gradient scene, then a textured landscape) and a caption beneath it, before and after the parser fix. Each read took
+about 7 to 9 seconds and returned a heading, paragraphs and the caption, but no `Picture` block, so zero regions both
+times. A review found that the parser and `StructureDerivation` dropped word-less blocks, which a real `Picture` block
+is; that is fixed (a word-less `FIGURE` block with a box is kept with an empty range, text and chunking unchanged;
+unit tests and the acceptance test's fake now exercise this path). Whether real Surya marks a real photograph as a
+`Picture` is still unknown, so region extraction remains unverified against real Surya and needs a run on a real
+photograph by the owner. Pages already read by Surya before the fix keep structures without figures until read again.
 
 ## Recorded verification
 

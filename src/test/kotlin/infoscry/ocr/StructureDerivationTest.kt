@@ -88,6 +88,37 @@ class StructureDerivationTest {
     }
 
     @Test
+    fun `a wordless figure with a box is kept with an empty range and changes no text`() {
+        val box = PixelBox(10, 20, 300, 400)
+        val withFigure = derive(
+            BlockDraft(BlockKind.FIGURE, "", bbox = box),
+            BlockDraft(BlockKind.HEADING, "Title", level = 1),
+            BlockDraft(BlockKind.FIGURE, " \n", bbox = box),
+            BlockDraft(BlockKind.CAPTION, "Figure 1. A quay"),
+        )
+        val without = derive(BlockDraft(BlockKind.HEADING, "Title", level = 1), BlockDraft(BlockKind.CAPTION, "Figure 1. A quay"))
+        assertEquals(without.extractedText, withFigure.extractedText)
+        assertEquals(without.searchText, withFigure.searchText)
+        assertEquals("Title\nFigure 1. A quay", withFigure.extractedText)
+        assertEquals(listOf(BlockKind.FIGURE, BlockKind.HEADING, BlockKind.FIGURE, BlockKind.CAPTION), withFigure.structure.blocks.map { it.kind })
+        val figures = withFigure.structure.blocks.filter { it.kind == BlockKind.FIGURE }
+        assertTrue(figures.all { it.bbox == box && it.extracted.start == it.extracted.endExclusive && it.search.start == it.search.endExclusive })
+        assertEquals(listOf(0, 5), figures.map { it.extracted.start })
+        assertEquals(listOf(0, 1, 2, 3), withFigure.structure.blocks.map { it.order })
+        assertEquals(without.structure.blocks.map { it.extracted }, withFigure.structure.blocks.filter { it.kind != BlockKind.FIGURE }.map { it.extracted })
+        assertFalse(withFigure.degraded)
+        assertInvariant(withFigure)
+    }
+
+    @Test
+    fun `a page of only a wordless figure has empty text and one block`() {
+        val page = derive(BlockDraft(BlockKind.FIGURE, "", bbox = PixelBox(1, 1, 5, 5)))
+        assertEquals("", page.extractedText)
+        assertEquals(1, page.structure.blocks.size)
+        assertInvariant(page)
+    }
+
+    @Test
     fun `a degraded draft gives a degraded page`() {
         val page = derive(BlockDraft(BlockKind.PARAGRAPH, "a"), degraded = true)
         assertTrue(page.degraded)

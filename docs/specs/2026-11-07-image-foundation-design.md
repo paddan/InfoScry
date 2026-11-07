@@ -224,12 +224,17 @@ Rulings made while implementing; they take precedence over the sections above.
   because the layout boxes are in its own coordinates.
 - Migration `004_images.sql` also adds the `source_image_*` columns to `content_units`, written only for image
   units, so an import's published revision finds its images the same way a rescan's does.
-- The Surya parser and structure derivation drop a block with no words, and a real Surya `Picture` block is
-  markup without text; whether a real run therefore ever reaches `LayoutRegions` with a `FIGURE` block is
-  unverified (two real runs on 2026-11-07 returned no `FIGURE` block for synthetic pictures). The browser
-  test's fake layout engine gives its figure placeholder text.
-- Embedded images in a PDF have no caption (the finder reads none); a caption comes from a scanned page's layout,
-  Office alt text or an EPUB `alt`/`figcaption`.
+- A real Surya `Picture` block is markup with no words, and the parser and structure derivation used to drop
+  every word-less block, so no `FIGURE` block could reach `LayoutRegions`. They now keep a word-less `FIGURE`
+  block that has a box, as a block with an empty text range and its box; it adds no text and no separator, and
+  chunking, the reader's structure view and Ask evidence ignore empty blocks. Other word-less blocks are still
+  dropped, `STRUCTURE_VERSION` and the parser identity are unchanged, and structures stored before this fix stay
+  valid but have no figures: a page already read by Surya yields no regions until it is read again. Two real
+  Surya runs on synthetic pictures returned no `Picture` block even after the fix, so region extraction from
+  scanned pages remains not verified against real Surya; it needs a run on a real photograph.
+- A PDF's embedded images have no caption source (the spec's caption sources are alt text, figcaption and layout
+  captions), so they carry no caption; a caption comes from a scanned page's layout, Office alt text or an EPUB
+  `alt` or `figcaption`.
 
 ## Out of scope
 

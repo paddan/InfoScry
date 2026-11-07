@@ -109,7 +109,8 @@ Design: [image foundation](specs/2026-11-07-image-foundation-design.md), with it
 - **Image stage.** After a document's text is complete, `ImageStage` runs per parent unit: the finder
   (PDFBox, POI, EPUB, or the picture itself) lists images, filters apply (96 px, 1 % of the page,
   repetition on more than three pages, masks, one colour; standalone pictures are exempt from size and
-  colour), and in `ALL` mode a scanned parent's `FIGURE` blocks are cut from the page raster by
+  colour), and in `ALL` mode (region extraction is not yet verified against real Surya, whose layout reading did
+  not mark synthetic pictures; a word-less `FIGURE` block is kept with an empty range so it can reach the stage) a scanned parent's `FIGURE` blocks are cut from the page raster by
   `LayoutRegions` using Surya (the parent's known structure, else a layout-only Surya read). The artifact,
   its metadata, the unit and the checkpoint commit in one unit boundary. A missing Surya runtime
   checkpoints the parent `FAILED` with `NEEDS_SURYA_LAYOUT` once per document. A rescan runs

@@ -26,7 +26,7 @@ object StructuredEvidence {
         require(start in 0..end && end <= searchText.length) { "the span lies inside the text" }
         val blocks = structure.blocks
             .sortedBy { it.search.start }
-            .filter { it.search.start < end && it.search.endExclusive > start }
+            .filter { it.search.start < end && it.search.endExclusive > start && it.search.endExclusive > it.search.start }
         if (blocks.isEmpty()) return searchText.substring(start, end)
 
         val out = StringBuilder()

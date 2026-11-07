@@ -44,7 +44,7 @@ data class StructureCellView(
 internal fun windowStructure(structure: PageStructure, from: Int, to: Int): StructureView =
     StructureView(
         blocks = structure.blocks
-            .filter { it.extracted.start < to && it.extracted.endExclusive > from }
+            .filter { it.extracted.start < to && it.extracted.endExclusive > from && it.extracted.endExclusive > it.extracted.start }
             .map { block ->
                 StructureBlockView(
                     kind = block.kind,

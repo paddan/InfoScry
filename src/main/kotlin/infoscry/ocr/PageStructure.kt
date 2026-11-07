@@ -154,7 +154,7 @@ data class PageStructure(
 
     private fun requireNoOverlap(ranges: List<TextRange>) {
         var previousEnd = 0
-        for (range in ranges.sortedBy { it.start }) {
+        for (range in ranges.sortedWith(compareBy({ it.start }, { it.endExclusive }))) {
             require(range.start >= previousEnd) { "block ranges do not overlap" }
             previousEnd = range.endExclusive
         }
