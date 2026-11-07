@@ -217,6 +217,26 @@ class LayoutRegionsTest {
         assertEquals(0, engine.calls)
     }
 
+    @Test
+    fun `a stored structure without figures on an oversized page is an empty result, not a refusal`() {
+        val small = LayoutRegions(PageOcrEngines(emptyList()), maxRenderedPixels = 1_000L)
+
+        val result = runBlocking {
+            small.regionsOf(parent, page(), structureOf(listOf(paragraph())), PAGE_TEXT, settings)
+        }
+
+        assertEquals(ParentImages.NONE, result)
+    }
+
+    @Test
+    fun `a missing Surya engine is reported before an oversized page is refused`() {
+        val small = LayoutRegions(PageOcrEngines(emptyList()), maxRenderedPixels = 1_000L)
+
+        assertFailsWith<SuryaLayoutUnavailableException> {
+            runBlocking { small.regionsOf(parent, page(), structure = null, pageText = null, settings = settings) }
+        }
+    }
+
     private fun regions(engine: PageOcrEngine, page: PageImage, structure: PageStructure?): ParentImages =
         regionsWith(PageOcrEngines(listOf(engine)), page, structure)
 

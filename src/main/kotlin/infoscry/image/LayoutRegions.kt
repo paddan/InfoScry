@@ -8,6 +8,7 @@ import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PageImage
+import infoscry.ocr.PageOcrEngine
 import infoscry.ocr.PageOcrEngines
 import infoscry.ocr.PageStructure
 import infoscry.ocr.PixelBox
@@ -86,29 +87,35 @@ class LayoutRegions(
         settings: OcrSettingsSnapshot,
     ): ParentImages {
         require(structure == null || pageText != null) { "a known page structure needs the text it was derived into" }
-        // The header is read once, before any engine call, so a page that is refused is never read by Surya.
-        return when (val opened = openPage(page)) {
-            is OpenedPage.Refused -> failedWith(opened.code)
-            is OpenedPage.Open -> opened.reader.use { reader ->
-                regionsFrom(parent, page, reader, structure, pageText, settings)
-            }
+        if (structure != null) {
+            // A page without figures has no regions to cut, so its size is never read.
+            if (figuresOf(structure).isEmpty()) return ParentImages.NONE
+            return withPage(page) { reader -> regionsIn(parent, reader, structure, requireNotNull(pageText)) }
         }
-    }
 
-    private suspend fun regionsFrom(
-        parent: ParentUnit,
-        page: PageImage,
-        reader: PageReader,
-        structure: PageStructure?,
-        pageText: String?,
-        settings: OcrSettingsSnapshot,
-    ): ParentImages {
-        if (structure != null) return regionsIn(parent, reader, structure, requireNotNull(pageText))
-
+        // The engine is checked first, then the header is read once before Surya is called, so a page that is
+        // refused is never read by Surya.
         val surya = engines.engineFor(OcrEngine.SURYA) ?: throw SuryaLayoutUnavailableException(
             "no Surya engine is configured in this build, so picture regions cannot be found on scanned pages. " +
                 SuryaOcr.installRemedy(),
         )
+        return withPage(page) { reader -> readAndCut(parent, page, reader, surya, settings) }
+    }
+
+    /** Runs [block] on the page's open reader, or answers the refusal when the page cannot be opened. */
+    private inline fun withPage(page: PageImage, block: (PageReader) -> ParentImages): ParentImages =
+        when (val opened = openPage(page)) {
+            is OpenedPage.Refused -> failedWith(opened.code)
+            is OpenedPage.Open -> opened.reader.use(block)
+        }
+
+    private suspend fun readAndCut(
+        parent: ParentUnit,
+        page: PageImage,
+        reader: PageReader,
+        surya: PageOcrEngine,
+        settings: OcrSettingsSnapshot,
+    ): ParentImages {
         val reading = try {
             surya.transcribe(page, settings)
         } catch (unavailable: OcrUnavailableException) {
@@ -129,10 +136,13 @@ class LayoutRegions(
         return if (code == null || code == OcrPageResult.EMPTY_READING_CODE) ParentImages.NONE else failedWith(code)
     }
 
+    /** The figures of [structure] that have a box, in reading order. */
+    private fun figuresOf(structure: PageStructure): List<StructureBlock> = structure.blocks
+        .filter { it.kind == BlockKind.FIGURE && it.bbox != null }
+        .sortedBy { it.order }
+
     private fun regionsIn(parent: ParentUnit, reader: PageReader, structure: PageStructure, text: String): ParentImages {
-        val figures = structure.blocks
-            .filter { it.kind == BlockKind.FIGURE && it.bbox != null }
-            .sortedBy { it.order }
+        val figures = figuresOf(structure)
         if (figures.isEmpty()) return ParentImages.NONE
 
         val raster = decode(reader) ?: return failedWith(ImageRejectedException.IMAGE_DECODE_FAILED)
@@ -241,26 +251,29 @@ class LayoutRegions(
      */
     private fun openPage(page: PageImage): OpenedPage {
         val decodeFailed = OpenedPage.Refused(ImageRejectedException.IMAGE_DECODE_FAILED)
-        val reader: PageReader = try {
-            ImageIO.createImageInputStream(page.imagePath.toFile())?.let { stream ->
-                val imageReader = ImageIO.getImageReaders(stream).takeIf { it.hasNext() }?.next()
-                if (imageReader == null) {
-                    stream.close()
-                    null
-                } else {
-                    PageReader(stream, imageReader)
-                }
-            }
+        // A decoder given untrusted bytes can fail with any runtime exception; none of them may escape.
+        val stream = try {
+            ImageIO.createImageInputStream(page.imagePath.toFile())
         } catch (unreadable: IOException) {
             null
         } catch (unreadable: RuntimeException) {
-            // A decoder given untrusted bytes can fail with any runtime exception; none of them may escape.
             null
         } ?: return decodeFailed
+        val imageReader = try {
+            ImageIO.getImageReaders(stream).takeIf { it.hasNext() }?.next()
+        } catch (unreadable: RuntimeException) {
+            closeQuietly(stream)
+            return decodeFailed
+        }
+        if (imageReader == null) {
+            closeQuietly(stream)
+            return decodeFailed
+        }
+        val reader = PageReader(stream, imageReader)
 
         val pixels = try {
-            reader.reader.input = reader.stream
-            reader.reader.getWidth(0).toLong() * reader.reader.getHeight(0)
+            imageReader.input = stream
+            imageReader.getWidth(0).toLong() * imageReader.getHeight(0)
         } catch (unreadable: IOException) {
             reader.close()
             return decodeFailed
@@ -273,6 +286,14 @@ class LayoutRegions(
             return OpenedPage.Refused(ImageRejectedException.IMAGE_TOO_LARGE)
         }
         return OpenedPage.Open(reader)
+    }
+
+    private fun closeQuietly(stream: ImageInputStream) {
+        try {
+            stream.close()
+        } catch (unreadable: IOException) {
+            // Nothing was read from the stream that a caller needs, so a failed close changes no answer.
+        }
     }
 
     /** The page raster, decoded by the reader [openPage] opened, or null when it cannot be decoded. */
