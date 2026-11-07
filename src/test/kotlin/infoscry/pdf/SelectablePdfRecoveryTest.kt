@@ -228,7 +228,8 @@ class SelectablePdfRecoveryTest {
                 ),
             )
             runBlocking { context.revisionPublication.publish(first.documentId, first.revisionId, candidateB) }
-            runNextSelectablePdfJob(context)
+            // A native page is exported from the original's own text layer, so B exports the same bytes as A and
+            // gets its own artifact from A's file without a build.
             val readyB = context.selectablePdfService.status(first.collectionId, first.documentId, candidateB)
             assertEquals(PdfArtifactState.READY, readyB.state)
 

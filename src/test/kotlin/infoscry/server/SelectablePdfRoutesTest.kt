@@ -571,14 +571,13 @@ class SelectablePdfRoutesTest {
             assertEquals(HttpStatusCode.OK, historicalFile.status)
             assertEquals(firstBytes.toList(), historicalFile.readBytes().toList())
 
-            assertEquals(PdfArtifactState.QUEUED, getStatus(second.documentId, second.revisionId).parsedStatus().state)
-            assertEquals(HttpStatusCode.Conflict, getFile(second, secondKey, inline = true).status)
+            // A native page is exported from the original's own text layer, so the newer revision exports the same
+            // bytes and gets its own artifact from the first one's file without a build.
+            assertEquals(PdfArtifactState.READY, getStatus(second.documentId, second.revisionId).parsedStatus().state)
+            val secondFile = getFile(second, secondKey, inline = true)
+            assertEquals(HttpStatusCode.OK, secondFile.status)
+            assertEquals(firstBytes.toList(), secondFile.readBytes().toList())
             assertEquals(HttpStatusCode.NotFound, getFile(first, secondKey, inline = true).status, "a key names one revision only")
-        }
-
-        runJob()
-        http {
-            assertEquals(HttpStatusCode.OK, getFile(second, secondKey, inline = true).status)
             assertEquals(firstBytes.toList(), getFile(first, firstKey, inline = true).readBytes().toList())
         }
     }

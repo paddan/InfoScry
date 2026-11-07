@@ -114,6 +114,7 @@ class SelectablePdfService(
             val revision = revisions.revision(revisionId) ?: return
             if (store.get(documentId, revisionId) != null) return
             if (document.mediaType != SelectablePdfInputResolver.PDF_MEDIA_TYPE) return
+            if (reuseParent(Identity(document, revision), collectionId)) return
             admitNew(Identity(document, revision), collectionId, documentId, revisionId)
         } catch (failure: Exception) {
             LOGGER.atWarn()
@@ -179,6 +180,47 @@ class SelectablePdfService(
                 toStatus(checkNotNull(store.get(documentId, revisionId)))
             }
         }
+    }
+
+    /**
+     * Gives a revision its parent's PDF when the two would export the same bytes, so a rescan that only found images
+     * (Keep current text) or changed nothing on the page builds nothing.
+     *
+     * The PDF is the parent's verified file, copied beside this revision's manifest; the row is published through the
+     * same verified path a build uses. A crash midway leaves a QUEUED row that recovery builds normally, and a second
+     * call finds the row and does nothing.
+     */
+    private fun reuseParent(identity: Identity, collectionId: CollectionId): Boolean {
+        val revision = identity.revision
+        val parentId = revision.parentRevisionId ?: return false
+        val documentId = identity.document.id
+        val parent = store.get(documentId, parentId) ?: return false
+        if (parent.state != SelectablePdfArtifactState.READY && parent.state != SelectablePdfArtifactState.PARTIAL) return false
+        if (verified(parent).state !in setOf(PdfArtifactState.READY, PdfArtifactState.PARTIAL)) return false
+        val parentKey = parent.key ?: return false
+        val resolution = resolve(identity, collectionId, documentId, revision.id) as? SelectablePdfResolution.Ready ?: return false
+        // Only the revision differs: the same pages, original, renderer and font make the same document.
+        if (selectablePdfArtifactKey(resolution.keyInput.copy(revisionId = parentId)) != parentKey) return false
+        val parentDirectory = paths.selectablePdfDir(collectionId, documentId, parentId, parentKey)
+        val manifest = runCatching {
+            json.decodeFromString(SelectablePdfManifest.serializer(), Files.readString(parentDirectory.resolve(MANIFEST_FILE_NAME)))
+        }.getOrNull() ?: return false
+        val key = selectablePdfArtifactKey(resolution.keyInput)
+        store.recordDesired(documentId, collectionId, revision.id, key)
+        val target = paths.selectablePdfDir(collectionId, documentId, revision.id, key).resolve(PDF_FILE_NAME)
+        Files.createDirectories(checkNotNull(target.parent))
+        val temporary = target.resolveSibling("${target.fileName}.${java.util.UUID.randomUUID()}.tmp")
+        try {
+            Files.copy(parentDirectory.resolve(PDF_FILE_NAME), temporary)
+            Files.move(temporary, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        } finally {
+            Files.deleteIfExists(temporary)
+        }
+        publishBuildResult(
+            documentId, collectionId, revision.id, key,
+            PdfWriteResult(manifest.copy(revisionId = revision.id), checkNotNull(parent.pdfSha256), checkNotNull(parent.pdfBytes)),
+        )
+        return true
     }
 
     /** The retry path: a PARTIAL/FAILED row already exists. Resolve again and re-admit atomically. */

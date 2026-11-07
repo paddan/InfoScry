@@ -101,7 +101,12 @@ process. A failed export never changes import/rescan success, the active reading
 embeddings or search. PostgreSQL owns desired artifact identity and job status.
 
 Cache identity includes collection/document, managed-original hash, revision ID,
-ordered page text/image/layout hashes and renderer/font versions. Store under
+ordered page text/image/layout hashes and renderer/font versions. A newly published
+revision whose identity equals its parent's in everything but the revision ID (a
+*Keep current text* rescan, or a native page whose export comes from the original's
+own text layer) gets no build: the parent's verified PDF is copied beside the new
+revision's own manifest and published through the same verification. A crash midway
+leaves a queued row that recovery builds normally. Store under
 `artifacts/<collection>/<document>/selectable-pdf/<revision>/<key>/` with a PDF
 and manifest. The manifest lists page coverage, transformations and safe errors.
 No source text belongs in status messages, filenames or logs.
