@@ -452,6 +452,18 @@ class AppContext private constructor(
         mutations = mutations,
     )
 
+    /** Finds the images of every document of a collection without reading any text again. */
+    val collectionImageRescanService: infoscry.document.CollectionImageRescanService =
+        infoscry.document.CollectionImageRescanService(
+            collections = collectionService,
+            documents = documents,
+            jobs = jobs,
+            mutations = mutations,
+            rescans = rescanService,
+            operations = ocrOperations,
+            cancelJob = { id -> cancelJob(id) },
+        )
+
     /** A collection's glossary: names with the same meaning, for search and for Ask and Investigate. */
     val glossaryService: GlossaryService = GlossaryService(
         store = GlossaryStore(database),

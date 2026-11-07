@@ -30,8 +30,8 @@ not a measured capacity claim.
 
 ## Storage and process ownership
 
-The default data directory is `~/.infoscry`. Use `--data-dir` to select another
-archive. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its layout:
+The default data directory is `INFOSCRY_DATA_DIR`, else `~/.infoscry`. Use `--data-dir` to select another
+archive. `INFOSCRY_LIBRARY_DIR` may move the library elsewhere but may not name the data directory itself. [AppPaths](../src/main/kotlin/infoscry/config/AppPaths.kt) defines its layout:
 
 | Path | Contents |
 |---|---|
@@ -60,7 +60,10 @@ database at the version before it and keeps its rows: `002_import_roots.sql`
 version 2 added once imports came only from uploads. `004_images.sql` (version 4)
 adds `document_images`, `image_extraction_checkpoints`, `collections.default_image_extraction`
 and the `source_image_*` columns of `content_units` (written only for image units). `005_caption_source_page_text.sql`
-(version 5) lets `document_images.caption_source` be `PAGE_TEXT`. [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
+(version 5) lets `document_images.caption_source` be `PAGE_TEXT`. `006_image_rescan_job.sql` (version 6) adds the
+`IMAGE_RESCAN` job type: a collection-wide image rescan that admits one *Keep current text* rescan per PDF and
+picture (request id `image-rescan:<job>:<document>`, so a repeated or resumed job starts nothing twice) and leaves a
+document with a running reading alone. [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
 applies every script above the database's version in one transaction, recording
 each version in `schema_version`, so a crash leaves the version it started from
 and starting again resumes. Values keep their

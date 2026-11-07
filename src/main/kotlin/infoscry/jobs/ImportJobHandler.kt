@@ -856,6 +856,9 @@ class ImportJobHandler internal constructor(
                         JobType.REINDEX to ReindexJobHandler(reindexService(context)),
                         JobType.RESCAN to rescanHandler,
                         JobType.SELECTABLE_PDF to selectablePdfHandler,
+                        JobType.IMAGE_RESCAN to ImageRescanJobHandler(context.documents) { collectionId, documentId, mode, requestId ->
+                            context.rescanService.startImageRescan(collectionId, documentId, mode, requestId)
+                        },
                         JobType.CORRECTIONS to CorrectionJobHandler(
                             revisions = context.revisions,
                             documents = context.documents,

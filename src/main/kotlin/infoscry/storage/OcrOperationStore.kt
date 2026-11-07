@@ -712,6 +712,20 @@ class OcrOperationStore(private val database: Database) {
         statement.setString(3, requestId)
     }
 
+    /** The operations of [collectionId] whose request id starts with [prefix], oldest first. */
+    fun operationsWithRequestPrefix(collectionId: String, prefix: String): List<OcrOperation> = database.read { connection ->
+        val found = mutableListOf<OcrOperation>()
+        val escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        connection.prepareStatement(
+            "$SELECT_OPERATION WHERE collection_id = ? AND request_id LIKE ? ESCAPE '\\' ORDER BY created_at ASC, insert_order ASC",
+        ).use { statement ->
+            statement.setString(1, collectionId)
+            statement.setString(2, "$escaped%")
+            statement.executeQuery().use { rows -> while (rows.next()) found += rows.toOperation(connection) }
+        }
+        found
+    }
+
     private fun Connection.selectOperations(documentId: DocumentId): List<OcrOperation> {
         val found = mutableListOf<OcrOperation>()
         prepareStatement("$SELECT_OPERATION WHERE document_id = ? ORDER BY created_at DESC, insert_order DESC")

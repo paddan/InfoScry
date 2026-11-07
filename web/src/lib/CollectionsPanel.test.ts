@@ -51,6 +51,10 @@ const api = vi.hoisted(() => ({
   startImport: vi.fn(),
   startRescan: vi.fn(),
   cancelRescan: vi.fn(),
+  getImageRescanCensus: vi.fn(),
+  startImageRescan: vi.fn(),
+  getImageRescanRun: vi.fn(),
+  cancelImageRescan: vi.fn(),
 }));
 
 vi.mock('./api', async (importOriginal) => ({
@@ -97,6 +101,10 @@ vi.mock('./api', async (importOriginal) => ({
   previewImport: api.previewImport,
   startImport: api.startImport,
   startRescan: api.startRescan,
+  getImageRescanCensus: api.getImageRescanCensus,
+  startImageRescan: api.startImageRescan,
+  getImageRescanRun: api.getImageRescanRun,
+  cancelImageRescan: api.cancelImageRescan,
 }));
 
 function collection(name: string, documentCount = 0): Collection {
@@ -631,6 +639,33 @@ describe('collections panel', () => {
     expect(screen.queryByLabelText('Search filenames')).toBeNull();
     expect(api.listCollectionDocuments).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Add documents' })).toBeTruthy();
+  });
+
+  it('finds images in all documents and follows the run like an import', async () => {
+    const run = { jobId: 'j1', documents: 4, examined: 4, started: 4, done: 1, failed: 0, cancelled: 0, scanning: 1, waiting: 2,
+      currentDocument: 'letter.pdf', active: true, cancelRequested: false };
+    api.getImageRescanRun.mockResolvedValueOnce(null).mockResolvedValue(run);
+    api.getImageRescanCensus.mockResolvedValue({ eligible: 4, skipped: {}, job: null });
+    api.startImageRescan.mockResolvedValue({ id: 'j1', type: 'IMAGE_RESCAN', state: 'QUEUED', collectionId: 'nightfall', createdAt: 't', updatedAt: 't', completed: 0, total: 4 });
+    render(CollectionsPanel, props({ collections: [collection('Nightfall', 75)], selectedId: 'nightfall' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Find images in all documents…' }));
+    expect(await screen.findByText('4 documents will be scanned for images.')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+
+    expect(await screen.findByText('Finding images: 1 of 4 documents done · 1 scanning · 2 waiting')).toBeTruthy();
+    expect(screen.getByRole('progressbar', { name: 'Image progress' })).toBeTruthy();
+    expect(screen.getByText('Scanning letter.pdf')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Stop finding images' })).toBeTruthy();
+    expect(api.startImageRescan).toHaveBeenCalledWith('nightfall', 'embedded');
+    expect(screen.queryByRole('dialog', { name: 'Find images in all documents' })).toBeNull();
+  });
+
+  it('shows a run still going when the collection opens', async () => {
+    api.getImageRescanRun.mockResolvedValue({ jobId: 'j2', documents: 4, examined: 4, started: 4, done: 3, failed: 0, cancelled: 0,
+      scanning: 1, waiting: 0, currentDocument: null, active: true, cancelRequested: false });
+    render(CollectionsPanel, props({ collections: [collection('Nightfall', 75)], selectedId: 'nightfall' }));
+    expect(await screen.findByText('Finding images: 3 of 4 documents done · 1 scanning')).toBeTruthy();
   });
 
   it('opens exact summary shortcuts, clears filename and preserves sort', async () => {

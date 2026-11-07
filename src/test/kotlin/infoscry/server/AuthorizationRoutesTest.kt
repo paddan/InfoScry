@@ -86,6 +86,28 @@ class AuthorizationRoutesTest {
         send(who, method, path, body).status
 
     @Test
+    fun `a reader sees the image rescan census, an editor starts it and an outsider gets 404`() = runBlocking {
+        val path = "/api/collections/$collectionId/image-rescan"
+        val body = """{"imageExtraction":"embedded"}"""
+
+        assertEquals(HttpStatusCode.OK, status("reader", HttpMethod.Get, path))
+        assertEquals(HttpStatusCode.Forbidden, status("reader", HttpMethod.Post, path, body))
+        assertEquals(HttpStatusCode.NotFound, status("outsider", HttpMethod.Get, path))
+        assertEquals(HttpStatusCode.NotFound, status("outsider", HttpMethod.Post, path, body))
+        val first = send("editor", HttpMethod.Post, path, body)
+        assertEquals(HttpStatusCode.OK, first.status, first.bodyAsText())
+        val again = send("owner", HttpMethod.Post, path, """{"imageExtraction":"all"}""")
+        assertEquals(first.bodyAsText().substringAfter("\"id\":\"").substringBefore("\""),
+            again.bodyAsText().substringAfter("\"id\":\"").substringBefore("\""))
+        assertEquals(HttpStatusCode.BadRequest, status("editor", HttpMethod.Post, path, """{"imageExtraction":"off"}"""))
+        assertEquals(HttpStatusCode.BadRequest, status("editor", HttpMethod.Post, path, """{"imageExtraction":"bogus"}"""))
+        assertEquals(HttpStatusCode.OK, status("reader", HttpMethod.Get, "$path/run"))
+        assertEquals(HttpStatusCode.Forbidden, status("reader", HttpMethod.Post, "$path/cancel"))
+        assertEquals(HttpStatusCode.NotFound, status("outsider", HttpMethod.Get, "$path/run"))
+        assertEquals(HttpStatusCode.OK, status("editor", HttpMethod.Post, "$path/cancel"))
+    }
+
+    @Test
     fun `the creator of a collection becomes its owner`() = runBlocking {
         val created = send("outsider", HttpMethod.Post, "/api/collections", """{"name":"Mine"}""")
         assertEquals(HttpStatusCode.Created, created.status, created.bodyAsText())

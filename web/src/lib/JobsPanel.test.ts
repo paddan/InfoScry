@@ -5,7 +5,7 @@ import * as api from './api';
 
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
-  listActiveJobs: vi.fn(), cancelJob: vi.fn(),
+  listActiveJobs: vi.fn(), cancelJob: vi.fn(), getImageRescanRun: vi.fn(), cancelImageRescan: vi.fn(),
 }));
 
 const collections: api.Collection[] = [
@@ -39,6 +39,30 @@ describe('JobsPanel', () => {
     expect(within(rows[0]).getByRole('progressbar', { name: 'Page progress' }).getAttribute('value')).toBe('2');
     expect(within(rows[1]).getByText('Reindex')).toBeTruthy();
     expect(within(rows[1]).getByText('Queued')).toBeTruthy();
+  });
+
+  it('shows a collection image run as one row with its counts and stops it as a whole', async () => {
+    const run = { jobId: 'img-1', documents: 41, examined: 41, started: 41, done: 10, failed: 0, cancelled: 0, scanning: 2, waiting: 29,
+      currentDocument: 'letter.pdf', active: true, cancelRequested: false };
+    vi.mocked(api.getImageRescanRun).mockResolvedValue(run);
+    vi.mocked(api.cancelImageRescan).mockResolvedValue({ ...run, cancelRequested: true });
+    vi.mocked(api.listActiveJobs).mockResolvedValue([
+      job({ id: 'r1', type: 'RESCAN', collectionId: 'c1', parentJobId: 'img-1' }),
+      job({ id: 'r2', type: 'RESCAN', collectionId: 'c1', parentJobId: 'img-1', state: 'QUEUED' }),
+      job({ id: 'r3', type: 'RESCAN', collectionId: 'c1' }),
+    ]);
+    render(JobsPanel, { collections, visible: true });
+
+    expect(await screen.findByText('10 of 41 documents done · 2 scanning · 29 waiting · letter.pdf')).toBeTruthy();
+    const rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]).getByText('Find images')).toBeTruthy();
+    expect(within(rows[0]).getByRole('progressbar', { name: 'Image progress' }).getAttribute('value')).toBe('10');
+    expect(within(rows[1]).getByText('Rescan')).toBeTruthy();
+
+    await fireEvent.click(within(rows[0]).getByRole('button', { name: 'Stop' }));
+    await waitFor(() => expect(api.cancelImageRescan).toHaveBeenCalledWith('c1'));
+    expect(api.cancelJob).not.toHaveBeenCalled();
   });
 
   it('says when nothing is running', async () => {

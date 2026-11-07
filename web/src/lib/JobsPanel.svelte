@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { cancelJob, listActiveJobs, type Collection, type JobApiView, type JobType } from './api';
+  import { cancelImageRescan, cancelJob, getImageRescanRun, listActiveJobs, type Collection, type ImageRescanRun, type JobApiView, type JobType } from './api';
   import ImportUnitProgress from './ImportUnitProgress.svelte';
   import { stageForReader, stageLabel } from './importProgress';
 
@@ -15,9 +15,82 @@
     RETRY: 'Retry',
     RESCAN: 'Rescan',
     SELECTABLE_PDF: 'Selectable PDF',
+    IMAGE_RESCAN: 'Find images',
   };
 
   let jobs: JobApiView[] = [];
+  /** Image runs by their job id, read for every run whose rescans are on the list. */
+  let runs = new Map<string, ImageRescanRun>();
+
+  type Entry =
+    | { kind: 'job'; job: JobApiView }
+    | { kind: 'images'; jobId: string; collectionId: string; children: JobApiView[] };
+
+  /** The list as shown: a collection's image run is one row however many documents it is scanning. */
+  $: entries = groupedEntries(jobs);
+
+  function groupedEntries(list: JobApiView[]): Entry[] {
+    const groups = new Map<string, Entry & { kind: 'images' }>();
+    const out: Entry[] = [];
+    for (const job of list) {
+      const runId = job.type === 'IMAGE_RESCAN' ? job.id : job.parentJobId ?? null;
+      if (runId === null || !job.collectionId) {
+        out.push({ kind: 'job', job });
+        continue;
+      }
+      let group = groups.get(runId);
+      if (group === undefined) {
+        group = { kind: 'images', jobId: runId, collectionId: job.collectionId, children: [] };
+        groups.set(runId, group);
+        out.push(group);
+      }
+      if (job.type !== 'IMAGE_RESCAN') group.children.push(job);
+    }
+    return out;
+  }
+
+  async function loadRuns(list: JobApiView[]): Promise<void> {
+    const wanted = new Map<string, string>();
+    for (const entry of groupedEntries(list)) if (entry.kind === 'images') wanted.set(entry.jobId, entry.collectionId);
+    const next = new Map<string, ImageRescanRun>();
+    await Promise.all([...wanted].map(async ([jobId, collectionId]) => {
+      try {
+        const run = await getImageRescanRun(collectionId);
+        if (run !== null && run.jobId === jobId) next.set(jobId, run);
+      } catch {
+        // The row still shows its rescans without the run's counts.
+      }
+    }));
+    runs = next;
+  }
+
+  async function stopImages(collectionId: string, jobId: string): Promise<void> {
+    if (stopping.has(jobId)) return;
+    stopping = new Set(stopping).add(jobId);
+    try {
+      await cancelImageRescan(collectionId);
+      error = null;
+      void refresh();
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message : 'Something went wrong.';
+    } finally {
+      const next = new Set(stopping);
+      next.delete(jobId);
+      stopping = next;
+    }
+  }
+
+  function imagesStatus(entry: Entry & { kind: 'images' }, known: Map<string, ImageRescanRun>): string {
+    const run = known.get(entry.jobId);
+    if (run === undefined) return `${entry.children.length} ${entry.children.length === 1 ? 'document' : 'documents'} scanning or waiting`;
+    const finished = run.done + run.failed + run.cancelled;
+    const total = run.examined < run.documents ? run.documents : run.started;
+    const parts = [`${finished} of ${total} ${total === 1 ? 'document' : 'documents'} done`];
+    if (run.scanning > 0) parts.push(`${run.scanning} scanning`);
+    if (run.waiting > 0) parts.push(`${run.waiting} waiting`);
+    if (run.currentDocument) parts.push(run.currentDocument);
+    return parts.join(' · ');
+  }
   let loaded = false;
   let error: string | null = null;
   /** Jobs whose stop request is on its way; the server's `cancelRequested` takes over once it answers. */
@@ -47,6 +120,7 @@
       if (current !== generation || destroyed) return;
       jobs = next;
       error = null;
+      void loadRuns(next);
     } catch (failure) {
       if (current !== generation || destroyed) return;
       error = failure instanceof Error ? failure.message : 'Something went wrong.';
@@ -100,7 +174,30 @@
     <p role="status">No jobs are running.</p>
   {:else if jobs.length > 0}
     <ul>
-      {#each jobs as job (job.id)}
+      {#each entries as entry (entry.kind === 'job' ? entry.job.id : `images-${entry.jobId}`)}
+        {#if entry.kind === 'images'}
+        <li>
+          <div class="head">
+            <strong>{TYPE_LABELS.IMAGE_RESCAN}</strong>
+            {#if collections.find((collection) => collection.id === entry.collectionId)}<span class="collection">{collections.find((collection) => collection.id === entry.collectionId)?.name}</span>{/if}
+            <button type="button" onclick={() => stopImages(entry.collectionId, entry.jobId)} disabled={stopping.has(entry.jobId) || runs.get(entry.jobId)?.cancelRequested === true}>
+              {stopping.has(entry.jobId) || runs.get(entry.jobId)?.cancelRequested ? 'Stopping…' : 'Stop'}
+            </button>
+          </div>
+          <p class="status">{imagesStatus(entry, runs)}</p>
+          {#if runs.get(entry.jobId)}
+            {@const run = runs.get(entry.jobId)!}
+            {@const total = run.examined < run.documents ? run.documents : run.started}
+            {#if total > 0}
+              <div class="files">
+                <progress value={run.done + run.failed + run.cancelled} max={total} aria-label="Image progress"></progress>
+                <span>{run.done + run.failed + run.cancelled} of {total}</span>
+              </div>
+            {/if}
+          {/if}
+        </li>
+        {:else}
+        {@const job = entry.job}
         <li>
           <div class="head">
             <strong>{TYPE_LABELS[job.type] ?? job.type}</strong>
@@ -119,6 +216,7 @@
           {/if}
           <ImportUnitProgress progress={job.currentProgress} />
         </li>
+        {/if}
       {/each}
     </ul>
   {/if}

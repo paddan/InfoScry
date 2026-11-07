@@ -28,6 +28,9 @@
     type RetryRejection,
     type UnitKindName,
     type OcrOperation,
+    type JobApiView,
+    type ImageRescanRun,
+    getImageRescanRun,
   } from './api';
   import { restoreDocumentListViewState, type DocumentListViewState } from './documentListViewState';
   import CollectionSettingsPanel from './CollectionSettingsPanel.svelte';
@@ -36,6 +39,8 @@
   import DocumentRescan from './DocumentRescan.svelte';
   import OcrHistoryPanel from './OcrHistoryPanel.svelte';
   import ImportPanel from './ImportPanel.svelte';
+  import ImageRescanDialog from './ImageRescanDialog.svelte';
+  import ImageRescanProgress from './ImageRescanProgress.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { fileCountLabel, stageForReader, stageLabel } from './importProgress';
   import { qualityLabel } from './ocrQuality';
@@ -166,6 +171,44 @@
   let newName = '';
   let newDescription = '';
   let addingDocuments = false;
+  /** The collection-wide image rescan dialog, and the collection's run, followed the way an import is. */
+  let findingImages = false;
+  let findImagesButton: HTMLButtonElement | null = null;
+  let imageRun: ImageRescanRun | null = null;
+  let imageRunCollection: string | null = null;
+
+  $: void loadImageRun(selected?.id ?? null);
+
+  async function loadImageRun(collectionId: string | null): Promise<void> {
+    if (collectionId === imageRunCollection) return;
+    imageRunCollection = collectionId;
+    imageRun = null;
+    if (collectionId === null) return;
+    try {
+      const run = await getImageRescanRun(collectionId);
+      // An ended run from earlier is not news; only one still going is shown when the collection opens.
+      if (imageRunCollection === collectionId && run?.active) imageRun = run;
+    } catch {
+      // The collection works without it; the run shows once it is started from here.
+    }
+  }
+
+  function closeFindImages(): void {
+    findingImages = false;
+    void tick().then(() => findImagesButton?.focus());
+  }
+
+  async function imageRescanStarted(job: JobApiView): Promise<void> {
+    closeFindImages();
+    const collectionId = job.collectionId ?? selected?.id ?? null;
+    if (collectionId === null) return;
+    try {
+      imageRun = await getImageRescanRun(collectionId);
+    } catch {
+      imageRun = null;
+    }
+    imageRunCollection = collectionId;
+  }
   /** The selected collection's unfinished import, which the import panel follows when it opens. */
   let unfinishedImportId: string | null = null;
 
@@ -1391,7 +1434,24 @@
           <button type="button" aria-expanded={addingDocuments} onclick={() => (addingDocuments = true)}>
             Add documents
           </button>
+          <button type="button" bind:this={findImagesButton} aria-haspopup="dialog" onclick={() => (findingImages = true)}>
+            Find images in all documents…
+          </button>
         </div>
+        {#if imageRun !== null && imageRunCollection === selected.id}
+          {#key imageRun.jobId}
+            <ImageRescanProgress collectionId={selected.id} run={imageRun} />
+          {/key}
+        {/if}
+        {#if findingImages}
+          <ImageRescanDialog
+            collectionId={selected.id}
+            collectionName={selected.name}
+            defaultImageExtraction={selected.defaultImageExtraction ?? 'off'}
+            onClose={closeFindImages}
+            onStarted={imageRescanStarted}
+          />
+        {/if}
         {#if addingDocuments}
           {#key selected.id}
             <ImportPanel collectionId={selected.id} defaultImageExtraction={selected.defaultImageExtraction ?? 'off'} collectionName={selected.name} onImportChanged={importChanged} {unfinishedImportId} {visible} {isAdmin} />

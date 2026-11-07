@@ -274,6 +274,7 @@ class JobRunner(
         is ImportSourceChangedException -> "IMPORT_SOURCE_CHANGED"
         is RescanAttemptFailedException -> failure.code
         is CorrectionJobFailedException -> failure.code
+        is ImageRescanFailedException -> failure.code
         is CollectionNotActiveException -> "COLLECTION_NOT_ACTIVE"
         is MaintenanceInProgressException -> "MAINTENANCE_IN_PROGRESS"
         is IllegalArgumentException -> "INVALID_REQUEST"

@@ -50,7 +50,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
 
             assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
-            assertEquals(5, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(6, SchemaMigrator.SUPPORTED_VERSION)
             assertEquals(SchemaMigrator.SUPPORTED_VERSION, count(database, "schema_version"), "one row per applied step")
         }
     }
@@ -116,7 +116,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(5, database.schemaVersion())
+            assertEquals(6, database.schemaVersion())
             assertEquals(1, count(database, "collections"))
             assertEquals(1, count(database, "documents"))
             assertTrue(tableNames(database).containsAll(listOf("document_images", "image_extraction_checkpoints")))
@@ -129,7 +129,7 @@ class SchemaMigratorTest {
                 }
             }
             assertEquals("OFF", mode)
-            assertEquals(5, count(database, "schema_version"), "no step may be applied twice")
+            assertEquals(6, count(database, "schema_version"), "no step may be applied twice")
         }
     }
 
@@ -529,6 +529,39 @@ class SchemaMigratorTest {
     }
 
     /** Migration 028 is the evidence revision provenance column; the schema version moves with it. */
+    @Test
+    fun `version six keeps existing jobs and accepts the collection image rescan job`() {
+        newDatabase().use { database ->
+            SchemaMigrator(database).migrate(upTo = 5)
+            database.transaction { connection ->
+                connection.createStatement().use {
+                    it.executeUpdate(
+                        "INSERT INTO collections (id, name, created_at, updated_at) " +
+                            "VALUES ('c', 'C', '2026-11-07T00:00:00Z', '2026-11-07T00:00:00Z')",
+                    )
+                    it.executeUpdate(
+                        "INSERT INTO jobs (id, collection_id, type, state, created_at, updated_at) " +
+                            "VALUES ('old', 'c', 'CORRECTIONS', 'COMPLETE', '2026-11-07T00:00:00Z', '2026-11-07T00:00:00Z')",
+                    )
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+            SchemaMigrator(database).migrate()
+
+            assertEquals(6, database.schemaVersion())
+            database.transaction { connection ->
+                connection.createStatement().use {
+                    it.executeUpdate(
+                        "INSERT INTO jobs (id, collection_id, type, state, created_at, updated_at) " +
+                            "VALUES ('new', 'c', 'IMAGE_RESCAN', 'QUEUED', '2026-11-07T00:00:00Z', '2026-11-07T00:00:00Z')",
+                    )
+                }
+            }
+            assertEquals(2, count(database, "jobs"))
+        }
+    }
+
     @Test
     fun `sql splitting keeps quoted semicolons and drops comments`() {
         val script = """

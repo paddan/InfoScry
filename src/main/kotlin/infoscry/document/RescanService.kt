@@ -151,6 +151,33 @@ data class RescanPage(
  */
 data class PageCensus(val documentPages: Int, val pagesToRead: Int)
 
+/** What one step of a collection-wide image rescan did with one document. */
+enum class ImageRescanOutcome {
+    /** A *Keep current text* rescan was admitted for it now. */
+    STARTED,
+
+    /** This step had already admitted its rescan; nothing new was started. */
+    ALREADY_STARTED,
+
+    /** Another reading of the document is running, and it is left to finish. */
+    BUSY,
+
+    /** The format has no page images to read again (Office files and e-books take images at import). */
+    UNSUPPORTED_FORMAT,
+
+    /** The document publishes no reading yet, so there is no text to keep. */
+    NOT_READ,
+
+    /** The document is being deleted. */
+    DELETING,
+
+    /** The rescan was refused for this document; [ImageRescanStep.refusal] says why. */
+    REFUSED,
+}
+
+/** One step of a collection-wide image rescan: what happened, and the refusal when there was one. */
+data class ImageRescanStep(val outcome: ImageRescanOutcome, val refusal: RescanRefusalException? = null)
+
 /**
  * The page images of one managed document, produced the way a page-image reading needs them.
  *
@@ -933,6 +960,54 @@ class RescanService(
     private fun requireDocument(collectionId: CollectionId, documentId: DocumentId): Document =
         documents.get(documentId)?.takeIf { it.collectionId == collectionId }
             ?: throw NoSuchElementException("no document with id ${documentId.value} exists")
+
+    /**
+     * Why a document is or is not part of a collection-wide image rescan, decided without starting anything.
+     *
+     * A document qualifies when its format has page images to read again and it publishes a reading; Keep current
+     * text has nothing to keep otherwise.
+     */
+    fun imageRescanEligibility(document: Document): ImageRescanOutcome? = when {
+        documents.isDeletionTarget(document.id) -> ImageRescanOutcome.DELETING
+        pageImagesRefusal(document) != null -> ImageRescanOutcome.UNSUPPORTED_FORMAT
+        revisions.activeRevisionId(document.id) == null -> ImageRescanOutcome.NOT_READ
+        else -> null
+    }
+
+    /**
+     * Starts a *Keep current text* rescan of [documentId] with [mode], as one step of a collection-wide image rescan.
+     *
+     * It is the per-document dialog's preview and admission done in one call, and safe to repeat: [requestId] names
+     * the step, so a repeated or resumed call answers with the operation it already admitted. A document another
+     * reading is running on is left alone — never replaced — and reported as [ImageRescanOutcome.BUSY].
+     */
+    suspend fun startImageRescan(
+        collectionId: CollectionId,
+        documentId: DocumentId,
+        mode: ImageExtractionMode,
+        requestId: String,
+    ): ImageRescanStep {
+        require(mode != ImageExtractionMode.OFF) { "an image rescan needs images on" }
+        val document = documents.get(documentId)?.takeIf { it.collectionId == collectionId }
+            ?: return ImageRescanStep(ImageRescanOutcome.DELETING)
+        if (operations.operationForRequest(collectionId.value, documentId, requestId) != null) {
+            return ImageRescanStep(ImageRescanOutcome.ALREADY_STARTED)
+        }
+        imageRescanEligibility(document)?.let { return ImageRescanStep(it) }
+        if (operations.activeOperation(documentId) != null) return ImageRescanStep(ImageRescanOutcome.BUSY)
+        return try {
+            val preview = preview(collectionId, documentId, ReadingMethod.KeepText, RescanSelection.Automatic, mode)
+            val operation = admitRescan(collectionId, documentId, preview.previewId, requestId)
+            ImageRescanStep(if (operation.requestId == requestId) ImageRescanOutcome.STARTED else ImageRescanOutcome.BUSY)
+        } catch (refused: RescanRefusalException) {
+            ImageRescanStep(ImageRescanOutcome.REFUSED, refused)
+        } catch (stale: StaleRescanPreviewException) {
+            // The document moved between the preview and the admission; starting the job again tries it again.
+            ImageRescanStep(ImageRescanOutcome.BUSY)
+        } catch (deleted: DocumentBeingDeletedException) {
+            ImageRescanStep(ImageRescanOutcome.DELETING)
+        }
+    }
 
     private fun requireNotBeingDeleted(documentId: DocumentId) {
         if (documents.isDeletionTarget(documentId)) throw DocumentBeingDeletedException(documentId)
