@@ -501,6 +501,34 @@ class ImageStageTest {
         assertEquals(2, finder.opens)
     }
 
+    @Test
+    fun `a page that cannot be rendered fails alone and the rest of the document is still looked at`() {
+        val parents = pages(3, scanned = true) { emptyList() }
+        val engine = FakeSurya()
+        val page = pageWithPicture()
+        var asked = 0
+        val contexts = contexts(parents) {
+            asked++
+            if (asked == 2) throw java.io.IOException("the page cannot be rendered") else page
+        }
+        val target = RecordingTarget()
+
+        val result = runBlocking {
+            stage(FakeFinder(parents), LayoutRegions(PageOcrEngines(listOf(engine)))).run(
+                document, managedPath, artifactRoot, contexts, ImageExtractionMode.ALL, target, Direct, settings,
+            )
+        }
+
+        assertEquals(2, result.images, "pages one and three delivered their regions")
+        assertEquals(2, engine.calls)
+        assertTrue(ImageFindFailure.PARENT_UNREADABLE in result.warnings)
+        val outcomes = store.checkpoints(document.id, target.target, ImageExtractionMode.ALL, IMAGE_EXTRACTOR_VERSION)
+        assertEquals(
+            listOf(ImageCheckpointOutcome.DONE, ImageCheckpointOutcome.FAILED, ImageCheckpointOutcome.DONE),
+            contexts.map { outcomes.getValue(it.parent.unitId).outcome },
+        )
+    }
+
     private enum class Step { RECORD, DELIVER, CHECKPOINT }
 
     /** Interrupts the first run at [step], runs again, and expects the rows a clean run leaves. */

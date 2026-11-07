@@ -222,8 +222,20 @@ class ImageStage(
                         images = images + located.images
                         located.failures.forEach(counts::warn)
                     }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (deleted: DocumentBeingDeletedException) {
+                    throw deleted
                 } catch (unavailable: SuryaLayoutUnavailableException) {
                     regionsUnavailable = true
+                } catch (unrenderable: IOException) {
+                    // One page that cannot be rendered or read must not stop the rest of the document: this parent
+                    // keeps its embedded images, records a failed checkpoint, and is tried again next run.
+                    counts.warn(ImageFindFailure.PARENT_UNREADABLE)
+                    failed = true
+                } catch (unrenderable: RuntimeException) {
+                    counts.warn(ImageFindFailure.PARENT_UNREADABLE)
+                    failed = true
                 }
             }
             if (regionsUnavailable) {
