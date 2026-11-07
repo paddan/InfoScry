@@ -258,3 +258,26 @@
 - [ ] **Step 4: Update docs** (status, usage of the dialog choice and Keep current text, CLI flag, technical reference) and run link/consistency checks.
 - [ ] **Step 5: Run** `./gradlew check` — PASS; record JVM and frontend test counts in `docs/implementation-status.md`.
 - [ ] **Step 6: Commit** `Images: browser coverage, docs and gates`.
+
+### Task 12: Captions and page context for PDF images (added 2026-11-07 at the owner's request)
+
+Runs after the final-review fix wave.
+
+**Decision (owner, 2026-11-07):** an embedded PDF image and a scanned-page region get (a) a caption derived from the page text nearest the image and (b) a bounded excerpt of the surrounding page text, both indexed with the image unit so a search on the caption or on the nearby page content also finds the image.
+
+**Files:**
+- Create: `src/main/kotlin/infoscry/image/PageTextContext.kt`
+- Modify: `src/main/kotlin/infoscry/image/PdfImageFinder.kt` (text positions per page via PDFBox `PDFTextStripper` with positions), `LayoutRegions.kt` (OCR word boxes / structure blocks as the text source for scanned pages), `ImageStage.kt` (unit text = caption, blank line, context), `infoscry.storage.CaptionSource` (`PAGE_TEXT`), migration 004 CHECK if needed, spec "Rules" and amendments
+- Test: `src/test/kotlin/infoscry/image/PageTextContextTest.kt`, `PdfImageFinderTest.kt`, `ImageStageTest.kt`
+
+**Interfaces:**
+- `data class TextLine(val text: String, val box: NormalizedBox)`
+- `object PageTextContext { const val CAPTION_GAP_SHARE = 0.03; const val MIN_OVERLAP = 0.5; const val MAX_CONTEXT_CHARS = 600; fun captionFor(image: NormalizedBox, lines: List<TextLine>): String?; fun contextFor(image: NormalizedBox, lines: List<TextLine>, exclude: String?): String? }`
+- Caption: the contiguous lines directly below (else above) the image within the gap and overlap bounds; a line starting with `Fig`, `Figur`, `Figure`, `Bild`, `Foto`, `Photo` or `Tab` (case-insensitive, followed by a number or punctuation) wins over a plain adjacent line; at most 3 lines. An existing alt text / figcaption / layout caption is kept and wins.
+- Context: page lines ordered by distance from the image box (vertical first), excluding the caption, joined until `MAX_CONTEXT_CHARS`, cut at a word boundary. The unit's text is `caption` + blank line + `context` (either part may be absent); `document_images.caption` stays the caption only. Embedding fit follows the existing chunker (never truncate).
+
+- [ ] **Step 1: Failing tests:** `PageTextContextTest`: "Figur 3. Anna Svensson 1923" below the box is the caption; a "Bild 2" line above wins over a plain line below; a line 5 % below is not a caption; a line overlapping 30 % horizontally is not; context excludes the caption, stays ≤ 600 characters, nearest lines first, cut at a word. `PdfImageFinderTest`: a generated PDF with an image and a caption line yields `PAGE_TEXT` caption and a context. `ImageStageTest`: the delivered unit text is caption + blank line + context; keyword search on a context word finds the image unit (integration through the existing search test harness).
+- [ ] **Step 2: Run** `./gradlew test -PskipFrontend --tests 'infoscry.image.*'` — FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `./gradlew test -PskipFrontend --tests 'infoscry.image.*' --tests 'infoscry.jobs.*'` then `./gradlew check` — PASS; update docs/usage.md and the spec.
+- [ ] **Step 5: Commit** `Caption and page context for PDF images from the page text`.
