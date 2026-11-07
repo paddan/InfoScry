@@ -130,6 +130,7 @@ class ImageExtractor(
 
         var abortCode: String? = null
         var confidence: Double? = null
+        var emptyReading = false
         input.boundary.unit {
             if (input.isCommitted(UNIT_KEY)) return@unit
             val image = try {
@@ -178,6 +179,27 @@ class ImageExtractor(
             val verified = reading.verifiedAgainst(image)
             if (verified.text.isBlank() && verified.verifiedBlank) {
                 emit(ExtractionEvent.UnitFailed(UNIT_KEY, ORDINAL, PAGE_BLANK_CODE))
+                return@unit
+            }
+            if (verified.text.isBlank() && input.keepsEmptyPictures &&
+                (verified.errorCode == null || verified.errorCode == OcrPageResult.EMPTY_READING_CODE)
+            ) {
+                // The engine read a picture with ink on it and found no words: a photograph. With images being
+                // extracted the picture is the document's content, so it keeps a unit with no text (the parent of
+                // its image unit) and the document is counted as complete with a warning, as an empty page is.
+                emptyReading = true
+                emit(
+                    ExtractionEvent.UnitReady(
+                        key = UNIT_KEY,
+                        ordinal = ORDINAL,
+                        unit = ContentUnitDraft(
+                            locator = SourceLocation.Image(input.originalFilename),
+                            extractedText = "",
+                            searchText = "",
+                            method = ExtractionMethod.DIRECT_TEXT,
+                        ),
+                    ),
+                )
                 return@unit
             }
             if (verified.text.isBlank() || verified.errorCode != null) {
@@ -230,7 +252,7 @@ class ImageExtractor(
         input.boundary.unit {
             emit(
                 ExtractionEvent.Finished(
-                    metadata = metadata(confidence),
+                    metadata = metadata(confidence, emptyReading),
                     totalUnits = ONE_UNIT,
                 ),
             )
@@ -462,9 +484,13 @@ class ImageExtractor(
     private fun declaredPixels(reader: ImageReader, frame: Int): Long =
         reader.getWidth(frame).toLong() * reader.getHeight(frame).toLong()
 
-    private fun metadata(confidence: Double?): Map<String, String> = buildMap {
+    private fun metadata(confidence: Double?, emptyReading: Boolean = false): Map<String, String> = buildMap {
         put(IMAGES_METADATA, ONE_UNIT.toString())
-        put(OCR_PAGES_METADATA, ONE_UNIT.toString())
+        if (emptyReading) {
+            put(PdfExtractor.EMPTY_READING_PAGES_METADATA, ONE_UNIT.toString())
+        } else {
+            put(OCR_PAGES_METADATA, ONE_UNIT.toString())
+        }
         confidence?.let { value ->
             put(OCR_MEAN_CONFIDENCE_METADATA, String.format(Locale.ROOT, "%.3f", value))
         }

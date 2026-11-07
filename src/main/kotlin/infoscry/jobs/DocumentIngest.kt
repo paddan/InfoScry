@@ -227,6 +227,7 @@ internal class DocumentIngest(
             dispatch = dispatch,
             // A candidate's pages name the images they were read from, so those renders outlive the attempt.
             retainsPageImages = sink.stagesForReview,
+            keepsEmptyPictures = reading != null && reading.imageExtraction != ImageExtractionMode.OFF,
         )
 
         var finished = false
@@ -612,7 +613,11 @@ internal class DocumentIngest(
                 if (units.size < CHUNK_BATCH) break
             }
 
-            if (rows.isEmpty()) {
+            // A document whose pictures are its content (a photograph the reading found no words in) has images to
+            // show and nothing to search; that is a document with a warning, not an empty replacement.
+            val holdsImages = rows.isEmpty() &&
+                content.listUnits(document.id, afterOrdinal = ImageIdentity.ORDINAL_BASE - 1, limit = 1).isNotEmpty()
+            if (rows.isEmpty() && !holdsImages) {
                 // Nothing to index means an extraction pass with no units, which the chunking stage
                 // would already have refused as a refusal rather than a finished pass. This guard keeps
                 // the record honest instead of silently publishing an empty replacement.
@@ -637,7 +642,13 @@ internal class DocumentIngest(
                 // reading the document does not publish.
                 val revisionId = revisions.transaction {
                     val revisionId = revisions.recordPublishedContent(document.id, PROVENANCE_IMPORT, reading)
-                    index().replaceDocument(rows.map { it.copy(revisionId = revisionId) })
+                    // The index refuses a document with no passage; a picture-only document has nothing to search, and
+                    // whatever an earlier reading made searchable is removed in the same transaction.
+                    if (rows.isEmpty()) {
+                        index().deleteDocument(document.id)
+                    } else {
+                        index().replaceDocument(rows.map { it.copy(revisionId = revisionId) })
+                    }
                     revisionId
                 }
                 revisionId?.let {

@@ -263,6 +263,38 @@ class ImportImagesTest {
     }
 
     @Test
+    fun `an imported photograph that OCR reads as empty still gets its image unit`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("photo.png")
+            Files.write(source, FinderFixtures.png(240, 180, 3))
+            val empty = object : infoscry.ocr.PageOcrEngine {
+                override val engine = OcrEngine.TESSERACT
+                override suspend fun transcribe(page: infoscry.ocr.PageImage, settings: OcrSettingsSnapshot) =
+                    infoscry.ocr.OcrPageResult(
+                        text = "", engine = OcrEngine.TESSERACT, imageSha256 = page.sha256,
+                        errorCode = infoscry.ocr.OcrPageResult.EMPTY_READING_CODE,
+                    )
+            }
+            val run = runImport(
+                harness, source, snapshot(ImageExtractionMode.EMBEDDED),
+                infoscry.extract.ImageExtractor(PageOcrEngines(listOf(empty))), finder = null, standard = true,
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            AppContext.open(harness.dataDir).use { context ->
+                val units = context.content.listUnits(run.documentId, afterOrdinal = -1, limit = 10)
+                assertEquals(listOf(0, ImageIdentity.ordinal(0, 1)), units.map { it.ordinal })
+                assertEquals("", units[0].extractedText)
+                val document = context.documents.get(run.documentId)!!
+                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, document.status, "${document.errorCode}: ${document.errorMessage}")
+                val image = context.imageStore.imagesOf(context.revisions.activeRevisionId(run.documentId)!!).single()
+                assertEquals(ImageSourceKind.STANDALONE, image.kind)
+                assertEquals(units[1].id, image.unitId)
+            }
+        }
+    }
+
+    @Test
     fun `an image warning completes the document with a warning and keeps its text`() {
         withHarness { harness ->
             val source = harness.writeText("album.txt", "scanned album\n")

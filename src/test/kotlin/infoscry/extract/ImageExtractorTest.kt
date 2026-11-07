@@ -520,6 +520,28 @@ class ImageExtractorTest {
             )
         }
 
+    @Test
+    fun `with images extracted a picture read as empty is kept as an empty unit and counted`() = runBlocking {
+        val managed = managedImage(OcrFixtureGenerator.IMAGE_NAME)
+        val probe = PermitProbeBoundary()
+
+        val events = collect(
+            ImageExtractor(
+                PageOcrEngines(listOf(OcrSpy(text = "", confidence = null, errorCode = OcrPageResult.EMPTY_READING_CODE))),
+            ),
+            inputFor(managed, probe, keepsEmptyPictures = true),
+            probe,
+        )
+
+        val unit = units(events).single()
+        assertEquals("", unit.unit.extractedText)
+        assertEquals(infoscry.domain.ExtractionMethod.DIRECT_TEXT, unit.unit.method)
+        assertEquals(infoscry.domain.SourceLocation.Image(managed.fileName.toString()), unit.unit.locator)
+        assertEquals(emptyList(), failures(events))
+        val finished = events.filterIsInstance<ExtractionEvent.Finished>().single()
+        assertEquals("1", finished.metadata[PdfExtractor.EMPTY_READING_PAGES_METADATA])
+    }
+
     // ---- A reading that cannot happen ----------------------------------------------------------------
 
     @Test
@@ -848,6 +870,7 @@ class ImageExtractorTest {
         languages: String = "swe+eng",
         originalFilename: String = source.fileName.toString(),
         settings: ExtractionSettings = ExtractionSettings(ocrLanguages = languages),
+        keepsEmptyPictures: Boolean = false,
     ): ExtractionInput = ExtractionInput(
         documentId = DocumentId("doc-1"),
         managedPath = source,
@@ -857,6 +880,7 @@ class ImageExtractorTest {
         committedUnitKeys = committed,
         boundary = boundary,
         originalFilename = originalFilename,
+        keepsEmptyPictures = keepsEmptyPictures,
     )
 
     private fun fingerprint(): ExtractionFingerprint =

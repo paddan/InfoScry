@@ -559,6 +559,12 @@ data class ExtractionInput(
      * working render is deleted with the attempt and the page records no image at all.
      */
     val retainsPageImages: Boolean = false,
+    /**
+     * Whether this attempt extracts images, so a picture whose reading is empty (a photograph with no words on it)
+     * is kept as a unit with no text instead of failing. The image stage needs that unit as the picture's parent.
+     * With images off the picture's empty reading fails its unit as it always has.
+     */
+    val keepsEmptyPictures: Boolean = false,
 ) {
 
     /** Whether an earlier attempt already committed this unit under the same fingerprint. */
