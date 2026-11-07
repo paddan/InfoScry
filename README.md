@@ -98,8 +98,8 @@ Collections); the Ask prompt flow has browser coverage in `DocumentBrowserAccept
 PDF/image review shows exact-revision images beside extracted text, including
 historical PDF page and image citations. Live review can mark pages and confirm an exact
 page set and reading method for rescanning. Stopped selected-page runs can resume
-from committed pages. Integrated browser verification passed 42 scenarios; the
-an earlier accumulated check (historical; current counts are in
+from committed pages. Integrated browser verification passed 42 scenarios; an
+earlier accumulated check (historical; current counts are in
 [implementation status](docs/implementation-status.md#image-foundation-2026-11-07)) passed 1,838 JVM and 474 frontend tests.
 The latest Investigate browser run passed all nine scenarios against local fake
 providers. [Effort contracts](docs/investigate-effort.md) describe profile overrides

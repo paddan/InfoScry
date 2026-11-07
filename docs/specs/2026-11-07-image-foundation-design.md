@@ -137,8 +137,10 @@ as `ImageExtractor` does today; an encoded size beyond `maxImageBytes` is skippe
   and no text layer is read. A rescan with images off produces a revision without image units; earlier revisions
   keep theirs. A selected-page rescan extracts images only for the selected pages and carries the others'
   image units forward.
-- Publication adds the image units, their `document_images` rows and their caption chunks in the same
-  transaction as the rest of the revision.
+- Publication adds the image units and their caption chunks in the same transaction as the rest of the revision.
+  The `document_images` rows are recorded by `ImageStore.record` in their own transaction, when the image is
+  written; a revision is bound to its images through its page rows (`image_region` pages joined to
+  `document_images` on document, unit and source image), not through the publication transaction.
 - A stopped import or rescan never blocks starting again. Temporary image files left by a killed process
   are removed by the existing stale-state cleanup; committed artifacts are reused by hash.
 - A missing Surya runtime in `ALL` mode refuses only the region step, once per document, with
@@ -178,7 +180,10 @@ has no rescan or collection-settings command; rescans and the collection default
 
 Logs carry counts, codes and IDs, never image bytes, captions or document text. New codes:
 `NEEDS_SURYA_LAYOUT`, `IMAGE_DECODE_FAILED`, `IMAGE_TOO_LARGE`, `IMAGE_LIMIT_REACHED`, `TOO_MANY_IMAGES`,
-`IMAGE_PARENT_UNREADABLE`, `IMAGE_EXTRACTION_FAILED` (amended 2026-11-07).
+`IMAGE_PARENT_UNREADABLE`, `IMAGE_EXTRACTION_FAILED`, `IMAGE_PARENT_ORDINAL_TOO_LATE`,
+`IMAGE_SOURCE_UNREADABLE` (amended 2026-11-07). The most important image code of a run is recorded on the document
+(error code and message) when it completes with a warning, and the reader names it; `NEEDS_SURYA_LAYOUT` comes
+first and carries its install remedy.
 
 ## Schema
 
@@ -211,7 +216,31 @@ Rulings made while implementing; they take precedence over the sections above.
   (the finder could not read the parent; its checkpoint is `FAILED` so the next run tries again) and
   `IMAGE_EXTRACTION_FAILED` (the stage failed for a reason of its own; the text is kept, no checkpoint is
   written) join the code list.
+- `IMAGE_PARENT_ORDINAL_TOO_LATE` (a parent too late in the reading order for its images to have ordinals; a `DONE`
+  checkpoint with no images) and `IMAGE_SOURCE_UNREADABLE` (the document could not be opened to look for images)
+  join the code list.
+- Vector drawings (EMF, WMF, SVG, PICT) in Office and EPUB documents are the skip reason `VECTOR`: counted in the
+  checkpoint and the run's skips, never a warning, because the spec puts vector drawings out of scope.
 - Image checkpoints exist only for `EMBEDDED` and `ALL`; `OFF` writes none.
+- Each parent reconciles what it holds: after a delivery, the image units in the parent's ordinal band (its
+  `ImageIdentity.ordinal(p, 1)` to `ordinal(p, 1000)`) that the delivery did not produce are removed, with their
+  passages, in both targets (published content and a candidate revision). So a re-run in another mode, a retry
+  that finds fewer images, or the cap, leaves no stale unit. A parent that could not be read at all keeps what it
+  holds. With images off an import or a rescan removes every image unit of the attempt. A retry carries the image
+  extraction of the document's last attempt, else the collection default; it never falls back to off.
+- A page that cannot be rendered or read for its regions fails alone: it warns `IMAGE_PARENT_UNREADABLE`, commits a
+  `FAILED` checkpoint and the stage goes on. The repetition pass and the delivery pass each open their own source,
+  and an EPUB chapter is parsed once per spine item, so a long book is not charged its archive budget per section
+  and per pass. A PDF stencil mask is counted as `MASK` from its XObject flag and never decoded.
+- When images are extracted, a picture whose OCR reading is empty (a photograph with no words) keeps a unit with no
+  text, counted like an empty-reading PDF page, so its `STANDALONE` image unit has a parent and the document
+  completes with a warning. With images off the empty reading fails its unit as before. A document that is only
+  pictures has no passage to index: its publication clears its search rows rather than being refused.
+- A standalone picture whose type browsers cannot show (TIFF) gets a PNG display copy of its bounded decoded
+  picture, written once at `artifacts/images/<sha>.png` beside its thumbnail; `/file` serves that copy and the
+  managed copy is never sent or changed.
+- The collection default and the OCR settings are saved in one store transaction under the caller's version, so an
+  image-default change sent beside an unchanged language still answers `409 EDIT_CONFLICT` when stale.
 - An xlsx picture anchored outside every emitted range is not found. Legacy `.doc`, `.xls` and `.ppt` files and
   e-books other than EPUB have no image finder in v1.
 - `STANDALONE` images are exempt from the size and one-colour filters.
@@ -228,8 +257,11 @@ Rulings made while implementing; they take precedence over the sections above.
   every word-less block, so no `FIGURE` block could reach `LayoutRegions`. They now keep a word-less `FIGURE`
   block that has a box, as a block with an empty text range and its box; it adds no text and no separator, and
   chunking, the reader's structure view and Ask evidence ignore empty blocks. Other word-less blocks are still
-  dropped, `STRUCTURE_VERSION` and the parser identity are unchanged, and structures stored before this fix stay
-  valid but have no figures: a page already read by Surya yields no regions until it is read again. Two real
+  dropped. `STRUCTURE_VERSION` is unchanged, but the Surya parser identity is now `surya-html/2`. The identity is part
+  of an attempt's fingerprint, so this changes the fingerprint of new Surya import attempts (an in-flight Surya
+  import from before the upgrade starts its reading over). A structure stored by `surya-html/1` has no figures, so
+  the region pass treats it as absent and runs the layout pass; so it does for a stored structure whose image hash
+  is not the page raster being cropped, whose boxes would not fit. Two real
   Surya runs on synthetic pictures returned no `Picture` block even after the fix, so region extraction from
   scanned pages remains not verified against real Surya; it needs a run on a real photograph.
 - A PDF's embedded images have no caption source (the spec's caption sources are alt text, figcaption and layout

@@ -115,16 +115,24 @@ Design: [image foundation](specs/2026-11-07-image-foundation-design.md), with it
   its metadata, the unit and the checkpoint commit in one unit boundary. A missing Surya runtime
   checkpoints the parent `FAILED` with `NEEDS_SURYA_LAYOUT` once per document. A rescan runs
   `RescanImages` after its page loop and records a `DONE` checkpoint per unselected parent with its carried
-  images, so the cap and repetition are judged over the whole document.
+  images, so the cap and repetition are judged over the whole document. Each parent then removes the image
+  units of its ordinal band that its delivery did not produce (so a re-run in another mode, a retry with
+  fewer images or the cap leaves nothing stale; images off removes every image unit of the attempt), and a
+  page that cannot be rendered fails alone with a `FAILED` checkpoint while the stage goes on. The
+  repetition pass and the delivery pass open their own source; vector drawings (EMF, WMF, SVG, PICT) are the
+  skip `VECTOR`; a PDF stencil is a `MASK` without being decoded.
 - **Artifacts.** Under the document's artifact root: `images/<sha256>.<ext>` and
   `images/thumbs/<sha256>.jpg` (320 px), written to a temporary file and moved atomically; a standalone
-  picture is served from the managed copy. A page raster for a region pass is rendered into
+  picture is served from the managed copy, except a TIFF, which is served from a PNG display copy at
+  `images/<sha256>.png` (the managed copy is never changed). A killed process's `.tmp` files and
+  `.image-pages/` are removed by the startup sweep. A page raster for a region pass is rendered into
   `.image-pages/`, cleared before and after the run.
 - **Routes.** Four reader routes list and serve images and thumbnails (never SVG; `nosniff`; paths are
   checked under the artifact root or the managed copy). Import and rescan start accept `imageExtraction`.
 - **Codes.** `NEEDS_SURYA_LAYOUT`, `IMAGE_DECODE_FAILED`, `IMAGE_TOO_LARGE`, `IMAGE_LIMIT_REACHED`,
-  `TOO_MANY_IMAGES`, `IMAGE_PARENT_UNREADABLE`, `IMAGE_EXTRACTION_FAILED`; a warning completes the document
-  with warnings and keeps its text.
+  `TOO_MANY_IMAGES`, `IMAGE_PARENT_UNREADABLE`, `IMAGE_EXTRACTION_FAILED`, `IMAGE_PARENT_ORDINAL_TOO_LATE`,
+  `IMAGE_SOURCE_UNREADABLE`; a warning completes the document with warnings and keeps its text, and the most
+  important code is recorded as the document's error code and message and named by the reader.
 
 ## Mutation, deletion and recovery
 
@@ -330,7 +338,7 @@ dropped and rebuilt without changing what is searched or cited.
 
 | Engine | Parser | Input |
 |---|---|---|
-| Surya | `surya-html/1` | Worker protocol 2 sends each block's `html`, `label`, `readingOrder` and `bbox` (from the polygon). The parser allowlists `table`, `thead`/`tbody`, `tr`, `th`/`td` (`rowspan`, `colspan`), headings, lists, `math` and `code`, and the block order is `readingOrder` |
+| Surya | `surya-html/2` | Worker protocol 2 sends each block's `html`, `label`, `readingOrder` and `bbox` (from the polygon). The parser allowlists `table`, `thead`/`tbody`, `tr`, `th`/`td` (`rowspan`, `colspan`), headings, lists, `math` and `code`, and the block order is `readingOrder` |
 | LLM reader | `markdown/1` | Transcription prompt version 2 asks for GitHub-flavoured Markdown with page header and footer comment markers; a hand-written, line-based Markdown parser with no library builds the blocks |
 | Tesseract | `tesseract-tsv/1` | Lines grouped by Tesseract's own block and paragraph numbers; no tables or headings |
 
