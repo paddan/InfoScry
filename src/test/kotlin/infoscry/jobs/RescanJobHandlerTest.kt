@@ -944,6 +944,15 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
 
     private val admissions = java.util.concurrent.atomic.AtomicInteger()
 
+    /** Builds the image stage an attempt runs with; null (the default) is a build without one. */
+    var imageStage: ((AppContext) -> infoscry.image.ImageStage)? = null
+
+    /** The image mode the next previews confirm; null takes the collection's default. */
+    var imageMode: infoscry.image.ImageExtractionMode? = null
+
+    /** The page source previews and attempts read pages through, so a test can count what is rendered. */
+    var pageSource: infoscry.document.RescanPageSource = infoscry.document.RescanPageSource()
+
     val resumedInitialProgress = mutableListOf<Int>()
 
     /** The archive itself, which is the directory a second process opens. */
@@ -1337,7 +1346,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
         val engine = FakePageEngine()
         val service = rescanServiceOf(context, engine)
         return runBlocking {
-            val preview = service.preview(CollectionId("default"), picture.documentId, method, selection)
+            val preview = service.preview(CollectionId("default"), picture.documentId, method, selection, imageMode)
             service.admitRescan(
                 collectionId = CollectionId("default"),
                 documentId = picture.documentId,
@@ -1409,6 +1418,9 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
             afterInitialProgressReported = { jobId -> onInitialProgress?.invoke(jobId) },
             beforeCandidatePublication = { jobId -> beforeCandidatePublication?.invoke(context, jobId) },
             corrector = context.candidateCorrector,
+            pages = pageSource,
+            images = imageStage?.invoke(context),
+            imageStore = context.imageStore,
         )
         val failure = runBlocking {
             runCatching {
@@ -1476,6 +1488,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
         profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
         engines = { _, _, _ -> engine },
         embedderAvailable = { true },
+        pages = pageSource,
     )
 
     private fun writePicture(file: Path) {

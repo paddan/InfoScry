@@ -138,6 +138,10 @@ class ImportCommand : CliktCommand(name = "import") {
                         all.firstOrNull { it.id.value == collection } ?: all.firstOrNull { it.name.equals(collection, ignoreCase = true) }
                     } ?: throw CliFailure("no usable collection named or identified by '$collection'")
                     val method = methodOption?.let(infoscry.ocr.ReadingMethod::parse) ?: selected.ocrSettings().defaultMethod
+                    // Keep current text carries a document's published text forward, so only a rescan has meaning for it.
+                    if (method == infoscry.ocr.ReadingMethod.KeepText) {
+                        throw CliFailure("--method keep is for rescans; an import has no published text to keep")
+                    }
                     // Local files travel to the server first; a file whose bytes are already a document of the
                     // collection is not sent twice, and is reported as a duplicate.
                     val uploads = localFiles(requested).mapNotNull { file ->

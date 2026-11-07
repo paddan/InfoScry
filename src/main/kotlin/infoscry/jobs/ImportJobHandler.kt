@@ -832,6 +832,8 @@ class ImportJobHandler internal constructor(
                 engineFor = rescanEngineFactory(context.ocrProfiles, clientEngine = clientEngine),
                 profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
                 corrector = context.candidateCorrector,
+                images = pipeline.images,
+                imageStore = context.imageStore,
             )
             // Durable selectable-PDF generation (ticket 06 of the selectable-PDF plan). It depends on
             // nothing above: it reads only already-committed revision text, images and layouts, and is

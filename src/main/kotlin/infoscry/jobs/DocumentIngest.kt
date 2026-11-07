@@ -353,10 +353,10 @@ internal class DocumentIngest(
         val mode = snapshot.imageExtraction
         if (mode == ImageExtractionMode.OFF) return emptyList()
         val artifactRoot = paths.artifactsDir(document.collectionId, document.id)
-        val workDirectory = artifactRoot.resolve(IMAGE_PAGES_DIRECTORY)
+        val workDirectory = artifactRoot.resolve(ImageParents.PAGES_DIRECTORY)
         try {
             val parents = stage.run(STAGE_RECORD) {
-                clearDirectory(workDirectory)
+                ImageParents.clearDirectory(workDirectory)
                 parentsOf(document, mediaType, managedPath, sink, mode, artifactRoot, workDirectory, snapshot)
             }
             return images.run(
@@ -383,7 +383,7 @@ internal class DocumentIngest(
                 .log("the images of a document could not be extracted; its text is kept")
             return listOf(IMAGE_EXTRACTION_FAILED)
         } finally {
-            runCatching { clearDirectory(workDirectory) }
+            runCatching { ImageParents.clearDirectory(workDirectory) }
         }
     }
 
@@ -402,18 +402,15 @@ internal class DocumentIngest(
         workDirectory: java.nio.file.Path,
         snapshot: OcrSettingsSnapshot,
     ): List<ParentUnitContext> {
-        val needsText = mode == ImageExtractionMode.ALL
         fun contextOf(
             unitId: infoscry.domain.ContentUnitId,
             ordinal: Int,
             locator: infoscry.domain.SourceLocation,
             text: String,
             structure: () -> infoscry.ocr.PageStructure?,
-        ) = ParentUnitContext(
-            parent = ParentUnit(unitId, ordinal, locator),
-            text = if (needsText) text else "",
-            structure = if (needsText) structure() else null,
-            page = { renderPage(mediaType, managedPath, locator, unitId, artifactRoot, workDirectory, snapshot, document) },
+        ) = ImageParents.contextOf(
+            document, mediaType, managedPath, mode, artifactRoot, workDirectory, snapshot,
+            unitId, ordinal, locator, text, structure,
         )
         val candidate = sink.candidateRevisionId
         if (sink.stagesForReview) {
@@ -440,38 +437,6 @@ internal class DocumentIngest(
             if (batch.size < CHUNK_BATCH) break
         }
         return parents
-    }
-
-    /** Renders the raster of a scanned PDF page for a region pass; null for any parent that is not a PDF page. */
-    private fun renderPage(
-        mediaType: String,
-        managedPath: java.nio.file.Path,
-        locator: infoscry.domain.SourceLocation,
-        unitId: infoscry.domain.ContentUnitId,
-        artifactRoot: java.nio.file.Path,
-        workDirectory: java.nio.file.Path,
-        snapshot: OcrSettingsSnapshot,
-        document: Document,
-    ): PageImage? {
-        if (mediaType != PdfExtractor.PDF_MEDIA_TYPE || locator !is infoscry.domain.SourceLocation.PdfPage) return null
-        return Loader.loadPDF(managedPath.toFile(), IOUtils.createTempFileOnlyStreamCache()).use { pdf ->
-            PageImageRenderer().render(
-                document = pdf,
-                page = locator.page,
-                requestedDpi = snapshot.renderDpi ?: PdfExtractor.DEFAULT_RENDER_DPI,
-                directory = workDirectory.resolve("page-${locator.page}"),
-                artifactRoot = artifactRoot,
-                documentId = document.id,
-                unitId = unitId.value,
-            )
-        }
-    }
-
-    private fun clearDirectory(directory: java.nio.file.Path) {
-        if (!java.nio.file.Files.exists(directory)) return
-        java.nio.file.Files.walk(directory).use { entries ->
-            entries.sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) }
-        }
     }
 
     /**
@@ -801,9 +766,6 @@ internal class DocumentIngest(
 
         /** The images of a document could not be extracted; its text is complete, so it finishes with this warning. */
         internal const val IMAGE_EXTRACTION_FAILED = "IMAGE_EXTRACTION_FAILED"
-
-        /** Where a region pass's page rasters live while it runs, inside the document's artifacts. */
-        private const val IMAGE_PAGES_DIRECTORY = ".image-pages"
 
         /** A completed OCR pass produced no page text, so the existing revision was kept. */
         internal const val NO_EXTRACTABLE_CONTENT = "NO_EXTRACTABLE_CONTENT"

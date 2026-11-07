@@ -338,6 +338,7 @@ class RevisionPublicationService(
                 structureRelativePath = page.structureReference?.relativePath,
                 structureSha256 = page.structureReference?.sha256,
                 reading = page.reading,
+                sourceImage = page.sourceImage,
                 chunks = byOrdinal[page.ordinal].orEmpty().map { chunk ->
                     infoscry.chunk.ChunkDraft(
                         ordinal = chunk.ordinal,

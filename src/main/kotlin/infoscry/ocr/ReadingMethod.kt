@@ -20,6 +20,13 @@ sealed interface ReadingMethod {
 
     /** No OCR: every page keeps the text the document itself carries, and nothing is rendered or read. */
     data object None : ReadingMethod { override val id: String = "none" }
+
+    /**
+     * Rescan only: no engine, no cost, and no page or text layer is read. Every page's published text is carried
+     * forward unchanged and only the image step runs, so turning images on for a document never repeats OCR.
+     * Imports, retries and collection defaults refuse it.
+     */
+    data object KeepText : ReadingMethod { override val id: String = "keep" }
     data class Llm(val profileId: String) : ReadingMethod {
         init { require(profileId.isNotBlank()) { "an LLM reading method needs a profile id" } }
         override val id: String get() = "llm:$profileId"
@@ -31,6 +38,7 @@ sealed interface ReadingMethod {
             id == Tesseract.id -> Tesseract
             id == Surya.id -> Surya
             id == None.id -> None
+            id == KeepText.id -> KeepText
             id.startsWith("llm:") && id.substringAfter(':').isNotBlank() -> Llm(id.substringAfter(':'))
             else -> throw IllegalArgumentException("unknown reading method")
         }
@@ -66,6 +74,15 @@ class ReadingMethodUnavailableException(val reason: String) : ApiFaultException(
 interface ReadingMethodCatalog {
     fun availability(collectionId: infoscry.domain.CollectionId): List<MethodAvailability>
 
+    /** The methods a rescan offers: those an import offers, and *Keep current text*, which only a rescan accepts. */
+    fun rescanAvailability(collectionId: infoscry.domain.CollectionId): List<MethodAvailability> =
+        availability(collectionId) + KEEP_CURRENT_TEXT
+
+    /** [require] for a rescan, which also accepts [ReadingMethod.KeepText]. */
+    fun requireForRescan(collectionId: infoscry.domain.CollectionId, method: ReadingMethod): MethodAvailability =
+        if (method == ReadingMethod.KeepText) KEEP_CURRENT_TEXT else require(collectionId, method)
+
+    /** The method an import, a retry or a collection default chooses; [ReadingMethod.KeepText] is never one. */
     fun require(collectionId: infoscry.domain.CollectionId, method: ReadingMethod): MethodAvailability {
         val option = availability(collectionId).firstOrNull { it.method == method }
             ?: throw ReadingMethodUnavailableException("that reading method is not available")
@@ -73,3 +90,13 @@ interface ReadingMethodCatalog {
         return option
     }
 }
+
+/** *Keep current text*: always available, runs nowhere and sends nothing. Whether images are on is a rescan's own check. */
+val KEEP_CURRENT_TEXT = MethodAvailability(
+    method = ReadingMethod.KeepText,
+    label = "Keep current text",
+    destination = "this machine",
+    available = true,
+    unavailableReason = null,
+    external = false,
+)

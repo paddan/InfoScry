@@ -232,6 +232,7 @@ data class CollectionOcrSettings(
 ) {
     init {
         requireOcrLanguages(language)
+        require(defaultMethod != ReadingMethod.KeepText) { "Keep current text is a rescan choice, never a default" }
     }
 }
 
@@ -382,8 +383,14 @@ data class OcrSettingsSnapshot(
      * its own checkpoints.
      */
     val imageExtraction: infoscry.image.ImageExtractionMode = infoscry.image.ImageExtractionMode.OFF,
+    /**
+     * A rescan that carries every page's published text forward and runs only the image step (the reading method
+     * *Keep current text*). It reads nothing, so its engine is [OcrEngine.NONE].
+     */
+    val keepsText: Boolean = false,
 ) {
     init {
+        require(!keepsText || engine == OcrEngine.NONE) { "keeping the current text reads with no engine" }
         require(language.isNotBlank()) { "OcrSettingsSnapshot.language must not be blank" }
         require(extractorVersion.isNotBlank()) { "OcrSettingsSnapshot.extractorVersion must not be blank" }
         require(transcriptionPromptVersion > 0) {
@@ -441,6 +448,7 @@ data class OcrSettingsSnapshot(
                 ReadingMethod.Surya -> OcrEngine.SURYA
                 is ReadingMethod.Llm -> OcrEngine.LLM
                 ReadingMethod.None -> OcrEngine.NONE
+                ReadingMethod.KeepText -> error("Keep current text is not a collection default")
             },
             // No OCR reads no page, so it never asks for a mode that reads pages with a text layer.
             mode = if (settings.defaultMethod == ReadingMethod.None) OcrImportMode.FILL_MISSING else OcrImportMode.READ_ALL,

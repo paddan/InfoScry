@@ -8,6 +8,7 @@ import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.ExtractionMethod
+import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceLocation
 import infoscry.domain.UnitKind
 import infoscry.extract.ContentUnitDraft
@@ -97,6 +98,11 @@ data class RevisionPage(
     val structureSha256: String? = null,
     /** The page's reading before corrections, as its revision recorded it. */
     val reading: ReadingText? = null,
+    /**
+     * The picture an image unit shows. Only an image unit's is published into its unit, like an import's own
+     * commit does; every other page's source image stays in its revision.
+     */
+    val sourceImage: SourceImageProvenance? = null,
 ) {
     init {
         require(ordinal >= 0) { "RevisionPage.ordinal must not be negative, was $ordinal" }
@@ -1173,7 +1179,9 @@ class ContentStore(private val database: Database) {
             "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
                 "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
                 "created_at, updated_at, structure_relative_path, structure_sha256, reading_extracted_text, " +
-                "reading_search_text, reading_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "reading_search_text, reading_references, source_image_root, source_image_relative_path, " +
+                "source_image_sha256, source_image_width, source_image_height, source_image_render_version) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (id) DO UPDATE SET document_id = excluded.document_id, " +
                 "ordinal = excluded.ordinal, locator_type = excluded.locator_type, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
@@ -1185,7 +1193,13 @@ class ContentStore(private val database: Database) {
                 "structure_sha256 = excluded.structure_sha256, " +
                 "reading_extracted_text = excluded.reading_extracted_text, " +
                 "reading_search_text = excluded.reading_search_text, " +
-                "reading_references = excluded.reading_references",
+                "reading_references = excluded.reading_references, " +
+                "source_image_root = excluded.source_image_root, " +
+                "source_image_relative_path = excluded.source_image_relative_path, " +
+                "source_image_sha256 = excluded.source_image_sha256, " +
+                "source_image_width = excluded.source_image_width, " +
+                "source_image_height = excluded.source_image_height, " +
+                "source_image_render_version = excluded.source_image_render_version",
         ).use { statement ->
             statement.setString(1, page.unitId.value)
             statement.setString(2, documentId.value)
@@ -1209,6 +1223,13 @@ class ContentStore(private val database: Database) {
             statement.setString(16, page.reading?.extractedText)
             statement.setString(17, page.reading?.searchText)
             statement.setString(18, page.reading?.encodedReferences())
+            val image = page.sourceImage.takeIf { page.locator is SourceLocation.ImageRegion }
+            statement.setString(19, image?.root?.name)
+            statement.setString(20, image?.relativePath)
+            statement.setString(21, image?.sha256)
+            if (image?.width == null) statement.setNull(22, java.sql.Types.BIGINT) else statement.setInt(22, image.width)
+            if (image?.height == null) statement.setNull(23, java.sql.Types.BIGINT) else statement.setInt(23, image.height)
+            if (image == null) statement.setNull(24, java.sql.Types.BIGINT) else statement.setInt(24, image.renderVersion)
             statement.executeUpdate()
         }
     }

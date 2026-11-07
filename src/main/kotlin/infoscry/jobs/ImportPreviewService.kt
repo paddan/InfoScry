@@ -146,7 +146,7 @@ class ImportPreviewService internal constructor(
 
     private fun hashOfConfirmed(language: String, method: ReadingMethod, sources: List<ConfirmedImportSource>): String {
         val profileRevision = when (method) {
-            ReadingMethod.Tesseract, ReadingMethod.Surya, ReadingMethod.None -> "-"
+            ReadingMethod.Tesseract, ReadingMethod.Surya, ReadingMethod.None, ReadingMethod.KeepText -> "-"
             is ReadingMethod.Llm -> profiles.get(method.profileId)?.revision?.revisionId
                 ?: throw IllegalArgumentException("the selected OCR profile is unavailable")
         }
