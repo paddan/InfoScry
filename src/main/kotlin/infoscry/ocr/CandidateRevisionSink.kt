@@ -75,6 +75,16 @@ class CandidateRevisionSink(
     /** The candidate this sink stages into, or `null` while it has staged nothing. */
     override val candidateRevisionId: String? get() = candidate
 
+    override suspend fun retainImageUnits(
+        documentId: DocumentId,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<ContentUnitId>,
+    ) {
+        val revisionId = candidate ?: return
+        revisions.removeImagePagesExcept(revisionId, fromOrdinal, toOrdinal, keep)
+    }
+
     /**
      * The keys staged for *this* reading of *this* document.
      *

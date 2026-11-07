@@ -239,6 +239,43 @@ class ContentStore(private val database: Database) {
     }
 
     /**
+     * Removes the image units of [documentId] whose ordinal is within [fromOrdinal]..[toOrdinal] and whose identity is
+     * not in [keep], with their chunks and their image checkpoints, so a delivery that produced fewer images (or none)
+     * than an earlier one leaves nothing of the earlier one behind. Safe to repeat: a second call finds nothing to do.
+     *
+     * @return how many units were removed.
+     */
+    fun removeImageUnitsExcept(
+        documentId: DocumentId,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<ContentUnitId>,
+    ): Int = database.transaction { connection ->
+        val stale = connection.prepareStatement(
+            "SELECT id FROM content_units WHERE document_id = ? AND ordinal BETWEEN ? AND ?",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setInt(2, fromOrdinal)
+            statement.setInt(3, toOrdinal)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(ContentUnitId(rows.getString(1))) }
+            }
+        }.filterNot { it in keep }
+        stale.forEach { unitId ->
+            connection.deleteUnit(unitId)
+            connection.prepareStatement(
+                "DELETE FROM extraction_checkpoints WHERE document_id = ? AND unit_key = ?",
+            ).use { statement ->
+                statement.setString(1, documentId.value)
+                statement.setString(2, "image:${unitId.value}")
+                statement.executeUpdate()
+            }
+        }
+        if (stale.isNotEmpty()) connection.deleteChunkingMarker(documentId)
+        stale.size
+    }
+
+    /**
      * Records what the extractor announced it has, before it has read all of it.
      *
      * The total is the extractor's statement, so an extractor that never announces one never gets a

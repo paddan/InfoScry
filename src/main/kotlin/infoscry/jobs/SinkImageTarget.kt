@@ -64,6 +64,10 @@ class SinkImageTarget(
         )
     }
 
+    override suspend fun retainImages(fromOrdinal: Int, toOrdinal: Int, keep: Set<ContentUnitId>) {
+        sink.retainImageUnits(documentId, fromOrdinal, toOrdinal, keep)
+    }
+
     companion object {
         /** The version of the procedure that produced an image's pixels: the stored file itself. */
         const val IMAGE_RENDER_VERSION: Int = 1

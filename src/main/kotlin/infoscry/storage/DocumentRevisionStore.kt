@@ -531,6 +531,44 @@ class DocumentRevisionStore(private val database: Database, private val content:
     }
 
     /**
+     * Removes the image pages of candidate [revisionId] whose ordinal is within [fromOrdinal]..[toOrdinal] and whose
+     * unit is not in [keep], with their passages. A repeat finds nothing more to remove.
+     *
+     * @return how many pages were removed.
+     */
+    fun removeImagePagesExcept(
+        revisionId: String,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<infoscry.domain.ContentUnitId>,
+    ): Int = database.transaction { connection ->
+        val revision = connection.selectRevision(revisionId)
+            ?: throw NoSuchElementException("no revision with id $revisionId exists")
+        check(revision.state == RevisionState.CANDIDATE) {
+            "revision $revisionId is ${revision.state}, so it cannot be staged into"
+        }
+        val stale = connection.prepareStatement(
+            "SELECT ordinal, unit_id FROM page_text_revisions WHERE revision_id = ? AND ordinal BETWEEN ? AND ?",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            statement.setInt(2, fromOrdinal)
+            statement.setInt(3, toOrdinal)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(rows.getInt(1) to rows.getString(2)) }
+            }
+        }.filterNot { (_, unit) -> infoscry.domain.ContentUnitId(unit) in keep }
+        stale.forEach { (ordinal, _) ->
+            connection.deletePageChunks(revisionId, ordinal)
+            connection.prepareStatement("DELETE FROM page_text_revisions WHERE revision_id = ? AND ordinal = ?").use { statement ->
+                statement.setString(1, revisionId)
+                statement.setInt(2, ordinal)
+                statement.executeUpdate()
+            }
+        }
+        stale.size
+    }
+
+    /**
      * Writes one staged page's passages, without touching the page's text.
      *
      * A rescan commits in the order its stages happen: a page's text is committed when the page was read and

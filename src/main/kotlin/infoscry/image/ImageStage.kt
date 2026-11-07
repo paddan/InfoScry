@@ -1,5 +1,6 @@
 package infoscry.image
 
+import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
@@ -217,7 +218,7 @@ class ImageStage(
         }
 
         val outcome = if (failed || regionsUnavailable) ImageCheckpointOutcome.FAILED else ImageCheckpointOutcome.DONE
-        val delivered = run.boundary.unit { deliverParent(run, images, repeated, totalBefore, counts, outcome) }
+        val delivered = run.boundary.unit { deliverParent(run, images, repeated, totalBefore, counts, outcome, failed) }
         summary.addRun(counts, delivered)
         return ParentOutcome(delivered, regionsUnavailable)
     }
@@ -229,11 +230,13 @@ class ImageStage(
         totalBefore: Int,
         counts: Counts,
         outcome: ImageCheckpointOutcome,
+        unreadable: Boolean,
     ): Int {
         checkNotDeleting(run)
         val parent = run.context.parent
         val occurrences = HashMap<String, Int>()
         var delivered = 0
+        val produced = HashSet<ContentUnitId>()
         for (found in images) {
             // Equal images in one parent are told apart in finder order, whether or not each is kept.
             val key = identityKey(found)
@@ -332,7 +335,15 @@ class ImageStage(
                 written,
                 root,
             )
+            produced += unitId
             delivered++
+        }
+        // What an earlier run (another mode, or more images) left in this parent's band and this one did not produce
+        // is stale. A parent that could not be read at all says nothing about what it holds, so it keeps its units.
+        if (!unreadable && parent.ordinal <= ImageIdentity.MAX_PARENT_ORDINAL) {
+            val first = checkNotNull(ImageIdentity.ordinal(parent.ordinal, 1))
+            val last = checkNotNull(ImageIdentity.ordinal(parent.ordinal, ImageIdentity.MAX_PER_PARENT))
+            run.target.retainImages(first, last, produced)
         }
         commit(run, counts, outcome, delivered)
         return delivered

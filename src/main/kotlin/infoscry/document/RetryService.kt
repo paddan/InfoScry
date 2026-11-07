@@ -248,8 +248,11 @@ class RetryService(
                 accepted.forEach { documentId -> documents.updateStatus(documentId, DocumentStatus.QUEUED) }
                 val snapshots = accepted.mapNotNull { id ->
                     val document = checkNotNull(documents.get(id))
-                    val snapshot = if (chosen == null) lastSnapshot(document) ?: reconciled.ocr else reconciled.ocr
-                    snapshot?.let { frozen ->
+                    val last = lastSnapshot(document)
+                    val snapshot = if (chosen == null) last ?: reconciled.ocr else reconciled.ocr
+                    // The choice of imagery belongs to the document's earlier attempt, else to the collection: a retry
+                    // (even with another reading method) must not silently turn the person's image extraction off.
+                    snapshot?.copy(imageExtraction = last?.imageExtraction ?: admitted.defaultImageExtraction)?.let { frozen ->
                         val perDocument = if (chosen != null && frozen.transcriptionProfileRevisionId != null) {
                             val external = database.read { c ->
                                 c.prepareStatement("SELECT endpoint FROM ocr_profile_revisions WHERE revision_id = ?").use { q ->

@@ -315,6 +315,69 @@ class ImportImagesTest {
         }
     }
 
+    @Test
+    fun `retaining image units removes the rest in the plain sink and in a candidate, and repeating changes nothing`() {
+        withHarness { harness ->
+            val source = harness.writeText("album.txt", "scanned album\n")
+            val run = runImport(harness, source, snapshot(ImageExtractionMode.OFF), Pages(2), tableFinder())
+            AppContext.open(harness.dataDir).use { context ->
+                val documentId = run.documentId
+                val document = context.documents.get(documentId)!!
+                val fingerprint = ExtractionFingerprint.of(document.sha256, ExtractionSettings(ocrLanguages = "eng"))
+                val kept = ContentUnitId("00000000-0000-5000-8000-000000000001")
+                val stale = ContentUnitId("00000000-0000-5000-8000-000000000002")
+                val sinks = listOf(
+                    StoredUnitsSink(context.paths, context.documents, context.content),
+                    CandidateRevisionSink(context.revisions, documentId, "TEST", baselineRevisionId = null),
+                )
+                for (sink in sinks) {
+                    val target = SinkImageTarget(sink, documentId, fingerprint)
+                    val locator = SourceLocation.ImageRegion(SourceLocation.PdfPage(1), 1, null)
+                    val first = ImageIdentity.ordinal(0, 1)!!
+                    val second = ImageIdentity.ordinal(0, 2)!!
+                    val outsideBand = ImageIdentity.ordinal(1, 1)!!
+                    val other = ContentUnitId("00000000-0000-5000-8000-000000000003")
+                    runBlocking {
+                        target.deliver(first, kept, locator, "kept", writtenImage(), SourceImageRoot.ARTIFACTS)
+                        target.deliver(second, stale, locator, "stale", writtenImage(), SourceImageRoot.ARTIFACTS)
+                        target.deliver(outsideBand, other, locator, "other parent", writtenImage(), SourceImageRoot.ARTIFACTS)
+                        repeat(2) { target.retainImages(first, ImageIdentity.ordinal(0, ImageIdentity.MAX_PER_PARENT)!!, setOf(kept)) }
+                    }
+                    fun held(): List<ContentUnitId> = if (sink is CandidateRevisionSink) {
+                        context.revisions.pages(assertNotNull(sink.candidateRevisionId)).map { it.ordinal to it.unitId }
+                    } else {
+                        context.content.listUnits(documentId, afterOrdinal = -1, limit = 50).map { it.ordinal to it.id }
+                    }.filter { ImageIdentity.isImageOrdinal(it.first) }.map { it.second }
+                    assertEquals(listOf(kept, other), held(), "${sink.javaClass.simpleName} dropped only the stale unit in the band")
+                    runBlocking { target.retainImages(ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet()) }
+                    assertEquals(emptyList(), held(), "${sink.javaClass.simpleName} dropped every image unit")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `importing again with images off removes the image units an earlier import left`() {
+        withHarness { harness ->
+            val source = harness.writeText("album.txt", "scanned album\n")
+            val first = runImport(harness, source, snapshot(ImageExtractionMode.EMBEDDED), Pages(3), tableFinder())
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(2, context.content.listUnits(first.documentId, afterOrdinal = -1, limit = 50).count { ImageIdentity.isImageOrdinal(it.ordinal) })
+                // A document that did not finish is read again by the next import.
+                context.documents.updateStatus(first.documentId, DocumentStatus.FAILED, "EXTRACTION_FAILED")
+            }
+
+            val again = runImport(harness, source, snapshot(ImageExtractionMode.OFF), Pages(3), tableFinder())
+
+            assertEquals(first.documentId, again.documentId)
+            AppContext.open(harness.dataDir).use { context ->
+                val units = context.content.listUnits(first.documentId, afterOrdinal = -1, limit = 50)
+                assertEquals(0, units.count { ImageIdentity.isImageOrdinal(it.ordinal) })
+                assertEquals(3, context.index().chunkCount(CollectionId("default"), first.documentId))
+            }
+        }
+    }
+
     // ---- fixtures ----
 
     private fun snapshot(

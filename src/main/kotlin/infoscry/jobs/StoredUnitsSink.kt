@@ -124,6 +124,16 @@ class StoredUnitsSink(
         return reuse.skipKeys
     }
 
+    override suspend fun retainImageUnits(
+        documentId: DocumentId,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<infoscry.domain.ContentUnitId>,
+    ) {
+        if (documents.isDeletionTarget(documentId)) throw DocumentBeingDeletedException(documentId)
+        content.removeImageUnitsExcept(documentId, fromOrdinal, toOrdinal, keep)
+    }
+
     override suspend fun deliver(
         documentId: DocumentId,
         fingerprint: ExtractionFingerprint,

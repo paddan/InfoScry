@@ -59,9 +59,16 @@ internal class RescanImages(
         stage: JobStage,
     ): List<String> {
         val mode = snapshot.imageExtraction
-        if (mode == ImageExtractionMode.OFF) return emptyList()
         val workDirectory = artifactRoot.resolve(ImageParents.PAGES_DIRECTORY)
         try {
+            if (mode == ImageExtractionMode.OFF) {
+                // The candidate holds no image units with images off, whatever an earlier attempt of it staged.
+                stage.run(STAGE_RECORD) {
+                    CandidateImageTarget(revisions, candidate, document)
+                        .retainImages(ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
+                }
+                return emptyList()
+            }
             val parents = stage.run(STAGE_RECORD) {
                 ImageParents.clearDirectory(workDirectory)
                 carryForward(document, managedPath, artifactRoot, workDirectory, candidate, baselineRevisionId, selection, snapshot, mode)

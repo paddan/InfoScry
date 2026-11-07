@@ -408,6 +408,76 @@ class ImageStageTest {
         assertEquals(listOf(ImageRejectedException.IMAGE_DECODE_FAILED), result.warnings)
     }
 
+    @Test
+    fun `switching from all to embedded drops the region units the earlier run left`() {
+        val parents = pages(1, scanned = true) { listOf(picture(100, 120)) }
+        val finder = FakeFinder(parents)
+        val page = pageWithPicture()
+        val contexts = contexts(parents) { page }
+        val target = RecordingTarget()
+
+        val all = runBlocking {
+            stage(finder, LayoutRegions(PageOcrEngines(listOf(FakeSurya())))).run(
+                document, managedPath, artifactRoot, contexts, ImageExtractionMode.ALL, target, Direct, settings,
+            )
+        }
+        assertEquals(2, all.images)
+        assertEquals(2, target.held.size)
+
+        val embedded = runBlocking {
+            stage(finder, LayoutRegions(PageOcrEngines(emptyList()))).run(
+                document, managedPath, artifactRoot, contexts, ImageExtractionMode.EMBEDDED, target, Direct, settings,
+            )
+        }
+
+        assertEquals(1, embedded.images)
+        assertEquals(1, target.held.size)
+        assertEquals(ImageSourceKind.EMBEDDED, store.image(document.id, target.held.keys.single(), target.delivered.first().image.sha256)?.kind)
+    }
+
+    @Test
+    fun `a retry that delivers fewer images leaves no stale unit, and repeating it changes nothing`() {
+        val target = RecordingTarget()
+        val before = pages(2) { listOf(picture(100, 120), picture(110, 120)) }
+        run(FakeFinder(before), before, target)
+        assertEquals(4, target.held.size)
+
+        // The same document, read again after its checkpoints are gone (a retry): page 0 now yields one image.
+        execute("DELETE FROM image_extraction_checkpoints")
+        val after = pages(2) { page -> if (page == 0) listOf(picture(100, 120)) else listOf(picture(100, 120), picture(110, 120)) }
+        run(FakeFinder(after), after, target)
+        assertEquals(3, target.held.size)
+        val onFirst = target.held.values.filter { it < ImageIdentity.ordinal(1, 1)!! }
+        assertEquals(listOf(ImageIdentity.ordinal(0, 1)!!), onFirst)
+
+        execute("DELETE FROM image_extraction_checkpoints")
+        run(FakeFinder(after), after, target)
+        assertEquals(3, target.held.size)
+    }
+
+    @Test
+    fun `a parent that cannot be read keeps the units it already holds`() {
+        val target = RecordingTarget()
+        val before = pages(1) { listOf(picture(100, 120)) }
+        run(FakeFinder(before), before, target)
+
+        execute("DELETE FROM image_extraction_checkpoints")
+        val failing = object : ImageFinder {
+            override val mediaTypes: Set<String> = setOf("application/pdf")
+            override fun open(managedPath: Path): OpenedSource = object : OpenedSource {
+                override fun imagesOf(parent: ParentUnit): ParentImages = throw IllegalStateException("unreadable")
+                override fun close() = Unit
+            }
+        }
+        runBlocking {
+            ImageStage(ImageFinders(listOf(failing)), LayoutRegions(PageOcrEngines(emptyList())), ImageArtifacts(), store, documentStore).run(
+                document, managedPath, artifactRoot, contexts(before) { null }, ImageExtractionMode.EMBEDDED, target, Direct, settings,
+            )
+        }
+
+        assertEquals(1, target.held.size)
+    }
+
     private enum class Step { RECORD, DELIVER, CHECKPOINT }
 
     /** Interrupts the first run at [step], runs again, and expects the rows a clean run leaves. */
@@ -603,6 +673,13 @@ class ImageStageTest {
     ) : ImageUnitTarget {
         val delivered = mutableListOf<Delivery>()
 
+        /** What the target holds now: delivered units, less what a later delivery retained away. */
+        val held = LinkedHashMap<ContentUnitId, Int>()
+
+        override suspend fun retainImages(fromOrdinal: Int, toOrdinal: Int, keep: Set<ContentUnitId>) {
+            held.entries.removeIf { (id, ordinal) -> ordinal in fromOrdinal..toOrdinal && id !in keep }
+        }
+
         override suspend fun deliver(
             ordinal: Int,
             unitId: ContentUnitId,
@@ -612,6 +689,7 @@ class ImageStageTest {
             provenanceRoot: SourceImageRoot,
         ) {
             delivered += Delivery(ordinal, unitId, locator, caption, image, provenanceRoot)
+            held[unitId] = ordinal
             after()
         }
     }

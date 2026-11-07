@@ -737,6 +737,18 @@ interface ExtractionSink {
     ) = deliver(documentId, fingerprint, event)
 
     /**
+     * Removes the image units this sink holds for the document within [fromOrdinal]..[toOrdinal] whose identity is not in
+     * [keep], so an image delivery that produced fewer images than an earlier one leaves nothing stale. Idempotent. A
+     * sink that holds no image units has nothing to remove, which is why the default does nothing.
+     */
+    suspend fun retainImageUnits(
+        documentId: DocumentId,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<infoscry.domain.ContentUnitId>,
+    ) = Unit
+
+    /**
      * How many of this document's committed units still await a person's decision.
      *
      * A reading is not automatically done because every page was read: a page a model proposed and nobody

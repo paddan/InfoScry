@@ -33,4 +33,11 @@ interface ImageUnitTarget {
         image: WrittenImage,
         provenanceRoot: SourceImageRoot,
     )
+
+    /**
+     * Removes the image units this target holds within [fromOrdinal]..[toOrdinal] whose identity is not in [keep]: what an
+     * earlier delivery left that this one did not produce. Runs inside the parent unit's boundary, and is a no-op
+     * when nothing is stale, so a repeat converges.
+     */
+    suspend fun retainImages(fromOrdinal: Int, toOrdinal: Int, keep: Set<ContentUnitId>)
 }

@@ -68,4 +68,8 @@ class CandidateImageTarget(
             ),
         )
     }
+
+    override suspend fun retainImages(fromOrdinal: Int, toOrdinal: Int, keep: Set<ContentUnitId>) {
+        revisions.removeImagePagesExcept(candidate, fromOrdinal, toOrdinal, keep)
+    }
 }

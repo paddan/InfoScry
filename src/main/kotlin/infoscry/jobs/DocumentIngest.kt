@@ -351,10 +351,17 @@ internal class DocumentIngest(
         val images = pipeline.images ?: return emptyList()
         val snapshot = reading ?: return emptyList()
         val mode = snapshot.imageExtraction
-        if (mode == ImageExtractionMode.OFF) return emptyList()
         val artifactRoot = paths.artifactsDir(document.collectionId, document.id)
         val workDirectory = artifactRoot.resolve(ImageParents.PAGES_DIRECTORY)
         try {
+            if (mode == ImageExtractionMode.OFF) {
+                // An earlier attempt with images on may have left image units beside this attempt's text; with images
+                // off the attempt holds none, so a repeat of the same choice converges on the same rows.
+                stage.run(STAGE_RECORD) {
+                    sink.retainImageUnits(document.id, ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
+                }
+                return emptyList()
+            }
             val parents = stage.run(STAGE_RECORD) {
                 ImageParents.clearDirectory(workDirectory)
                 parentsOf(document, mediaType, managedPath, sink, mode, artifactRoot, workDirectory, snapshot)
