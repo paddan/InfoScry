@@ -236,9 +236,10 @@ class ImageRoutesTest {
         assertEquals(HttpStatusCode.NotFound, server.get("${base()}/$unit/file").status)
     }
 
-    @Test fun `a standalone picture is served from the managed copy and nothing else`() = runBlocking {
+    @Test fun `a standalone tiff is served from its png display copy and the managed copy is never sent`() = runBlocking {
         val tiff = fixture.tiff("scan.tiff")
         val managed = server.context.library.managedPathOf(tiff)
+        val managedBytes = Files.readAllBytes(managed)
         val sha = tiff.sha256
         val unit = imageUnitId(tiff, first)
         val parent = SourceLocation.Image("scan.tiff")
@@ -252,12 +253,47 @@ class ImageRoutesTest {
         record(tiff, first, 0, sha, "none", mediaType = "image/tiff", relativePath = managed.fileName.toString(),
             kind = ImageSourceKind.STANDALONE, thumbnail = "images/none.jpg")
         val path = "${base(tiff)}/${unit.value}/file"
+
+        // Without a display copy there is nothing a browser can show: the TIFF bytes are not sent in its place.
+        assertEquals(HttpStatusCode.NotFound, server.get(path).status)
+
+        val picture = BufferedImage(8, 6, BufferedImage.TYPE_INT_RGB).apply { setRGB(0, 0, 0x0000ff) }
+        val copy = artifactRoot(tiff).resolve(infoscry.image.ImageArtifacts.displayCopyPath(sha))
+        Files.createDirectories(copy.parent)
+        ImageIO.write(picture, "png", copy.toFile())
+
+        val ok = server.get(path)
+        assertEquals(HttpStatusCode.OK, ok.status, ok.bodyAsText())
+        assertEquals("image/png", ok.headers[HttpHeaders.ContentType])
+        assertContentEquals(Files.readAllBytes(copy), ok.bodyAsBytes())
+        assertContentEquals(managedBytes, Files.readAllBytes(managed), "the managed copy is unchanged")
+
+        val view = json("${base(tiff)}/${unit.value}")!!
+        assertEquals("image/png", view["mediaType"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `a standalone picture is served from the managed copy and nothing else`() = runBlocking {
+        val tiff = fixture.tiff("scan.tiff")
+        val managed = server.context.library.managedPathOf(tiff)
+        val sha = tiff.sha256
+        val unit = imageUnitId(tiff, first)
+        val parent = SourceLocation.Image("scan.tiff")
+        fixture.publish(
+            tiff,
+            listOf(
+                fixture.page(0, "scan").copy(locator = parent),
+                imagePage(first, 1, sha, "the picture").copy(locator = SourceLocation.ImageRegion(parent, 1, null)),
+            ),
+        )
+        record(tiff, first, 0, sha, "none", mediaType = "image/png", relativePath = managed.fileName.toString(),
+            kind = ImageSourceKind.STANDALONE, thumbnail = "images/none.jpg")
+        val path = "${base(tiff)}/${unit.value}/file"
         val ok = server.get(path)
         assertEquals(HttpStatusCode.OK, ok.status, ok.bodyAsText())
         assertContentEquals(Files.readAllBytes(managed), ok.bodyAsBytes())
 
         // A standalone row naming any other file than the managed copy is refused.
-        record(tiff, first, 0, sha, "none", mediaType = "image/tiff", relativePath = "../scan.tiff",
+        record(tiff, first, 0, sha, "none", mediaType = "image/png", relativePath = "../scan.tiff",
             kind = ImageSourceKind.STANDALONE, thumbnail = "images/none.jpg")
         assertEquals(HttpStatusCode.NotFound, server.get(path).status)
     }

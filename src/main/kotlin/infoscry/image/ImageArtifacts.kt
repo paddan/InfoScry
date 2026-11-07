@@ -117,11 +117,18 @@ class ImageArtifacts(
      * The source is decoded through the same pixel bound as [write], so a large managed copy is reduced
      * rather than read whole.
      *
+     * With [displayCopy] a PNG of the same bounded raster is written too, at [displayCopyPath], for a picture whose
+     * format a browser cannot show (TIFF); the managed copy itself is never touched. An existing copy is reused.
+     *
      * @throws ImageRejectedException with [ImageRejectedException.IMAGE_DECODE_FAILED] when [source] cannot be decoded.
      */
-    fun thumbnailFor(documentArtifactRoot: Path, source: Path, sha256: String): String {
+    fun thumbnailFor(documentArtifactRoot: Path, source: Path, sha256: String, displayCopy: Boolean = false): String {
         val raster = decodeBounded(ImageIO.createImageInputStream(source.toFile())).raster
         writeThumbnail(documentArtifactRoot, sha256, raster)
+        if (displayCopy) {
+            val target = documentArtifactRoot.resolve(displayCopyPath(sha256))
+            if (!Files.isRegularFile(target)) writeAtomically(target, pngBytes(raster))
+        }
         return thumbnailPath(sha256)
     }
 
@@ -281,6 +288,15 @@ class ImageArtifacts(
 
         /** The directory, under an artifact root, that holds the thumbnails. */
         const val THUMBNAIL_DIRECTORY: String = "images/thumbs"
+
+        /** The media types of imported pictures that browsers cannot show, which are served from a PNG display copy. */
+        private val NEEDS_DISPLAY_COPY: Set<String> = setOf("image/tiff")
+
+        /** Whether an imported picture of [mediaType] is served from a display copy rather than its managed copy. */
+        fun needsDisplayCopy(mediaType: String): Boolean = mediaType.lowercase() in NEEDS_DISPLAY_COPY
+
+        /** The display copy of the picture whose SHA-256 is [sha256], relative to the artifact root. */
+        fun displayCopyPath(sha256: String): String = "$IMAGE_DIRECTORY/$sha256.png"
     }
 }
 

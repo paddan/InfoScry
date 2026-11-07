@@ -5,6 +5,7 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
+import infoscry.image.ImageArtifacts
 import infoscry.image.ImageSourceKind
 import infoscry.storage.ImageStore
 import infoscry.storage.RevisionState
@@ -84,6 +85,14 @@ fun Routing.configureImageRoutes(context: AppContext) {
             call.handle {
                 val (document, revisionId) = call.imageScope(context)
                 val image = call.findImage(context, revisionId).second
+                if (image.usesDisplayCopy()) {
+                    // A TIFF cannot be shown by a browser: its PNG display copy is served, the managed copy is not.
+                    val copy = regularFileIn(
+                        context.paths.artifactsDir(document.collectionId, document.id),
+                        ImageArtifacts.displayCopyPath(image.sha256),
+                    ) ?: throw missingImage()
+                    return@handle call.serveImage(copy, ContentType.Image.PNG)
+                }
                 val mediaType = servableMediaType(image.mediaType) ?: throw missingImage()
                 call.serveImage(imageFile(context, document, image), mediaType)
             }
@@ -99,6 +108,10 @@ fun Routing.configureImageRoutes(context: AppContext) {
 }
 
 private val THUMBNAIL_MEDIA_TYPE = ContentType.Image.JPEG
+
+/** Whether the stored picture is served from a PNG display copy: a standalone picture a browser cannot show. */
+private fun StoredImage.usesDisplayCopy(): Boolean =
+    kind == ImageSourceKind.STANDALONE && ImageArtifacts.needsDisplayCopy(mediaType)
 
 private fun missingImage() = NoSuchElementException("no such image exists in this document")
 
@@ -131,7 +144,7 @@ private fun ImageStore.LocatedImage.toView(): Pair<ImageView, StoredImage> = Ima
     label = locator.describe(),
     parentUnitId = image.parentUnitId.value,
     kind = image.kind.name,
-    mediaType = image.mediaType,
+    mediaType = if (image.usesDisplayCopy()) ContentType.Image.PNG.toString() else image.mediaType,
     widthPx = image.widthPx,
     heightPx = image.heightPx,
     caption = image.caption,

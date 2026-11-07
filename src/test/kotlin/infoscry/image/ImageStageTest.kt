@@ -292,6 +292,50 @@ class ImageStageTest {
     }
 
     @Test
+    fun `a standalone tiff gets a png display copy beside its thumbnail and the managed copy is untouched`() {
+        val picture = FinderFixtures.picture(300, 200, 5)
+        val tiff = directory.resolve("scan.tiff")
+        check(ImageIO.write(picture, "tiff", tiff.toFile())) { "no TIFF writer is available" }
+        val before = Files.readAllBytes(tiff)
+        val owner = documentStore.insert(
+            newDocument(document.collectionId, "doc-tiff").copy(
+                mediaType = "image/tiff",
+                sha256 = infoscry.storage.ContentAddressedFile.sha256Of(before),
+            ),
+        )
+        val parent = ParentUnit(ContentUnitId.new(), 0, SourceLocation.Image("scan.tiff"))
+        val candidate = ImageProbe.candidateOf(before, box = null)!!
+        val finder = FakeFinder(
+            mapOf(parent.unitId to ParentImages(listOf(FoundImage(parent, ImageSourceKind.STANDALONE, candidate, null, null)), emptyList(), false)),
+            mediaType = "image/tiff",
+        )
+
+        repeat(2) {
+            runBlocking {
+                stage(finder, LayoutRegions(PageOcrEngines(emptyList()))).run(
+                    owner, tiff, artifactRoot, listOf(ParentUnitContext(parent, "", null) { null }),
+                    ImageExtractionMode.EMBEDDED, RecordingTarget(), Direct, settings,
+                )
+            }
+        }
+
+        val copy = artifactRoot.resolve(ImageArtifacts.displayCopyPath(owner.sha256))
+        assertTrue(Files.isRegularFile(copy), "the display copy was not written")
+        val shown = ImageIO.read(copy.toFile())
+        assertEquals(300, shown.width)
+        assertEquals(200, shown.height)
+        assertTrue(Files.readAllBytes(copy).take(4) == listOf<Byte>(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte()))
+        assertEquals(before.toList(), Files.readAllBytes(tiff).toList(), "the managed copy changed")
+    }
+
+    @Test
+    fun `a standalone png needs no display copy`() {
+        assertEquals(false, ImageArtifacts.needsDisplayCopy("image/png"))
+        assertEquals(false, ImageArtifacts.needsDisplayCopy("image/jpeg"))
+        assertEquals(true, ImageArtifacts.needsDisplayCopy("image/tiff"))
+    }
+
+    @Test
     fun `a standalone picture that is tiny or one colour is still kept`() {
         val tiny = BufferedImage(20, 20, BufferedImage.TYPE_INT_RGB)
         val bytes = FinderFixtures.encode(tiny, "png")

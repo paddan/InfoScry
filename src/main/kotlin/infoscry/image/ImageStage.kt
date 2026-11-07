@@ -323,7 +323,10 @@ class ImageStage(
                         sha256 = run.document.sha256,
                         relativePath = run.managedPath.fileName.toString(),
                         thumbnailRelativePath =
-                            artifacts.thumbnailFor(run.artifactRoot, run.managedPath, run.document.sha256),
+                            artifacts.thumbnailFor(
+                                run.artifactRoot, run.managedPath, run.document.sha256,
+                                displayCopy = ImageArtifacts.needsDisplayCopy(run.document.mediaType),
+                            ),
                         mediaType = run.document.mediaType,
                         widthPx = candidate.widthPx,
                         heightPx = candidate.heightPx,
