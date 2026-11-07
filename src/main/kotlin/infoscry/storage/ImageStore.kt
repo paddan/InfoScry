@@ -224,6 +224,34 @@ class ImageStore(private val database: Database) {
                 statement.setString(9, Instants.now())
                 statement.executeUpdate()
             }
+            // The mode that delivered last is authoritative for this parent: a checkpoint another mode left would
+            // make a later run of that mode skip a parent whose units this run has since changed.
+            connection.prepareStatement(
+                "DELETE FROM image_extraction_checkpoints WHERE document_id = ? AND target = ? " +
+                    "AND parent_unit_id = ? AND mode <> ?",
+            ).use { statement ->
+                statement.setString(1, documentId.value)
+                statement.setString(2, target)
+                statement.setString(3, checkpoint.parentUnitId.value)
+                statement.setString(4, mode.checkpointName())
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    /**
+     * Removes every checkpoint of [documentId] under [target], whatever the mode, once an attempt with images off has
+     * removed the image units they described. Safe to repeat.
+     */
+    fun clearCheckpoints(documentId: DocumentId, target: String) {
+        database.transaction { connection ->
+            connection.prepareStatement(
+                "DELETE FROM image_extraction_checkpoints WHERE document_id = ? AND target = ?",
+            ).use { statement ->
+                statement.setString(1, documentId.value)
+                statement.setString(2, target)
+                statement.executeUpdate()
+            }
         }
     }
 

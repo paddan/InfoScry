@@ -2,6 +2,7 @@ package infoscry.image
 
 import infoscry.domain.ContentUnitId
 import infoscry.domain.Document
+import infoscry.domain.DocumentId
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.extract.UnitBoundary
@@ -81,6 +82,13 @@ class ImageStage(
     private val store: ImageStore,
     private val documents: DocumentStore,
 ) {
+
+    /**
+     * Forgets what any mode checkpointed for [target], after an attempt with images off removed the image units those
+     * checkpoints described. Without it a later run of the earlier mode would find its checkpoints, skip every parent
+     * and never deliver the removed units again.
+     */
+    fun clearCheckpoints(documentId: DocumentId, target: String) = store.clearCheckpoints(documentId, target)
 
     suspend fun run(
         document: Document,
@@ -245,7 +253,7 @@ class ImageStage(
         }
 
         val outcome = if (failed || regionsUnavailable) ImageCheckpointOutcome.FAILED else ImageCheckpointOutcome.DONE
-        val delivered = run.boundary.unit { deliverParent(run, images, repeated, totalBefore, counts, outcome, failed) }
+        val delivered = run.boundary.unit { deliverParent(run, images, repeated, totalBefore, counts, outcome, failed || regionsUnavailable) }
         summary.addRun(counts, delivered)
         return ParentOutcome(delivered, regionsUnavailable)
     }

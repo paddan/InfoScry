@@ -480,6 +480,114 @@ class ImageStageTest {
     }
 
     @Test
+    fun `embedded then all then embedded on one target delivers what the last mode says, and repeating changes nothing`() {
+        val parents = pages(1, scanned = true) { listOf(picture(100, 120)) }
+        val finder = FakeFinder(parents)
+        val contexts = contexts(parents) { pageWithPicture() }
+        val target = RecordingTarget()
+
+        val first = runMode(finder, contexts, target, ImageExtractionMode.EMBEDDED)
+        val all = runMode(finder, contexts, target, ImageExtractionMode.ALL)
+        val last = runMode(finder, contexts, target, ImageExtractionMode.EMBEDDED)
+
+        assertEquals(1, first.images)
+        assertEquals(2, all.images)
+        assertEquals(1, last.images)
+        assertEquals(1, target.held.size, "the last EMBEDDED run drops the region unit the ALL run added")
+        assertEquals(1, imageCheckpointImages(target.target))
+        val calls = finder.calls.size
+        assertEquals(last, runMode(finder, contexts, target, ImageExtractionMode.EMBEDDED))
+        assertEquals(calls, finder.calls.size, "repeating the last mode looks at nothing again")
+    }
+
+    @Test
+    fun `all then embedded then all delivers the region units again`() {
+        val parents = pages(1, scanned = true) { listOf(picture(100, 120)) }
+        val finder = FakeFinder(parents)
+        val contexts = contexts(parents) { pageWithPicture() }
+        val target = RecordingTarget()
+
+        runMode(finder, contexts, target, ImageExtractionMode.ALL)
+        runMode(finder, contexts, target, ImageExtractionMode.EMBEDDED)
+        assertEquals(1, target.held.size)
+        val again = runMode(finder, contexts, target, ImageExtractionMode.ALL)
+
+        assertEquals(2, again.images)
+        assertEquals(2, target.held.size, "the region unit the EMBEDDED run removed is delivered again")
+        assertEquals(2, imageCheckpointImages(target.target), "the cap counts the images that exist")
+        val calls = finder.calls.size
+        assertEquals(again, runMode(finder, contexts, target, ImageExtractionMode.ALL))
+        assertEquals(calls, finder.calls.size)
+    }
+
+    @Test
+    fun `clearing an attempt's checkpoints makes every mode look at the document again, and repeats cleanly`() {
+        val parents = pages(2) { listOf(picture(100, 120)) }
+        val finder = FakeFinder(parents)
+        val contexts = contexts(parents) { null }
+        val target = RecordingTarget()
+        runMode(finder, contexts, target, ImageExtractionMode.EMBEDDED)
+        val calls = finder.calls.size
+
+        stage(finder, LayoutRegions(PageOcrEngines(emptyList()))).clearCheckpoints(document.id, target.target)
+        stage(finder, LayoutRegions(PageOcrEngines(emptyList()))).clearCheckpoints(document.id, target.target)
+        assertEquals(0, imageCheckpointImages(target.target))
+        assertEquals(0, checkpointRows())
+        runMode(finder, contexts, target, ImageExtractionMode.EMBEDDED)
+
+        assertEquals(calls + 2, finder.calls.size)
+        assertEquals(2, imageCheckpointImages(target.target))
+    }
+
+    @Test
+    fun `an all-mode run with Surya missing deletes no region unit of a parent that is not done`() {
+        val parents = pages(1, scanned = true) { listOf(picture(100, 120)) }
+        val finder = FakeFinder(parents)
+        val contexts = contexts(parents) { pageWithPicture() }
+        val target = RecordingTarget()
+        runBlocking {
+            stage(finder, LayoutRegions(PageOcrEngines(listOf(FakeSurya())))).run(
+                document, managedPath, artifactRoot, contexts, ImageExtractionMode.ALL, target, Direct, settings,
+            )
+        }
+        assertEquals(2, target.held.size)
+        execute("DELETE FROM image_extraction_checkpoints")
+
+        val result = runBlocking {
+            stage(finder, LayoutRegions(PageOcrEngines(emptyList()))).run(
+                document, managedPath, artifactRoot, contexts, ImageExtractionMode.ALL, target, Direct, settings,
+            )
+        }
+
+        assertTrue("NEEDS_SURYA_LAYOUT" in result.warnings)
+        assertEquals(2, target.held.size, "the region unit stays while Surya cannot say whether it is still there")
+    }
+
+    private fun runMode(
+        finder: FakeFinder,
+        contexts: List<ParentUnitContext>,
+        target: RecordingTarget,
+        mode: ImageExtractionMode,
+    ): ImageStageResult = runBlocking {
+        stage(finder, LayoutRegions(PageOcrEngines(listOf(FakeSurya())))).run(
+            document, managedPath, artifactRoot, contexts, mode, target, Direct, settings,
+        )
+    }
+
+    private fun imageCheckpointImages(target: String): Int = database.read { connection ->
+        connection.prepareStatement("SELECT COALESCE(SUM(image_count), 0) FROM image_extraction_checkpoints WHERE target = ?").use { statement ->
+            statement.setString(1, target)
+            statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+        }
+    }
+
+    private fun checkpointRows(): Int = database.read { connection ->
+        connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT count(*) FROM image_extraction_checkpoints").use { rows -> rows.next(); rows.getInt(1) }
+        }
+    }
+
+    @Test
     fun `a retry that delivers fewer images leaves no stale unit, and repeating it changes nothing`() {
         val target = RecordingTarget()
         val before = pages(2) { listOf(picture(100, 120), picture(110, 120)) }

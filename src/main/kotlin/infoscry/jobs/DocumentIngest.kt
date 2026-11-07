@@ -362,6 +362,9 @@ internal class DocumentIngest(
                 stage.run(STAGE_RECORD) {
                     sink.retainImageUnits(document.id, ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
                 }
+                    // What the removed units were checkpointed under is forgotten with them, so a later attempt with
+                    // images on looks at every parent again instead of skipping parents whose units are gone.
+                    images.clearCheckpoints(document.id, fingerprint.value)
                 return emptyList()
             }
             val parents = stage.run(STAGE_RECORD) {

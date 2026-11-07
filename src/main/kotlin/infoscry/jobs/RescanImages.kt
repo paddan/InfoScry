@@ -66,6 +66,7 @@ internal class RescanImages(
                 stage.run(STAGE_RECORD) {
                     CandidateImageTarget(revisions, candidate, document)
                         .retainImages(ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
+                    images.clearCheckpoints(document.id, candidate)
                 }
                 return emptyList()
             }
