@@ -163,9 +163,4 @@ class SourceLocationTest {
         assertFailsWith<IllegalArgumentException> { NormalizedBox(0.5, 0.0, 0.4, 0.5) }
         assertFailsWith<IllegalArgumentException> { NormalizedBox(0.0, 0.0, 1.2, 0.5) }
     }
-
-    @Test
-    fun `normalized box rounds to three decimals`() {
-        assertEquals(NormalizedBox(0.123, 0.5, 0.124, 1.0), NormalizedBox(0.12341, 0.5, 0.12394, 1.0).rounded())
-    }
 }

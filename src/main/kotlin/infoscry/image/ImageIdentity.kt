@@ -68,7 +68,9 @@ object ImageIdentity {
             add("parent=${parentUnitId.value}")
             add("kind=${kind.name}")
             sha256?.let { add("sha256=$it") }
-            box?.rounded()?.let { add("box=${it.left},${it.top},${it.right},${it.bottom}") }
+            // The coordinates are rounded as values, not as a box: a thin box can round to zero width, which a
+            // NormalizedBox refuses, and identity must still be computable for every box that was accepted.
+            box?.let { add("box=${round3(it.left)},${round3(it.top)},${round3(it.right)},${round3(it.bottom)}") }
             add("occurrence=$occurrence")
         }
         val name = fields.joinToString("\n").toByteArray(Charsets.UTF_8)
@@ -88,6 +90,9 @@ object ImageIdentity {
 
     /** Whether [ordinal] belongs to an image unit rather than a text unit. */
     fun isImageOrdinal(ordinal: Int): Boolean = ordinal >= ORDINAL_BASE
+
+    /** A coordinate to three decimals, the precision identity compares page regions at. */
+    private fun round3(value: Double): Double = Math.round(value * 1000.0) / 1000.0
 
     /** RFC 4122 section 4.3: SHA-1 over the namespace bytes and the name, with version and variant bits set. */
     private fun uuidV5(namespace: UUID, name: ByteArray): UUID {

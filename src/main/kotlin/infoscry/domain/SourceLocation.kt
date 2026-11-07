@@ -6,8 +6,7 @@ import kotlinx.serialization.Serializable
 /**
  * A rectangle on a parent page as fractions of its width and height, each in `0..1`, with a positive size.
  *
- * Coordinates grow rightwards and downwards from the top-left corner. [rounded] gives the form used for
- * identity, so two extractions that differ only in sub-thousandth noise name the same image.
+ * Coordinates grow rightwards and downwards from the top-left corner.
  */
 @Serializable
 data class NormalizedBox(val left: Double, val top: Double, val right: Double, val bottom: Double) {
@@ -18,11 +17,6 @@ data class NormalizedBox(val left: Double, val top: Double, val right: Double, v
         require(right > left) { "NormalizedBox.right ($right) must exceed left ($left)" }
         require(bottom > top) { "NormalizedBox.bottom ($bottom) must exceed top ($top)" }
     }
-
-    /** The box with every coordinate rounded to three decimals. */
-    fun rounded(): NormalizedBox = NormalizedBox(round3(left), round3(top), round3(right), round3(bottom))
-
-    private fun round3(value: Double): Double = Math.round(value * 1000.0) / 1000.0
 }
 
 /**

@@ -42,10 +42,14 @@ class ImageIdentityTest {
         val other = ImageIdentity.unitId(document, parent, ImageSourceKind.PAGE_REGION, null, NormalizedBox(0.124, 0.2, 0.5, 0.6), 1)
         assertEquals(rounded, same)
         assertNotEquals(rounded, other)
-        assertEquals(
-            ImageIdentity.unitId(document, parent, ImageSourceKind.PAGE_REGION, null, box, 1),
-            ImageIdentity.unitId(document, parent, ImageSourceKind.PAGE_REGION, null, box.rounded(), 1),
-        )
+    }
+
+    @Test
+    fun `a box whose width rounds to zero still gets a unit id`() {
+        // Valid as a box (width 0.0002), but both edges round to 0.1: hashing must not rebuild and validate a box.
+        val thin = NormalizedBox(0.1, 0.0, 0.1002, 1.0)
+        val id = ImageIdentity.unitId(document, parent, ImageSourceKind.PAGE_REGION, null, thin, 1)
+        assertEquals(id, ImageIdentity.unitId(document, parent, ImageSourceKind.PAGE_REGION, null, thin, 1))
     }
 
     @Test
