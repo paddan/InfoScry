@@ -5,6 +5,7 @@ import infoscry.domain.ApiStatus
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.image.ImageExtractionMode
 import infoscry.jobs.IgnorePatterns
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrEngine
@@ -181,6 +182,27 @@ class CollectionStore(private val database: Database) {
         }
 
     /**
+     * Sets how much imagery imports and rescans of the collection extract by default. Setting the value it
+     * already has changes nothing, whatever version the caller holds; a different value needs the current one.
+     */
+    fun updateImageDefault(id: CollectionId, mode: ImageExtractionMode, expectedVersion: Long? = null): Collection =
+        database.transaction { connection ->
+            val existing = selectById(connection, id, forUpdate = true)
+                ?: throw NoSuchElementException("no collection with id ${id.value}")
+            if (existing.defaultImageExtraction == mode) return@transaction existing
+            infoscry.domain.requireVersion(expectedVersion, existing.version, existing.updatedBy)
+            connection.prepareStatement(
+                "UPDATE collections SET default_image_extraction = ?, updated_at = ? WHERE id = ?",
+            ).use { statement ->
+                statement.setString(1, mode.name)
+                statement.setString(2, Instants.now())
+                statement.setString(3, id.value)
+                statement.executeUpdate()
+            }
+            checkNotNull(selectById(connection, id))
+        }
+
+    /**
      * Deletes a collection row and cascades to its documents and jobs. Returns whether the
      * collection existed, and refuses to act unless [confirmName] is the collection's own name.
      *
@@ -292,6 +314,7 @@ class CollectionStore(private val database: Database) {
         ocrTranscriptionProfileId = getString("ocr_transcription_profile_id"),
         version = getLong("version"),
         updatedBy = getString("updated_by")?.let { infoscry.domain.UserRef(it, getString("updated_by_name") ?: it) },
+        defaultImageExtraction = ImageExtractionMode.valueOf(getString("default_image_extraction")),
     )
 
     companion object {
@@ -302,7 +325,7 @@ class CollectionStore(private val database: Database) {
 
         private const val SELECT_COLLECTIONS =
             "SELECT id, name, description, ocr_languages, lifecycle, created_at, updated_at, " +
-                "ocr_engine, ocr_transcription_profile_id, version, updated_by, " +
+                "ocr_engine, ocr_transcription_profile_id, version, updated_by, default_image_extraction, " +
                 "(SELECT display_name FROM users WHERE id = collections.updated_by) AS updated_by_name FROM collections"
 
         /**
@@ -312,7 +335,7 @@ class CollectionStore(private val database: Database) {
          */
         private const val SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT =
             "SELECT c.id, c.name, c.description, c.ocr_languages, c.lifecycle, c.created_at, " +
-                "c.updated_at, c.ocr_engine, c.ocr_transcription_profile_id, c.version, c.updated_by, " +
+                "c.updated_at, c.ocr_engine, c.ocr_transcription_profile_id, c.version, c.updated_by, c.default_image_extraction, " +
                 "(SELECT display_name FROM users WHERE id = c.updated_by) AS updated_by_name, COUNT(d.id) AS document_count " +
                 "FROM collections c LEFT JOIN documents d ON d.collection_id = c.id GROUP BY c.id"
     }

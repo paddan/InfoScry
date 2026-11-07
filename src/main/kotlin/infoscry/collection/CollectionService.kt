@@ -4,6 +4,7 @@ import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.image.ImageExtractionMode
 import infoscry.jobs.IgnorePatterns
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.requireOcrLanguages
@@ -282,6 +283,17 @@ class CollectionService(
                 }
             }
             collections.updateOcrSettings(id, settings, expectedVersion)
+        }
+
+    /**
+     * Saves how much imagery imports and rescans of the collection extract by default. It changes future
+     * imports and rescans only, which also take the mode they are started with.
+     */
+    suspend fun updateImageDefault(id: CollectionId, mode: ImageExtractionMode, expectedVersion: Long? = null): Collection =
+        coordinator.withMutation {
+            requireMutationsAllowed()
+            requireActive(id)
+            collections.updateImageDefault(id, mode, expectedVersion)
         }
 
     /**

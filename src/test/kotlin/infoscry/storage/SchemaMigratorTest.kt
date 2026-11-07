@@ -50,7 +50,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
 
             assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
-            assertEquals(3, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(4, SchemaMigrator.SUPPORTED_VERSION)
             assertEquals(SchemaMigrator.SUPPORTED_VERSION, count(database, "schema_version"), "one row per applied step")
         }
     }
@@ -90,8 +90,46 @@ class SchemaMigratorTest {
 
             SchemaMigrator(database).migrate()
 
-            assertEquals(3, database.schemaVersion())
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
             assertFalse("import_roots" in tableNames(database))
+        }
+    }
+
+    @Test
+    fun `a version three database gains the image tables and keeps its rows with images off`() {
+        newDatabase().use { database ->
+            SchemaMigrator(database).migrate(upTo = 3)
+            database.transaction { connection ->
+                connection.createStatement().use {
+                    it.executeUpdate(
+                        "INSERT INTO collections (id, name, created_at, updated_at) " +
+                            "VALUES ('kept', 'Kept', '2026-11-06T00:00:00Z', '2026-11-06T00:00:00Z')",
+                    )
+                    it.executeUpdate(
+                        "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, original_path, " +
+                            "size_bytes, status, created_at, updated_at) VALUES ('d', 'kept', 'h', 'application/pdf', " +
+                            "'d.pdf', '/d.pdf', 1, 'COMPLETE', '2026-11-06T00:00:00Z', '2026-11-06T00:00:00Z')",
+                    )
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+            SchemaMigrator(database).migrate()
+
+            assertEquals(4, database.schemaVersion())
+            assertEquals(1, count(database, "collections"))
+            assertEquals(1, count(database, "documents"))
+            assertTrue(tableNames(database).containsAll(listOf("document_images", "image_extraction_checkpoints")))
+            val mode = database.read { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery("SELECT default_image_extraction FROM collections WHERE id = 'kept'").use { rows ->
+                        rows.next()
+                        rows.getString(1)
+                    }
+                }
+            }
+            assertEquals("OFF", mode)
+            assertEquals(4, count(database, "schema_version"), "no step may be applied twice")
         }
     }
 
