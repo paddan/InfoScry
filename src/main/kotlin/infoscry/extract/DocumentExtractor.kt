@@ -213,6 +213,11 @@ data class ContentUnitDraft(
     val structureReference: StructureReference? = null,
     /** The unit's reading before corrections, set by the sink that corrected it; extractors never set it. */
     val reading: infoscry.domain.ReadingText? = null,
+    /**
+     * The identity the unit must be stored under, or null to let the store assign one. Set only for image units,
+     * whose IDs are derived from their content and parent so they survive a repeated import.
+     */
+    val unitId: infoscry.domain.ContentUnitId? = null,
 )
 
 /**

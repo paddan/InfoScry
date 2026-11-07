@@ -155,7 +155,8 @@ class CandidateRevisionSink(
         val baseline = baselinePages[event.ordinal]?.takeIf { (_, locator) -> locator == draft.locator }
         return RevisionPageDraft(
             ordinal = event.ordinal,
-            unitId = baseline?.first ?: ContentUnitId.new(),
+            // An image unit arrives with the identity derived from its content, which a repeat must find again.
+            unitId = draft.unitId ?: baseline?.first ?: ContentUnitId.new(),
             locator = draft.locator,
             extractedText = draft.extractedText,
             searchText = draft.searchText,

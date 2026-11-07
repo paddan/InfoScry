@@ -23,6 +23,16 @@ import infoscry.extract.PAGES_WITHOUT_TEXT_METADATA
 import infoscry.extract.PdfExtractor
 import infoscry.extract.UnitBoundary
 import infoscry.extract.UnsupportedMediaTypeException
+import infoscry.image.ImageExtractionMode
+import infoscry.image.ImageIdentity
+import infoscry.image.ImageStage
+import infoscry.image.ParentUnit
+import infoscry.image.ParentUnitContext
+import infoscry.ocr.PageImage
+import infoscry.ocr.PageImageRenderer
+import infoscry.ocr.PageStructureStore
+import org.apache.pdfbox.Loader
+import org.apache.pdfbox.io.IOUtils
 import infoscry.ocr.CandidateRevisionPhases
 import infoscry.ocr.ExternalPageAllowanceExceededException
 import infoscry.ocr.OcrSettingsSnapshot
@@ -282,7 +292,7 @@ internal class DocumentIngest(
             return IngestResult.Failed
         }
 
-        val warned = lastFailureCode != null || keptWithoutReading
+        var warned = lastFailureCode != null || keptWithoutReading
         if (sink.stagesForReview && lastFailureCode != null) {
             // One page that could not be read does not fail the document: the pages that were read are
             // published and the document is complete with a warning. Two cases still fail. A reading with no
@@ -301,6 +311,13 @@ internal class DocumentIngest(
                 return IngestResult.Failed
             }
         }
+        // The text is complete, so the images found beside it can be delivered into the same sink, before the
+        // passages that make their captions searchable are cut. A warning here is a warning on the document,
+        // never a failure of its text.
+        if (extractImages(document, mediaType.value, managedPath, fingerprint, sink, stage, reading).isNotEmpty()) {
+            warned = true
+        }
+
         if (sink.stagesForReview) {
             return publishStagedReading(document, sink, stage, onFailure, warned)
         }
@@ -308,6 +325,153 @@ internal class DocumentIngest(
         chunkContent(document, stage)
         if (!embedAndIndex(collection, document, sink, stage, onFailure, reading, warned)) return IngestResult.Failed
         return IngestResult.Complete
+    }
+
+    /**
+     * Delivers the images of a document whose text this attempt has just completed, one parent unit at a time.
+     *
+     * The parents are the text units the sink holds for the document, which is what a resumed attempt also
+     * finds: an image checkpoint is kept per text fingerprint, so a parent whose images were delivered is not
+     * looked at again. Page rasters are rendered only when a region pass needs one, into a directory that is
+     * removed afterwards and that an interrupted attempt's next run clears first.
+     *
+     * @return the distinct warning codes of the stage, which make the document complete with a warning. An
+     *   image stage that fails for a reason of its own answers [IMAGE_EXTRACTION_FAILED] rather than failing the
+     *   text it was run beside: nothing it left is half a unit, and the next attempt converges from its checkpoints.
+     */
+    private suspend fun extractImages(
+        document: Document,
+        mediaType: String,
+        managedPath: java.nio.file.Path,
+        fingerprint: ExtractionFingerprint,
+        sink: ExtractionSink,
+        stage: JobStage,
+        reading: OcrSettingsSnapshot?,
+    ): List<String> {
+        val images = pipeline.images ?: return emptyList()
+        val snapshot = reading ?: return emptyList()
+        val mode = snapshot.imageExtraction
+        if (mode == ImageExtractionMode.OFF) return emptyList()
+        val artifactRoot = paths.artifactsDir(document.collectionId, document.id)
+        val workDirectory = artifactRoot.resolve(IMAGE_PAGES_DIRECTORY)
+        try {
+            val parents = stage.run(STAGE_RECORD) {
+                clearDirectory(workDirectory)
+                parentsOf(document, mediaType, managedPath, sink, mode, artifactRoot, workDirectory, snapshot)
+            }
+            return images.run(
+                document = document,
+                managedPath = managedPath,
+                artifactRoot = artifactRoot,
+                parents = parents,
+                mode = mode,
+                target = SinkImageTarget(sink, document.id, fingerprint),
+                boundary = StageBoundary(stage),
+                settings = snapshot,
+            ).warnings
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (notActive: CollectionNotActiveException) {
+            throw notActive
+        } catch (deleted: DocumentBeingDeletedException) {
+            throw deleted
+        } catch (failure: Exception) {
+            LOGGER.atWarn()
+                .addKeyValue(COMPONENT_FIELD, INGEST_COMPONENT)
+                .addKeyValue(DOCUMENT_FIELD, document.id.value)
+                .setCause(failure)
+                .log("the images of a document could not be extracted; its text is kept")
+            return listOf(IMAGE_EXTRACTION_FAILED)
+        } finally {
+            runCatching { clearDirectory(workDirectory) }
+        }
+    }
+
+    /**
+     * The text units the sink holds for [document], in reading order, as the units images are found under.
+     *
+     * An image unit is never a parent. A page's structure is read only when a region pass can use it.
+     */
+    private fun parentsOf(
+        document: Document,
+        mediaType: String,
+        managedPath: java.nio.file.Path,
+        sink: ExtractionSink,
+        mode: ImageExtractionMode,
+        artifactRoot: java.nio.file.Path,
+        workDirectory: java.nio.file.Path,
+        snapshot: OcrSettingsSnapshot,
+    ): List<ParentUnitContext> {
+        val needsText = mode == ImageExtractionMode.ALL
+        fun contextOf(
+            unitId: infoscry.domain.ContentUnitId,
+            ordinal: Int,
+            locator: infoscry.domain.SourceLocation,
+            text: String,
+            structure: () -> infoscry.ocr.PageStructure?,
+        ) = ParentUnitContext(
+            parent = ParentUnit(unitId, ordinal, locator),
+            text = if (needsText) text else "",
+            structure = if (needsText) structure() else null,
+            page = { renderPage(mediaType, managedPath, locator, unitId, artifactRoot, workDirectory, snapshot, document) },
+        )
+        val candidate = sink.candidateRevisionId
+        if (sink.stagesForReview) {
+            return candidate?.let { revisions.pages(it) }.orEmpty()
+                .filterNot { ImageIdentity.isImageOrdinal(it.ordinal) }
+                .map { page ->
+                    contextOf(page.unitId, page.ordinal, page.locator, page.extractedText) {
+                        page.structureReference?.let { PageStructureStore.read(artifactRoot, it, page.extractedText) }
+                    }
+                }
+        }
+        val parents = ArrayList<ParentUnitContext>()
+        var afterOrdinal = -1
+        while (true) {
+            val batch = content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
+            if (batch.isEmpty()) break
+            batch.forEach { unit ->
+                afterOrdinal = unit.ordinal
+                if (ImageIdentity.isImageOrdinal(unit.ordinal)) return@forEach
+                parents += contextOf(unit.id, unit.ordinal, unit.locator, unit.extractedText) {
+                    content.structureOf(unit, artifactRoot)
+                }
+            }
+            if (batch.size < CHUNK_BATCH) break
+        }
+        return parents
+    }
+
+    /** Renders the raster of a scanned PDF page for a region pass; null for any parent that is not a PDF page. */
+    private fun renderPage(
+        mediaType: String,
+        managedPath: java.nio.file.Path,
+        locator: infoscry.domain.SourceLocation,
+        unitId: infoscry.domain.ContentUnitId,
+        artifactRoot: java.nio.file.Path,
+        workDirectory: java.nio.file.Path,
+        snapshot: OcrSettingsSnapshot,
+        document: Document,
+    ): PageImage? {
+        if (mediaType != PdfExtractor.PDF_MEDIA_TYPE || locator !is infoscry.domain.SourceLocation.PdfPage) return null
+        return Loader.loadPDF(managedPath.toFile(), IOUtils.createTempFileOnlyStreamCache()).use { pdf ->
+            PageImageRenderer().render(
+                document = pdf,
+                page = locator.page,
+                requestedDpi = snapshot.renderDpi ?: PdfExtractor.DEFAULT_RENDER_DPI,
+                directory = workDirectory.resolve("page-${locator.page}"),
+                artifactRoot = artifactRoot,
+                documentId = document.id,
+                unitId = unitId.value,
+            )
+        }
+    }
+
+    private fun clearDirectory(directory: java.nio.file.Path) {
+        if (!java.nio.file.Files.exists(directory)) return
+        java.nio.file.Files.walk(directory).use { entries ->
+            entries.sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) }
+        }
     }
 
     /**
@@ -634,6 +798,12 @@ internal class DocumentIngest(
 
         /** The extractor stopped without delivering every unit. */
         internal const val EXTRACTION_FAILED = "EXTRACTION_FAILED"
+
+        /** The images of a document could not be extracted; its text is complete, so it finishes with this warning. */
+        internal const val IMAGE_EXTRACTION_FAILED = "IMAGE_EXTRACTION_FAILED"
+
+        /** Where a region pass's page rasters live while it runs, inside the document's artifacts. */
+        private const val IMAGE_PAGES_DIRECTORY = ".image-pages"
 
         /** A completed OCR pass produced no page text, so the existing revision was kept. */
         internal const val NO_EXTRACTABLE_CONTENT = "NO_EXTRACTABLE_CONTENT"

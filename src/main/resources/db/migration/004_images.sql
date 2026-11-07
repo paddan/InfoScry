@@ -50,3 +50,33 @@ CREATE TABLE image_extraction_checkpoints (
 ALTER TABLE collections
     ADD COLUMN default_image_extraction TEXT NOT NULL DEFAULT 'OFF'
         CHECK (default_image_extraction IN ('OFF', 'EMBEDDED', 'ALL'));
+
+-- The picture an image unit shows, on the unit itself. An import publishes its units into a revision's page rows
+-- from `content_units`, and a revision finds its images through `source_image_sha256`, so the unit carries the
+-- same source-image columns the page rows have. Only image units set them; every other unit keeps them empty.
+ALTER TABLE content_units
+    ADD COLUMN source_image_root           TEXT   CHECK (source_image_root IS NULL OR source_image_root IN ('MANAGED_COPY', 'ARTIFACTS')),
+    ADD COLUMN source_image_relative_path  TEXT   CHECK (
+        source_image_relative_path IS NULL OR (
+            length(trim(source_image_relative_path)) > 0
+            AND substr(source_image_relative_path, 1, 1) NOT IN ('/', '\')
+            AND source_image_relative_path !~ '^[A-Za-z]:'
+            AND ('/' || replace(source_image_relative_path, '\', '/') || '/') NOT LIKE '%/../%'
+            AND ('/' || replace(source_image_relative_path, '\', '/') || '/') NOT LIKE '%/./%'
+            AND ('/' || replace(source_image_relative_path, '\', '/') || '/') NOT LIKE '%//%'
+        )
+    ),
+    ADD COLUMN source_image_sha256         TEXT   CHECK (source_image_sha256 IS NULL OR length(source_image_sha256) = 64),
+    ADD COLUMN source_image_width          BIGINT CHECK (source_image_width IS NULL OR source_image_width > 0),
+    ADD COLUMN source_image_height         BIGINT CHECK (source_image_height IS NULL OR source_image_height > 0),
+    ADD COLUMN source_image_render_version BIGINT CHECK (source_image_render_version IS NULL OR source_image_render_version > 0),
+    ADD CONSTRAINT content_units_source_image_complete CHECK (
+        (
+            source_image_root IS NULL AND source_image_relative_path IS NULL AND source_image_sha256 IS NULL
+            AND source_image_render_version IS NULL AND source_image_width IS NULL AND source_image_height IS NULL
+        ) OR (
+            source_image_root IS NOT NULL AND source_image_relative_path IS NOT NULL
+            AND source_image_sha256 IS NOT NULL AND source_image_render_version IS NOT NULL
+            AND (source_image_width IS NULL) = (source_image_height IS NULL)
+        )
+    );

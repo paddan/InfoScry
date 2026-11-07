@@ -271,7 +271,7 @@ class RescanJobHandler internal constructor(
             )
         }
         val baseline: Map<Int, RevisionPageText> = baselineRevisionId
-            ?.let { revisionId -> revisions.pages(revisionId).associateBy { page -> page.ordinal } }
+            ?.let { revisionId -> infoscry.document.textPagesOf(revisions.pages(revisionId)) }
             .orEmpty()
         val candidate = operation.candidateRevisionId ?: stage.run(STAGE_STAGE) {
             revisions.openCandidate(document.id, baselineRevisionId, PROVENANCE_RESCAN)

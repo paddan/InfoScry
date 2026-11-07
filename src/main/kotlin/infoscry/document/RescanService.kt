@@ -584,7 +584,7 @@ class RescanService(
         val settings = CollectionOcrSettings(collection.ocrLanguages, method)
         val baselineRevisionId = revisions.activeRevisionId(documentId)
         val baseline = baselineRevisionId
-            ?.let { revisionId -> revisions.pages(revisionId).associateBy { page -> page.ordinal } }
+            ?.let { revisionId -> textPagesOf(revisions.pages(revisionId)) }
             .orEmpty()
         // The pages a rescan reads, not all the pages: the dialog's count, the cost and the external allowance
         // all describe what is actually sent, and the pages that keep their published text are not in them.
@@ -1222,3 +1222,12 @@ class RescanService(
             )
     }
 }
+
+/**
+ * The pages of a revision keyed by ordinal, without its image units.
+ *
+ * A rescan reads and compares the pages of the original; an image unit is not one of them, and its ordinal sits
+ * beyond every page's, so leaving it in would only offer a baseline for a page that does not exist.
+ */
+internal fun textPagesOf(pages: List<RevisionPageText>): Map<Int, RevisionPageText> =
+    pages.filterNot { infoscry.image.ImageIdentity.isImageOrdinal(it.ordinal) }.associateBy { it.ordinal }

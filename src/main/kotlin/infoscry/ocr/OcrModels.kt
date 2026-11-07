@@ -376,6 +376,12 @@ data class OcrSettingsSnapshot(
     val renderDpi: Int? = null,
     val autoValidationId: String? = null,
     val runtimeIdentity: String? = null,
+    /**
+     * How much of the document's imagery the attempt extracts as image units. It is not part of the reading's
+     * identity ([attemptIdentity]): switching it never invalidates committed text, and image extraction keeps
+     * its own checkpoints.
+     */
+    val imageExtraction: infoscry.image.ImageExtractionMode = infoscry.image.ImageExtractionMode.OFF,
 ) {
     init {
         require(language.isNotBlank()) { "OcrSettingsSnapshot.language must not be blank" }

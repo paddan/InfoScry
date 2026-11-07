@@ -31,6 +31,8 @@ data class ImportStartRequest(
     val requestId: String,
     /** CLI opts in so a later identical command can replace a stopped import; HTTP defaults to strict replay. */
     val restartStopped: Boolean = false,
+    /** How much imagery to extract; null follows the collection's default when the import is admitted. */
+    val imageExtraction: infoscry.image.ImageExtractionMode? = null,
 )
 
 class StaleImportPreviewException : ApiFaultException(
@@ -86,6 +88,7 @@ class ImportStartService internal constructor(
                     baseSnapshot.copy(
                         externalPageLimit = allowance,
                         externalConfirmedSourceScope = manifestScopeConfirmed,
+                        imageExtraction = request.imageExtraction ?: collection.defaultImageExtraction,
                     ),
                 )
                 val settings = extractionSettings(collection.ocrLanguages).forOcrSettings(snapshot)
@@ -147,6 +150,9 @@ class ImportStartService internal constructor(
             add("method" to request.method.id)
             add("previewHash" to request.previewHash)
             add("restartStopped" to request.restartStopped.toString())
+            // Absent follows the collection's default and adds nothing, so a request recorded before the field
+            // existed still replays; a stated mode is part of what was asked.
+            request.imageExtraction?.let { add("images" to it.id) }
             add("recursive" to request.recursive.toString())
             extensions.include.forEach { add("include" to it) }
             extensions.exclude.forEach { add("exclude" to it) }
