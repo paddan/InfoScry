@@ -684,21 +684,22 @@ class ContentStore(private val database: Database) {
     fun neighboursOf(documentId: DocumentId, ordinal: Int): UnitNeighbours = database.read { connection ->
         fun adjacent(comparison: String, order: String): ContentUnitId? =
             connection.prepareStatement(
-                "SELECT id FROM content_units WHERE document_id = ? AND ordinal $comparison ? ORDER BY ordinal $order LIMIT 1",
+                "SELECT id FROM content_units WHERE document_id = ? AND ordinal $comparison ? AND ordinal < ? ORDER BY ordinal $order LIMIT 1",
             ).use { statement ->
                 statement.setString(1, documentId.value)
                 statement.setInt(2, ordinal)
+                statement.setInt(3, infoscry.image.ImageIdentity.ORDINAL_BASE)
                 statement.executeQuery().use { rows -> if (rows.next()) ContentUnitId(rows.getString(1)) else null }
             }
         val before = connection.prepareStatement(
-            "SELECT COUNT(*) FROM content_units WHERE document_id = ? AND ordinal < ?",
+            "SELECT COUNT(*) FROM content_units WHERE document_id = ? AND ordinal < ? AND ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE}",
         ).use { statement ->
             statement.setString(1, documentId.value)
             statement.setInt(2, ordinal)
             statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
         }
         val total = connection.prepareStatement(
-            "SELECT COUNT(*) FROM content_units WHERE document_id = ?",
+            "SELECT COUNT(*) FROM content_units WHERE document_id = ? AND ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE}",
         ).use { statement ->
             statement.setString(1, documentId.value)
             statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }

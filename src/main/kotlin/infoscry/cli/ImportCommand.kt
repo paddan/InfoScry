@@ -73,6 +73,10 @@ class ImportCommand : CliktCommand(name = "import") {
     ).multiple(required = true)
 
     private val methodOption by option("--method", help = "Reading method: none, tesseract, surya, or llm:<profileId>")
+    private val imagesOption by option(
+        "--images",
+        help = "Image extraction: off, embedded or all; without it the collection default applies",
+    )
     private val yesFlag by option("--yes", help = "Confirm sending the previewed pages to an external endpoint").flag()
 
     private val waitFlag by option(
@@ -104,9 +108,16 @@ class ImportCommand : CliktCommand(name = "import") {
         val options = resolveOptions(parentOptions, jsonFlag, null)
         // Refused before anything is sent, so a bad extension list has no effect at all.
         val extensions = extensionFilter()
+        val images = imagesOption?.let { raw ->
+            try {
+                infoscry.image.ImageExtractionMode.parse(raw)
+            } catch (_: IllegalArgumentException) {
+                throw CliFailure("--images must be off, embedded or all, was '$raw'")
+            }
+        }
         val requested = canonicalSources(sources)
         try {
-            importThroughServer(requested, extensions, options)
+            importThroughServer(requested, extensions, options, images)
         } catch (invalid: IllegalArgumentException) {
             throw CliFailure(invalid.message.orEmpty(), invalid)
         }
@@ -129,6 +140,7 @@ class ImportCommand : CliktCommand(name = "import") {
         requested: List<String>,
         extensions: ExtensionFilter,
         options: CliOptions,
+        images: infoscry.image.ImageExtractionMode?,
     ) {
         CliSession.connect().use { session ->
             val api = session.api
@@ -163,7 +175,8 @@ class ImportCommand : CliktCommand(name = "import") {
                         uploads = uploads.map { it.first },
                         include = extensions.include, exclude = extensions.exclude,
                         method = method.id, previewHash = preview.previewHash,
-                        requestId = commandRequestId(identity, request, preview.previewHash), restartStopped = true))
+                        requestId = commandRequestId(identity, request, preview.previewHash, images), restartStopped = true,
+                        imageExtraction = images?.id))
                 }
             } catch (failure: RemoteApiFailure) {
                 throw CliFailure("${failure.code}: ${failure.message}", failure)
@@ -214,8 +227,10 @@ class ImportCommand : CliktCommand(name = "import") {
     }
 
     /** One id per identical command: the same server paths or the same file contents, settings and preview. */
-    private fun commandRequestId(identity: List<String>, request: infoscry.server.ImportPreviewRouteRequest, previewHash: String): String {
+    private fun commandRequestId(identity: List<String>, request: infoscry.server.ImportPreviewRouteRequest, previewHash: String,
+        images: infoscry.image.ImageExtractionMode?): String {
         val canonical = listOf(request.collection, request.method, recursiveFlag.toString()) +
+            listOfNotNull(images?.let { "images=${it.id}" }) +
             identity.distinct().sorted() + request.include.sorted() + listOf("|") + request.exclude.sorted()
         val bytes = (canonical.joinToString("\n") + "\n" + previewHash).toByteArray(Charsets.UTF_8)
         return "cli-import-" + java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))

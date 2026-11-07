@@ -85,6 +85,54 @@ class ImageUnitConsumersTest {
     }
 
     @Test
+    fun `the source viewer's previous, next, place and count are text-only`() {
+        val document = fixture.pdf(count = 3)
+        fixture.publish(
+            document,
+            listOf(
+                fixture.page(0, "first"), fixture.page(1, "second"), fixture.page(2, "third"),
+                imagePage(fixture.page(0, "a caption")),
+            ),
+        )
+
+        val last = context.content.neighboursOf(document.id, 2)
+        assertEquals(3, last.total, "the image unit is not a page of y")
+        assertEquals(3, last.position)
+        assertNull(last.next, "the unit after the last page is not the image")
+        assertEquals(ContentUnitId("${document.id.value}-1"), last.previous)
+
+        val head = context.content.neighboursOf(document.id, 0)
+        assertEquals(1, head.position)
+        assertEquals(3, head.total)
+        assertEquals(ContentUnitId("${document.id.value}-1"), head.next)
+    }
+
+    @Test
+    fun `history change counts leave image units out of both revisions`() {
+        val document = fixture.pdf(count = 2)
+        fixture.publish(
+            document,
+            listOf(fixture.page(0, "first"), fixture.page(1, "second"), imagePage(fixture.page(0, "a caption"))),
+        )
+        // The next reading keeps the text, changes the image's caption and adds a second image.
+        val secondImage = ImageIdentity.ordinal(1, 1)!!
+        fixture.publish(
+            document,
+            listOf(
+                fixture.page(0, "first"), fixture.page(1, "second"),
+                imagePage(fixture.page(0, "a new caption")),
+                imagePage(fixture.page(0, "another")).copy(ordinal = secondImage),
+            ),
+        )
+
+        val entry = context.revisionHistory.history(document.collectionId, document.id).last()
+        assertEquals(2, entry.pageCount)
+        assertEquals(2, entry.pageChanges.unchanged)
+        assertEquals(0, entry.pageChanges.added)
+        assertEquals(0, entry.pageChanges.automatic + entry.pageChanges.manual + entry.pageChanges.unknown + entry.pageChanges.restored)
+    }
+
+    @Test
     fun `the rescan census and baseline count only the pages of the original`() {
         val document = fixture.pdf(count = 3)
         val revision = fixture.publish(
