@@ -40,7 +40,11 @@ version. The first person to approve or reject a new reading decides.
    already in the collection is not uploaded again. The reading dialog opens next. Choose Tesseract, Surya or an
    enabled image-capable LLM profile. The collection default only pre-selects it.
 5. Check the page count, destination and estimated cost, then confirm **Read …**
-   or **Send …**. Unavailable methods show their reason.
+   or **Send …**. Unavailable methods show their reason. **Extract images**
+   chooses whether pictures are kept too: **Off**, **Embedded images** (pictures
+   inside PDFs, Office files and EPUBs) or **Embedded + regions from scanned
+   pages** (also pictures cut out of scanned pages by Surya's layout reading,
+   which needs the Surya runtime; Picture regions on scanned pages are not yet verified against real Surya: its layout reading did not mark synthetic test pictures, so they may not be found until checked on a real photograph.) The collection's default only pre-fills it.
 6. Follow file progress and the separate progress bar for pages of the current
    document, then inspect the per-file results in import history. The page count
    updates as each page is saved, including pages with direct text. If the total
@@ -153,6 +157,13 @@ LLM reading allows up to 10 minutes per page, including receiving the full answe
 The small image-capability check allows 60 seconds. A timed-out page is not
 automatically sent again, since the provider may already have billed the call.
 You can cancel a running scan without waiting for that deadline.
+
+**Keep current text** is a reading method only **Scan again** offers. It reads
+no page and leaves every page's text as it is; it only adds images, so turning
+images on for a document that is already read never repeats OCR. It needs
+**Extract images** set to something other than Off. A scan with images Off
+produces a version without images; earlier versions keep theirs. A
+selected-page scan extracts images only for the selected pages.
 
 To force reading of a particular PDF/image page, open it in page review and choose
 **Scan this page again**. Use **Mark page N** while navigating, then **Scan selected
@@ -280,6 +291,20 @@ or OCR-only filtering. Import dates accept inclusive calendar days in the web
 interface; the `infoscry search` CLI also accepts ISO instants. Open a result to
 read its source. Semantic and hybrid
 retrieval require the local embedding model and supported GPU runtime.
+
+Images appear as a strip of thumbnails under the page, slide or section they
+belong to. Select one to see it full size with its caption and *from page N*; for
+a picture cut out of a scanned page, its position is outlined on the page.
+Escape closes the viewer. A picture is found by its caption (alt text, a
+figcaption, a caption on a scanned page, or for a PDF image or a picture on a scanned page the text next to
+it, such as "Figur 3. Anna Svensson 1923" under it) and by a short excerpt of the page text around it, so
+searching for a nearby word finds the picture. A picture with no caption and no text around it
+is shown and citable but not found by search. A document read before this existed keeps its old picture
+text until it is rescanned. *Keep current text*, and a rescan with automatic page selection, refresh every picture
+(*Keep current text* without reading any page); a rescan of pages you selected refreshes only those pages' pictures. A search result or an Ask citation on a picture opens it with its page
+behind it, and a citation from an older version opens that version's picture.
+Document details show the number of images. Picture regions on scanned pages are not yet verified against real Surya: its layout reading did not mark synthetic test pictures, so they may not be found until checked on a real photograph. From the command line,
+`infoscry import … --images off|embedded|all` chooses the same setting.
 
 A scanned page read with Surya or the LLM reader shows its layout in the source
 viewer: headings, lists, tables with their header cells, and formulas as their

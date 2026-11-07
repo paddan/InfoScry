@@ -77,7 +77,9 @@ object SelectablePdfInputResolver {
             return SelectablePdfResolution.Failed("ORIGINAL_UNREADABLE", "the managed original could not be opened")
         }
 
-        val byOrdinal = revisionPages.associateBy { it.ordinal }
+        // The copy has the original's physical pages; the image units of a revision are not among them.
+        val byOrdinal = revisionPages.filterNot { infoscry.image.ImageIdentity.isImageOrdinal(it.ordinal) }
+            .associateBy { it.ordinal }
         val artifactRoot = paths.artifactsDir(document.collectionId, document.id)
         val managedRoot = paths.documentDir(document.collectionId, document.id)
 

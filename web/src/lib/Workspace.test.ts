@@ -817,7 +817,7 @@ describe('app shell', () => {
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(await screen.findByRole('button', { name: 'Read page 1 with Surya' })).toBeTruthy();
     const previewCall = calls.find((call) => call.url.endsWith('/documents/document-1/ocr/preview'));
-    expect(JSON.parse(String(previewCall?.init?.body))).toEqual({ method: 'surya', selection: { mode: 'explicit', ordinals: [0] } });
+    expect(JSON.parse(String(previewCall?.init?.body))).toEqual({ method: 'surya', imageExtraction: 'off', selection: { mode: 'explicit', ordinals: [0] } });
     await fireEvent.click(screen.getByRole('button', { name: 'Read page 1 with Surya' }));
     await waitFor(() => expect(calls.some((call) => call.url.endsWith('/documents/document-1/ocr/rescan'))).toBe(true));
     expect(await screen.findByText('Reading revision-2', {}, { timeout: 3000 })).toBeTruthy();
@@ -3156,6 +3156,76 @@ function notCreatedPdfStatus(url: string) {
     blankPages: 0, unavailablePages: [], reasonCode: null,
   };
 }
+
+describe('image hits and citations', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
+  });
+  afterEach(() => {
+    cleanup();
+    window.localStorage.clear();
+  });
+
+  const imageLocator = { type: 'image_region', parent: { type: 'pdf_page', page: 12 }, index: 1, box: null };
+  const imageRow = {
+    unitId: 'image-1', locator: imageLocator, label: 'image 1 on page 12', parentUnitId: 'unit-1', kind: 'EMBEDDED',
+    mediaType: 'image/png', widthPx: 400, heightPx: 300, caption: 'A harbour at dusk', captionSource: 'ALT_TEXT',
+  };
+
+  /** Searches the default collection and opens its one image result. */
+  async function openImageHit(result: Record<string, unknown>, images: unknown[]) {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [result], staleFiltered: 0 }),
+      document: (url) => url.includes('/images') ? jsonResponse(images) : jsonResponse({ error: { code: 'NOT_FOUND', message: 'no such route' } }, 404),
+      source: () => jsonResponse({ ...sourcePage('A matching excerpt', 0, 19), revisionId: 'revision-1' }),
+    });
+    renderWorkspace();
+    await screen.findByText('Default');
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'harbour' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Default.*image 1 on page 12/s }));
+    return { calls };
+  }
+
+  it('opens an image hit over its parent unit, asking for the revision the hit names', async () => {
+    const { calls } = await openImageHit(
+      { ...hit('Default', 'image 1 on page 12'), unitId: 'image-1', locator: imageLocator, revisionId: 'revision-1' },
+      [imageRow],
+    );
+
+    const dialog = await screen.findByTestId('image-viewer');
+    expect(within(dialog).getByRole('heading', { name: 'Image 1 on page 12' })).toBeTruthy();
+    expect(calls.some((call) => call.url === '/api/collections/default/documents/document-1/images?revision=revision-1')).toBe(true);
+    expect(calls.some((call) => call.url.includes('/sources/unit-1') && call.url.includes('revision=revision-1'))).toBe(true);
+    // A historical citation shows its own revision's picture, not the current reading's.
+    expect(within(dialog).getByAltText('A harbour at dusk').getAttribute('src'))
+      .toBe('/api/collections/default/documents/document-1/images/image-1/file?revision=revision-1');
+  });
+
+  it('says so when the cited image is no longer part of the reading', async () => {
+    await openImageHit(
+      { ...hit('Default', 'image 1 on page 12'), unitId: 'image-1', locator: imageLocator, revisionId: 'revision-1' },
+      [],
+    );
+
+    expect(await screen.findByText('This image is not part of the reading any more.')).toBeTruthy();
+    expect(screen.queryByTestId('image-viewer')).toBeNull();
+  });
+
+  it('shows the thumbnails of the revision a historical hit names, not the current reading\u2019s', async () => {
+    await openImageHit(
+      { ...hit('Default', 'image 1 on page 12'), unitId: 'image-1', locator: imageLocator, revisionId: 'revision-1' },
+      [imageRow],
+    );
+
+    await screen.findByTestId('image-viewer');
+    const strip = await screen.findByRole('list', { name: 'Images on this page' });
+    expect(within(strip).getByRole('img').getAttribute('src'))
+      .toBe('/api/collections/default/documents/document-1/images/image-1/thumbnail?revision=revision-1');
+  });
+});
 
 describe('selectable PDF copies of cited sources', () => {
   beforeEach(() => {

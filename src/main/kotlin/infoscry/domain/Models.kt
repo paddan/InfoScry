@@ -3,6 +3,7 @@ package infoscry.domain
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
+import infoscry.image.ImageExtractionMode
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrEngine
 import infoscry.ocr.OcrImportMode
@@ -295,6 +296,8 @@ data class Collection(
     val version: Long = 1,
     /** Who last changed the collection's settings. */
     val updatedBy: UserRef? = null,
+    /** How much imagery an import or rescan of this collection extracts unless it is told otherwise. */
+    val defaultImageExtraction: ImageExtractionMode = ImageExtractionMode.OFF,
     /** The caller's role here (`OWNER`, `EDITOR`, `READER`), filled in for a listing; never persisted. */
     val callerRole: String? = null,
 ) {

@@ -22,6 +22,10 @@ import java.nio.file.Path
  * import can be between writing a file and committing its row. Nothing but regular `*.structure.json.gz`
  * files directly under the `structure` directory is touched, and original files are never reachable from here.
  *
+ * The same pass removes what a killed image step leaves in a document's artifacts: temporary files of an image or
+ * thumbnail being written (a `.tmp` file under `images` or `images/thumbs`) and the working directory of page rasters a region
+ * pass was using (`.image-pages`). Neither is named by any row, and a run that needs them writes them afresh.
+ *
  * Like the rest of [StaleOcrStateCleanup] it assumes a single process owns the data directory (the process
  * lock guarantees it) and that no worker is attached yet.
  */
@@ -40,6 +44,42 @@ class OrphanedStructureSweep(private val database: Database, private val paths: 
 
     private fun sweep(collectionId: CollectionId, documentId: DocumentId): Int {
         val root = paths.artifactsDir(collectionId, documentId)
+        return sweepStructures(root, documentId) + sweepImageLeftovers(root)
+    }
+
+    /** Temporary image files and the page-raster working directory a killed image step left under [root]. */
+    private fun sweepImageLeftovers(root: Path): Int {
+        var removed = 0
+        for (directory in listOf(root.resolve(IMAGES), root.resolve(IMAGES).resolve(THUMBS))) {
+            if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) continue
+            try {
+                Files.list(directory).use { entries ->
+                    entries.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) && it.fileName.toString().endsWith(TEMPORARY_SUFFIX) }
+                        .forEach { file ->
+                            try {
+                                if (Files.deleteIfExists(file)) removed++
+                            } catch (unremovable: IOException) {
+                                // Left for the next startup; a leftover costs only disk.
+                            }
+                        }
+                }
+            } catch (unreadable: IOException) {
+                // Nothing is removed from a directory that cannot be listed.
+            }
+        }
+        val pages = root.resolve(infoscry.jobs.ImageParents.PAGES_DIRECTORY)
+        if (Files.isDirectory(pages, LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                infoscry.jobs.ImageParents.clearDirectory(pages)
+                removed++
+            } catch (unremovable: IOException) {
+                // The next region pass clears it first anyway.
+            }
+        }
+        return removed
+    }
+
+    private fun sweepStructures(root: Path, documentId: DocumentId): Int {
         val directory = root.resolve(DIRECTORY)
         if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) return 0
         val named = referenced(documentId)
@@ -84,5 +124,8 @@ class OrphanedStructureSweep(private val database: Database, private val paths: 
     private companion object {
         const val DIRECTORY = "structure"
         const val SUFFIX = ".structure.json.gz"
+        const val IMAGES = "images"
+        const val THUMBS = "thumbs"
+        const val TEMPORARY_SUFFIX = ".tmp"
     }
 }

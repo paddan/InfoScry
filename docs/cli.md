@@ -209,6 +209,12 @@ the collection default is used. `none` (No OCR) reads no page: each page keeps t
 document's own text, and a page without text is kept without text. The command prints pages and destination before
 starting. An external method asks for confirmation; `--yes` confirms the shown
 pages without a prompt. EOF or a negative answer aborts before a job is queued.
+
+`--images off|embedded|all` chooses how much imagery the import extracts: `off` none,
+`embedded` the pictures stored in each document, `all` those and the page regions found
+by layout analysis. Without it the collection default applies (set in the web UI). Any
+other value is refused before a file is uploaded. A stated value is part of the request,
+so repeating the command with a different `--images` is a different import.
 Repeating the same command returns its active or completed job. After `FAILED`
 or `CANCELLED`, it starts a fresh attempt from the confirmed files. Changing
 the method, files or preview inputs creates a different request. When an external

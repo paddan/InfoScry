@@ -522,7 +522,8 @@ private class StructureLayout(
          * back to plain chunking, which puts page headers and footers back into chunks.
          */
         fun of(structure: PageStructure, text: String): StructureLayout? {
-            val blocks = structure.blocks.sortedBy { it.search.start }
+            // A block without words (a figure's box) takes no part in chunking.
+            val blocks = structure.blocks.filter { it.search.endExclusive > it.search.start }.sortedBy { it.search.start }
             if (blocks.isEmpty() || blocks.any { it.search.endExclusive > text.length }) return null
             val excluded = setOf(BlockKind.PAGE_HEADER, BlockKind.PAGE_FOOTER)
             val segments = mutableListOf<Pair<Int, Int>>()

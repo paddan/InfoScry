@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { cancelRescan, getJob, getRescanOperation, listRescanOperations, resumeRescan, type DocumentApiRow, type JobApiView, type OcrOperation, type RescanSelection, type RescanStarted, type RetryAttempt, type RetryOcrChoice } from './api';
+  import { cancelRescan, getJob, getRescanOperation, listRescanOperations, resumeRescan, type DocumentApiRow, type ImageExtraction, type JobApiView, type OcrOperation, type RescanSelection, type RescanStarted, type RetryAttempt, type RetryOcrChoice } from './api';
   import StartReadingDialog from './StartReadingDialog.svelte';
   import { newRequestId } from './ocrRescan';
   import { documentStatus, readableFailureCause } from './documentStatus';
 
   export let visible = true;
   export let collectionId: string;
+  export let defaultImageExtraction: ImageExtraction = 'off';
   export let documentId: string;
   export let documentName: string;
   export let document: DocumentApiRow | undefined = undefined;
@@ -354,6 +355,7 @@
   {#if dialogOpen}
     <StartReadingDialog
       {collectionId}
+      {defaultImageExtraction}
       request={{ kind: 'rescan', documentId, selection: dialogSelection }}
       onstarted={(run) => readingStarted(run as RescanStarted)}
       oncancel={() => (dialogOpen = false)}

@@ -167,6 +167,8 @@ class PageReviewService(
         discoverPhysicalCount: Boolean = true,
     ): Resolved {
         require(ordinal >= 0) { "ordinal must be a whole number, zero or greater" }
+        // An image unit is not a page of the document, so there is no page to review at its position.
+        if (infoscry.image.ImageIdentity.isImageOrdinal(ordinal)) missing()
         val document = documents.get(documentId)?.takeIf { it.collectionId == collection } ?: missing()
         if (document.mediaType !in RescanPageSource.SUPPORTED_MEDIA_TYPES) {
             throw PageReviewUnavailableException("PAGE_IMAGES_UNSUPPORTED", true, "this document format has no page review")

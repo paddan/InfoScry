@@ -28,7 +28,9 @@ fun Routing.configureReadingMethodRoutes(context: AppContext, catalog: ReadingMe
             call.handle {
                 val id = call.collectionId()
                 val collection = context.collectionService.requireActiveByNameOrId(id.value)
-                val options = catalog.availability(id).map { method ->
+                // A rescan dialog asks with `?for=rescan` and is also offered Keep current text; an import never is.
+                val methods = if (call.request.queryParameters["for"] == "rescan") catalog.rescanAvailability(id) else catalog.availability(id)
+                val options = methods.map { method ->
                     ReadingMethodOption(
                         method = method.method.id,
                         label = method.label,

@@ -105,6 +105,9 @@ class RescanJobHandler internal constructor(
     private val beforeCandidatePublication: suspend (JobId) -> Unit = {},
     /** Applies the collection's corrections to the staged reading before it is chunked. */
     private val corrector: CandidateCorrector? = null,
+    /** The image step; without it (and its store) a rescan extracts no images whatever its snapshot says. */
+    private val images: infoscry.image.ImageStage? = null,
+    private val imageStore: infoscry.storage.ImageStore? = null,
 ) : JobHandler {
 
     /** What a staged reading becomes: the page it is decided to be, its passages, and the publication. */
@@ -218,6 +221,7 @@ class RescanJobHandler internal constructor(
             dispatchStage = OcrDispatchStage.TRANSCRIPTION,
         )
         // No OCR reads no page: it has no engine, no runtime to compare and no positioning pass.
+        val keepsText = snapshot.keepsText
         val readsImages = snapshot.engine != infoscry.ocr.OcrEngine.NONE
         val engine = if (!readsImages) null else engineFor(snapshot.engine, snapshot, transcriptionDispatch)
             ?: fail(
@@ -271,7 +275,7 @@ class RescanJobHandler internal constructor(
             )
         }
         val baseline: Map<Int, RevisionPageText> = baselineRevisionId
-            ?.let { revisionId -> revisions.pages(revisionId).associateBy { page -> page.ordinal } }
+            ?.let { revisionId -> infoscry.document.textPagesOf(revisions.pages(revisionId)) }
             .orEmpty()
         val candidate = operation.candidateRevisionId ?: stage.run(STAGE_STAGE) {
             revisions.openCandidate(document.id, baselineRevisionId, PROVENANCE_RESCAN)
@@ -290,6 +294,7 @@ class RescanJobHandler internal constructor(
                 committedPages = revisions.pages(candidate).filter { it.producerRevisionId == candidate }.associateBy { it.ordinal },
                 selection = operation.selection,
                 readsImages = readsImages,
+                keepsText = keepsText,
             )
         }
         val pagesToRead = pageImages.filter(RescanPage::read)
@@ -337,7 +342,8 @@ class RescanJobHandler internal constructor(
                 val alreadyPreserved = revisions.page(candidate, page.ordinal)
                     ?.let { staged -> staged.unitId.value == page.unitId } == true
                 // An explicit page set limits No OCR to the chosen pages; the others keep their published text.
-                if (!readsImages && operation.selection.selects(page.ordinal, true)) {
+                // Keeping the text reads no text layer either: the published text of every page is carried below.
+                if (!readsImages && !keepsText && operation.selection.selects(page.ordinal, true)) {
                     // No OCR: a usable text layer replaces the page's published text; a page without one keeps
                     // what the document publishes for it, or, with nothing published, whatever its layer has.
                     val ownText = page.ownText
@@ -424,6 +430,23 @@ class RescanJobHandler internal constructor(
             )
         }
 
+        // ---- the images of the pages in scope, beside the text this candidate now holds ----
+        // A warning here is a warning on the rescan, never a failure of its text.
+        val imageWarnings = if (images != null && imageStore != null) {
+            RescanImages(revisions, imageStore, images).run(
+                document = document,
+                managedPath = managedPath,
+                artifactRoot = documentArtifactRoot,
+                candidate = candidate,
+                baselineRevisionId = baselineRevisionId,
+                selection = operation.selection,
+                snapshot = snapshot,
+                stage = stage,
+            )
+        } else {
+            emptyList()
+        }
+
         // ---- phase 2: chunk what was staged ----
         stage.run(STAGE_CHUNK) {
             operations.advance(operation.operationId, OcrOperationStage.CHUNKING)
@@ -455,10 +478,15 @@ class RescanJobHandler internal constructor(
         if (phases.publishCandidate(operation, candidate, stage)) {
             afterCandidatePublished(job.id)
             stage.run(STAGE_RECORD) {
-                updateDocumentStatus(
-                    operation,
-                    if (failed == 0 && keptWithoutText == 0) DocumentStatus.COMPLETE else DocumentStatus.COMPLETE_WITH_WARNINGS,
-                )
+                val imageWarning = infoscry.image.ImageWarnings.mostImportant(imageWarnings)
+                if (failed == 0 && keptWithoutText == 0 && imageWarnings.isEmpty()) {
+                    updateDocumentStatus(operation, DocumentStatus.COMPLETE)
+                } else {
+                    updateDocumentStatus(
+                        operation, DocumentStatus.COMPLETE_WITH_WARNINGS,
+                        imageWarning, imageWarning?.let(infoscry.image.ImageWarnings::messageFor),
+                    )
+                }
             }
             LOGGER.atInfo()
                 .addKeyValue(DOCUMENT_FIELD, operation.documentId.value)

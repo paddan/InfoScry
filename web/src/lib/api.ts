@@ -44,10 +44,22 @@ export type Collection = {
   updatedBy?: UserRef | null;
   /** The signed-in user's role here; absent from servers and fixtures that do not send it (treated as owner). */
   callerRole?: 'OWNER' | 'EDITOR' | 'READER' | null;
+  /** How much imagery an import or rescan extracts unless told otherwise; absent means `off`. */
+  defaultImageExtraction?: ImageExtraction;
 };
 
+/** How much of a document's imagery an import or rescan extracts. */
+export type ImageExtraction = 'off' | 'embedded' | 'all';
+
+function decodeImageExtraction(value: unknown): ImageExtraction | undefined {
+  const mode = typeof value === 'string' ? value.toLowerCase() : '';
+  return mode === 'off' || mode === 'embedded' || mode === 'all' ? mode : undefined;
+}
+
 /** Current servers still serialize the persisted OCR engine/profile pair; newer ones may also send its method id. */
-type CollectionResponse = Omit<Collection, 'language' | 'defaultMethod'> & {
+type CollectionResponse = Omit<Collection, 'language' | 'defaultMethod' | 'defaultImageExtraction'> & {
+  /** The server may spell the mode in either case. */
+  defaultImageExtraction?: string;
   language?: string;
   defaultMethod?: string | null;
   ocrLanguages?: string;
@@ -69,6 +81,7 @@ function decodeCollection(response: CollectionResponse): Collection {
     ocrImportMode: _ocrImportMode,
     ocrReviewProfileId: _ocrReviewProfileId,
     ocrExternalPageLimit: _ocrExternalPageLimit,
+    defaultImageExtraction,
     ...fields
   } = response;
   const derivedMethod = ocrEngine === 'SURYA'
@@ -78,10 +91,12 @@ function decodeCollection(response: CollectionResponse): Collection {
       : ocrEngine === 'LLM' && ocrTranscriptionProfileId
       ? `llm:${ocrTranscriptionProfileId}`
       : 'tesseract';
+  const images = decodeImageExtraction(defaultImageExtraction);
   return {
     ...fields,
     language: language ?? ocrLanguages ?? 'eng',
     defaultMethod: defaultMethod === undefined ? derivedMethod : defaultMethod,
+    ...(images === undefined ? {} : { defaultImageExtraction: images }),
   };
 }
 
@@ -504,6 +519,8 @@ export type DocumentApiRow = {
   author?: string | null;
   language?: string | null;
   errorCode?: string | null;
+  /** The server's own sentence for an image warning the document finished with; fixed wording, never document text. */
+  warningNote?: string | null;
   /** Compact progress of the current attempt; absent while the document has no attempt recorded. */
   progress?: DocumentProgressView | null;
   /** OCR text quality, 0-100 (higher is cleaner); absent when unknown. */
@@ -1064,6 +1081,72 @@ function pageReviewPath(collectionId: string, documentId: string): string {
   return `/api/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/page-review`;
 }
 
+// ---- images of one document's reading ----
+
+/** Where an image sits: an image of a page or file (`parent`), its one-based index there, and a normalised box when it is a region of a page. */
+export type ImageRegionLocator = {
+  type: 'image_region';
+  parent: { type?: string; page?: number; name?: string; [key: string]: unknown };
+  index: number;
+  box: { left: number; top: number; right: number; bottom: number } | null;
+};
+
+export type ImageView = {
+  unitId: string;
+  locator: ImageRegionLocator;
+  /** The locator's own description, such as `image 2 on page 14`. */
+  label: string;
+  parentUnitId: string;
+  kind: string;
+  mediaType: string;
+  widthPx: number;
+  heightPx: number;
+  caption: string | null;
+  captionSource: string | null;
+};
+
+function imagesPath(collectionId: string, documentId: string): string {
+  return `/api/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/images`;
+}
+
+/** The images of a document's published (or the given) revision, in reading order. */
+export async function listImages(collectionId: string, documentId: string, revisionId?: string | null): Promise<ImageView[]> {
+  const query = revisionId ? `?revision=${encodeURIComponent(revisionId)}` : '';
+  return (await readJson(await fetch(`${imagesPath(collectionId, documentId)}${query}`))) as ImageView[];
+}
+
+/** The query that names a revision, so an older reading shows its own pictures and not the current reading's. */
+function revisionQuery(revisionId?: string | null): string {
+  return revisionId ? `?revision=${encodeURIComponent(revisionId)}` : '';
+}
+
+export function imageFileUrl(collectionId: string, documentId: string, unitId: string, revisionId?: string | null): string {
+  return `${imagesPath(collectionId, documentId)}/${encodeURIComponent(unitId)}/file${revisionQuery(revisionId)}`;
+}
+
+export function imageThumbnailUrl(collectionId: string, documentId: string, unitId: string, revisionId?: string | null): string {
+  return `${imagesPath(collectionId, documentId)}/${encodeURIComponent(unitId)}/thumbnail${revisionQuery(revisionId)}`;
+}
+
+/** The text a reader sees for an image: its caption, else the locator's own description with a capital. */
+export function imageAltText(image: ImageView): string {
+  const caption = image.caption?.trim();
+  if (caption) return caption;
+  const label = image.label.trim();
+  return label === '' ? `Image ${image.locator.index}` : label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+/** The page an image came from, for "from page 14"; null when its parent is not a page. */
+export function imageParentPage(image: ImageView): number | null {
+  const page = image.locator.parent.page;
+  return typeof page === 'number' ? page : null;
+}
+
+/** True for a locator that names an image of a document rather than a page or text. */
+export function isImageRegionLocator(locator: unknown): locator is ImageRegionLocator {
+  return typeof locator === 'object' && locator !== null && (locator as { type?: unknown }).type === 'image_region';
+}
+
 // ---- selectable PDF copies of one published revision ----
 
 /** The state of one revision's selectable PDF copy. NOT_CREATED means no artifact exists yet. */
@@ -1221,9 +1304,11 @@ export type ImportPreview = {
 };
 export type ImportStarted = { accepted?: boolean; job: JobApiView };
 
-export async function listReadingMethods(collectionId: string): Promise<ReadingMethodList> {
+/** A rescan's list also offers *Keep current text* (`keep`); an import's never does. */
+export async function listReadingMethods(collectionId: string, purpose?: 'rescan'): Promise<ReadingMethodList> {
   const collection = encodeURIComponent(collectionId);
-  return (await readJson(await fetch(`/api/collections/${collection}/reading-methods`))) as ReadingMethodList;
+  const query = purpose === 'rescan' ? '?for=rescan' : '';
+  return (await readJson(await fetch(`/api/collections/${collection}/reading-methods${query}`))) as ReadingMethodList;
 }
 
 /** An uploaded file: its upload id to import, or the document its bytes already are in the collection. */
@@ -1248,7 +1333,7 @@ export async function previewImport(request: ImportPreviewRequest): Promise<Impo
 }
 
 export async function startImport(
-  request: ImportPreviewRequest & { previewHash: string; requestId: string },
+  request: ImportPreviewRequest & { previewHash: string; requestId: string; imageExtraction?: ImageExtraction },
 ): Promise<ImportStarted> {
   return (await mutate('/api/imports', 'POST', request)) as ImportStarted;
 }
@@ -1562,6 +1647,7 @@ export async function setCollectionPromptDefault(collectionId: string, role: Pro
 export type CollectionOcrSettingsPatch = {
   language?: string;
   defaultMethod?: string;
+  defaultImageExtraction?: ImageExtraction;
 };
 
 /** Saves any of a collection's OCR settings. Nothing is reprocessed; the next import or rescan snapshots them. */
@@ -2012,8 +2098,10 @@ export async function previewRescan(
   documentId: string,
   method: string,
   selection?: RescanSelection,
+  imageExtraction?: ImageExtraction,
 ): Promise<RescanPreview> {
-  return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', { method, selection })) as RescanPreview;
+  const body = imageExtraction === undefined ? { method, selection } : { method, selection, imageExtraction };
+  return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', body)) as RescanPreview;
 }
 
 export async function startRescan(

@@ -5,6 +5,7 @@ import infoscry.domain.ApiStatus
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.image.ImageExtractionMode
 import infoscry.jobs.IgnorePatterns
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrEngine
@@ -147,8 +148,17 @@ class CollectionStore(private val database: Database) {
      * [settings] is the whole effective set rather than the fields that changed, because the settings are
      * only meaningful together: an engine without the profile it reads through is not a collection state.
      * Already queued payloads are untouched — this changes what the *next* attempt snapshots.
+     *
+     * [imageDefault], when given, is written in the same transaction under the same version check, so an edit of
+     * both is one edit: it either holds the version it was made from or conflicts, and a stale edit of the image
+     * default alone cannot slip past the check. Changing neither value changes nothing, whatever version is held.
      */
-    fun updateOcrSettings(id: CollectionId, settings: CollectionOcrSettings, expectedVersion: Long? = null): Collection =
+    fun updateOcrSettings(
+        id: CollectionId,
+        settings: CollectionOcrSettings,
+        expectedVersion: Long? = null,
+        imageDefault: ImageExtractionMode? = null,
+    ): Collection =
         database.transaction { connection ->
             val existing = selectById(connection, id, forUpdate = true)
                 ?: throw NoSuchElementException("no collection with id ${id.value}")
@@ -157,10 +167,12 @@ class CollectionStore(private val database: Database) {
                 infoscry.ocr.ReadingMethod.Tesseract -> OcrEngine.TESSERACT to null
                 infoscry.ocr.ReadingMethod.Surya -> OcrEngine.SURYA to null
                 infoscry.ocr.ReadingMethod.None -> OcrEngine.NONE to null
+                infoscry.ocr.ReadingMethod.KeepText -> error("Keep current text is not a collection default")
                 is infoscry.ocr.ReadingMethod.Llm -> OcrEngine.LLM to method.profileId
             }
+            val images = imageDefault ?: existing.defaultImageExtraction
             if (existing.ocrLanguages == language && existing.ocrEngine == engine &&
-                existing.ocrTranscriptionProfileId == profileId
+                existing.ocrTranscriptionProfileId == profileId && existing.defaultImageExtraction == images
             ) {
                 return@transaction existing
             }
@@ -168,13 +180,35 @@ class CollectionStore(private val database: Database) {
             val updatedAt = Instants.now()
             connection.prepareStatement(
                 "UPDATE collections SET ocr_languages = ?, ocr_engine = ?, " +
-                    "ocr_transcription_profile_id = ?, updated_at = ? WHERE id = ?",
+                    "ocr_transcription_profile_id = ?, default_image_extraction = ?, updated_at = ? WHERE id = ?",
             ).use { statement ->
                 statement.setString(1, language)
                 statement.setString(2, engine.name)
                 statement.setString(3, profileId)
-                statement.setString(4, updatedAt)
-                statement.setString(5, id.value)
+                statement.setString(4, images.name)
+                statement.setString(5, updatedAt)
+                statement.setString(6, id.value)
+                statement.executeUpdate()
+            }
+            checkNotNull(selectById(connection, id))
+        }
+
+    /**
+     * Sets how much imagery imports and rescans of the collection extract by default. Setting the value it
+     * already has changes nothing, whatever version the caller holds; a different value needs the current one.
+     */
+    fun updateImageDefault(id: CollectionId, mode: ImageExtractionMode, expectedVersion: Long? = null): Collection =
+        database.transaction { connection ->
+            val existing = selectById(connection, id, forUpdate = true)
+                ?: throw NoSuchElementException("no collection with id ${id.value}")
+            if (existing.defaultImageExtraction == mode) return@transaction existing
+            infoscry.domain.requireVersion(expectedVersion, existing.version, existing.updatedBy)
+            connection.prepareStatement(
+                "UPDATE collections SET default_image_extraction = ?, updated_at = ? WHERE id = ?",
+            ).use { statement ->
+                statement.setString(1, mode.name)
+                statement.setString(2, Instants.now())
+                statement.setString(3, id.value)
                 statement.executeUpdate()
             }
             checkNotNull(selectById(connection, id))
@@ -292,6 +326,7 @@ class CollectionStore(private val database: Database) {
         ocrTranscriptionProfileId = getString("ocr_transcription_profile_id"),
         version = getLong("version"),
         updatedBy = getString("updated_by")?.let { infoscry.domain.UserRef(it, getString("updated_by_name") ?: it) },
+        defaultImageExtraction = ImageExtractionMode.valueOf(getString("default_image_extraction")),
     )
 
     companion object {
@@ -302,7 +337,7 @@ class CollectionStore(private val database: Database) {
 
         private const val SELECT_COLLECTIONS =
             "SELECT id, name, description, ocr_languages, lifecycle, created_at, updated_at, " +
-                "ocr_engine, ocr_transcription_profile_id, version, updated_by, " +
+                "ocr_engine, ocr_transcription_profile_id, version, updated_by, default_image_extraction, " +
                 "(SELECT display_name FROM users WHERE id = collections.updated_by) AS updated_by_name FROM collections"
 
         /**
@@ -312,7 +347,7 @@ class CollectionStore(private val database: Database) {
          */
         private const val SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT =
             "SELECT c.id, c.name, c.description, c.ocr_languages, c.lifecycle, c.created_at, " +
-                "c.updated_at, c.ocr_engine, c.ocr_transcription_profile_id, c.version, c.updated_by, " +
+                "c.updated_at, c.ocr_engine, c.ocr_transcription_profile_id, c.version, c.updated_by, c.default_image_extraction, " +
                 "(SELECT display_name FROM users WHERE id = c.updated_by) AS updated_by_name, COUNT(d.id) AS document_count " +
                 "FROM collections c LEFT JOIN documents d ON d.collection_id = c.id GROUP BY c.id"
     }

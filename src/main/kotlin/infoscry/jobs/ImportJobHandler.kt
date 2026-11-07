@@ -663,7 +663,11 @@ class ImportJobHandler internal constructor(
             OCR_FAILED_CODE ->
                 "the OCR tool ran but could not read part of this document; the rest of it was extracted"
 
-            else -> "the extractor stopped before it delivered every unit of this document"
+            else -> if (infoscry.image.ImageWarnings.knows(code)) {
+                infoscry.image.ImageWarnings.messageFor(code)
+            } else {
+                "the extractor stopped before it delivered every unit of this document"
+            }
         }
 
         /** Where a verified CoreML session writes its one profile, under the data directory's temp root. */
@@ -832,6 +836,8 @@ class ImportJobHandler internal constructor(
                 engineFor = rescanEngineFactory(context.ocrProfiles, clientEngine = clientEngine),
                 profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
                 corrector = context.candidateCorrector,
+                images = pipeline.images,
+                imageStore = context.imageStore,
             )
             // Durable selectable-PDF generation (ticket 06 of the selectable-PDF plan). It depends on
             // nothing above: it reads only already-committed revision text, images and layouts, and is

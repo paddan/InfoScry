@@ -7,6 +7,7 @@ import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Document
+import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.document.RevisionPublicationService
 import infoscry.embedding.DocumentEmbedder
@@ -23,6 +24,17 @@ import infoscry.extract.PAGES_WITHOUT_TEXT_METADATA
 import infoscry.extract.PdfExtractor
 import infoscry.extract.UnitBoundary
 import infoscry.extract.UnsupportedMediaTypeException
+import infoscry.image.ImageExtractionMode
+import infoscry.image.ImageIdentity
+import infoscry.image.ImageWarnings
+import infoscry.image.ImageStage
+import infoscry.image.ParentUnit
+import infoscry.image.ParentUnitContext
+import infoscry.ocr.PageImage
+import infoscry.ocr.PageImageRenderer
+import infoscry.ocr.PageStructureStore
+import org.apache.pdfbox.Loader
+import org.apache.pdfbox.io.IOUtils
 import infoscry.ocr.CandidateRevisionPhases
 import infoscry.ocr.ExternalPageAllowanceExceededException
 import infoscry.ocr.OcrSettingsSnapshot
@@ -216,6 +228,7 @@ internal class DocumentIngest(
             dispatch = dispatch,
             // A candidate's pages name the images they were read from, so those renders outlive the attempt.
             retainsPageImages = sink.stagesForReview,
+            keepsEmptyPictures = reading != null && reading.imageExtraction != ImageExtractionMode.OFF,
         )
 
         var finished = false
@@ -282,7 +295,7 @@ internal class DocumentIngest(
             return IngestResult.Failed
         }
 
-        val warned = lastFailureCode != null || keptWithoutReading
+        var warned = lastFailureCode != null || keptWithoutReading
         if (sink.stagesForReview && lastFailureCode != null) {
             // One page that could not be read does not fail the document: the pages that were read are
             // published and the document is complete with a warning. Two cases still fail. A reading with no
@@ -301,13 +314,143 @@ internal class DocumentIngest(
                 return IngestResult.Failed
             }
         }
+        // The text is complete, so the images found beside it can be delivered into the same sink, before the
+        // passages that make their captions searchable are cut. A warning here is a warning on the document,
+        // never a failure of its text.
+        val imageWarnings = extractImages(document, mediaType.value, managedPath, fingerprint, sink, stage, reading)
+        if (imageWarnings.isNotEmpty()) warned = true
+        val imageWarning = ImageWarnings.mostImportant(imageWarnings)
+
         if (sink.stagesForReview) {
-            return publishStagedReading(document, sink, stage, onFailure, warned)
+            return publishStagedReading(document, sink, stage, onFailure, warned, imageWarning)
         }
 
         chunkContent(document, stage)
-        if (!embedAndIndex(collection, document, sink, stage, onFailure, reading, warned)) return IngestResult.Failed
+        if (!embedAndIndex(collection, document, sink, stage, onFailure, reading, warned, imageWarning)) return IngestResult.Failed
         return IngestResult.Complete
+    }
+
+    /**
+     * Delivers the images of a document whose text this attempt has just completed, one parent unit at a time.
+     *
+     * The parents are the text units the sink holds for the document, which is what a resumed attempt also
+     * finds: an image checkpoint is kept per text fingerprint, so a parent whose images were delivered is not
+     * looked at again. Page rasters are rendered only when a region pass needs one, into a directory that is
+     * removed afterwards and that an interrupted attempt's next run clears first.
+     *
+     * @return the distinct warning codes of the stage, which make the document complete with a warning. An
+     *   image stage that fails for a reason of its own answers [IMAGE_EXTRACTION_FAILED] rather than failing the
+     *   text it was run beside: nothing it left is half a unit, and the next attempt converges from its checkpoints.
+     */
+    private suspend fun extractImages(
+        document: Document,
+        mediaType: String,
+        managedPath: java.nio.file.Path,
+        fingerprint: ExtractionFingerprint,
+        sink: ExtractionSink,
+        stage: JobStage,
+        reading: OcrSettingsSnapshot?,
+    ): List<String> {
+        val images = pipeline.images ?: return emptyList()
+        val snapshot = reading ?: return emptyList()
+        val mode = snapshot.imageExtraction
+        val artifactRoot = paths.artifactsDir(document.collectionId, document.id)
+        val workDirectory = artifactRoot.resolve(ImageParents.PAGES_DIRECTORY)
+        try {
+            if (mode == ImageExtractionMode.OFF) {
+                // An earlier attempt with images on may have left image units beside this attempt's text; with images
+                // off the attempt holds none, so a repeat of the same choice converges on the same rows.
+                stage.run(STAGE_RECORD) {
+                    // The checkpoints go first: a kill between the two steps then leaves units without checkpoints (a
+                    // harmless repeat), never checkpoints without units, which would make a later attempt with
+                    // images on skip every parent.
+                    images.clearCheckpoints(document.id, fingerprint.value)
+                    sink.retainImageUnits(document.id, ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
+                }
+                return emptyList()
+            }
+            val parents = stage.run(STAGE_RECORD) {
+                ImageParents.clearDirectory(workDirectory)
+                parentsOf(document, mediaType, managedPath, sink, mode, artifactRoot, workDirectory, snapshot)
+            }
+            return images.run(
+                document = document,
+                managedPath = managedPath,
+                artifactRoot = artifactRoot,
+                parents = parents,
+                mode = mode,
+                target = SinkImageTarget(sink, document.id, fingerprint),
+                boundary = StageBoundary(stage),
+                settings = snapshot,
+            ).warnings
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (notActive: CollectionNotActiveException) {
+            throw notActive
+        } catch (deleted: DocumentBeingDeletedException) {
+            throw deleted
+        } catch (failure: Exception) {
+            LOGGER.atWarn()
+                .addKeyValue(COMPONENT_FIELD, INGEST_COMPONENT)
+                .addKeyValue(DOCUMENT_FIELD, document.id.value)
+                .setCause(failure)
+                .log("the images of a document could not be extracted; its text is kept")
+            return listOf(IMAGE_EXTRACTION_FAILED)
+        } finally {
+            runCatching { ImageParents.clearDirectory(workDirectory) }
+        }
+    }
+
+    /**
+     * The text units the sink holds for [document], in reading order, as the units images are found under.
+     *
+     * An image unit is never a parent. A page's structure is read only when a region pass can use it.
+     */
+    private fun parentsOf(
+        document: Document,
+        mediaType: String,
+        managedPath: java.nio.file.Path,
+        sink: ExtractionSink,
+        mode: ImageExtractionMode,
+        artifactRoot: java.nio.file.Path,
+        workDirectory: java.nio.file.Path,
+        snapshot: OcrSettingsSnapshot,
+    ): List<ParentUnitContext> {
+        fun contextOf(
+            unitId: infoscry.domain.ContentUnitId,
+            ordinal: Int,
+            locator: infoscry.domain.SourceLocation,
+            text: String,
+            structure: () -> infoscry.ocr.PageStructure?,
+        ) = ImageParents.contextOf(
+            document, mediaType, managedPath, mode, artifactRoot, workDirectory, snapshot,
+            unitId, ordinal, locator, text, structure,
+        )
+        val candidate = sink.candidateRevisionId
+        if (sink.stagesForReview) {
+            return candidate?.let { revisions.pages(it) }.orEmpty()
+                .filterNot { ImageIdentity.isImageOrdinal(it.ordinal) }
+                .map { page ->
+                    contextOf(page.unitId, page.ordinal, page.locator, page.extractedText) {
+                        page.structureReference?.let { PageStructureStore.read(artifactRoot, it, page.extractedText) }
+                    }
+                }
+        }
+        val parents = ArrayList<ParentUnitContext>()
+        var afterOrdinal = -1
+        while (true) {
+            val batch = content.listUnits(document.id, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
+            if (batch.isEmpty()) break
+            batch.forEach { unit ->
+                afterOrdinal = unit.ordinal
+                if (ImageIdentity.isImageOrdinal(unit.ordinal)) return@forEach
+                parents += contextOf(unit.id, unit.ordinal, unit.locator, unit.extractedText) {
+                    content.structureOf(unit, artifactRoot)
+                }
+            }
+            if (batch.size < CHUNK_BATCH) break
+        }
+        return parents
     }
 
     /**
@@ -323,6 +466,7 @@ internal class DocumentIngest(
         stage: JobStage,
         onFailure: suspend (String, String) -> Unit,
         warned: Boolean,
+        imageWarning: String? = null,
     ): IngestResult {
         val candidate = sink.candidateRevisionId
         if (candidate == null) {
@@ -389,10 +533,14 @@ internal class DocumentIngest(
             return IngestResult.Failed
         }
         stage.run(STAGE_RECORD) {
-            documents.updateStatus(
-                document.id,
-                if (warned) DocumentStatus.COMPLETE_WITH_WARNINGS else DocumentStatus.COMPLETE,
-            )
+            if (warned) {
+                documents.updateStatus(
+                    document.id, DocumentStatus.COMPLETE_WITH_WARNINGS,
+                    imageWarning, imageWarning?.let(ImageWarnings::messageFor),
+                )
+            } else {
+                documents.updateStatus(document.id, DocumentStatus.COMPLETE)
+            }
         }
         return IngestResult.Complete
     }
@@ -415,6 +563,7 @@ internal class DocumentIngest(
         onFailure: suspend (String, String) -> Unit,
         reading: OcrSettingsSnapshot?,
         warned: Boolean,
+        imageWarning: String? = null,
     ): Boolean {
         val embedder = documentEmbedder()
         if (embedder == null) {
@@ -469,7 +618,10 @@ internal class DocumentIngest(
                 if (units.size < CHUNK_BATCH) break
             }
 
-            if (rows.isEmpty()) {
+            // A document whose pictures are its content (a photograph the reading found no words in) has images to
+            // show and nothing to search; that is a document with a warning, not an empty replacement.
+            val holdsOnlyPictures = rows.isEmpty() && holdsOnlyPictures(document.id)
+            if (rows.isEmpty() && !holdsOnlyPictures) {
                 // Nothing to index means an extraction pass with no units, which the chunking stage
                 // would already have refused as a refusal rather than a finished pass. This guard keeps
                 // the record honest instead of silently publishing an empty replacement.
@@ -494,7 +646,13 @@ internal class DocumentIngest(
                 // reading the document does not publish.
                 val revisionId = revisions.transaction {
                     val revisionId = revisions.recordPublishedContent(document.id, PROVENANCE_IMPORT, reading)
-                    index().replaceDocument(rows.map { it.copy(revisionId = revisionId) })
+                    // The index refuses a document with no passage; a picture-only document has nothing to search, and
+                    // whatever an earlier reading made searchable is removed in the same transaction.
+                    if (rows.isEmpty()) {
+                        index().deleteDocument(document.id)
+                    } else {
+                        index().replaceDocument(rows.map { it.copy(revisionId = revisionId) })
+                    }
                     revisionId
                 }
                 revisionId?.let {
@@ -513,7 +671,11 @@ internal class DocumentIngest(
                     failedUnits > 0 || warned -> DocumentStatus.COMPLETE_WITH_WARNINGS
                     else -> DocumentStatus.COMPLETE
                 }
-                documents.updateStatus(document.id, status)
+                if (status == DocumentStatus.COMPLETE_WITH_WARNINGS && imageWarning != null) {
+                    documents.updateStatus(document.id, status, imageWarning, ImageWarnings.messageFor(imageWarning))
+                } else {
+                    documents.updateStatus(document.id, status)
+                }
             }
             return true
         } catch (cancelled: CancellationException) {
@@ -528,6 +690,19 @@ internal class DocumentIngest(
             onFailure(embeddingCodeFor(failure), failure.message ?: "the document could not be embedded")
             return false
         }
+    }
+
+    /** Whether every unit of [documentId] is a picture or the empty reading kept beside one (R26). */
+    private fun holdsOnlyPictures(documentId: DocumentId): Boolean {
+        val units = ArrayList<Pair<Int, Boolean>>()
+        var afterOrdinal = -1
+        while (true) {
+            val batch = content.listUnits(documentId, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
+            batch.forEach { units += it.ordinal to it.extractedText.isBlank() }
+            if (batch.size < CHUNK_BATCH) break
+            afterOrdinal = batch.last().ordinal
+        }
+        return ImageIdentity.isPictureOnly(units)
     }
 
     /**
@@ -634,6 +809,9 @@ internal class DocumentIngest(
 
         /** The extractor stopped without delivering every unit. */
         internal const val EXTRACTION_FAILED = "EXTRACTION_FAILED"
+
+        /** The images of a document could not be extracted; its text is complete, so it finishes with this warning. */
+        internal const val IMAGE_EXTRACTION_FAILED = infoscry.image.ImageWarnings.INTERNAL_FAILURE_CODE
 
         /** A completed OCR pass produced no page text, so the existing revision was kept. */
         internal const val NO_EXTRACTABLE_CONTENT = "NO_EXTRACTABLE_CONTENT"

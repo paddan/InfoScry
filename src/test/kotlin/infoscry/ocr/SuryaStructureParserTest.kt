@@ -18,6 +18,24 @@ class SuryaStructureParserTest {
     private fun parse(vararg blocks: SuryaBlockInput) = SuryaStructureParser.parse(blocks.toList())
 
     @Test
+    fun `a wordless picture keeps its box and a wordless text block is still dropped`() {
+        val picture = PixelBox(5, 6, 700, 800)
+        val draft = parse(
+            block("<img>", "Picture", 0, picture),
+            block("<p> </p>", "Text", 1),
+            block("", "Caption", 2),
+            block("<p>Figure 1. A quay</p>", "Caption", 3),
+        )
+        assertEquals(listOf(BlockKind.FIGURE, BlockKind.CAPTION), draft.blocks.map { it.kind })
+        assertEquals(picture, draft.blocks[0].bbox)
+        assertEquals("", draft.blocks[0].text)
+        val derived = StructureDerivation.derive(draft, "b".repeat(64))
+        assertEquals("Figure 1. A quay", derived.extractedText)
+        assertEquals(BlockKind.FIGURE, derived.structure.blocks[0].kind)
+        derived.structure.verifiedAgainst(derived.extractedText)
+    }
+
+    @Test
     fun `mapsEveryLabel`() {
         val cases = mapOf(
             "SectionHeader" to BlockKind.HEADING,
@@ -190,15 +208,14 @@ class SuryaStructureParserTest {
     }
 
     @Test
-    fun `pictureWithoutTextDropped`() {
+    fun `pictureWithoutTextIsKeptWithItsBox`() {
         val blocks = parse(
             block("", "Picture"),
             block("<img src=\"x.png\">", "Figure"),
             block("Fig 1: a chart", "Picture"),
         ).blocks
-        assertEquals(1, blocks.size)
-        assertEquals(BlockKind.FIGURE, blocks.single().kind)
-        assertEquals("Fig 1: a chart", blocks.single().text)
+        assertEquals(listOf(BlockKind.FIGURE, BlockKind.FIGURE, BlockKind.FIGURE), blocks.map { it.kind })
+        assertEquals(listOf("", "", "Fig 1: a chart"), blocks.map { it.text })
     }
 
     @Test
@@ -244,7 +261,7 @@ class SuryaStructureParserTest {
     fun `parserNameAndNoDegradationForCleanPage`() {
         val result = parse(block("<h1>Title</h1>", "SectionHeader"), block("body", "Text"))
         assertEquals(SuryaStructureParser.PARSER, result.parser)
-        assertEquals("surya-html/1", result.parser)
+        assertEquals("surya-html/2", result.parser)
         assertFalse(result.degraded)
     }
 }

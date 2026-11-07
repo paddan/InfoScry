@@ -65,6 +65,10 @@ under the server's library (`INFOSCRY_LIBRARY_DIR`). The CLI
 is a client of the server with a personal access token. Earlier single-user
 archives are not migrated; collections are imported again.
 Collections, Search, Ask and Investigate have browser acceptance against local test doubles.
+Images are implemented: *Extract images* in the import and rescan dialogs finds pictures embedded in PDFs,
+Office files and EPUBs and, with Surya layout, pictures on scanned pages; they are shown, searchable by
+caption and citable. Browser coverage is `ImagesBrowserAcceptanceTest`; region extraction is not yet verified
+against real Surya ([status](docs/implementation-status.md#image-foundation-2026-11-07)).
 The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan (including No OCR, which uses the
 document's own text), reads selected pages and publishes
@@ -94,8 +98,9 @@ Collections); the Ask prompt flow has browser coverage in `DocumentBrowserAccept
 PDF/image review shows exact-revision images beside extracted text, including
 historical PDF page and image citations. Live review can mark pages and confirm an exact
 page set and reading method for rescanning. Stopped selected-page runs can resume
-from committed pages. Integrated browser verification passed 42 scenarios; the
-latest accumulated check passed 1,838 JVM and 474 frontend tests.
+from committed pages. Integrated browser verification passed 42 scenarios; an
+earlier accumulated check (historical; current counts are in
+[implementation status](docs/implementation-status.md#image-foundation-2026-11-07)) passed 1,838 JVM and 474 frontend tests.
 The latest Investigate browser run passed all nine scenarios against local fake
 providers. [Effort contracts](docs/investigate-effort.md) describe profile overrides
 and the fresh-database prerequisite; no existing archive was reset or migrated.

@@ -30,6 +30,7 @@ import infoscry.ocr.OcrOperationStage
 import infoscry.ocr.OcrProfileRevision
 import infoscry.ocr.OcrProfileRole
 import infoscry.ocr.OcrSettingsSnapshot
+import infoscry.image.ImageExtractionMode
 import infoscry.ocr.ReadingMethod
 import infoscry.ocr.ReadingMethodCatalog
 import infoscry.ocr.ReadingMethodUnavailableException
@@ -271,6 +272,8 @@ class RescanPageSource(
         committedPages: Map<Int, RevisionPageText> = emptyMap(),
         selection: RescanSelection = RescanSelection.Automatic,
         readsImages: Boolean = true,
+        /** Keep current text: no page is rendered and no text layer is read, so no page carries its own text. */
+        keepsText: Boolean = false,
     ): List<RescanPage> = when {
         mediaType == PDF_MEDIA_TYPE -> pdfPages(
             document = document,
@@ -282,6 +285,7 @@ class RescanPageSource(
             committedPages = committedPages,
             selection = selection,
             readsImages = readsImages,
+            keepsText = keepsText,
         )
 
         // No OCR does not open the picture: its one page keeps the document's published text.
@@ -321,6 +325,7 @@ class RescanPageSource(
         committedPages: Map<Int, RevisionPageText>,
         selection: RescanSelection,
         readsImages: Boolean,
+        keepsText: Boolean,
     ): List<RescanPage> {
         val pdf = openPdf(managedPath)
             ?: throw RescanRefusalException(
@@ -344,10 +349,14 @@ class RescanPageSource(
                         image = null,
                         baseline = baselinePage,
                         read = false,
-                        ownText = try {
-                            PdfBoxPageTextReader.read(container, page)
-                        } catch (unreadable: IOException) {
+                        ownText = if (keepsText) {
                             null
+                        } else {
+                            try {
+                                PdfBoxPageTextReader.read(container, page)
+                            } catch (unreadable: IOException) {
+                                null
+                            }
                         },
                     )
                 }
@@ -576,15 +585,26 @@ class RescanService(
         documentId: DocumentId,
         method: ReadingMethod,
         selection: RescanSelection = RescanSelection.Automatic,
+        /** The image mode confirmed in the dialog; null takes the collection's default. */
+        imageExtraction: ImageExtractionMode? = null,
     ): RescanPreview {
         val collection = requireActiveCollection(collectionId)
         val document = requireDocument(collectionId, documentId)
-        methodCatalog?.require(collectionId, method)
+        methodCatalog?.requireForRescan(collectionId, method)
+        val images = imageExtraction ?: collection.defaultImageExtraction
+        // Keeping the text leaves only the image step to do, so with images off there is nothing for it to do.
+        if (method == ReadingMethod.KeepText && images == ImageExtractionMode.OFF) {
+            throw ReadingMethodUnavailableException(KEEP_TEXT_NEEDS_IMAGES)
+        }
         pageImagesRefusal(document)?.let { throw it }
-        val settings = CollectionOcrSettings(collection.ocrLanguages, method)
+        // Keep current text is no collection default, so its snapshot is built from the no-engine settings.
+        val settings = CollectionOcrSettings(
+            collection.ocrLanguages,
+            if (method == ReadingMethod.KeepText) ReadingMethod.None else method,
+        )
         val baselineRevisionId = revisions.activeRevisionId(documentId)
         val baseline = baselineRevisionId
-            ?.let { revisionId -> revisions.pages(revisionId).associateBy { page -> page.ordinal } }
+            ?.let { revisionId -> textPagesOf(revisions.pages(revisionId)) }
             .orEmpty()
         // The pages a rescan reads, not all the pages: the dialog's count, the cost and the external allowance
         // all describe what is actually sent, and the pages that keep their published text are not in them.
@@ -593,13 +613,16 @@ class RescanService(
             document.mediaType,
             baseline,
             selection,
-            readsImages = method != ReadingMethod.None,
+            readsImages = method != ReadingMethod.None && method != ReadingMethod.KeepText,
         )
         val frozenSelection = selection.canonicalized(census.documentPages)
         val pageTotal = census.pagesToRead
         val snapshot = snapshotFor(settings, externalPageLimit = if (method is ReadingMethod.Llm &&
             profileOf(method.profileId)?.revision?.scope == OcrEndpointScope.EXTERNAL
-        ) pageTotal else 0)
+        ) pageTotal else 0).copy(
+            imageExtraction = images,
+            keepsText = method == ReadingMethod.KeepText,
+        )
         requireRescanable(document, snapshot)
         val destinations = destinationsOf(snapshot)
         val external = snapshot.transcriptionProfileRevisionId?.let { profileRevisionOf(it)?.scope } == OcrEndpointScope.EXTERNAL
@@ -639,6 +662,8 @@ class RescanService(
         method: ReadingMethod,
         externalPageLimit: Int = 0,
     ): OcrSettingsSnapshot {
+        // A retry reads again, so it never takes the rescan-only method, with or without a catalog to say so.
+        if (method == ReadingMethod.KeepText) throw ReadingMethodUnavailableException("that reading method is not available")
         methodCatalog?.require(collection.id, method)
         val snapshot = snapshotFor(
             CollectionOcrSettings(collection.ocrLanguages, method),
@@ -1085,7 +1110,7 @@ class RescanService(
         val selectedMethod = when (shown.engine) {
             infoscry.ocr.OcrEngine.TESSERACT -> ReadingMethod.Tesseract
             infoscry.ocr.OcrEngine.SURYA -> ReadingMethod.Surya
-            infoscry.ocr.OcrEngine.NONE -> ReadingMethod.None
+            infoscry.ocr.OcrEngine.NONE -> if (shown.keepsText) ReadingMethod.KeepText else ReadingMethod.None
             infoscry.ocr.OcrEngine.LLM -> {
                 val revisionId = shown.transcriptionProfileRevisionId
                     ?: refuse("transcription profile", "none", "missing")
@@ -1099,7 +1124,7 @@ class RescanService(
             }
         }
         try {
-            methodCatalog?.require(collection.id, selectedMethod)
+            methodCatalog?.requireForRescan(collection.id, selectedMethod)
         } catch (unavailable: ReadingMethodUnavailableException) {
             refuse("reading method", selectedMethod.id, "unavailable")
         }
@@ -1216,9 +1241,21 @@ class RescanService(
 
         const val CANCELLED_CODE: String = "RESCAN_CANCELLED"
 
+        /** Why a rescan that keeps the text is refused while images are off. */
+        const val KEEP_TEXT_NEEDS_IMAGES: String = "Keep current text needs images on"
+
         private fun hexHash(fields: List<String>): String =
             HexFormat.of().formatHex(
                 MessageDigest.getInstance("SHA-256").digest(fields.joinToString("\n").toByteArray(Charsets.UTF_8)),
             )
     }
 }
+
+/**
+ * The pages of a revision keyed by ordinal, without its image units.
+ *
+ * A rescan reads and compares the pages of the original; an image unit is not one of them, and its ordinal sits
+ * beyond every page's, so leaving it in would only offer a baseline for a page that does not exist.
+ */
+internal fun textPagesOf(pages: List<RevisionPageText>): Map<Int, RevisionPageText> =
+    pages.filterNot { infoscry.image.ImageIdentity.isImageOrdinal(it.ordinal) }.associateBy { it.ordinal }

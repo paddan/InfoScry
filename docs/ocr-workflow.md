@@ -65,6 +65,14 @@ A **reading method** is one entry in one list, never a pair of fields:
 | Surya | this machine | installed model |
 | LLM: *profile name* | the profile's endpoint (local or external) | an enabled OCR profile |
 
+**Keep current text** (id `keep`) is a rescan-only method (2026-11-07,
+[image foundation](specs/2026-11-07-image-foundation-design.md)): it reads no
+page and carries every page's published text forward unchanged, then runs only
+the image step. It is listed when the dialog is opened for a rescan, is refused
+for imports, retries and as a collection default, and needs *Extract images* set
+to Embedded or Embedded + regions. Its snapshot has engine `NONE` and
+`keepsText`.
+
 Engine and profile are stored together as one value, so a method cannot name an
 engine without its profile or the reverse. A method that cannot run now (tool
 missing, profile disabled, key variable unset, image check not passed) is
@@ -94,6 +102,10 @@ Opened by *Import* (file or directory) and by *Scan again* on a document.
   (`this machine` or the endpoint host for an external profile), and, for an
   external profile with known prices, an estimated cost with its basis. An
   unknown price says so.
+- **Extract images** (Off, Embedded images, Embedded + regions from scanned
+  pages) beside the method, pre-filled from the collection default and frozen in
+  the attempt's snapshot; it is not part of the text fingerprint, so changing it
+  never rereads a page.
 - **Confirm button** names the consequence: `Read 48 pages with Surya` or
   `Send 48 pages to <host> with <profile>`. Pressing it is the approval of
   exactly those pages and that method.

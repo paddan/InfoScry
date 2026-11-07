@@ -151,6 +151,27 @@ class DocumentRoutesTest {
     }
 
     @Test
+    fun `a row carries InfoScry's sentence for an image warning and none for a failure`() = runBlocking {
+        val id = CollectionId(newCollection())
+        harness.context.documents.insert(
+            documentAt("doc-warned", id, "scan.pdf", status = DocumentStatus.COMPLETE_WITH_WARNINGS, errorCode = "NEEDS_SURYA_LAYOUT"),
+        )
+        harness.context.documents.insert(
+            documentAt(
+                "doc-failed", id, "bad.pdf", status = DocumentStatus.FAILED, errorCode = "PDF_PARSE_FAILED",
+                errorMessage = "could not parse page 2 of the 2025 budget worksheet",
+            ),
+        )
+
+        val rows = page(id, "").documents.associateBy { it.id.value }
+
+        val note = rows.getValue("doc-warned").warningNote
+        assertEquals(infoscry.image.ImageWarnings.messageFor("NEEDS_SURYA_LAYOUT"), note)
+        assertContains(note!!, infoscry.ocr.SuryaOcr.INTERPRETER_ENV)
+        assertEquals(null, rows.getValue("doc-failed").warningNote)
+    }
+
+    @Test
     fun `an unknown collection is not found`() = runBlocking {
         val response = harness.get("/api/collections/does-not-exist/documents")
 

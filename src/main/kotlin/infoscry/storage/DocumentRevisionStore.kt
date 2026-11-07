@@ -325,6 +325,7 @@ class DocumentRevisionStore(private val database: Database, private val content:
         val order = if (previous) "DESC" else "ASC"
         connection.prepareStatement(
             "SELECT ordinal FROM page_text_revisions WHERE revision_id = ? AND ordinal $comparison ? " +
+                "AND ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE} " +
                 "AND approval = 'APPROVED' ORDER BY ordinal $order LIMIT 1",
         ).use { statement ->
             statement.setString(1, revisionId)
@@ -522,10 +523,49 @@ class DocumentRevisionStore(private val database: Database, private val content:
                         source.structureReference == page.structureReference) { "a preserved page must match its recorded producer" }
                 }
             }
+            if (page.locator is SourceLocation.ImageRegion) connection.removeMovedImagePage(revisionId, page)
             connection.deletePageChunks(revisionId, page.ordinal)
             connection.writePageText(revisionId, page, Instants.now())
             connection.writeChunks(revisionId, page)
         }
+    }
+
+    /**
+     * Removes the image pages of candidate [revisionId] whose ordinal is within [fromOrdinal]..[toOrdinal] and whose
+     * unit is not in [keep], with their passages. A repeat finds nothing more to remove.
+     *
+     * @return how many pages were removed.
+     */
+    fun removeImagePagesExcept(
+        revisionId: String,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<infoscry.domain.ContentUnitId>,
+    ): Int = database.transaction { connection ->
+        val revision = connection.selectRevision(revisionId)
+            ?: throw NoSuchElementException("no revision with id $revisionId exists")
+        check(revision.state == RevisionState.CANDIDATE) {
+            "revision $revisionId is ${revision.state}, so it cannot be staged into"
+        }
+        val stale = connection.prepareStatement(
+            "SELECT ordinal, unit_id FROM page_text_revisions WHERE revision_id = ? AND ordinal BETWEEN ? AND ?",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            statement.setInt(2, fromOrdinal)
+            statement.setInt(3, toOrdinal)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(rows.getInt(1) to rows.getString(2)) }
+            }
+        }.filterNot { (_, unit) -> infoscry.domain.ContentUnitId(unit) in keep }
+        stale.forEach { (ordinal, _) ->
+            connection.deletePageChunks(revisionId, ordinal)
+            connection.prepareStatement("DELETE FROM page_text_revisions WHERE revision_id = ? AND ordinal = ?").use { statement ->
+                statement.setString(1, revisionId)
+                statement.setInt(2, ordinal)
+                statement.executeUpdate()
+            }
+        }
+        stale.size
     }
 
     /**
@@ -1205,11 +1245,13 @@ class DocumentRevisionStore(private val database: Database, private val content:
                 "search_text, text_sha256, extraction_method, mean_confidence, artifact_relative_path, " +
                 "artifact_sha256, approval, created_at, producer_revision_id, layout_relative_path, layout_sha256, " +
                 "structure_relative_path, structure_sha256, reading_extracted_text, reading_search_text, " +
-                "reading_references) " +
+                "reading_references, source_image_root, source_image_relative_path, source_image_sha256, " +
+                "source_image_width, source_image_height, source_image_render_version) " +
                 "SELECT ?, ordinal, id, locator, extracted_text, search_text, NULL, extraction_method, " +
                 "mean_confidence, artifact_relative_path, artifact_sha256, ?, ?, ?, NULL, NULL, " +
                 "structure_relative_path, structure_sha256, reading_extracted_text, reading_search_text, " +
-                "reading_references " +
+                "reading_references, source_image_root, source_image_relative_path, source_image_sha256, " +
+                "source_image_width, source_image_height, source_image_render_version " +
                 "FROM content_units " +
                 "WHERE document_id = ?",
         ).use { statement ->
@@ -1318,6 +1360,29 @@ class DocumentRevisionStore(private val database: Database, private val content:
             statement.setInt(2, ordinal)
             statement.executeQuery().use { rows -> if (rows.next()) rows.toPageText() else null }
         }
+
+    /**
+     * Removes the row an image unit already has in [revisionId] at another ordinal, with its passages, so staging the
+     * unit again at a new position moves it instead of leaving two pages for one unit.
+     */
+    private fun Connection.removeMovedImagePage(revisionId: String, page: RevisionPageDraft) {
+        val moved = prepareStatement(
+            "SELECT ordinal FROM page_text_revisions WHERE revision_id = ? AND unit_id = ? AND ordinal <> ?",
+        ).use { statement ->
+            statement.setString(1, revisionId)
+            statement.setString(2, page.unitId.value)
+            statement.setInt(3, page.ordinal)
+            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getInt(1)) } }
+        }
+        moved.forEach { ordinal ->
+            deletePageChunks(revisionId, ordinal)
+            prepareStatement("DELETE FROM page_text_revisions WHERE revision_id = ? AND ordinal = ?").use { statement ->
+                statement.setString(1, revisionId)
+                statement.setInt(2, ordinal)
+                statement.executeUpdate()
+            }
+        }
+    }
 
     private fun Connection.deletePageChunks(revisionId: String, unitOrdinal: Int) {
         prepareStatement("DELETE FROM revision_chunks WHERE revision_id = ? AND unit_ordinal = ?").use { statement ->

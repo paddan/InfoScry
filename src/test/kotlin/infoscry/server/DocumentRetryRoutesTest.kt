@@ -545,6 +545,58 @@ class DocumentRetryRoutesTest {
         }
     }
 
+    @Test
+    fun `a retry keeps the image extraction of the earlier attempt, else the collection default`() = runBlocking {
+        val racedDir = Files.createTempDirectory("infoscry-retry-images")
+        try {
+            val server = ApiTestServer(
+                racedDir,
+                retryPrerequisites = { collection ->
+                    val snapshot = infoscry.ocr.OcrSettingsSnapshot(
+                        engine = infoscry.ocr.OcrEngine.TESSERACT,
+                        mode = infoscry.ocr.OcrImportMode.FILL_MISSING,
+                        language = collection.ocrLanguages,
+                        extractorVersion = "schema-1",
+                    )
+                    RetryPrerequisites(
+                        settings = ExtractionSettings(ocrLanguages = collection.ocrLanguages),
+                        ocr = snapshot,
+                        ocrToolAvailable = true,
+                        ebookToolAvailable = true,
+                        embeddingModelAvailable = true,
+                    )
+                },
+            )
+            server.use { live ->
+                live.createCollection("Pictures", Credential.BEARER)
+                val collectionId = CollectionId(live.collectionIdOf("Pictures"))
+                live.context.collectionService.updateImageDefault(collectionId, infoscry.image.ImageExtractionMode.ALL)
+                val document = seedDocument(live, collectionId, "failed.txt", "failed bytes", DocumentStatus.FAILED)
+
+                fun retry(): infoscry.ocr.OcrSettingsSnapshot {
+                    val response = kotlinx.coroutines.runBlocking {
+                        live.request(
+                            HttpMethod.Post, retryPath(collectionId.value),
+                            body = """{"documentIds":["${document.value}"]}""", credential = Credential.BEARER,
+                        )
+                    }
+                    val admission = ApiJson.decodeFromString<RetryDocumentsResponse>(kotlinx.coroutines.runBlocking { response.bodyAsText() })
+                    val job = live.context.jobs.get(infoscry.domain.JobId(admission.acceptedJobIds.single()))!!
+                    return RetryJobPayload.decode(job.payload).documentSnapshots.getValue(document.value)
+                }
+
+                assertEquals(infoscry.image.ImageExtractionMode.ALL, retry().imageExtraction, "the collection default")
+
+                // The default moves, but the document's earlier attempt chose ALL and the retry keeps it.
+                live.context.collectionService.updateImageDefault(collectionId, infoscry.image.ImageExtractionMode.OFF)
+                live.context.documents.updateStatus(document, DocumentStatus.FAILED)
+                assertEquals(infoscry.image.ImageExtractionMode.ALL, retry().imageExtraction, "the earlier attempt")
+            }
+        } finally {
+            racedDir.toFile().deleteRecursively()
+        }
+    }
+
     private suspend fun createCollection(name: String): String {
         harness.createCollection(name, Credential.BEARER)
         return harness.collectionIdOf(name)

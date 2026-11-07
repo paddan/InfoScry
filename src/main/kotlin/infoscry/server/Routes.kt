@@ -75,6 +75,8 @@ data class RenameCollectionRequest(val name: String)
 data class UpdateOcrLanguagesRequest(
     val language: String? = null,
     val defaultMethod: ReadingMethod? = null,
+    /** `off`, `embedded` or `all`; absent keeps the collection's current default. */
+    val defaultImageExtraction: String? = null,
 ) {
 
     fun toUpdate(): OcrSettingsUpdate = OcrSettingsUpdate(
@@ -168,6 +170,8 @@ data class ImportRequest(
     val requestId: String,
     /** CLI permits a later identical command to replace a failed or cancelled import. */
     val restartStopped: Boolean = false,
+    /** `off`, `embedded` or `all`; absent takes the collection's default. A stated value is part of the request. */
+    val imageExtraction: String? = null,
 )
 
 @Serializable
@@ -330,10 +334,15 @@ fun Application.configureRoutes(
                 call.handle {
                     val id = call.collectionId()
                     val request = call.receiveJson<UpdateOcrLanguagesRequest>()
-                    call.respondJson(
-                        HttpStatusCode.OK,
-                        CollectionResponse(context.collectionService.updateOcrSettings(id, request.toUpdate(), call.ifMatchVersion())),
-                    )
+                    val images = parseImageMode(request.defaultImageExtraction)
+                    val expected = call.ifMatchVersion()
+                    val saved = if (images != null && request.language == null && request.defaultMethod == null) {
+                        context.collectionService.updateImageDefault(id, images, expected)
+                    } else {
+                        // One edit, one version check: the image default travels with the OCR settings.
+                        context.collectionService.updateOcrSettings(id, request.toUpdate(), expected, images)
+                    }
+                    call.respondJson(HttpStatusCode.OK, CollectionResponse(saved))
                 }
             }
         }
@@ -392,6 +401,7 @@ fun Application.configureRoutes(
                             previewHash = request.previewHash,
                             requestId = request.requestId,
                             restartStopped = request.restartStopped,
+                            imageExtraction = parseImageMode(request.imageExtraction),
                         ),
                     )
                     call.respondJson(
@@ -475,6 +485,7 @@ fun Application.configureRoutes(
 
         configureSearchRoutes(context, context.mutations)
         configureSourceRoutes(context)
+        configureImageRoutes(context)
         configureSelectablePdfRoutes(context)
         configurePageReviewRoutes(context)
         configureLlmProfileRoutes(context)
@@ -721,4 +732,11 @@ internal fun ApiStatus.toHttpStatusCode(): HttpStatusCode = when (this) {
     ApiStatus.CONFLICT -> HttpStatusCode.Conflict
     ApiStatus.LOCKED -> HttpStatusCode.Locked
     ApiStatus.SERVICE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+}
+
+/** The image extraction mode a request names, null when it names none; an unknown name is a 400. */
+internal fun parseImageMode(raw: String?): infoscry.image.ImageExtractionMode? = try {
+    raw?.let(infoscry.image.ImageExtractionMode::parse)
+} catch (_: IllegalArgumentException) {
+    throw BadRequestException("unknown image extraction mode")
 }

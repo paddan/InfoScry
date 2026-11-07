@@ -78,4 +78,21 @@ describe('CollectionOcrSettings', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
     await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng+deu', defaultMethod: 'surya' }, undefined));
   });
+
+  it('saves the default image extraction with the version it was edited from', async () => {
+    render(CollectionOcrSettings, { collection: { ...collection(), version: 7, defaultImageExtraction: 'embedded' }, onChanged: vi.fn() });
+    const select = await screen.findByLabelText('Extract images by default') as HTMLSelectElement;
+    expect(select.value).toBe('embedded');
+    await fireEvent.change(select, { target: { value: 'all' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
+    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng', defaultMethod: 'tesseract', defaultImageExtraction: 'all' }, 7));
+  });
+
+  it('shows the conflict message when someone else changed the settings', async () => {
+    vi.mocked(api.updateCollectionOcrSettings).mockRejectedValue(new api.ApiError('EDIT_CONFLICT', 'These settings changed while you were editing; reload and try again.', 409));
+    render(CollectionOcrSettings, { collection: { ...collection(), version: 7 }, onChanged: vi.fn() });
+    await fireEvent.change(await screen.findByLabelText('Extract images by default'), { target: { value: 'embedded' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('These settings changed while you were editing');
+  });
 });

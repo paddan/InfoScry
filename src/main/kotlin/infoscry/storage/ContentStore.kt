@@ -8,6 +8,7 @@ import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.ExtractionMethod
+import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceLocation
 import infoscry.domain.UnitKind
 import infoscry.extract.ContentUnitDraft
@@ -97,6 +98,11 @@ data class RevisionPage(
     val structureSha256: String? = null,
     /** The page's reading before corrections, as its revision recorded it. */
     val reading: ReadingText? = null,
+    /**
+     * The picture an image unit shows. Only an image unit's is published into its unit, like an import's own
+     * commit does; every other page's source image stays in its revision.
+     */
+    val sourceImage: SourceImageProvenance? = null,
 ) {
     init {
         require(ordinal >= 0) { "RevisionPage.ordinal must not be negative, was $ordinal" }
@@ -180,6 +186,9 @@ class ContentStore(private val database: Database) {
         }
         val now = Instants.now()
 
+        // An image unit keeps the identity it was given, wherever it sits: a repeat that moves it to another
+        // ordinal replaces the old row, and a unit that held the ordinal under another identity makes room.
+        draft.unitId?.let { connection.removeImageUnitConflicts(documentId, it, ordinal) }
         val existing = connection.selectUnit(documentId, ordinal)
         val changed = existing == null || existing.searchText != draft.searchText ||
             existing.extractedText != draft.extractedText
@@ -216,14 +225,54 @@ class ContentStore(private val database: Database) {
         )
         // The attempt's own row, written in the same transaction as the unit it describes: what the UI
         // calls progress and what the store holds as committed text are then never two different states.
-        connection.upsertProgress(
-            documentId = documentId,
-            fingerprint = fingerprint,
-            unitKind = draft.locator.unitKind,
-            totalUnits = null,
-            now = now,
-        )
+        // An image unit is not a page of the reading: the progress "page x of y" counts and names pages only.
+        if (draft.locator !is SourceLocation.ImageRegion) {
+            connection.upsertProgress(
+                documentId = documentId,
+                fingerprint = fingerprint,
+                unitKind = draft.locator.unitKind,
+                totalUnits = null,
+                now = now,
+            )
+        }
         UnitCommit(unit = unit, artifactIssue = issue)
+    }
+
+    /**
+     * Removes the image units of [documentId] whose ordinal is within [fromOrdinal]..[toOrdinal] and whose identity is
+     * not in [keep], with their chunks and their image checkpoints, so a delivery that produced fewer images (or none)
+     * than an earlier one leaves nothing of the earlier one behind. Safe to repeat: a second call finds nothing to do.
+     *
+     * @return how many units were removed.
+     */
+    fun removeImageUnitsExcept(
+        documentId: DocumentId,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<ContentUnitId>,
+    ): Int = database.transaction { connection ->
+        val stale = connection.prepareStatement(
+            "SELECT id FROM content_units WHERE document_id = ? AND ordinal BETWEEN ? AND ?",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setInt(2, fromOrdinal)
+            statement.setInt(3, toOrdinal)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(ContentUnitId(rows.getString(1))) }
+            }
+        }.filterNot { it in keep }
+        stale.forEach { unitId ->
+            connection.deleteUnit(unitId)
+            connection.prepareStatement(
+                "DELETE FROM extraction_checkpoints WHERE document_id = ? AND unit_key = ?",
+            ).use { statement ->
+                statement.setString(1, documentId.value)
+                statement.setString(2, "image:${unitId.value}")
+                statement.executeUpdate()
+            }
+        }
+        if (stale.isNotEmpty()) connection.deleteChunkingMarker(documentId)
+        stale.size
     }
 
     /**
@@ -672,21 +721,22 @@ class ContentStore(private val database: Database) {
     fun neighboursOf(documentId: DocumentId, ordinal: Int): UnitNeighbours = database.read { connection ->
         fun adjacent(comparison: String, order: String): ContentUnitId? =
             connection.prepareStatement(
-                "SELECT id FROM content_units WHERE document_id = ? AND ordinal $comparison ? ORDER BY ordinal $order LIMIT 1",
+                "SELECT id FROM content_units WHERE document_id = ? AND ordinal $comparison ? AND ordinal < ? ORDER BY ordinal $order LIMIT 1",
             ).use { statement ->
                 statement.setString(1, documentId.value)
                 statement.setInt(2, ordinal)
+                statement.setInt(3, infoscry.image.ImageIdentity.ORDINAL_BASE)
                 statement.executeQuery().use { rows -> if (rows.next()) ContentUnitId(rows.getString(1)) else null }
             }
         val before = connection.prepareStatement(
-            "SELECT COUNT(*) FROM content_units WHERE document_id = ? AND ordinal < ?",
+            "SELECT COUNT(*) FROM content_units WHERE document_id = ? AND ordinal < ? AND ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE}",
         ).use { statement ->
             statement.setString(1, documentId.value)
             statement.setInt(2, ordinal)
             statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
         }
         val total = connection.prepareStatement(
-            "SELECT COUNT(*) FROM content_units WHERE document_id = ?",
+            "SELECT COUNT(*) FROM content_units WHERE document_id = ? AND ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE}",
         ).use { statement ->
             statement.setString(1, documentId.value)
             statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
@@ -770,7 +820,7 @@ class ContentStore(private val database: Database) {
     /**
      * The extracted text of every live unit of each of [documentIds], in ordinal order, from one batched read.
      *
-     * A document with no units is absent from the map. This is the text a document-level quality score is
+     * A document with no units is absent from the map; image units are not counted. This is the text a document-level quality score is
      * computed over, so it reads what a reader sees rather than any extraction attempt still in progress.
      */
     fun extractedTextsOf(documentIds: Collection<DocumentId>): Map<DocumentId, List<String>> {
@@ -780,7 +830,9 @@ class ContentStore(private val database: Database) {
             connection.readRows(
                 // Only the sample the quality score judges is read: a long unit's full text is never needed here.
                 "SELECT document_id, SUBSTR(extracted_text, 1, ${OcrQualityScorer.SAMPLE_CHARS}) AS extracted_text " +
-                    "FROM content_units WHERE document_id IN (%s) ORDER BY document_id, ordinal",
+                    "FROM content_units WHERE document_id IN (%s) " +
+                    // An image unit's text is a caption, not a reading, so it is not what the score judges.
+                    "AND ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE} ORDER BY document_id, ordinal",
                 ids,
             ) { rows ->
                 val texts = linkedMapOf<DocumentId, MutableList<String>>()
@@ -987,6 +1039,23 @@ class ContentStore(private val database: Database) {
         }
     }
 
+    /**
+     * Removes the rows an image unit's arrival would collide with: the unit itself at another ordinal, and any
+     * other unit holding [ordinal]. Their chunks go with them.
+     */
+    private fun Connection.removeImageUnitConflicts(documentId: DocumentId, unitId: ContentUnitId, ordinal: Int) {
+        prepareStatement(
+            "DELETE FROM content_units WHERE document_id = ? AND ((id = ? AND ordinal <> ?) OR (ordinal = ? AND id <> ?))",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setString(2, unitId.value)
+            statement.setInt(3, ordinal)
+            statement.setInt(4, ordinal)
+            statement.setString(5, unitId.value)
+            if (statement.executeUpdate() > 0) deleteChunkingMarker(documentId)
+        }
+    }
+
     private fun Connection.selectUnit(documentId: DocumentId, ordinal: Int): ContentUnit? =
         prepareStatement("$SELECT_UNITS WHERE document_id = ? AND ordinal = ?").use { statement ->
             statement.setString(1, documentId.value)
@@ -1007,12 +1076,16 @@ class ContentStore(private val database: Database) {
         structure: StructureReference?,
         now: String,
     ): ContentUnit {
-        val id = existing?.id ?: ContentUnitId.new()
+        val id = existing?.id ?: draft.unitId ?: ContentUnitId.new()
+        // Only an image unit carries the picture it shows; every other unit's source image stays what it was.
+        val image = draft.sourceImage.takeIf { draft.locator is SourceLocation.ImageRegion }
         connection.prepareStatement(
             "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
                 "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
                 "created_at, updated_at, structure_relative_path, structure_sha256, reading_extracted_text, " +
-                "reading_search_text, reading_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "reading_search_text, reading_references, source_image_root, source_image_relative_path, " +
+                "source_image_sha256, source_image_width, source_image_height, source_image_render_version) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (document_id, ordinal) DO UPDATE SET locator_type = excluded.locator_type, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
                 "search_text = excluded.search_text, " +
@@ -1023,7 +1096,13 @@ class ContentStore(private val database: Database) {
                 "structure_sha256 = excluded.structure_sha256, " +
                 "reading_extracted_text = excluded.reading_extracted_text, " +
                 "reading_search_text = excluded.reading_search_text, " +
-                "reading_references = excluded.reading_references",
+                "reading_references = excluded.reading_references, " +
+                "source_image_root = excluded.source_image_root, " +
+                "source_image_relative_path = excluded.source_image_relative_path, " +
+                "source_image_sha256 = excluded.source_image_sha256, " +
+                "source_image_width = excluded.source_image_width, " +
+                "source_image_height = excluded.source_image_height, " +
+                "source_image_render_version = excluded.source_image_render_version",
         ).use { statement ->
             statement.setString(1, id.value)
             statement.setString(2, documentId.value)
@@ -1047,6 +1126,12 @@ class ContentStore(private val database: Database) {
             statement.setString(16, draft.reading?.extractedText)
             statement.setString(17, draft.reading?.searchText)
             statement.setString(18, draft.reading?.encodedReferences())
+            statement.setString(19, image?.root?.name)
+            statement.setString(20, image?.relativePath)
+            statement.setString(21, image?.sha256)
+            if (image?.width == null) statement.setNull(22, java.sql.Types.BIGINT) else statement.setInt(22, image.width)
+            if (image?.height == null) statement.setNull(23, java.sql.Types.BIGINT) else statement.setInt(23, image.height)
+            if (image == null) statement.setNull(24, java.sql.Types.BIGINT) else statement.setInt(24, image.renderVersion)
             statement.executeUpdate()
         }
         return checkNotNull(connection.selectUnit(documentId, ordinal)) {
@@ -1134,7 +1219,9 @@ class ContentStore(private val database: Database) {
             "INSERT INTO content_units (id, document_id, ordinal, locator_type, locator, extracted_text, " +
                 "search_text, artifact_relative_path, artifact_sha256, mean_confidence, extraction_method, " +
                 "created_at, updated_at, structure_relative_path, structure_sha256, reading_extracted_text, " +
-                "reading_search_text, reading_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "reading_search_text, reading_references, source_image_root, source_image_relative_path, " +
+                "source_image_sha256, source_image_width, source_image_height, source_image_render_version) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (id) DO UPDATE SET document_id = excluded.document_id, " +
                 "ordinal = excluded.ordinal, locator_type = excluded.locator_type, " +
                 "locator = excluded.locator, extracted_text = excluded.extracted_text, " +
@@ -1146,7 +1233,13 @@ class ContentStore(private val database: Database) {
                 "structure_sha256 = excluded.structure_sha256, " +
                 "reading_extracted_text = excluded.reading_extracted_text, " +
                 "reading_search_text = excluded.reading_search_text, " +
-                "reading_references = excluded.reading_references",
+                "reading_references = excluded.reading_references, " +
+                "source_image_root = excluded.source_image_root, " +
+                "source_image_relative_path = excluded.source_image_relative_path, " +
+                "source_image_sha256 = excluded.source_image_sha256, " +
+                "source_image_width = excluded.source_image_width, " +
+                "source_image_height = excluded.source_image_height, " +
+                "source_image_render_version = excluded.source_image_render_version",
         ).use { statement ->
             statement.setString(1, page.unitId.value)
             statement.setString(2, documentId.value)
@@ -1170,6 +1263,13 @@ class ContentStore(private val database: Database) {
             statement.setString(16, page.reading?.extractedText)
             statement.setString(17, page.reading?.searchText)
             statement.setString(18, page.reading?.encodedReferences())
+            val image = page.sourceImage.takeIf { page.locator is SourceLocation.ImageRegion }
+            statement.setString(19, image?.root?.name)
+            statement.setString(20, image?.relativePath)
+            statement.setString(21, image?.sha256)
+            if (image?.width == null) statement.setNull(22, java.sql.Types.BIGINT) else statement.setInt(22, image.width)
+            if (image?.height == null) statement.setNull(23, java.sql.Types.BIGINT) else statement.setInt(23, image.height)
+            if (image == null) statement.setNull(24, java.sql.Types.BIGINT) else statement.setInt(24, image.renderVersion)
             statement.executeUpdate()
         }
     }
@@ -1323,7 +1423,7 @@ class ContentStore(private val database: Database) {
                    SUM(CASE WHEN p.extraction_method = 'OCR' THEN 1 ELSE 0 END) AS ocr_units,
                    COUNT(p.extraction_method) AS units_with_method
             FROM document_revisions r
-            LEFT JOIN page_text_revisions p ON p.revision_id = r.id
+            LEFT JOIN page_text_revisions p ON p.revision_id = r.id AND p.ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE}
             WHERE r.state IN ('CANDIDATE', 'PUBLISHED') AND r.attempt_fingerprint IS NOT NULL
               AND r.document_id IN (%s)
             GROUP BY r.id
@@ -1350,7 +1450,7 @@ class ContentStore(private val database: Database) {
                             THEN 1 ELSE 0 END) AS units_with_method
             FROM extraction_checkpoints c
             LEFT JOIN content_units u ON u.document_id = c.document_id AND u.ordinal = c.ordinal
-            WHERE c.document_id IN (%s)
+            WHERE c.document_id IN (%s) AND c.ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE}
             GROUP BY c.document_id, c.fingerprint
         """.trimIndent()
 
@@ -1437,6 +1537,7 @@ class ContentStore(private val database: Database) {
             is SourceLocation.TextLines -> "text_lines"
             is SourceLocation.HtmlSection -> "html_section"
             is SourceLocation.EbookSection -> "ebook_section"
+            is SourceLocation.ImageRegion -> "image_region"
         }
 
         private fun encodeLocator(locator: SourceLocation): String =

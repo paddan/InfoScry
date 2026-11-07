@@ -30,6 +30,8 @@ import kotlinx.serialization.Serializable
 data class RescanPreviewRequest(
     val method: String,
     val selection: RescanSelection? = null,
+    /** `off`, `embedded` or `all`; absent takes the collection's default. */
+    val imageExtraction: String? = null,
 )
 
 /** Admitting a previewed rescan. The request id is what makes a repeated POST one operation. */
@@ -189,11 +191,17 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                 } catch (_: IllegalArgumentException) {
                     throw BadRequestException("unknown reading method")
                 }
+                val images = try {
+                    request.imageExtraction?.let(infoscry.image.ImageExtractionMode::parse)
+                } catch (_: IllegalArgumentException) {
+                    throw BadRequestException("unknown image extraction mode")
+                }
                 val preview = context.rescanService.preview(
                     collectionId = collectionId,
                     documentId = documentId,
                     method = method,
                     selection = request.selection ?: RescanSelection.Automatic,
+                    imageExtraction = images,
                 )
                 call.respondJson(HttpStatusCode.OK, preview)
             }

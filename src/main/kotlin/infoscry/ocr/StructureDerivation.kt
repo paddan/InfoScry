@@ -54,7 +54,7 @@ object StructureDerivation {
      * else an empty page, which holds the invariant trivially.
      */
     private fun degradedFallback(prepared: List<Prepared>, parser: String, imageSha256: String): DerivedPage {
-        val joined = prepared.joinToString("\n") { it.extracted }
+        val joined = prepared.filter { it.extracted.isNotEmpty() }.joinToString("\n") { it.extracted }
         val lines = joined.split('\n').filter { it.isNotBlank() }
             .mapNotNull { prepare(BlockDraft(BlockKind.PARAGRAPH, it)) }
         val whole = listOfNotNull(prepare(BlockDraft(BlockKind.PARAGRAPH, joined)))
@@ -90,7 +90,10 @@ object StructureDerivation {
             return Prepared(draft, extracted, TextNormalizer.normalize(extracted).search, cells)
         }
         val text = TextNormalizer.normalize(unifyLineEnds(draft.text))
-        if (text.search.isBlank()) return null
+        // A figure with a box and no words stays as a block with an empty range: it adds no text and no separator.
+        if (text.search.isBlank()) {
+            return if (draft.kind == BlockKind.FIGURE && draft.bbox != null) Prepared(draft, "", "", null) else null
+        }
         return Prepared(draft, text.extracted, text.search, null)
     }
 
@@ -98,11 +101,15 @@ object StructureDerivation {
         val extractedText = StringBuilder()
         val searchText = StringBuilder()
         val structureBlocks = ArrayList<StructureBlock>()
+        var wrote = false
         for ((order, block) in blocks.withIndex()) {
-            if (order > 0) {
+            // A block without words (a figure) writes nothing, so the page's text is the same without it.
+            val wordless = block.cells == null && block.extracted.isEmpty()
+            if (wrote && !wordless) {
                 extractedText.append('\n')
                 searchText.append('\n')
             }
+            if (!wordless) wrote = true
             val extractedStart = extractedText.length
             val searchStart = searchText.length
             val rows = block.cells?.let { appendTable(it, extractedText, searchText) }

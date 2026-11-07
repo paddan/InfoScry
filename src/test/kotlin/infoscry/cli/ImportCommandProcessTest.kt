@@ -109,6 +109,31 @@ class ImportCommandProcessTest {
     }
 
     @Test
+    fun `--images all sends the mode, another value is a different request, and a bogus value stops before an upload`() {
+        val source = writeSource("pictures.txt", "Words with pictures.\n")
+        val all = cli.run("import", "--collection", "Default", "--method", "none", "--images", "all", "--json", source.toString())
+        assertEquals(0, all.exitCode, all.stderr)
+        val job = cli.context.jobs.list(100).single()
+        val payload = infoscry.jobs.ImportJobPayload.decode(job.payload!!)
+        assertEquals(infoscry.image.ImageExtractionMode.ALL, payload.ocr!!.imageExtraction)
+
+        // The same command again is the same request; the same files with another value are not.
+        assertEquals(0, cli.run("import", "--collection", "Default", "--method", "none", "--images", "all", "--json", source.toString()).exitCode)
+        assertEquals(1, cli.context.jobs.list(100).size)
+
+        val uploadsBefore = cli.context.uploadAreas.uploadArea(cli.context.collections.list().single().id).toFile().walkTopDown().count()
+        val bogus = cli.run("import", "--collection", "Default", "--method", "none", "--images", "bogus", "--json", source.toString())
+        assertNotEquals(0, bogus.exitCode)
+        assertContains(bogus.stderr, "--images must be off, embedded or all")
+        assertEquals(1, cli.context.jobs.list(100).size)
+        assertEquals(
+            uploadsBefore,
+            cli.context.uploadAreas.uploadArea(cli.context.collections.list().single().id).toFile().walkTopDown().count(),
+            "nothing is uploaded for a refused flag",
+        )
+    }
+
+    @Test
     fun `--wait reports every document and exits nonzero when one could not be read`() {
         val good = writeSource("good.txt", "Readable.\n")
         // A supported file whose extraction fails: it is an item and a failure, as it always was.

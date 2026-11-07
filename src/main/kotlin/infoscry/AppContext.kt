@@ -252,6 +252,9 @@ class AppContext private constructor(
      */
     val ocrOperations: OcrOperationStore = OcrOperationStore(database)
 
+    /** The metadata of the images documents yield, and the checkpoints of the extraction that finds them. */
+    val imageStore: infoscry.storage.ImageStore = infoscry.storage.ImageStore(database)
+
     /** The reviews a comparison writes and a person decides about. */
     val ocrReviews: OcrReviewStore = OcrReviewStore(database)
 

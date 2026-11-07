@@ -23,6 +23,36 @@ const FAILURE_CAUSES: Record<string, string> = {
   SOURCE_UNREADABLE: 'The source file could not be read.',
 };
 
+/** What a document that finished with an image warning tells the person; the text is never part of it. */
+const IMAGE_WARNING_NOTES: Record<string, string> = {
+  NEEDS_SURYA_LAYOUT:
+    'Pictures on scanned pages were not located because Surya is not installed. Install it as the installation guide describes, then scan the pages again.',
+  IMAGE_LIMIT_REACHED: 'The document holds more images than the limit, so the rest were not kept.',
+  IMAGE_DECODE_FAILED: 'Some images could not be decoded and were left out.',
+  IMAGE_TOO_LARGE: 'Some images were too large to keep.',
+  TOO_MANY_IMAGES: 'A page or section holds more images than can be kept, so the rest were left out.',
+  IMAGE_PARENT_UNREADABLE: 'The images of some pages or sections could not be read.',
+  IMAGE_EXTRACTION_FAILED: 'The images could not be extracted. The text was kept.',
+  IMAGE_SOURCE_UNREADABLE: 'The document could not be opened to look for its images.',
+  IMAGE_PARENT_ORDINAL_TOO_LATE: 'Images late in a very long document were not kept.',
+};
+
+/**
+ * The sentence for an image warning code, or null when the code is not an image warning.
+ *
+ * The server sends its own sentence with the warning (`warningNote`, fixed wording, never document text); for the missing Surya layout engine that sentence carries the
+ * install commands, the pinned version and the interpreter variable, so it is shown as written rather than repeated here.
+ */
+export function imageWarningNote(code: string | null | undefined, message?: string | null): string | null {
+  if (!code) return null;
+  const known = IMAGE_WARNING_NOTES[code] ?? null;
+  if (known && code === 'NEEDS_SURYA_LAYOUT' && message && message.trim()) {
+    const sentence = message.trim();
+    return sentence.charAt(0).toUpperCase() + sentence.slice(1) + (/[.!?]$/.test(sentence) ? '' : '.');
+  }
+  return known;
+}
+
 export function readableFailureCause(code: string | null | undefined): string {
   return code ? FAILURE_CAUSES[code] ?? 'The reading attempt failed.' : 'The reading attempt failed.';
 }
@@ -42,7 +72,8 @@ export function documentStatus(doc: DocumentSummary, job?: JobSummary): Document
     return { kind: 'cancelled', label: 'Cancelled', nextAction: 'scan' };
   }
   if (doc.status === 'COMPLETE' || doc.status === 'COMPLETE_WITH_WARNINGS') {
-    return { kind: 'done', label: 'Done', nextAction: 'scan' };
+    const note = doc.status === 'COMPLETE_WITH_WARNINGS' ? imageWarningNote(doc.errorCode, doc.warningNote) : null;
+    return { kind: 'done', label: note ? `Done. ${note}` : 'Done', nextAction: 'scan' };
   }
   return { kind: 'imported', label: 'Imported', nextAction: 'scan' };
 }

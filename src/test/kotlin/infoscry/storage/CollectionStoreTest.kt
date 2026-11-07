@@ -2,6 +2,8 @@ package infoscry.storage
 
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.domain.EditConflictException
+import infoscry.image.ImageExtractionMode
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.ReadingMethod
 import java.nio.file.Files
@@ -102,6 +104,32 @@ class CollectionStoreTest {
 
         assertEquals(listOf("Acme"), store.list().map { it.name }, "a refused create stored a collection")
         assertEquals("eng", store.get(created.id)?.ocrLanguages, "a refused update changed the collection")
+    }
+
+    @Test
+    fun `a collection starts with images off and the default changes with its version`() {
+        val created = store.create("Pictures")
+        assertEquals(ImageExtractionMode.OFF, created.defaultImageExtraction)
+
+        val updated = store.updateImageDefault(created.id, ImageExtractionMode.EMBEDDED, created.version)
+
+        assertEquals(ImageExtractionMode.EMBEDDED, updated.defaultImageExtraction)
+        assertEquals(ImageExtractionMode.EMBEDDED, store.get(created.id)?.defaultImageExtraction)
+        assertEquals(created.version + 1, updated.version)
+    }
+
+    @Test
+    fun `a stale version cannot change the image default but repeating the current value is a no-op`() {
+        val created = store.create("Pictures")
+        val changed = store.updateImageDefault(created.id, ImageExtractionMode.EMBEDDED, created.version)
+
+        assertFailsWith<EditConflictException> {
+            store.updateImageDefault(created.id, ImageExtractionMode.ALL, created.version)
+        }
+        assertEquals(ImageExtractionMode.EMBEDDED, store.get(created.id)?.defaultImageExtraction)
+
+        val repeated = store.updateImageDefault(created.id, ImageExtractionMode.EMBEDDED, created.version)
+        assertEquals(changed, repeated, "the same value with a stale version changes nothing")
     }
 
     @Test

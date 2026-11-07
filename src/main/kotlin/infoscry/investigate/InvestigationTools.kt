@@ -5,6 +5,7 @@ import infoscry.ask.StructuredEvidenceSource
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
+import infoscry.image.ImageIdentity
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -204,7 +205,10 @@ class InvestigationTools(
         val beforeUnits = if (before == 0) emptyList() else content
             .listUnits(unit.documentId, afterOrdinal = maxOf(-1, unit.ordinal - before - 1), limit = before)
             .filter { it.ordinal < unit.ordinal } // the requested unit itself is not a neighbour
-        val afterUnits = if (after == 0) emptyList() else content.listUnits(unit.documentId, afterOrdinal = unit.ordinal, limit = after)
+            .filterNot { ImageIdentity.isImageOrdinal(it.ordinal) } // an image is a figure, not the text around a page
+        val afterUnits = if (after == 0) emptyList() else content
+            .listUnits(unit.documentId, afterOrdinal = unit.ordinal, limit = after)
+            .filterNot { ImageIdentity.isImageOrdinal(it.ordinal) }
 
         val revisionId = provableRevision(unit.documentId, beforeUnits + unit + afterUnits)
         val session = structured?.session(collectionId)

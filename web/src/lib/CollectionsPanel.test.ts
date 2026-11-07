@@ -2641,7 +2641,7 @@ describe('collections panel', () => {
       expect(within(details).getByTestId('document-reading-status').textContent).toContain('Done');
       await fireEvent.click(within(details).getByRole('button', { name: 'Scan again' }));
       expect(await within(details).findByRole('dialog')).toBeTruthy();
-      expect(api.previewRescan).toHaveBeenCalledWith('nightfall', 'doc-1', 'tesseract');
+      expect(api.previewRescan).toHaveBeenCalledWith('nightfall', 'doc-1', 'tesseract', undefined, 'off');
     });
   });
 });

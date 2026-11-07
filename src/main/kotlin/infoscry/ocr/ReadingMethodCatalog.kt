@@ -76,7 +76,7 @@ private fun localMethodUnavailableReason(method: ReadingMethod): String? = when 
         null
     }
     is ReadingMethod.Llm -> null
-    ReadingMethod.None -> null
+    ReadingMethod.None, ReadingMethod.KeepText -> null
 }
 
 private fun findExecutable(name: String): Path? = System.getenv("PATH")

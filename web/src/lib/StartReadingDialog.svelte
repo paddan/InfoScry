@@ -1,7 +1,7 @@
 <script lang="ts">
   import { isUncheckedImageProfile, methodOptionLabel } from './ocrRescan';
   import { onDestroy, onMount, tick } from 'svelte';
-  import { ApiError, listReadingMethods, previewImport, previewRescan, startImport, startRescan, type ImportPreview, type ImportStarted, type ReadingMethodOption, type RescanPreview, type RescanSelection, type RescanStarted } from './api';
+  import { ApiError, listReadingMethods, previewImport, previewRescan, startImport, startRescan, type ImageExtraction, type ImportPreview, type ImportStarted, type ReadingMethodOption, type RescanPreview, type RescanSelection, type RescanStarted } from './api';
 
   export let collectionId: string;
   export let request:
@@ -9,6 +9,8 @@
     | { kind: 'rescan'; documentId: string; selection?: RescanSelection };
   export let onstarted: (run: ImportStarted | RescanStarted) => void;
   export let oncancel: () => void;
+  /** The collection's default for *Extract images*; it only pre-fills the choice. */
+  export let defaultImageExtraction: ImageExtraction = 'off';
 
   type Preview = ImportPreview | RescanPreview;
   type PendingStart =
@@ -17,6 +19,12 @@
   const requestId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const imageOptions: { value: ImageExtraction; label: string }[] = [
+    { value: 'off', label: 'Off' },
+    { value: 'embedded', label: 'Embedded images' },
+    { value: 'all', label: 'Embedded + regions from scanned pages' },
+  ];
+  let imageExtraction: ImageExtraction = defaultImageExtraction;
   let methods: ReadingMethodOption[] = [];
   let selectedMethod = '';
   let preview: Preview | null = null;
@@ -37,8 +45,11 @@
   $: documentPageCount = preview !== null && !('files' in preview) && typeof preview.documentPages === 'number' ? preview.documentPages : null;
   // No OCR reads no page by design, so a zero total is what it is for rather than nothing to do.
   $: usesOwnText = selectedMethod === 'none';
+  // Keep current text reads nothing and only makes sense to add images to what is already read.
+  $: keepsText = selectedMethod === 'keep';
+  $: keepNeedsImages = keepsText && imageExtraction === 'off';
   // A rescan that keeps every page's text reads none; it may report no total, or a total of zero.
-  $: nothingToRead = !usesOwnText && preview !== null && !('files' in preview) && (pageCount === 0 || ((preview.pageTotal ?? 0) === 0 && documentPageCount !== null && documentPageCount > 0));
+  $: nothingToRead = !usesOwnText && !keepsText && preview !== null && !('files' in preview) && (pageCount === 0 || ((preview.pageTotal ?? 0) === 0 && documentPageCount !== null && documentPageCount > 0));
   $: importHasNoPagesToRead = preview !== null && 'files' in preview && pageCount === 0;
   $: explicitPages = preview !== null && !('files' in preview) && preview.selection?.mode === 'explicit'
     ? preview.selection.ordinals.map((ordinal) => ordinal + 1)
@@ -52,7 +63,9 @@
     : selectedOption?.destination ?? 'this machine';
   $: unknownExternalTotal = preview !== null && 'files' in preview && preview.external && preview.atLeast;
   $: displayedCost = unknownExternalTotal ? null : costTextFor(preview);
-  $: confirmationLabel = usesOwnText
+  $: confirmationLabel = keepsText
+    ? 'Extract images and keep the current text'
+    : usesOwnText
     ? request.kind === 'import' ? "Import with the document's own text" : "Use the document's own text"
     : nothingToRead
     ? 'No pages to read'
@@ -88,15 +101,19 @@
     if (selectedMethod === '' || pendingStart !== null) return;
     const mine = ++generation;
     const currentRequest = request;
-    previewing = true;
     preview = null;
     error = null;
+    if (selectedMethod === 'keep' && imageExtraction === 'off') {
+      previewing = false;
+      return;
+    }
+    previewing = true;
     try {
       const next = currentRequest.kind === 'import'
         ? await previewImport({ collection: collectionId, uploads: [...currentRequest.uploads], include: currentRequest.include, exclude: currentRequest.exclude, method: selectedMethod })
         : currentRequest.selection === undefined
-          ? await previewRescan(collectionId, currentRequest.documentId, selectedMethod)
-          : await previewRescan(collectionId, currentRequest.documentId, selectedMethod, currentRequest.selection);
+          ? await previewRescan(collectionId, currentRequest.documentId, selectedMethod, undefined, imageExtraction)
+          : await previewRescan(collectionId, currentRequest.documentId, selectedMethod, currentRequest.selection, imageExtraction);
       if (mine === generation) preview = next;
     } catch (failure) {
       if (mine === generation) error = describe(failure);
@@ -108,7 +125,7 @@
   async function load(): Promise<void> {
     loadingMethods = true;
     try {
-      const list = await listReadingMethods(collectionId);
+      const list = await (request.kind === 'rescan' ? listReadingMethods(collectionId, 'rescan') : listReadingMethods(collectionId));
       methods = list.methods.filter((entry) => !isUncheckedImageProfile(entry));
       const preferred = methods.find((entry) => entry.method === list.default && entry.available);
       selectedMethod = preferred?.method ?? methods.find((entry) => entry.available)?.method ?? '';
@@ -129,8 +146,16 @@
     await updatePreview();
   }
 
+  async function chooseImages(event: Event): Promise<void> {
+    const value = (event.currentTarget as HTMLSelectElement).value as ImageExtraction;
+    if (value === imageExtraction) return;
+    imageExtraction = value;
+    // An import's summary does not depend on images; a rescan's does.
+    if (request.kind === 'rescan') await updatePreview();
+  }
+
   async function confirm(): Promise<void> {
-    if (submitLock || started) return;
+    if (submitLock || started || keepNeedsImages) return;
     if (pendingStart === null && (preview === null || nothingToRead || !selectedOption?.available || selectedMethod === '')) return;
     submitLock = true;
     submitting = true;
@@ -139,7 +164,7 @@
       if (pendingStart === null) {
         const currentRequest = request;
         pendingStart = currentRequest.kind === 'import'
-          ? { kind: 'import', body: { collection: collectionId, uploads: [...currentRequest.uploads], include: [...currentRequest.include], exclude: [...currentRequest.exclude], method: selectedMethod, previewHash: (preview as ImportPreview).previewHash, requestId } }
+          ? { kind: 'import', body: { collection: collectionId, uploads: [...currentRequest.uploads], include: [...currentRequest.include], exclude: [...currentRequest.exclude], method: selectedMethod, previewHash: (preview as ImportPreview).previewHash, requestId, imageExtraction } }
           : { kind: 'rescan', collectionId, documentId: currentRequest.documentId, body: { previewId: (preview as RescanPreview).previewId, requestId } };
       }
       const run = pendingStart.kind === 'import'
@@ -223,13 +248,22 @@
         <p class="unavailable">{method.label}: {method.unavailableReason ?? 'Unavailable'}</p>
       {/each}
     {/if}
+    {#if !loadingMethods && methods.length > 0}
+      <label for="image-extraction">Extract images</label>
+      <select id="image-extraction" data-testid="image-extraction" value={imageExtraction} onchange={chooseImages} disabled={submitting || pendingStart !== null}>
+        {#each imageOptions as option (option.value)}<option value={option.value}>{option.label}</option>{/each}
+      </select>
+      {#if keepNeedsImages}<p class="unavailable" role="alert">Choose which images to extract.</p>{/if}
+    {/if}
     {#if previewing}<p role="status">Preparing page summary…</p>{/if}
     {#if preview !== null}
       <section class="summary" aria-label="Reading summary">
         {#if 'files' in preview}
           <ul>{#each preview.files as file (file.path)}<li>{file.path}: {file.pages == null ? file.reason ?? 'page count unknown' : typeof file.documentPages === 'number' && file.documentPages > file.pages ? `${file.pages} of ${file.documentPages} pages will be read` : `${file.pages} pages`}</li>{/each}</ul>
         {/if}
-        {#if usesOwnText}
+        {#if keepsText}
+          <p>No page is read. The text stays as it is; images are added.</p>
+        {:else if usesOwnText}
           <p>No page is read. Each page keeps the document's own text; pages without text are kept without text.</p>
         {:else if nothingToRead}
           <p>No page needs reading; the document keeps its text.</p>
@@ -247,7 +281,7 @@
     {#if error}<p role="alert">{error}</p>{/if}
     </div>
     <div class="actions">
-      <button type="button" class="primary" onclick={confirm} disabled={started || submitting || previewing || (pendingStart === null && (preview === null || nothingToRead || !selectedOption?.available))}>{started ? 'Started' : submitting ? 'Starting…' : pendingStart !== null ? 'Retry same start' : confirmationLabel}</button>
+      <button type="button" class="primary" onclick={confirm} disabled={started || submitting || previewing || keepNeedsImages || (pendingStart === null && (preview === null || nothingToRead || !selectedOption?.available))}>{started ? 'Started' : submitting ? 'Starting…' : pendingStart !== null ? 'Retry same start' : confirmationLabel}</button>
       <button type="button" onclick={oncancel} disabled={submitting || pendingStart !== null}>Cancel</button>
     </div>
   </div>

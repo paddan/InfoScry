@@ -944,6 +944,15 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
 
     private val admissions = java.util.concurrent.atomic.AtomicInteger()
 
+    /** Builds the image stage an attempt runs with; null (the default) is a build without one. */
+    var imageStage: ((AppContext) -> infoscry.image.ImageStage)? = null
+
+    /** The image mode the next previews confirm; null takes the collection's default. */
+    var imageMode: infoscry.image.ImageExtractionMode? = null
+
+    /** The page source previews and attempts read pages through, so a test can count what is rendered. */
+    var pageSource: infoscry.document.RescanPageSource = infoscry.document.RescanPageSource()
+
     val resumedInitialProgress = mutableListOf<Int>()
 
     /** The archive itself, which is the directory a second process opens. */
@@ -985,6 +994,56 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
         AppContext.open(harness.dataDir).use { context ->
             val revisionId = context.revisions.activeRevisionId(documentId)!!
             val page = context.revisions.pages(revisionId).single()
+            return Picture(documentId, revisionId, page.unitId.value, file)
+        }
+    }
+
+    /**
+     * A photograph the reading found no words in: its published reading is one empty unit and one standalone image
+     * unit, with nothing in the search index.
+     */
+    fun importPhotoOnly(): Picture {
+        val file = harness.sourcesDir.resolve("photo.png")
+        Files.write(file, infoscry.image.FinderFixtures.png(240, 180, 3))
+        val empty = object : PageOcrEngine {
+            override val engine = OcrEngine.TESSERACT
+            override suspend fun transcribe(page: PageImage, settings: OcrSettingsSnapshot) = OcrPageResult(
+                text = "", engine = OcrEngine.TESSERACT, imageSha256 = page.sha256,
+                errorCode = OcrPageResult.EMPTY_READING_CODE,
+            )
+        }
+        val snapshot = OcrSettingsSnapshot(
+            engine = OcrEngine.TESSERACT,
+            mode = infoscry.ocr.OcrImportMode.FILL_MISSING,
+            language = "eng",
+            extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+            imageExtraction = infoscry.image.ImageExtractionMode.EMBEDDED,
+        )
+        AppContext.open(harness.dataDir).use { context ->
+            val job = harness.enqueueForTest(context, listOf(file), ocr = snapshot)
+            val images = infoscry.image.ImageStage(
+                infoscry.image.ImageFinders(listOf(infoscry.image.StandaloneImageFinder())),
+                infoscry.image.LayoutRegions(infoscry.ocr.PageOcrEngines(emptyList())),
+                infoscry.image.ImageArtifacts(), context.imageStore, context.documents,
+            )
+            harness.attach(
+                context,
+                ImportPipeline(
+                    detector = infoscry.extract.MediaTypeDetector(),
+                    registry = infoscry.extract.ExtractorRegistry(
+                        listOf(infoscry.extract.ImageExtractor(infoscry.ocr.PageOcrEngines(listOf(empty)))),
+                        infoscry.extract.TextualFallbackExtractor(),
+                    ),
+                    sink = StoredUnitsSink(context.paths, context.documents, context.content, context.corrections),
+                    images = images,
+                ),
+            )
+            harness.awaitJob(context, job.id)
+        }
+        AppContext.open(harness.dataDir).use { context ->
+            val documentId = context.documents.listByCollection(CollectionId("default"), limit = 10).single().id
+            val revisionId = assertNotNull(context.revisions.activeRevisionId(documentId))
+            val page = context.revisions.pages(revisionId).first()
             return Picture(documentId, revisionId, page.unitId.value, file)
         }
     }
@@ -1337,7 +1396,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
         val engine = FakePageEngine()
         val service = rescanServiceOf(context, engine)
         return runBlocking {
-            val preview = service.preview(CollectionId("default"), picture.documentId, method, selection)
+            val preview = service.preview(CollectionId("default"), picture.documentId, method, selection, imageMode)
             service.admitRescan(
                 collectionId = CollectionId("default"),
                 documentId = picture.documentId,
@@ -1409,6 +1468,9 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
             afterInitialProgressReported = { jobId -> onInitialProgress?.invoke(jobId) },
             beforeCandidatePublication = { jobId -> beforeCandidatePublication?.invoke(context, jobId) },
             corrector = context.candidateCorrector,
+            pages = pageSource,
+            images = imageStage?.invoke(context),
+            imageStore = context.imageStore,
         )
         val failure = runBlocking {
             runCatching {
@@ -1476,6 +1538,7 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
         profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
         engines = { _, _, _ -> engine },
         embedderAvailable = { true },
+        pages = pageSource,
     )
 
     private fun writePicture(file: Path) {

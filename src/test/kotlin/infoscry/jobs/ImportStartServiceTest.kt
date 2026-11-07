@@ -169,6 +169,39 @@ class ImportStartServiceTest {
         data.toFile().deleteRecursively()
     }
 
+    @Test
+    fun `an import follows the collection's image default unless the request states a mode`() = runBlocking<Unit> {
+        val data = Files.createTempDirectory("infoscry-import-images-mode")
+        val source = data.resolve("source.txt").also { Files.writeString(it, "import this") }
+        AppContext.open(data.resolve("archive")).use { context ->
+            val collection = context.collections.create("Pictures")
+            context.collectionService.updateImageDefault(collection.id, infoscry.image.ImageExtractionMode.EMBEDDED)
+            val (previews, service) = services(context)
+            val request = ImportPreviewRequest(collection.id, listOf(source.toString()), method = ReadingMethod.Tesseract)
+            val preview = previews.preview(request)
+            suspend fun start(id: String, mode: infoscry.image.ImageExtractionMode?) = service.start(
+                ImportStartRequest(
+                    collectionId = collection.id, paths = request.paths, method = ReadingMethod.Tesseract,
+                    previewHash = preview.previewHash, requestId = id, imageExtraction = mode,
+                ),
+            )
+            fun modeOf(job: infoscry.domain.Job) =
+                ImportJobPayload.decode(context.jobs.get(job.id)!!.payload).ocr!!.imageExtraction
+
+            val followsDefault = start("follows-default", null)
+            // The same files already queued are that work, whoever asks; stopping it lets a new mode start.
+            context.jobs.fail(context.jobs.claimNextQueued()!!.id, "TEST_FAILURE", "test failure")
+            val stated = start("states-off", infoscry.image.ImageExtractionMode.OFF)
+
+            assertEquals(infoscry.image.ImageExtractionMode.EMBEDDED, modeOf(followsDefault))
+            assertEquals(infoscry.image.ImageExtractionMode.OFF, modeOf(stated))
+            // The mode is part of the request's identity: the same id with another mode is not a replay.
+            val conflict = runCatching { start("follows-default", infoscry.image.ImageExtractionMode.ALL) }
+            assertTrue(conflict.isFailure || conflict.getOrThrow().id != followsDefault.id)
+        }
+        data.toFile().deleteRecursively()
+    }
+
     private fun services(context: AppContext): Pair<ImportPreviewService, ImportStartService> {
         val selection = ImportSelection(
             MediaTypeDetector(),

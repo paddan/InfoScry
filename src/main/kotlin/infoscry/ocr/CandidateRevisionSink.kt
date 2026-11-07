@@ -75,6 +75,16 @@ class CandidateRevisionSink(
     /** The candidate this sink stages into, or `null` while it has staged nothing. */
     override val candidateRevisionId: String? get() = candidate
 
+    override suspend fun retainImageUnits(
+        documentId: DocumentId,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<ContentUnitId>,
+    ) {
+        val revisionId = candidate ?: return
+        revisions.removeImagePagesExcept(revisionId, fromOrdinal, toOrdinal, keep)
+    }
+
     /**
      * The keys staged for *this* reading of *this* document.
      *
@@ -155,7 +165,8 @@ class CandidateRevisionSink(
         val baseline = baselinePages[event.ordinal]?.takeIf { (_, locator) -> locator == draft.locator }
         return RevisionPageDraft(
             ordinal = event.ordinal,
-            unitId = baseline?.first ?: ContentUnitId.new(),
+            // An image unit arrives with the identity derived from its content, which a repeat must find again.
+            unitId = draft.unitId ?: baseline?.first ?: ContentUnitId.new(),
             locator = draft.locator,
             extractedText = draft.extractedText,
             searchText = draft.searchText,

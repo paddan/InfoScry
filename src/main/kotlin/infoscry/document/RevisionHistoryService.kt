@@ -116,7 +116,9 @@ class RevisionHistoryService(
         val digests = all.associate { it.id to revisions.pageDigests(it.id) }
         val snapshots = revisions.readingSnapshots(documentId)
         return all.map { revision ->
-            val pages = digests.getValue(revision.id)
+            val allRows = digests.getValue(revision.id)
+            // An image unit is not a page of the document: it neither counts as one nor says how a page was read.
+            val pages = allRows.filterNot { infoscry.image.ImageIdentity.isImageOrdinal(it.ordinal) }
             val methods = pages.filter { it.approval == PageApproval.APPROVED }
                 .mapNotNull { it.extractionMethod?.name }.distinct().sorted()
             val operationReading = readings[revision.id]?.let { readingOfSnapshot(it.snapshot) }
@@ -170,8 +172,11 @@ class RevisionHistoryService(
         var unknown = 0
         var restored = 0
         var notPublished = 0
-        val parentByOrdinal = parentPages?.filter { it.approval == PageApproval.APPROVED }?.associateBy { it.ordinal }
-        pages.forEach { page ->
+        // Image units are not pages of either revision, whatever the caller passed.
+        val parentByOrdinal = parentPages
+            ?.filter { it.approval == PageApproval.APPROVED && !infoscry.image.ImageIdentity.isImageOrdinal(it.ordinal) }
+            ?.associateBy { it.ordinal }
+        pages.filterNot { infoscry.image.ImageIdentity.isImageOrdinal(it.ordinal) }.forEach { page ->
             if (page.approval != PageApproval.APPROVED) {
                 notPublished++
                 return@forEach

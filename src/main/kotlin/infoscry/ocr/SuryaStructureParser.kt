@@ -9,7 +9,7 @@ import org.jsoup.nodes.TextNode
 data class SuryaBlockInput(val html: String, val label: String?, val readingOrder: Int?, val bbox: PixelBox)
 
 /**
- * Turns Surya's per-block HTML into a [PageStructureDraft] (`surya-html/1`).
+ * Turns Surya's per-block HTML into a [PageStructureDraft] (`surya-html/2`).
  *
  * Parsing is an allowlist: only the elements that carry structure (headings, lists, tables, math) are read
  * for their shape, and every other element contributes its text. Script and style content is dropped. No
@@ -20,7 +20,15 @@ data class SuryaBlockInput(val html: String, val label: String?, val readingOrde
  */
 object SuryaStructureParser {
 
-    const val PARSER: String = "surya-html/1"
+    /**
+     * The parser identity new structures carry. `surya-html/2` keeps a figure that holds no words, which
+     * `surya-html/1` dropped, so a structure stored by version 1 has no figures even where the page has pictures.
+     * The identity is part of an attempt's fingerprint, so a Surya attempt started before this version reads again.
+     */
+    const val PARSER: String = "surya-html/2"
+
+    /** The identity of structures stored before word-less figures were kept; they are not read for picture regions. */
+    const val LEGACY_PARSER: String = "surya-html/1"
 
     private const val DEFAULT_HEADING_LEVEL = 2
     private const val MAX_SPAN = 1000
@@ -162,8 +170,13 @@ object SuryaStructureParser {
         return ParsedBlock(listOf(formula) + restBlocks)
     }
 
+    /**
+     * A block is kept when it has words. A figure that has a box is kept without any: Surya's `Picture` block is
+     * markup with no text, and its box is what locates the picture, so it stays as a block with an empty range.
+     */
     private fun hasText(block: BlockDraft): Boolean =
-        block.rows?.any { row -> row.any { it.text.isNotBlank() } } ?: block.text.isNotBlank()
+        (block.kind == BlockKind.FIGURE && block.bbox != null) ||
+            (block.rows?.any { row -> row.any { it.text.isNotBlank() } } ?: block.text.isNotBlank())
 
     /** The label mapping from the structure spec. An unknown or missing label is a paragraph. */
     private fun kindOf(label: String?): BlockKind = when (label) {

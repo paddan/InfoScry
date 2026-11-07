@@ -4,6 +4,7 @@ import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
+import infoscry.image.ImageExtractionMode
 import infoscry.jobs.IgnorePatterns
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.requireOcrLanguages
@@ -271,7 +272,12 @@ class CollectionService(
      * edit to that collection. Whether the effective settings are still usable is decided when work is
      * admitted, where the profiles are resolved again into a snapshot.
      */
-    suspend fun updateOcrSettings(id: CollectionId, update: OcrSettingsUpdate, expectedVersion: Long? = null): Collection =
+    suspend fun updateOcrSettings(
+        id: CollectionId,
+        update: OcrSettingsUpdate,
+        expectedVersion: Long? = null,
+        imageDefault: ImageExtractionMode? = null,
+    ): Collection =
         coordinator.withMutation {
             requireMutationsAllowed()
             val existing = requireActive(id)
@@ -281,7 +287,18 @@ class CollectionService(
                     ocrProfiles.requireSelectable(method.profileId, OcrProfileRole.TRANSCRIPTION)
                 }
             }
-            collections.updateOcrSettings(id, settings, expectedVersion)
+            collections.updateOcrSettings(id, settings, expectedVersion, imageDefault)
+        }
+
+    /**
+     * Saves how much imagery imports and rescans of the collection extract by default. It changes future
+     * imports and rescans only, which also take the mode they are started with.
+     */
+    suspend fun updateImageDefault(id: CollectionId, mode: ImageExtractionMode, expectedVersion: Long? = null): Collection =
+        coordinator.withMutation {
+            requireMutationsAllowed()
+            requireActive(id)
+            collections.updateImageDefault(id, mode, expectedVersion)
         }
 
     /**

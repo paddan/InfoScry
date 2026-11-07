@@ -213,6 +213,11 @@ data class ContentUnitDraft(
     val structureReference: StructureReference? = null,
     /** The unit's reading before corrections, set by the sink that corrected it; extractors never set it. */
     val reading: infoscry.domain.ReadingText? = null,
+    /**
+     * The identity the unit must be stored under, or null to let the store assign one. Set only for image units,
+     * whose IDs are derived from their content and parent so they survive a repeated import.
+     */
+    val unitId: infoscry.domain.ContentUnitId? = null,
 )
 
 /**
@@ -554,6 +559,12 @@ data class ExtractionInput(
      * working render is deleted with the attempt and the page records no image at all.
      */
     val retainsPageImages: Boolean = false,
+    /**
+     * Whether this attempt extracts images, so a picture whose reading is empty (a photograph with no words on it)
+     * is kept as a unit with no text instead of failing. The image stage needs that unit as the picture's parent.
+     * With images off the picture's empty reading fails its unit as it always has.
+     */
+    val keepsEmptyPictures: Boolean = false,
 ) {
 
     /** Whether an earlier attempt already committed this unit under the same fingerprint. */
@@ -730,6 +741,18 @@ interface ExtractionSink {
         event: ExtractionEvent,
         approval: infoscry.storage.PageApproval?,
     ) = deliver(documentId, fingerprint, event)
+
+    /**
+     * Removes the image units this sink holds for the document within [fromOrdinal]..[toOrdinal] whose identity is not in
+     * [keep], so an image delivery that produced fewer images than an earlier one leaves nothing stale. Idempotent. A
+     * sink that holds no image units has nothing to remove, which is why the default does nothing.
+     */
+    suspend fun retainImageUnits(
+        documentId: DocumentId,
+        fromOrdinal: Int,
+        toOrdinal: Int,
+        keep: Set<infoscry.domain.ContentUnitId>,
+    ) = Unit
 
     /**
      * How many of this document's committed units still await a person's decision.

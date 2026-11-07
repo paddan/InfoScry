@@ -4,6 +4,22 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
+ * A rectangle on a parent page as fractions of its width and height, each in `0..1`, with a positive size.
+ *
+ * Coordinates grow rightwards and downwards from the top-left corner.
+ */
+@Serializable
+data class NormalizedBox(val left: Double, val top: Double, val right: Double, val bottom: Double) {
+    init {
+        require(listOf(left, top, right, bottom).all { it in 0.0..1.0 }) {
+            "NormalizedBox coordinates must be within 0..1, were $this"
+        }
+        require(right > left) { "NormalizedBox.right ($right) must exceed left ($left)" }
+        require(bottom > top) { "NormalizedBox.bottom ($bottom) must exceed top ($top)" }
+    }
+}
+
+/**
  * The smallest source location a search result or citation can point at.
  *
  * The hierarchy is closed: every extractor must express its unit as one of these variants, so a
@@ -116,6 +132,25 @@ sealed interface SourceLocation {
     }
 
     /**
+     * One image inside [parent]: a picture on a page, slide, section, sheet or e-book chapter.
+     *
+     * [index] is one-based in the parent's reading order. [box] is the picture's rectangle on the parent
+     * page, or null when the format has no page geometry. A region's parent is never another region.
+     */
+    @Serializable
+    @SerialName("image_region")
+    data class ImageRegion(
+        val parent: SourceLocation,
+        val index: Int,
+        val box: NormalizedBox?,
+    ) : SourceLocation {
+        init {
+            require(parent !is ImageRegion) { "ImageRegion.parent must not be another ImageRegion" }
+            require(index >= 1) { "ImageRegion.index is one-based, was $index" }
+        }
+    }
+
+    /**
      * What one of this location's units is called: the structure the unit came from, not a guess.
      *
      * A page is a page and a slide is a slide, so progress counted in these units is counted in the thing
@@ -126,6 +161,7 @@ sealed interface SourceLocation {
         get() = when (this) {
             is PdfPage -> UnitKind.PAGE
             is Image -> UnitKind.IMAGE
+            is ImageRegion -> UnitKind.IMAGE
             is Slide -> UnitKind.SLIDE
             is TextLines -> UnitKind.LINE
             is SpreadsheetRange -> UnitKind.SHEET
@@ -144,6 +180,8 @@ sealed interface SourceLocation {
     fun describe(): String = when (this) {
         is PdfPage -> "page $page"
         is Image -> "image $name"
+        // An imported picture is its own image: its name is the label, and there is no page to point at.
+        is ImageRegion -> if (parent is Image) "image ${parent.name}" else "image $index on ${parent.describe()}"
         is Slide -> "slide $number"
         is TextLines -> "lines $start" + if (end == start) "" else "–$end"
         is SpreadsheetRange -> "$sheet!$startCell:$endCell"

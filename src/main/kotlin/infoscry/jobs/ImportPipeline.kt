@@ -6,6 +6,12 @@ import infoscry.extract.ExtractionSink
 import infoscry.extract.ExtractorRegistry
 import infoscry.extract.MediaTypeDetector
 import infoscry.extract.PageImageSupport
+import infoscry.image.ImageArtifacts
+import infoscry.image.ImageFinders
+import infoscry.image.ImageStage
+import infoscry.image.LayoutRegions
+import infoscry.ocr.PageOcrEngines
+import infoscry.ocr.SuryaOcr
 import infoscry.ocr.CandidateRevisionSink
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrSettingsSnapshot
@@ -34,6 +40,13 @@ class ImportPipeline(
      * seam existed and what a pipeline wired with a recording sink still does.
      */
     private val candidateSinkFor: ((DocumentId, OcrSettingsSnapshot?) -> ExtractionSink)? = null,
+    /**
+     * Looks for the images of a document once its text is read, or null for a pipeline that extracts none.
+     *
+     * It travels with the pipeline for the same reason the sinks do: it is part of what an attempt reads a
+     * document with, and a test substitutes it together with the fake engines it is paired with.
+     */
+    val images: ImageStage? = null,
 ) {
 
     /**
@@ -73,9 +86,19 @@ class ImportPipeline(
                 content = context.content,
                 corrections = context.corrections,
             )
+            // One Surya for the reading and for locating page regions, so a process never starts two workers.
+            val surya = SuryaOcr.configured()
             return ImportPipeline(
                 detector = MediaTypeDetector(),
+                images = ImageStage(
+                    finders = ImageFinders.standard(),
+                    regions = LayoutRegions(PageOcrEngines(listOfNotNull(surya))),
+                    artifacts = ImageArtifacts(),
+                    store = context.imageStore,
+                    documents = context.documents,
+                ),
                 registry = ExtractorRegistry.production(
+                    surya = surya,
                     // The image-model engine of an admitted attempt: it resolves the profile revision the job's
                     // snapshot names, and every page it would send is asked for a permit against the allowance
                     // that job owns, so nothing leaves this machine before the scope was approved.
