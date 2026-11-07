@@ -319,16 +319,14 @@ class ImageStageTest {
     }
 
     @Test
-    fun `a retried middle parent counts only the parents before it toward the limit`() {
-        // Parents 0 and 2 hold 200 images each and are committed; the retried parent 1 holds 150. Counting the later
-        // parent's 200 would put it at 400 + 150 and drop images; only the 200 before it count, so all 150 are kept.
+    fun `a retried middle parent delivers only what the cap leaves`() {
+        // Parents 0 and 2 hold 200 images each and are committed; the retried parent 1 holds 150 but only 100 fit.
         val parents = pages(3) { page ->
             val size = if (page == 1) 150 else 200
             (0 until size).map { picture(96 + page * 300 + it, 100) }
         }
         val finder = FakeFinder(parents)
         val target = RecordingTarget()
-        // Commit parents 0 and 2 as DONE and parent 1 as FAILED, as an earlier run with an unreadable middle would.
         run(finder, parents.filterKeys { it != ContentUnitId("page-1") }, target)
         store.commitCheckpoint(
             document.id, target.target, ImageExtractionMode.EMBEDDED, IMAGE_EXTRACTOR_VERSION,
@@ -337,9 +335,31 @@ class ImageStageTest {
 
         val result = run(finder, parents, target)
 
-        assertEquals(550, result.images)
-        assertEquals(null, result.skipped[SkipReason.LIMIT])
-        assertTrue(ImageStage.LIMIT_REACHED !in result.warnings)
+        assertEquals(ImageFilter.MAX_PER_DOCUMENT, result.images)
+        assertEquals(ImageFilter.MAX_PER_DOCUMENT, target.delivered.size)
+        assertEquals(100, target.delivered.count { it.locator.parent == SourceLocation.PdfPage(2) })
+        assertEquals(50, result.skipped[SkipReason.LIMIT])
+        assertTrue(ImageStage.LIMIT_REACHED in result.warnings)
+    }
+
+    @Test
+    fun `a first parent retried after a full later parent cannot push the document over the cap`() {
+        val parents = pages(2) { page ->
+            (0 until if (page == 0) 50 else 500).map { picture(96 + page * 600 + it, 100) }
+        }
+        val finder = FakeFinder(parents)
+        val target = RecordingTarget()
+        run(finder, parents.filterKeys { it != ContentUnitId("page-0") }, target)
+        store.commitCheckpoint(
+            document.id, target.target, ImageExtractionMode.EMBEDDED, IMAGE_EXTRACTOR_VERSION,
+            infoscry.storage.ImageCheckpoint(ContentUnitId("page-0"), ImageCheckpointOutcome.FAILED, 0, null),
+        )
+
+        val result = run(finder, parents, target)
+
+        assertEquals(ImageFilter.MAX_PER_DOCUMENT, result.images)
+        assertEquals(ImageFilter.MAX_PER_DOCUMENT, target.delivered.size)
+        assertTrue(ImageStage.LIMIT_REACHED in result.warnings)
     }
 
     @Test

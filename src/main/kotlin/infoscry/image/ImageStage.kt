@@ -66,6 +66,10 @@ data class ImageStageResult(val images: Int, val skipped: Map<SkipReason, Int>, 
  * parent is still to do, so a logo is judged by the same count however often the run was interrupted. The first pass
  * is skipped when the document has no more parents than an image may repeat on.
  *
+ * The per-document cap is an invariant: a parent may deliver only what is left after every committed parent and
+ * the images delivered earlier in this run, so which images survive near the cap can depend on which parent was
+ * retried (only for a document over the cap).
+ *
  * A parent whose regions could not be located because Surya is unavailable commits a `FAILED` checkpoint after its
  * embedded images, so the next run tries it again.
  */
@@ -107,14 +111,11 @@ class ImageStage(
         }
         source.use {
             val repeated = repeatedHashes(source, parents)
-            // Only parents before the current one count toward the limit, so a retried parent sees what a first run saw.
-            var total = 0
+            // Every committed parent counts, before or after the current one, so the document never exceeds its cap.
+            var total = parents.sumOf { committed[it.parent.unitId]?.imageCount ?: 0 }
             var regionsAvailable = true
             for (context in parents) {
-                committed[context.parent.unitId]?.let {
-                    total += it.imageCount
-                    continue
-                }
+                if (context.parent.unitId in committed) continue
                 if (documents.isDeletionTarget(document.id)) throw DocumentBeingDeletedException(document.id)
                 val run = ParentRun(document, managedPath, artifactRoot, context, mode, target, boundary, settings)
                 val outcome = extractParent(run, source, repeated, total, regionsAvailable, summary)
