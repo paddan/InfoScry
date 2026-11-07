@@ -130,10 +130,17 @@ class ImageArtifacts(
             throw ImageRejectedException(ImageRejectedException.IMAGE_TOO_LARGE)
         }
         val decoded = decodeBounded(ImageIO.createImageInputStream(ByteArrayInputStream(encoded.bytes)))
-        return if (decoded.reduced) {
+        // The bytes decide the format, not the declared media type: a mislabelled file keeps its real format.
+        val detectedMediaType = ENCODED_MEDIA_TYPES_BY_FORMAT[decoded.formatName.lowercase()]
+        return if (decoded.reduced || detectedMediaType == null) {
             Prepared(pngBytes(decoded.raster), "png", "image/png", decoded.raster)
         } else {
-            Prepared(encoded.bytes, ENCODED_EXTENSIONS.getValue(encoded.mediaType), encoded.mediaType, decoded.raster)
+            Prepared(
+                encoded.bytes,
+                ENCODED_EXTENSIONS.getValue(detectedMediaType),
+                detectedMediaType,
+                decoded.raster,
+            )
         }
     }
 
@@ -157,8 +164,10 @@ class ImageArtifacts(
             val reader = readers.next()
             val step: Int
             val raster: BufferedImage
+            val formatName: String
             try {
                 reader.input = stream
+                formatName = reader.formatName
                 step = subsampleStep(reader.getWidth(0), reader.getHeight(0))
                 val parameter = reader.defaultReadParam
                 if (step > 1) parameter.setSourceSubsampling(step, step, 0, 0)
@@ -175,7 +184,7 @@ class ImageArtifacts(
                 raster.flush()
                 throw ImageRejectedException(ImageRejectedException.IMAGE_DECODE_FAILED)
             }
-            return Decoded(raster, reduced = step > 1)
+            return Decoded(raster, reduced = step > 1, formatName = formatName)
         }
     }
 
@@ -260,7 +269,8 @@ class ImageArtifacts(
     /** The file a written image is stored as: its bytes, extension, media type and the raster they show. */
     private class Prepared(val data: ByteArray, val extension: String, val mediaType: String, val raster: BufferedImage)
 
-    private class Decoded(val raster: BufferedImage, val reduced: Boolean)
+    /** The first frame of an image: its pixels, whether they were reduced, and the format its reader detected. */
+    private class Decoded(val raster: BufferedImage, val reduced: Boolean, val formatName: String)
 
     companion object {
         /** The longest side of a thumbnail, in pixels. */
@@ -279,4 +289,11 @@ private val ENCODED_EXTENSIONS: Map<String, String> = mapOf(
     "image/jpeg" to "jpg",
     "image/png" to "png",
     "image/gif" to "gif",
+)
+
+/** The media type of each format a reader names, lowercased, that may keep its original bytes. */
+private val ENCODED_MEDIA_TYPES_BY_FORMAT: Map<String, String> = mapOf(
+    "jpeg" to "image/jpeg",
+    "png" to "image/png",
+    "gif" to "image/gif",
 )

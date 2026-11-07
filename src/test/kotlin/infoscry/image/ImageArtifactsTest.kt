@@ -47,7 +47,7 @@ class ImageArtifactsTest {
         assertEquals("image/jpeg", first.mediaType)
         assertEquals(200, first.widthPx)
         assertEquals(150, first.heightPx)
-        assertTrue(noTemporaryFiles(root), "no *.tmp may remain under $root")
+        assertEquals(emptyList(), temporaryFiles())
     }
 
     @Test
@@ -142,6 +142,30 @@ class ImageArtifactsTest {
 
         assertEquals(first, second)
         assertTrue(root.resolve(second.relativePath).exists())
+        assertEquals(listOf("images/${first.sha256}.jpg.1234.tmp"), temporaryFiles())
+    }
+
+    @Test
+    fun `a declared media type that disagrees with the bytes follows the bytes`() {
+        val jpeg = jpegBytes(200, 150)
+
+        val written = ImageArtifacts().write(root, ImageBytes.Encoded(jpeg, "image/png"))
+
+        assertTrue(written.relativePath.endsWith(".jpg"), written.relativePath)
+        assertEquals("image/jpeg", written.mediaType)
+        assertTrue(root.resolve(written.relativePath).readBytes().contentEquals(jpeg))
+    }
+
+    @Test
+    fun `bytes in a format other than jpeg, png or gif are written as png`() {
+        val output = ByteArrayOutputStream()
+        ImageIO.write(solid(200, 150, Color.CYAN), "bmp", output)
+
+        val written = ImageArtifacts().write(root, ImageBytes.Encoded(output.toByteArray(), "image/jpeg"))
+
+        assertTrue(written.relativePath.endsWith(".png"), written.relativePath)
+        assertEquals("image/png", written.mediaType)
+        assertEquals(PNG_SIGNATURE.toList(), root.resolve(written.relativePath).readBytes().take(PNG_SIGNATURE.size))
     }
 
     @Test
@@ -182,8 +206,13 @@ class ImageArtifactsTest {
         }
     }
 
-    private fun noTemporaryFiles(directory: Path): Boolean =
-        Files.walk(directory).use { paths -> paths.noneMatch { it.fileName.toString().endsWith(".tmp") } }
+    /** The `*.tmp` files under the artifact root, relative to it. */
+    private fun temporaryFiles(): List<String> =
+        Files.walk(root).use { paths ->
+            paths.filter { it.fileName.toString().endsWith(".tmp") }
+                .map { root.relativize(it).toString().replace('\\', '/') }
+                .toList()
+        }
 
     private companion object {
         val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte())
