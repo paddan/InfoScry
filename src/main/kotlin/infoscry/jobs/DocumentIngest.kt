@@ -25,6 +25,7 @@ import infoscry.extract.UnitBoundary
 import infoscry.extract.UnsupportedMediaTypeException
 import infoscry.image.ImageExtractionMode
 import infoscry.image.ImageIdentity
+import infoscry.image.ImageWarnings
 import infoscry.image.ImageStage
 import infoscry.image.ParentUnit
 import infoscry.image.ParentUnitContext
@@ -314,16 +315,16 @@ internal class DocumentIngest(
         // The text is complete, so the images found beside it can be delivered into the same sink, before the
         // passages that make their captions searchable are cut. A warning here is a warning on the document,
         // never a failure of its text.
-        if (extractImages(document, mediaType.value, managedPath, fingerprint, sink, stage, reading).isNotEmpty()) {
-            warned = true
-        }
+        val imageWarnings = extractImages(document, mediaType.value, managedPath, fingerprint, sink, stage, reading)
+        if (imageWarnings.isNotEmpty()) warned = true
+        val imageWarning = ImageWarnings.mostImportant(imageWarnings)
 
         if (sink.stagesForReview) {
-            return publishStagedReading(document, sink, stage, onFailure, warned)
+            return publishStagedReading(document, sink, stage, onFailure, warned, imageWarning)
         }
 
         chunkContent(document, stage)
-        if (!embedAndIndex(collection, document, sink, stage, onFailure, reading, warned)) return IngestResult.Failed
+        if (!embedAndIndex(collection, document, sink, stage, onFailure, reading, warned, imageWarning)) return IngestResult.Failed
         return IngestResult.Complete
     }
 
@@ -459,6 +460,7 @@ internal class DocumentIngest(
         stage: JobStage,
         onFailure: suspend (String, String) -> Unit,
         warned: Boolean,
+        imageWarning: String? = null,
     ): IngestResult {
         val candidate = sink.candidateRevisionId
         if (candidate == null) {
@@ -525,10 +527,14 @@ internal class DocumentIngest(
             return IngestResult.Failed
         }
         stage.run(STAGE_RECORD) {
-            documents.updateStatus(
-                document.id,
-                if (warned) DocumentStatus.COMPLETE_WITH_WARNINGS else DocumentStatus.COMPLETE,
-            )
+            if (warned) {
+                documents.updateStatus(
+                    document.id, DocumentStatus.COMPLETE_WITH_WARNINGS,
+                    imageWarning, imageWarning?.let(ImageWarnings::messageFor),
+                )
+            } else {
+                documents.updateStatus(document.id, DocumentStatus.COMPLETE)
+            }
         }
         return IngestResult.Complete
     }
@@ -551,6 +557,7 @@ internal class DocumentIngest(
         onFailure: suspend (String, String) -> Unit,
         reading: OcrSettingsSnapshot?,
         warned: Boolean,
+        imageWarning: String? = null,
     ): Boolean {
         val embedder = documentEmbedder()
         if (embedder == null) {
@@ -649,7 +656,11 @@ internal class DocumentIngest(
                     failedUnits > 0 || warned -> DocumentStatus.COMPLETE_WITH_WARNINGS
                     else -> DocumentStatus.COMPLETE
                 }
-                documents.updateStatus(document.id, status)
+                if (status == DocumentStatus.COMPLETE_WITH_WARNINGS && imageWarning != null) {
+                    documents.updateStatus(document.id, status, imageWarning, ImageWarnings.messageFor(imageWarning))
+                } else {
+                    documents.updateStatus(document.id, status)
+                }
             }
             return true
         } catch (cancelled: CancellationException) {
@@ -772,7 +783,7 @@ internal class DocumentIngest(
         internal const val EXTRACTION_FAILED = "EXTRACTION_FAILED"
 
         /** The images of a document could not be extracted; its text is complete, so it finishes with this warning. */
-        internal const val IMAGE_EXTRACTION_FAILED = "IMAGE_EXTRACTION_FAILED"
+        internal const val IMAGE_EXTRACTION_FAILED = infoscry.image.ImageWarnings.INTERNAL_FAILURE_CODE
 
         /** A completed OCR pass produced no page text, so the existing revision was kept. */
         internal const val NO_EXTRACTABLE_CONTENT = "NO_EXTRACTABLE_CONTENT"

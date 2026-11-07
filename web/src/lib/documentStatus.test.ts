@@ -37,6 +37,19 @@ describe('documentStatus', () => {
       .toEqual({ kind: 'cancelled', label: 'Cancelled', nextAction: 'scan' });
   });
 
+  it('names the image warning a finished document carries', () => {
+    expect(documentStatus(doc('COMPLETE_WITH_WARNINGS', { errorCode: 'IMAGE_LIMIT_REACHED' })).label)
+      .toBe('Done. The document holds more images than the limit, so the rest were not kept.');
+    expect(documentStatus(doc('COMPLETE_WITH_WARNINGS', { errorCode: 'NEEDS_SURYA_LAYOUT' })).label)
+      .toContain('uv pip install surya-ocr');
+    for (const code of ['IMAGE_DECODE_FAILED', 'IMAGE_TOO_LARGE', 'TOO_MANY_IMAGES', 'IMAGE_PARENT_UNREADABLE', 'IMAGE_EXTRACTION_FAILED', 'IMAGE_SOURCE_UNREADABLE', 'IMAGE_PARENT_ORDINAL_TOO_LATE']) {
+      expect(documentStatus(doc('COMPLETE_WITH_WARNINGS', { errorCode: code })).label).not.toBe('Done');
+    }
+    // A warning without an image code, and a clean document, stay plain.
+    expect(documentStatus(doc('COMPLETE_WITH_WARNINGS', { errorCode: 'NO_EXTRACTABLE_CONTENT' })).label).toBe('Done');
+    expect(documentStatus(doc('COMPLETE', { errorCode: 'IMAGE_LIMIT_REACHED' })).label).toBe('Done');
+  });
+
   it('translates stable failure codes and keeps unknown causes readable', () => {
     expect(documentStatus(doc('FAILED', { errorCode: 'MORE_PAGES_THAN_CONFIRMED' })).label)
       .toBe('Failed: The document had more pages than were confirmed.');

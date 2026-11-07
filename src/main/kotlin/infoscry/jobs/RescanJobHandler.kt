@@ -478,10 +478,15 @@ class RescanJobHandler internal constructor(
         if (phases.publishCandidate(operation, candidate, stage)) {
             afterCandidatePublished(job.id)
             stage.run(STAGE_RECORD) {
-                updateDocumentStatus(
-                    operation,
-                    if (failed == 0 && keptWithoutText == 0 && imageWarnings.isEmpty()) DocumentStatus.COMPLETE else DocumentStatus.COMPLETE_WITH_WARNINGS,
-                )
+                val imageWarning = infoscry.image.ImageWarnings.mostImportant(imageWarnings)
+                if (failed == 0 && keptWithoutText == 0 && imageWarnings.isEmpty()) {
+                    updateDocumentStatus(operation, DocumentStatus.COMPLETE)
+                } else {
+                    updateDocumentStatus(
+                        operation, DocumentStatus.COMPLETE_WITH_WARNINGS,
+                        imageWarning, imageWarning?.let(infoscry.image.ImageWarnings::messageFor),
+                    )
+                }
             }
             LOGGER.atInfo()
                 .addKeyValue(DOCUMENT_FIELD, operation.documentId.value)

@@ -273,7 +273,10 @@ class ImportImagesTest {
 
             assertEquals(JobState.COMPLETE, run.job.state)
             AppContext.open(harness.dataDir).use { context ->
-                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, context.documents.get(run.documentId)!!.status)
+                val document = context.documents.get(run.documentId)!!
+                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, document.status)
+                assertEquals("IMAGE_SOURCE_UNREADABLE", document.errorCode, "the document names the image warning")
+                assertTrue(document.errorMessage!!.isNotBlank())
                 assertEquals(2, context.index().chunkCount(CollectionId("default"), run.documentId))
             }
         }
