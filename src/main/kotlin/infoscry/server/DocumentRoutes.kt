@@ -6,6 +6,7 @@ import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.UnitKind
+import infoscry.image.ImageWarnings
 import infoscry.jobs.ImportJobHandler
 import infoscry.ocr.OcrQualityScorer
 import infoscry.ocr.OcrOperation
@@ -41,6 +42,12 @@ data class DocumentListItem(
     val author: String? = null,
     val language: String? = null,
     val errorCode: String? = null,
+    /**
+     * InfoScry's own sentence for the image warning a document finished with, so a row can say what to do about it.
+     * Fixed wording per code, never document text (unlike `errorMessage`, which a row omits).
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val warningNote: String? = null,
     /**
      * How far the document's current attempt has got, for the compact progress a row shows. Absent while
      * the document has no attempt recorded at all — a document sitting in the queue has no counts to show,
@@ -468,6 +475,8 @@ private fun Document.toListItem(
     author = author,
     language = language,
     errorCode = errorCode,
+    warningNote = errorCode?.takeIf { status == DocumentStatus.COMPLETE_WITH_WARNINGS && ImageWarnings.knows(it) }
+        ?.let(ImageWarnings::messageFor),
     progress = progress,
     qualityScore = qualityScore,
 )

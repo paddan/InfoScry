@@ -25,6 +25,7 @@ import infoscry.image.LayoutRegions
 import infoscry.image.OpenedSource
 import infoscry.image.ParentImages
 import infoscry.image.ParentUnit
+import infoscry.image.StandaloneImageFinder
 import infoscry.ocr.OcrOperationStage
 import infoscry.ocr.PageOcrEngines
 import infoscry.ocr.ReadingMethod
@@ -108,6 +109,27 @@ class RescanImagesTest {
                     contentUnitImageRows(context, picture.documentId),
                     "published units keep their image provenance beside the revision's pages",
                 )
+            }
+        }
+    }
+
+    @Test
+    fun `keep current text republishes a picture-only document that has no searchable text`() {
+        withHarness { harness ->
+            val photo = harness.importPhotoOnly()
+            harness.useImages(StandaloneImageFinder(), ImageExtractionMode.EMBEDDED)
+            val engine = FakePageEngine(readings = listOf("must never be read"))
+
+            val attempt = harness.rescan(photo, engine, method = ReadingMethod.KeepText)
+
+            assertNull(attempt.failure)
+            assertNull(attempt.operation.errorCode, "${attempt.operation.errorCode}: ${attempt.operation.errorMessage}")
+            assertEquals(OcrOperationStage.COMPLETE, attempt.operation.stage)
+            assertNotEquals(photo.baselineRevisionId, attempt.activeRevisionId, "the rescan published a new reading")
+            assertEquals(0, attempt.indexedChunks)
+            assertEquals(0, engine.calls)
+            AppContext.open(harness.archiveDir).use { context ->
+                assertEquals(1, context.imageStore.imagesOf(assertNotNull(attempt.activeRevisionId)).size)
             }
         }
     }

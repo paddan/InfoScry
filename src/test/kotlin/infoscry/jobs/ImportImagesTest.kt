@@ -295,6 +295,100 @@ class ImportImagesTest {
     }
 
     @Test
+    fun `a check-and-improve import of a photograph read as empty publishes through the candidate`() {
+        withHarness { harness ->
+            val source = harness.sourcesDir.resolve("photo.png")
+            Files.write(source, FinderFixtures.png(240, 180, 3))
+            val empty = emptyReadingEngine()
+            val run = runImport(
+                harness, source, snapshot(ImageExtractionMode.EMBEDDED, OcrImportMode.CHECK_AND_IMPROVE),
+                infoscry.extract.ImageExtractor(PageOcrEngines(listOf(empty))), finder = null, standard = true,
+                staging = true,
+            )
+
+            assertEquals(JobState.COMPLETE, run.job.state)
+            AppContext.open(harness.dataDir).use { context ->
+                val document = context.documents.get(run.documentId)!!
+                assertEquals(DocumentStatus.COMPLETE_WITH_WARNINGS, document.status, "${document.errorCode}: ${document.errorMessage}")
+                val revisionId = assertNotNull(context.revisions.activeRevisionId(run.documentId))
+                val pages = context.revisions.pages(revisionId)
+                assertEquals(listOf(0, ImageIdentity.ordinal(0, 1)), pages.map { it.ordinal })
+                assertEquals(0, context.index().chunkCount(CollectionId("default"), run.documentId))
+                assertEquals(ImageSourceKind.STANDALONE, context.imageStore.imagesOf(revisionId).single().kind)
+            }
+        }
+    }
+
+    @Test
+    fun `an empty page beside a picture-only page is still an embedding failure, not a picture-only document`() {
+        withHarness { harness ->
+            val source = harness.writeText("album.txt", "scanned album\n")
+            val run = runImport(
+                harness, source, snapshot(ImageExtractionMode.EMBEDDED), Pages(pages = 2, emptyPages = setOf(0, 1)),
+                TableFinder(mapOf(2 to listOf(embedded(null, seed = 5)))),
+            )
+
+            AppContext.open(harness.dataDir).use { context ->
+                val document = context.documents.get(run.documentId)!!
+                assertEquals(DocumentStatus.FAILED, document.status)
+                assertEquals("EMBEDDING_FAILED", document.errorCode)
+            }
+        }
+    }
+
+    @Test
+    fun `an embedded then off then embedded import of one failed document delivers the images again`() {
+        withHarness { harness ->
+            val source = harness.writeText("album.txt", "scanned album\n")
+            val first = runImport(harness, source, snapshot(ImageExtractionMode.EMBEDDED), Pages(3), tableFinder())
+            fun reset() = AppContext.open(harness.dataDir).use { context ->
+                context.documents.updateStatus(first.documentId, DocumentStatus.FAILED, "EXTRACTION_FAILED")
+            }
+            reset()
+            runImport(harness, source, snapshot(ImageExtractionMode.OFF), Pages(3), tableFinder())
+            AppContext.open(harness.dataDir).use { context ->
+                assertEquals(0, context.content.listUnits(first.documentId, afterOrdinal = -1, limit = 50).count { ImageIdentity.isImageOrdinal(it.ordinal) })
+            }
+            reset()
+
+            val third = runImport(harness, source, snapshot(ImageExtractionMode.EMBEDDED), Pages(3), tableFinder())
+            assertEquals(first.documentId, third.documentId)
+            assertImagesDelivered(harness, first.documentId)
+
+            reset()
+            runImport(harness, source, snapshot(ImageExtractionMode.EMBEDDED), Pages(3), tableFinder())
+            assertImagesDelivered(harness, first.documentId)
+        }
+    }
+
+    private fun assertImagesDelivered(harness: Harness, documentId: DocumentId) {
+        AppContext.open(harness.dataDir).use { context ->
+            val images = context.content.listUnits(documentId, afterOrdinal = -1, limit = 50)
+                .filter { ImageIdentity.isImageOrdinal(it.ordinal) }
+            assertEquals(2, images.size)
+            assertEquals(2, imageRows(context, documentId))
+            val counted = context.database.read { connection ->
+                connection.prepareStatement(
+                    "SELECT COALESCE(SUM(image_count), 0) FROM image_extraction_checkpoints WHERE document_id = ?",
+                ).use { statement ->
+                    statement.setString(1, documentId.value)
+                    statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+                }
+            }
+            assertEquals(2, counted, "the cap counts the images that exist")
+        }
+    }
+
+    private fun emptyReadingEngine() = object : infoscry.ocr.PageOcrEngine {
+        override val engine = OcrEngine.TESSERACT
+        override suspend fun transcribe(page: infoscry.ocr.PageImage, settings: OcrSettingsSnapshot) =
+            infoscry.ocr.OcrPageResult(
+                text = "", engine = OcrEngine.TESSERACT, imageSha256 = page.sha256,
+                errorCode = infoscry.ocr.OcrPageResult.EMPTY_READING_CODE,
+            )
+    }
+
+    @Test
     fun `an image warning completes the document with a warning and keeps its text`() {
         withHarness { harness ->
             val source = harness.writeText("album.txt", "scanned album\n")
@@ -567,6 +661,7 @@ class ImportImagesTest {
     /** Text pages of the media type `text/plain`; counts the pages it reads, which is what OCR would cost. */
     private class Pages(
         private val pages: Int,
+        private val emptyPages: Set<Int> = emptySet(),
         override val pageImageSupport: PageImageSupport = PageImageSupport.Unsupported(PAGE_IMAGES_UNSUPPORTED_CODE),
     ) : DocumentExtractor {
         override val supportedMediaTypes = setOf("text/plain")
@@ -578,13 +673,14 @@ class ImportImagesTest {
                 val key = "page-$ordinal"
                 if (!input.isCommitted(key)) {
                     produced += key
+                    val text = if (ordinal in emptyPages) "" else "page text $ordinal"
                     input.boundary.unit {
                         emit(
                             ExtractionEvent.UnitReady(
                                 key, ordinal,
                                 ContentUnitDraft(
                                     locator = SourceLocation.PdfPage(ordinal + 1),
-                                    extractedText = "page text $ordinal", searchText = "page text $ordinal",
+                                    extractedText = text, searchText = text,
                                     method = ExtractionMethod.OCR,
                                 ),
                             ),

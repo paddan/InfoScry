@@ -247,6 +247,79 @@ class RevisionPublicationTest {
     }
 
     @Test
+    fun aPictureOnlyCandidateWithNoPassagesPublishesAndClearsTheOldRows() {
+        AppContext.open(dataDir).use { context ->
+            val fixture = published(context, BASELINE_TEXT)
+            assertEquals(1, context.index().chunkCount(CollectionId("default"), fixture.documentId))
+            val candidate = context.revisions.openCandidate(fixture.documentId, fixture.revisionId, "TEST_REPLACEMENT")
+            context.revisions.appendPage(
+                candidate,
+                infoscry.storage.RevisionPageDraft(
+                    ordinal = 0,
+                    unitId = fixture.unitId,
+                    locator = SourceLocation.Image("photo.png"),
+                    extractedText = "",
+                    searchText = "",
+                    extractionMethod = ExtractionMethod.DIRECT_TEXT,
+                    approval = PageApproval.APPROVED,
+                ),
+            )
+            context.revisions.appendPage(
+                candidate,
+                infoscry.storage.RevisionPageDraft(
+                    ordinal = infoscry.image.ImageIdentity.ORDINAL_BASE,
+                    unitId = ContentUnitId.new(),
+                    locator = SourceLocation.ImageRegion(SourceLocation.Image("photo.png"), 1, null),
+                    extractedText = "",
+                    searchText = "",
+                    extractionMethod = ExtractionMethod.DIRECT_TEXT,
+                    approval = PageApproval.APPROVED,
+                    sourceImage = SourceImageProvenance(
+                        root = SourceImageRoot.MANAGED_COPY, relativePath = "photo.png", sha256 = "e".repeat(64),
+                        width = 10, height = 10, renderVersion = 1,
+                    ),
+                ),
+            )
+
+            val operation = runBlocking {
+                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate)
+            }
+
+            val intent = assertNotNull(context.revisions.intent(operation))
+            assertEquals(PublicationPhase.PUBLISHED, intent.phase, "${intent.errorCode}: ${intent.errorMessage}")
+            assertEquals(candidate, context.revisions.activeRevisionId(fixture.documentId))
+            assertEquals(0, context.index().chunkCount(CollectionId("default"), fixture.documentId))
+        }
+    }
+
+    @Test
+    fun aCandidateWithNoPassagesAndWordlessTextWithoutAPictureIsStillRefused() {
+        AppContext.open(dataDir).use { context ->
+            val fixture = published(context, BASELINE_TEXT)
+            val candidate = context.revisions.openCandidate(fixture.documentId, fixture.revisionId, "TEST_REPLACEMENT")
+            context.revisions.appendPage(
+                candidate,
+                infoscry.storage.RevisionPageDraft(
+                    ordinal = 0,
+                    unitId = fixture.unitId,
+                    locator = SourceLocation.TextLines(1, 1),
+                    extractedText = "",
+                    searchText = "",
+                    extractionMethod = ExtractionMethod.OCR,
+                    approval = PageApproval.APPROVED,
+                ),
+            )
+
+            val operation = runBlocking {
+                context.revisionPublication.publish(fixture.documentId, fixture.revisionId, candidate)
+            }
+
+            assertEquals(PublicationPhase.REFUSED, assertNotNull(context.revisions.intent(operation)).phase)
+            assertEquals(fixture.revisionId, context.revisions.activeRevisionId(fixture.documentId))
+        }
+    }
+
+    @Test
     fun aHitNamesTheRevisionItsTextCameFrom() {
         AppContext.open(dataDir).use { context ->
             val fixture = published(context, BASELINE_TEXT)

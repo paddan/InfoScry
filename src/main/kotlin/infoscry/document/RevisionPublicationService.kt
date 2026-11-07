@@ -6,6 +6,7 @@ import infoscry.domain.ChunkId
 import infoscry.domain.CollectionId
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.DocumentId
+import infoscry.image.ImageIdentity
 import infoscry.search.DocumentRow
 import infoscry.search.SearchIndex
 import infoscry.storage.CollectionNotActiveException
@@ -135,7 +136,13 @@ class RevisionPublicationService(
                         baseRevisionId = baseRevisionId,
                         targetRevisionId = candidateRevisionId,
                     )
-                    index().replaceDocument(stagedRows(intent, pages, chunks))
+                    // The index refuses a document with no passage; a picture-only reading has nothing to search, and
+                    // whatever the replaced reading made searchable is removed in the same transaction.
+                    if (chunks.isEmpty()) {
+                        index().deleteDocument(documentId)
+                    } else {
+                        index().replaceDocument(stagedRows(intent, pages, chunks))
+                    }
                     revisions.makeAuthoritative(intent, revisionPages(pages, chunks))
                     revisions.markPublished(intent.id)
                     intent
@@ -242,7 +249,7 @@ class RevisionPublicationService(
             }
         }
         val chunks = revisions.chunks(revisionId)
-        if (chunks.isEmpty()) {
+        if (chunks.isEmpty() && !isPictureOnly(pages)) {
             return ARTIFACTS_INCOMPLETE_CODE to
                 "the replacement has no indexed passages yet; it was not published"
         }
@@ -281,6 +288,9 @@ class RevisionPublicationService(
             )
         }
     }
+
+    private fun isPictureOnly(pages: List<RevisionPageText>): Boolean =
+        ImageIdentity.isPictureOnly(pages.map { it.ordinal to it.extractedText.isBlank() })
 
     private fun stagedRows(
         intent: PublicationIntent,

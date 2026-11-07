@@ -26,7 +26,7 @@ const FAILURE_CAUSES: Record<string, string> = {
 /** What a document that finished with an image warning tells the person; the text is never part of it. */
 const IMAGE_WARNING_NOTES: Record<string, string> = {
   NEEDS_SURYA_LAYOUT:
-    'Pictures on scanned pages were not located because Surya is not installed. Install it with "uv venv --python 3.12" and "uv pip install surya-ocr==0.22.1", then scan the pages again.',
+    'Pictures on scanned pages were not located because Surya is not installed. Install it as the installation guide describes, then scan the pages again.',
   IMAGE_LIMIT_REACHED: 'The document holds more images than the limit, so the rest were not kept.',
   IMAGE_DECODE_FAILED: 'Some images could not be decoded and were left out.',
   IMAGE_TOO_LARGE: 'Some images were too large to keep.',
@@ -37,9 +37,20 @@ const IMAGE_WARNING_NOTES: Record<string, string> = {
   IMAGE_PARENT_ORDINAL_TOO_LATE: 'Images late in a very long document were not kept.',
 };
 
-/** The sentence for an image warning code, or null when the code is not an image warning. */
-export function imageWarningNote(code: string | null | undefined): string | null {
-  return code ? IMAGE_WARNING_NOTES[code] ?? null : null;
+/**
+ * The sentence for an image warning code, or null when the code is not an image warning.
+ *
+ * The server sends its own sentence with the warning (`warningNote`, fixed wording, never document text); for the missing Surya layout engine that sentence carries the
+ * install commands, the pinned version and the interpreter variable, so it is shown as written rather than repeated here.
+ */
+export function imageWarningNote(code: string | null | undefined, message?: string | null): string | null {
+  if (!code) return null;
+  const known = IMAGE_WARNING_NOTES[code] ?? null;
+  if (known && code === 'NEEDS_SURYA_LAYOUT' && message && message.trim()) {
+    const sentence = message.trim();
+    return sentence.charAt(0).toUpperCase() + sentence.slice(1) + (/[.!?]$/.test(sentence) ? '' : '.');
+  }
+  return known;
 }
 
 export function readableFailureCause(code: string | null | undefined): string {
@@ -61,7 +72,7 @@ export function documentStatus(doc: DocumentSummary, job?: JobSummary): Document
     return { kind: 'cancelled', label: 'Cancelled', nextAction: 'scan' };
   }
   if (doc.status === 'COMPLETE' || doc.status === 'COMPLETE_WITH_WARNINGS') {
-    const note = doc.status === 'COMPLETE_WITH_WARNINGS' ? imageWarningNote(doc.errorCode) : null;
+    const note = doc.status === 'COMPLETE_WITH_WARNINGS' ? imageWarningNote(doc.errorCode, doc.warningNote) : null;
     return { kind: 'done', label: note ? `Done. ${note}` : 'Done', nextAction: 'scan' };
   }
   return { kind: 'imported', label: 'Imported', nextAction: 'scan' };

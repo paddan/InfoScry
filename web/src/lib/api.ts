@@ -519,6 +519,8 @@ export type DocumentApiRow = {
   author?: string | null;
   language?: string | null;
   errorCode?: string | null;
+  /** The server's own sentence for an image warning the document finished with; fixed wording, never document text. */
+  warningNote?: string | null;
   /** Compact progress of the current attempt; absent while the document has no attempt recorded. */
   progress?: DocumentProgressView | null;
   /** OCR text quality, 0-100 (higher is cleaner); absent when unknown. */

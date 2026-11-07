@@ -7,6 +7,7 @@ import infoscry.config.AppPaths
 import infoscry.domain.Collection
 import infoscry.domain.CollectionLifecycle
 import infoscry.domain.Document
+import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.document.RevisionPublicationService
 import infoscry.embedding.DocumentEmbedder
@@ -361,10 +362,10 @@ internal class DocumentIngest(
                 // off the attempt holds none, so a repeat of the same choice converges on the same rows.
                 stage.run(STAGE_RECORD) {
                     sink.retainImageUnits(document.id, ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
-                }
                     // What the removed units were checkpointed under is forgotten with them, so a later attempt with
                     // images on looks at every parent again instead of skipping parents whose units are gone.
                     images.clearCheckpoints(document.id, fingerprint.value)
+                }
                 return emptyList()
             }
             val parents = stage.run(STAGE_RECORD) {
@@ -618,9 +619,8 @@ internal class DocumentIngest(
 
             // A document whose pictures are its content (a photograph the reading found no words in) has images to
             // show and nothing to search; that is a document with a warning, not an empty replacement.
-            val holdsImages = rows.isEmpty() &&
-                content.listUnits(document.id, afterOrdinal = ImageIdentity.ORDINAL_BASE - 1, limit = 1).isNotEmpty()
-            if (rows.isEmpty() && !holdsImages) {
+            val holdsOnlyPictures = rows.isEmpty() && holdsOnlyPictures(document.id)
+            if (rows.isEmpty() && !holdsOnlyPictures) {
                 // Nothing to index means an extraction pass with no units, which the chunking stage
                 // would already have refused as a refusal rather than a finished pass. This guard keeps
                 // the record honest instead of silently publishing an empty replacement.
@@ -689,6 +689,19 @@ internal class DocumentIngest(
             onFailure(embeddingCodeFor(failure), failure.message ?: "the document could not be embedded")
             return false
         }
+    }
+
+    /** Whether every unit of [documentId] is a picture or the empty reading kept beside one (R26). */
+    private fun holdsOnlyPictures(documentId: DocumentId): Boolean {
+        val units = ArrayList<Pair<Int, Boolean>>()
+        var afterOrdinal = -1
+        while (true) {
+            val batch = content.listUnits(documentId, afterOrdinal = afterOrdinal, limit = CHUNK_BATCH)
+            batch.forEach { units += it.ordinal to it.extractedText.isBlank() }
+            if (batch.size < CHUNK_BATCH) break
+            afterOrdinal = batch.last().ordinal
+        }
+        return ImageIdentity.isPictureOnly(units)
     }
 
     /**

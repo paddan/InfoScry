@@ -91,6 +91,18 @@ object ImageIdentity {
     /** Whether [ordinal] belongs to an image unit rather than a text unit. */
     fun isImageOrdinal(ordinal: Int): Boolean = ordinal >= ORDINAL_BASE
 
+    /**
+     * Whether a document's units are a picture and nothing else (R26): every text unit is an empty reading kept as the
+     * parent of at least one image unit, so there is nothing to search and nothing to chunk.
+     *
+     * @param units each unit's ordinal and whether its text is empty or blank.
+     */
+    fun isPictureOnly(units: Collection<Pair<Int, Boolean>>): Boolean {
+        val parents = units.filter { isImageOrdinal(it.first) }.map { (it.first - ORDINAL_BASE) / MAX_PER_PARENT }.toSet()
+        val texts = units.filter { !isImageOrdinal(it.first) }
+        return parents.isNotEmpty() && texts.isNotEmpty() && texts.all { (ordinal, empty) -> empty && ordinal in parents }
+    }
+
     /** A coordinate to three decimals, the precision identity compares page regions at. */
     private fun round3(value: Double): Double = Math.round(value * 1000.0) / 1000.0
 

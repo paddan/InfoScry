@@ -999,6 +999,56 @@ internal class RescanHarness(private val directory: Path, seedCollection: Boolea
     }
 
     /**
+     * A photograph the reading found no words in: its published reading is one empty unit and one standalone image
+     * unit, with nothing in the search index.
+     */
+    fun importPhotoOnly(): Picture {
+        val file = harness.sourcesDir.resolve("photo.png")
+        Files.write(file, infoscry.image.FinderFixtures.png(240, 180, 3))
+        val empty = object : PageOcrEngine {
+            override val engine = OcrEngine.TESSERACT
+            override suspend fun transcribe(page: PageImage, settings: OcrSettingsSnapshot) = OcrPageResult(
+                text = "", engine = OcrEngine.TESSERACT, imageSha256 = page.sha256,
+                errorCode = OcrPageResult.EMPTY_READING_CODE,
+            )
+        }
+        val snapshot = OcrSettingsSnapshot(
+            engine = OcrEngine.TESSERACT,
+            mode = infoscry.ocr.OcrImportMode.FILL_MISSING,
+            language = "eng",
+            extractorVersion = infoscry.extract.EXTRACTOR_SCHEMA_VERSION,
+            imageExtraction = infoscry.image.ImageExtractionMode.EMBEDDED,
+        )
+        AppContext.open(harness.dataDir).use { context ->
+            val job = harness.enqueueForTest(context, listOf(file), ocr = snapshot)
+            val images = infoscry.image.ImageStage(
+                infoscry.image.ImageFinders(listOf(infoscry.image.StandaloneImageFinder())),
+                infoscry.image.LayoutRegions(infoscry.ocr.PageOcrEngines(emptyList())),
+                infoscry.image.ImageArtifacts(), context.imageStore, context.documents,
+            )
+            harness.attach(
+                context,
+                ImportPipeline(
+                    detector = infoscry.extract.MediaTypeDetector(),
+                    registry = infoscry.extract.ExtractorRegistry(
+                        listOf(infoscry.extract.ImageExtractor(infoscry.ocr.PageOcrEngines(listOf(empty)))),
+                        infoscry.extract.TextualFallbackExtractor(),
+                    ),
+                    sink = StoredUnitsSink(context.paths, context.documents, context.content, context.corrections),
+                    images = images,
+                ),
+            )
+            harness.awaitJob(context, job.id)
+        }
+        AppContext.open(harness.dataDir).use { context ->
+            val documentId = context.documents.listByCollection(CollectionId("default"), limit = 10).single().id
+            val revisionId = assertNotNull(context.revisions.activeRevisionId(documentId))
+            val page = context.revisions.pages(revisionId).first()
+            return Picture(documentId, revisionId, page.unitId.value, file)
+        }
+    }
+
+    /**
      * A two-page PDF: page one carries [cleanText] as its own text layer, and page two has no text layer at all,
      * which is the case a scan presents. The published reading of each page is the one the import committed,
      * with page two's published text given by [scannedText].
