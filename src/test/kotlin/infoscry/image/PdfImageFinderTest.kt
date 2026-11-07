@@ -272,4 +272,29 @@ class PdfImageFinderTest {
         assertEquals(2, result.images.size)
         assertEquals(listOf(ImageRejectedException.IMAGE_TOO_LARGE), result.failures)
     }
+
+    @Test
+    fun `a failing xobject drawn three times records one failure and later images still return`() {
+        val file = pdf { document, page ->
+            val broken = PDImageXObject(
+                document,
+                ByteArrayInputStream(ByteArray(64) { (it * 31).toByte() }),
+                COSName.JBIG2_DECODE,
+                400,
+                300,
+                1,
+                PDDeviceGray.INSTANCE,
+            )
+            val good = jpegImage(document)
+            PDPageContentStream(document, page).use {
+                repeat(3) { n -> it.drawImage(broken, 50f, 100f + n * 100f, 100f, 80f) }
+                it.drawImage(good, 300f, 100f, 100f, 80f)
+            }
+        }
+
+        val result = imagesOf(file, page())
+
+        assertEquals(listOf(ImageRejectedException.IMAGE_DECODE_FAILED), result.failures)
+        assertEquals(1, result.images.size)
+    }
 }

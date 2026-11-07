@@ -91,7 +91,8 @@ class PdfImageFinder(private val maxParentBytes: Long = ImageProbe.MAX_PARENT_BY
             }
             val key: Any = (pdImage as? PDImageXObject)?.cosObject ?: pdImage
             val candidate = if (decoded.containsKey(key)) {
-                decoded[key]?.copy(box = box)
+                // A failure is recorded once per XObject, when it is first decoded.
+                decoded[key]?.copy(box = box) ?: return
             } else {
                 val fresh = candidateOf(pdImage, box)
                 decoded[key] = fresh

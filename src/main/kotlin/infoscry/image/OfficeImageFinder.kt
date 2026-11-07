@@ -13,6 +13,8 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
+import org.apache.poi.openxml4j.opc.OPCPackage
+import org.apache.poi.openxml4j.opc.PackageAccess
 import org.apache.poi.xslf.usermodel.XMLSlideShow
 import org.apache.poi.xslf.usermodel.XSLFGroupShape
 import org.apache.poi.xslf.usermodel.XSLFPictureShape
@@ -44,19 +46,28 @@ import org.openxmlformats.schemas.presentationml.x2006.main.CTPicture
  * The caption is the shape's alt text (`descr`). A value that is only a file name, as Word writes for an inserted
  * file, is not a caption. A box with no area on the page is dropped and the picture is kept without one.
  */
-class OfficeImageFinder : ImageFinder {
+class OfficeImageFinder internal constructor(
+    private val hooks: Hooks,
+) : ImageFinder {
+
+    constructor() : this(Hooks())
+
+    /** Test seams: called each time a docx package is opened and each time a picture's bytes are read. */
+    internal class Hooks(val onOpen: () -> Unit = {}, val onLoad: () -> Unit = {})
+
 
     override val mediaTypes: Set<String> = setOf(DOCX_MEDIA_TYPE, PPTX_MEDIA_TYPE, XLSX_MEDIA_TYPE)
 
-    override fun open(managedPath: Path): OpenedSource = Opened(managedPath)
+    override fun open(managedPath: Path): OpenedSource = Opened(managedPath, hooks)
 
     /** A picture found but not yet read: [load] fetches its bytes only when its parent is served. */
     private class RawPicture(val load: () -> ByteArray?, val box: NormalizedBox?, val alt: String?)
 
-    private class Opened(private val path: Path) : OpenedSource {
+    private class Opened(private val path: Path, private val hooks: Hooks) : OpenedSource {
 
         private var word: Map<SourceLocation.WordSection, List<RawPicture>>? = null
-        private var wordDocument: XWPFDocument? = null
+        private var wordPackage: OPCPackage? = null
+        private var wordFailed = false
         private var show: XMLSlideShow? = null
         private var book: XSSFWorkbook? = null
 
@@ -80,7 +91,7 @@ class OfficeImageFinder : ImageFinder {
 
         @Synchronized
         override fun close() {
-            wordDocument?.close()
+            wordPackage?.revert()
             show?.close()
             book?.close()
         }
@@ -93,7 +104,15 @@ class OfficeImageFinder : ImageFinder {
                     failures += ImageFindFailure.TOO_MANY_IMAGES
                     break
                 }
-                val candidate = picture.load()?.let { ImageProbe.candidateOf(it, picture.box) }
+                val bytes = try {
+                    hooks.onLoad()
+                    picture.load()
+                } catch (unreadable: IOException) {
+                    null
+                } catch (unreadable: RuntimeException) {
+                    null
+                }
+                val candidate = bytes?.let { ImageProbe.candidateOf(it, picture.box) }
                 if (candidate == null) {
                     failures += ImageRejectedException.IMAGE_DECODE_FAILED
                     continue
@@ -112,12 +131,22 @@ class OfficeImageFinder : ImageFinder {
 
         private fun wordPictures(): Map<SourceLocation.WordSection, List<RawPicture>> {
             word?.let { return it }
-            // The document stays open so a picture's bytes are read only when its section is served.
-            val document = Files.newInputStream(path).use { XWPFDocument(it) }
-            wordDocument = document
-            val loaded = wordPicturesOf(document)
-            word = loaded
-            return loaded
+            // A document that failed to open or parse is not opened again for the next parent.
+            if (wordFailed) throw IOException("the document could not be read")
+            // File-backed and left open: a picture's bytes are read only when its section is served.
+            var opened: OPCPackage? = null
+            try {
+                hooks.onOpen()
+                opened = OPCPackage.open(path.toFile(), PackageAccess.READ)
+                val loaded = wordPicturesOf(XWPFDocument(opened))
+                wordPackage = opened
+                word = loaded
+                return loaded
+            } catch (failure: Exception) {
+                wordFailed = true
+                runCatching { opened?.revert() }
+                throw if (failure is IOException || failure is RuntimeException) failure else IOException("the document could not be read")
+            }
         }
 
         private fun wordPicturesOf(document: XWPFDocument): Map<SourceLocation.WordSection, List<RawPicture>> {

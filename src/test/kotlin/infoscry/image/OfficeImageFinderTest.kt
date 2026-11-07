@@ -204,4 +204,66 @@ class OfficeImageFinderTest {
         assertEquals(listOf(ImageRejectedException.IMAGE_DECODE_FAILED), result.failures)
         assertEquals(1, result.images.size)
     }
+
+    private fun twoSectionDocx(): Path = docx { document ->
+        document.createParagraph().apply { style = "Heading1" }.createRun().setText("First")
+        document.createParagraph().createRun().setText("Body")
+        document.picture(1, "One")
+        document.createParagraph().apply { style = "Heading1" }.createRun().setText("Second")
+        document.createParagraph().createRun().setText("More")
+        document.picture(2, "Two")
+    }
+
+    @Test
+    fun `a sections picture bytes are not read until that section is served`() {
+        val file = twoSectionDocx()
+        val sections = sectionLocators(file)
+        var loads = 0
+        val lazy = OfficeImageFinder(OfficeImageFinder.Hooks(onLoad = { loads++ }))
+
+        lazy.open(file).use { source ->
+            assertEquals(0, loads)
+            assertEquals(listOf("One"), source.imagesOf(FinderFixtures.parent(sections[0])).images.map { it.caption })
+            assertEquals(1, loads)
+            assertEquals(listOf("Two"), source.imagesOf(FinderFixtures.parent(sections[1])).images.map { it.caption })
+            assertEquals(2, loads)
+        }
+    }
+
+    @Test
+    fun `a picture whose read throws fails alone and the others still return`() {
+        val file = docx { document ->
+            document.createParagraph().createRun().setText("Text")
+            document.picture(1, "One")
+            document.picture(2, "Two")
+        }
+        var loads = 0
+        val failing = OfficeImageFinder(
+            OfficeImageFinder.Hooks(onLoad = { if (++loads == 1) throw IllegalStateException("read failed") }),
+        )
+
+        val result = failing.open(file).use { it.imagesOf(FinderFixtures.parent(sectionLocators(file).single())) }
+
+        assertEquals(listOf(ImageRejectedException.IMAGE_DECODE_FAILED), result.failures)
+        assertEquals(listOf("Two"), result.images.map { it.caption })
+    }
+
+    @Test
+    fun `a malformed docx is opened once and every parent reports it unreadable`() {
+        val file = Files.write(directory.resolve("bad.docx"), ByteArray(100) { 5 })
+        var opens = 0
+        val counting = OfficeImageFinder(OfficeImageFinder.Hooks(onOpen = { opens++ }))
+        val section = SourceLocation.WordSection(emptyList(), 1, 2)
+
+        counting.open(file).use { source ->
+            repeat(2) {
+                assertEquals(
+                    listOf(ImageFindFailure.PARENT_UNREADABLE),
+                    source.imagesOf(FinderFixtures.parent(section)).failures,
+                )
+            }
+        }
+
+        assertEquals(1, opens)
+    }
 }
