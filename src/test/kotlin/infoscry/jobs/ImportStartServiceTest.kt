@@ -170,7 +170,7 @@ class ImportStartServiceTest {
     }
 
     @Test
-    fun `an import follows the collection's image default unless the request states a mode`() = runBlocking {
+    fun `an import follows the collection's image default unless the request states a mode`() = runBlocking<Unit> {
         val data = Files.createTempDirectory("infoscry-import-images-mode")
         val source = data.resolve("source.txt").also { Files.writeString(it, "import this") }
         AppContext.open(data.resolve("archive")).use { context ->
@@ -189,6 +189,8 @@ class ImportStartServiceTest {
                 ImportJobPayload.decode(context.jobs.get(job.id)!!.payload).ocr!!.imageExtraction
 
             val followsDefault = start("follows-default", null)
+            // The same files already queued are that work, whoever asks; stopping it lets a new mode start.
+            context.jobs.fail(context.jobs.claimNextQueued()!!.id, "TEST_FAILURE", "test failure")
             val stated = start("states-off", infoscry.image.ImageExtractionMode.OFF)
 
             assertEquals(infoscry.image.ImageExtractionMode.EMBEDDED, modeOf(followsDefault))
