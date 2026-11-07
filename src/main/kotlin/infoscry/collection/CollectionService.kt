@@ -272,7 +272,12 @@ class CollectionService(
      * edit to that collection. Whether the effective settings are still usable is decided when work is
      * admitted, where the profiles are resolved again into a snapshot.
      */
-    suspend fun updateOcrSettings(id: CollectionId, update: OcrSettingsUpdate, expectedVersion: Long? = null): Collection =
+    suspend fun updateOcrSettings(
+        id: CollectionId,
+        update: OcrSettingsUpdate,
+        expectedVersion: Long? = null,
+        imageDefault: ImageExtractionMode? = null,
+    ): Collection =
         coordinator.withMutation {
             requireMutationsAllowed()
             val existing = requireActive(id)
@@ -282,7 +287,7 @@ class CollectionService(
                     ocrProfiles.requireSelectable(method.profileId, OcrProfileRole.TRANSCRIPTION)
                 }
             }
-            collections.updateOcrSettings(id, settings, expectedVersion)
+            collections.updateOcrSettings(id, settings, expectedVersion, imageDefault)
         }
 
     /**

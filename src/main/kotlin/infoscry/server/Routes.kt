@@ -339,9 +339,8 @@ fun Application.configureRoutes(
                     val saved = if (images != null && request.language == null && request.defaultMethod == null) {
                         context.collectionService.updateImageDefault(id, images, expected)
                     } else {
-                        val updated = context.collectionService.updateOcrSettings(id, request.toUpdate(), expected)
-                        // The first save moved the version this edit was made from; the second belongs to the same edit.
-                        if (images != null) context.collectionService.updateImageDefault(id, images, updated.version) else updated
+                        // One edit, one version check: the image default travels with the OCR settings.
+                        context.collectionService.updateOcrSettings(id, request.toUpdate(), expected, images)
                     }
                     call.respondJson(HttpStatusCode.OK, CollectionResponse(saved))
                 }

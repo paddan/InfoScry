@@ -327,4 +327,27 @@ class ImageRoutesTest {
         assertEquals(HttpStatusCode.OK, both.status, both.bodyAsText())
         assertEquals(ImageExtractionMode.ALL, ApiJson.decodeFromString<CollectionResponse>(both.bodyAsText()).collection.defaultImageExtraction)
     }
+
+    @Test fun `an image default edit sent beside an unchanged language still carries its version`() = runBlocking {
+        val path = "/api/collections/${document.collectionId.value}/ocr-languages"
+        suspend fun patch(body: String, ifMatch: String) = server.client.request(server.url + path) {
+            method = HttpMethod.Patch
+            header(HttpHeaders.Authorization, "Bearer ${server.bearer}")
+            header(HttpHeaders.IfMatch, ifMatch)
+            contentType(ContentType.Application.Json)
+            setBody(body)
+        }
+        val start = server.context.collectionService.requireActiveByNameOrId(document.collectionId.value)
+        val same = "\"${start.ocrLanguages}\""
+        // Two editors read the same version; the first one's image default wins, the second one is stale.
+        val firstEditor = patch("""{"language":${same},"defaultImageExtraction":"embedded"}""", "\"${start.version}\"")
+        assertEquals(HttpStatusCode.OK, firstEditor.status, firstEditor.bodyAsText())
+        val secondEditor = patch("""{"language":${same},"defaultImageExtraction":"all"}""", "\"${start.version}\"")
+        assertEquals(HttpStatusCode.Conflict, secondEditor.status, secondEditor.bodyAsText())
+        assert(secondEditor.bodyAsText().contains("EDIT_CONFLICT")) { secondEditor.bodyAsText() }
+        assertEquals(
+            ImageExtractionMode.EMBEDDED,
+            server.context.collectionService.requireActiveByNameOrId(document.collectionId.value).defaultImageExtraction,
+        )
+    }
 }

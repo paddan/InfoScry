@@ -148,8 +148,17 @@ class CollectionStore(private val database: Database) {
      * [settings] is the whole effective set rather than the fields that changed, because the settings are
      * only meaningful together: an engine without the profile it reads through is not a collection state.
      * Already queued payloads are untouched — this changes what the *next* attempt snapshots.
+     *
+     * [imageDefault], when given, is written in the same transaction under the same version check, so an edit of
+     * both is one edit: it either holds the version it was made from or conflicts, and a stale edit of the image
+     * default alone cannot slip past the check. Changing neither value changes nothing, whatever version is held.
      */
-    fun updateOcrSettings(id: CollectionId, settings: CollectionOcrSettings, expectedVersion: Long? = null): Collection =
+    fun updateOcrSettings(
+        id: CollectionId,
+        settings: CollectionOcrSettings,
+        expectedVersion: Long? = null,
+        imageDefault: ImageExtractionMode? = null,
+    ): Collection =
         database.transaction { connection ->
             val existing = selectById(connection, id, forUpdate = true)
                 ?: throw NoSuchElementException("no collection with id ${id.value}")
@@ -161,8 +170,9 @@ class CollectionStore(private val database: Database) {
                 infoscry.ocr.ReadingMethod.KeepText -> error("Keep current text is not a collection default")
                 is infoscry.ocr.ReadingMethod.Llm -> OcrEngine.LLM to method.profileId
             }
+            val images = imageDefault ?: existing.defaultImageExtraction
             if (existing.ocrLanguages == language && existing.ocrEngine == engine &&
-                existing.ocrTranscriptionProfileId == profileId
+                existing.ocrTranscriptionProfileId == profileId && existing.defaultImageExtraction == images
             ) {
                 return@transaction existing
             }
@@ -170,13 +180,14 @@ class CollectionStore(private val database: Database) {
             val updatedAt = Instants.now()
             connection.prepareStatement(
                 "UPDATE collections SET ocr_languages = ?, ocr_engine = ?, " +
-                    "ocr_transcription_profile_id = ?, updated_at = ? WHERE id = ?",
+                    "ocr_transcription_profile_id = ?, default_image_extraction = ?, updated_at = ? WHERE id = ?",
             ).use { statement ->
                 statement.setString(1, language)
                 statement.setString(2, engine.name)
                 statement.setString(3, profileId)
-                statement.setString(4, updatedAt)
-                statement.setString(5, id.value)
+                statement.setString(4, images.name)
+                statement.setString(5, updatedAt)
+                statement.setString(6, id.value)
                 statement.executeUpdate()
             }
             checkNotNull(selectById(connection, id))
