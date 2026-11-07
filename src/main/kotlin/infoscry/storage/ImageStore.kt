@@ -240,6 +240,25 @@ class ImageStore(private val database: Database) {
     }
 
     /**
+     * Removes [parentUnitId]'s checkpoints under [target] in every mode but [mode]. Run before a parent is delivered
+     * and reconciled, so a process killed anywhere after that leaves no other-mode checkpoint to skip it later.
+     */
+    fun clearOtherModeCheckpoints(documentId: DocumentId, target: String, parentUnitId: ContentUnitId, mode: ImageExtractionMode) {
+        database.transaction { connection ->
+            connection.prepareStatement(
+                "DELETE FROM image_extraction_checkpoints WHERE document_id = ? AND target = ? " +
+                    "AND parent_unit_id = ? AND mode <> ?",
+            ).use { statement ->
+                statement.setString(1, documentId.value)
+                statement.setString(2, target)
+                statement.setString(3, parentUnitId.value)
+                statement.setString(4, mode.checkpointName())
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    /**
      * Removes every checkpoint of [documentId] under [target], whatever the mode, once an attempt with images off has
      * removed the image units they described. Safe to repeat.
      */

@@ -153,8 +153,11 @@ class LayoutRegions(
         val raster = decode(reader) ?: return failedWith(ImageRejectedException.IMAGE_DECODE_FAILED)
         val captions = captionsByFigure(figures, structure.blocks, text, raster.height)
         val lines = pageLines(structure.blocks, text, raster.width, raster.height)
+        // A caption line belongs to one picture: one a figure's layout caption claimed, or an earlier region took as its
+        // page-text caption, is not another's.
+        val pool = lines.filter { it.text !in captions.values }.toMutableList()
         val images = figures.mapNotNull { figure ->
-            regionOf(parent, raster, figure.bbox!!, captions[figure.order], lines)
+            regionOf(parent, raster, figure.bbox!!, captions[figure.order], lines, pool)
         }
         return ParentImages(images, failures = emptyList(), scanned = false)
     }
@@ -243,6 +246,7 @@ class LayoutRegions(
         box: PixelBox,
         layoutCaption: String?,
         lines: List<TextLine>,
+        captionPool: MutableList<TextLine>,
     ): FoundImage? {
         val left = box.left.coerceIn(0, raster.width)
         val right = box.right.coerceIn(0, raster.width)
@@ -271,7 +275,9 @@ class LayoutRegions(
             isMask = false,
         )
         // A caption the layout found wins; the text next to the picture is the fallback.
-        val pageCaption = if (layoutCaption == null) PageTextContext.captionFor(normalizedBox, lines) else null
+        val pageBlock = if (layoutCaption == null) PageTextContext.captionBlockFor(normalizedBox, captionPool) else emptyList()
+        captionPool.removeAll { line -> pageBlock.any { it === line } }
+        val pageCaption = pageBlock.joinToString(" ") { it.text }.replace(Regex("\\s+"), " ").trim().takeIf { it.isNotEmpty() }
         val caption = layoutCaption ?: pageCaption
         return FoundImage(
             parent = parent,

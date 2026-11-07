@@ -361,6 +361,43 @@ class ImportImagesTest {
         }
     }
 
+    @Test
+    fun `an off import killed while removing the image units still delivers them on the next embedded import`() {
+        withHarness { harness ->
+            val source = harness.writeText("album.txt", "scanned album\n")
+            val first = runImport(harness, source, snapshot(ImageExtractionMode.EMBEDDED), Pages(3), tableFinder())
+            fun reset() = AppContext.open(harness.dataDir).use { context ->
+                context.documents.updateStatus(first.documentId, DocumentStatus.FAILED, "EXTRACTION_FAILED")
+            }
+            reset()
+
+            // The OFF attempt dies at the unit removal, once.
+            AppContext.open(harness.dataDir).use { context ->
+                val job = harness.enqueueForTest(context, listOf(source), ocr = snapshot(ImageExtractionMode.OFF))
+                val plain = StoredUnitsSink(context.paths, context.documents, context.content, context.corrections)
+                var killed = false
+                val dying = object : ExtractionSink by plain {
+                    override suspend fun deliver(documentId: DocumentId, fingerprint: ExtractionFingerprint, event: ExtractionEvent) =
+                        plain.deliver(documentId, fingerprint, event)
+
+                    override suspend fun retainImageUnits(documentId: DocumentId, fromOrdinal: Int, toOrdinal: Int, keep: Set<ContentUnitId>) {
+                        plain.retainImageUnits(documentId, fromOrdinal, toOrdinal, keep)
+                        if (!killed) {
+                            killed = true
+                            throw IllegalStateException("killed right after the image units were removed")
+                        }
+                    }
+                }
+                harness.attach(context, pipeline(context, Pages(3), imagesWith(context, tableFinder()), sink = dying))
+                harness.awaitJob(context, job.id)
+            }
+            reset()
+
+            runImport(harness, source, snapshot(ImageExtractionMode.EMBEDDED), Pages(3), tableFinder())
+            assertImagesDelivered(harness, first.documentId)
+        }
+    }
+
     private fun assertImagesDelivered(harness: Harness, documentId: DocumentId) {
         AppContext.open(harness.dataDir).use { context ->
             val images = context.content.listUnits(documentId, afterOrdinal = -1, limit = 50)

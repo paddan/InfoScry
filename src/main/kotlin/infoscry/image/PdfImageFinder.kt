@@ -70,12 +70,18 @@ class PdfImageFinder(private val maxParentBytes: Long = ImageProbe.MAX_PARENT_BY
          */
         private fun withPageText(images: List<FoundImage>, lines: List<TextLine>): List<FoundImage> {
             if (lines.isEmpty()) return images
+            // A caption line belongs to one image: the first image that takes it, in drawing order, keeps it.
+            val unclaimed = lines.toMutableList()
             return images.map { found ->
                 val box = found.candidate.box ?: return@map found
-                val caption = PageTextContext.captionFor(box, lines)
+                val pageCaption = if (found.caption == null) PageTextContext.captionBlockFor(box, unclaimed) else emptyList()
+                unclaimed.removeAll { line -> pageCaption.any { it === line } }
+                val pageText = pageCaption.joinToString(" ") { it.text }.replace(Regex("\\s+"), " ").trim().takeIf { it.isNotEmpty() }
+                val caption = found.caption ?: pageText
                 found.copy(
                     caption = caption,
-                    captionSource = caption?.let { CaptionSource.PAGE_TEXT },
+                    captionSource = found.captionSource ?: pageText?.let { CaptionSource.PAGE_TEXT },
+                    // Other images' captions are not this one's context either.
                     context = PageTextContext.contextFor(box, lines, caption),
                 )
             }

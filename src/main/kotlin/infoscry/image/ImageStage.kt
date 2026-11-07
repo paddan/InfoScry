@@ -269,6 +269,9 @@ class ImageStage(
     ): Int {
         checkNotDeleting(run)
         val parent = run.context.parent
+        // Invalidate first: a checkpoint of another mode that outlives a kill between the changes below would make a
+        // later run of that mode skip a parent whose units this run changed. A missing checkpoint only costs a repeat.
+        store.clearOtherModeCheckpoints(run.document.id, run.target.target, parent.unitId, run.mode)
         val occurrences = HashMap<String, Int>()
         var delivered = 0
         val produced = HashSet<ContentUnitId>()

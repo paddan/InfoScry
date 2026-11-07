@@ -361,10 +361,11 @@ internal class DocumentIngest(
                 // An earlier attempt with images on may have left image units beside this attempt's text; with images
                 // off the attempt holds none, so a repeat of the same choice converges on the same rows.
                 stage.run(STAGE_RECORD) {
-                    sink.retainImageUnits(document.id, ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
-                    // What the removed units were checkpointed under is forgotten with them, so a later attempt with
-                    // images on looks at every parent again instead of skipping parents whose units are gone.
+                    // The checkpoints go first: a kill between the two steps then leaves units without checkpoints (a
+                    // harmless repeat), never checkpoints without units, which would make a later attempt with
+                    // images on skip every parent.
                     images.clearCheckpoints(document.id, fingerprint.value)
+                    sink.retainImageUnits(document.id, ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
                 }
                 return emptyList()
             }

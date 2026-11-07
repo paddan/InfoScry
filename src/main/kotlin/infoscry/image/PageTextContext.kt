@@ -36,7 +36,7 @@ object PageTextContext {
 
     /** A line starting with a figure label (`Fig. 2`, `Figur 3.`, `Bild 1`, `Foto:`, `Photo 7`, `Tab 4`) is preferred. */
     private val LABEL = Regex(
-        "^(?:figure|figur|fig|bild|foto|photo|tab)(?=\\s*[\\d.:;,)\\u002D\\u2013\\u2014])",
+        "^(?:figure|figur|fig|bild|foto|photo|tabell|table|tab)(?=\\s*[\\d.:;,)\\u002D\\u2013\\u2014])",
         RegexOption.IGNORE_CASE,
     )
 
@@ -49,19 +49,22 @@ object PageTextContext {
      * of the narrower width. A block that starts with a figure label wins over a plain adjacent one; with no label
      * anywhere, the block below is used before the block above. Null when no line is adjacent.
      */
-    fun captionFor(image: NormalizedBox, lines: List<TextLine>): String? {
+    fun captionFor(image: NormalizedBox, lines: List<TextLine>): String? =
+        captionBlockFor(image, lines).joinToString(" ") { it.text }.collapsed().takeIf { it.isNotEmpty() }
+
+    /** The lines [captionFor] joins into the caption of [image], in reading order; empty when there is none. */
+    fun captionBlockFor(image: NormalizedBox, lines: List<TextLine>): List<TextLine> {
         val beside = lines.filter {
             it.text.isNotBlank() && it.text.length <= MAX_CAPTION_LINE_CHARS && sharesWidth(image, it.box)
         }
         val below = chainBelow(image, beside)
         val above = chainAbove(image, beside)
-        val chosen = when {
+        return when {
             below.isNotEmpty() && isLabel(below.first().text) -> below
             above.isNotEmpty() && isLabel(above.first().text) -> above
             below.isNotEmpty() -> below
             else -> above
         }
-        return chosen.joinToString(" ") { it.text }.collapsed().takeIf { it.isNotEmpty() }
     }
 
     /**
@@ -70,10 +73,10 @@ object PageTextContext {
      * at a word boundary. Null when nothing is left.
      */
     fun contextFor(image: NormalizedBox, lines: List<TextLine>, exclude: String?): String? {
-        val excluded = exclude?.collapsed()?.takeIf { it.isNotEmpty() }
+        val captionLines = exclude?.collapsed()?.takeIf { it.isNotEmpty() }?.let { linesOfCaption(it, lines) }.orEmpty()
         val ordered = lines
             .map { it to it.text.collapsed() }
-            .filter { (_, text) -> text.isNotEmpty() && (excluded == null || !excluded.contains(text)) }
+            .filter { (line, text) -> text.isNotEmpty() && captionLines.none { it === line } }
             .sortedWith(
                 compareBy<Pair<TextLine, String>>(
                     { (line, _) -> verticalGap(image, line.box) },
@@ -99,6 +102,25 @@ object PageTextContext {
             break
         }
         return out.toString().takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * The lines the collapsed [caption] is made of: a run of up to [MAX_CAPTION_LINES] consecutive lines (top to bottom)
+     * that joins to exactly the caption, else the lines equal to it. A line that merely occurs inside the caption
+     * (a year, a name) elsewhere on the page is not part of it.
+     */
+    private fun linesOfCaption(caption: String, lines: List<TextLine>): List<TextLine> {
+        val sorted = lines.sortedWith(compareBy({ it.box.top }, { it.box.left }))
+        for (start in sorted.indices) {
+            val joined = StringBuilder()
+            for (end in start until minOf(sorted.size, start + MAX_CAPTION_LINES)) {
+                if (joined.isNotEmpty()) joined.append(' ')
+                joined.append(sorted[end].text.collapsed())
+                if (joined.toString() == caption) return sorted.subList(start, end + 1)
+                if (joined.length > caption.length) break
+            }
+        }
+        return lines.filter { it.text.collapsed() == caption }
     }
 
     /** The longest prefix of [text] within [room] characters that ends on a whole word (a hard cut only for one giant word). */

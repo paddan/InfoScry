@@ -300,7 +300,8 @@ figcaption, a caption on a scanned page, or for a PDF image or a picture on a sc
 it, such as "Figur 3. Anna Svensson 1923" under it) and by a short excerpt of the page text around it, so
 searching for a nearby word finds the picture. A picture with no caption and no text around it
 is shown and citable but not found by search. A document read before this existed keeps its old picture
-text until it is rescanned; *Keep current text* refreshes it without reading any page. A search result or an Ask citation on a picture opens it with its page
+text until it is rescanned. *Keep current text*, and a rescan with automatic page selection, refresh every picture
+(*Keep current text* without reading any page); a rescan of pages you selected refreshes only those pages' pictures. A search result or an Ask citation on a picture opens it with its page
 behind it, and a citation from an older version opens that version's picture.
 Document details show the number of images. Picture regions on scanned pages are not yet verified against real Surya: its layout reading did not mark synthetic test pictures, so they may not be found until checked on a real photograph. From the command line,
 `infoscry import … --images off|embedded|all` chooses the same setting.

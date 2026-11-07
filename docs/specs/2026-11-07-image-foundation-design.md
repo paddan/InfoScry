@@ -143,8 +143,10 @@ either finds the image.
   boundary.
 - **Refreshing.** The text of an image unit changes only when the image is delivered again. The image
   extractor version is now `2`, so an import that resumes or is retried looks at its pictures again, and any
-  rescan (including *Keep current text*, which reads no page) delivers the pictures into its new revision with
-  the caption and context. A document already complete keeps its old unit text until it is rescanned.
+  rescan with the automatic page selection or the rescan-only *Keep current text* (which reads no page) delivers every
+  picture into its new revision with the caption and context. A rescan of an explicitly selected set of pages carries
+  the unselected pages' pictures forward with their old text; only the selected pages are delivered again. A document
+  already complete keeps its old unit text until it is rescanned.
 - No document text is logged.
 
 ### Filtering

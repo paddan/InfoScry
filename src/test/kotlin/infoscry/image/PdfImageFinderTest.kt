@@ -392,6 +392,71 @@ class PdfImageFinderTest {
     }
 
     @Test
+    fun `a caption under a picture is found on a page displayed rotated by one hundred and eighty degrees`() {
+        // Displayed 612 wide and 792 tall: picture at display x 100..300, y 100..250, caption below it.
+        val file = pdf { document, page ->
+            page.rotation = 180
+            PDPageContentStream(document, page).use {
+                it.drawImage(jpegImage(document), 312f, 100f, 200f, 150f)
+                it.beginText()
+                it.setFont(helvetica, 12f)
+                it.setTextMatrix(Matrix.getRotateInstance(Math.PI, 512f, 264f))
+                it.showText("Fig. 8 Upside down page caption")
+                it.endText()
+            }
+        }
+
+        val found = imagesOf(file, page()).images.single()
+
+        val box = checkNotNull(found.candidate.box)
+        assertEquals(100.0 / 612, box.left, 0.002)
+        assertEquals(250.0 / 792, box.bottom, 0.002)
+        assertEquals("Fig. 8 Upside down page caption", found.caption)
+    }
+
+    @Test
+    fun `a caption under a picture is found on a page displayed rotated by two hundred and seventy degrees`() {
+        // Displayed 792 wide and 612 tall: picture at display x 100..300, y 100..250, caption below it.
+        val file = pdf { document, page ->
+            page.rotation = 270
+            PDPageContentStream(document, page).use {
+                it.drawImage(jpegImage(document), 362f, 492f, 150f, 200f)
+                it.beginText()
+                it.setFont(helvetica, 12f)
+                it.setTextMatrix(Matrix.getRotateInstance(3 * Math.PI / 2, 348f, 692f))
+                it.showText("Fig. 9 Quarter turn page caption")
+                it.endText()
+            }
+        }
+
+        val found = imagesOf(file, page()).images.single()
+
+        val box = checkNotNull(found.candidate.box)
+        assertEquals(100.0 / 792, box.left, 0.002)
+        assertEquals(250.0 / 612, box.bottom, 0.002)
+        assertEquals("Fig. 9 Quarter turn page caption", found.caption)
+    }
+
+    @Test
+    fun `one caption line belongs to one image when two images sit around it`() {
+        val file = pdf { document, page ->
+            val upper = jpegImage(document)
+            val lower = jpegImage(document, seed = 5)
+            PDPageContentStream(document, page).use {
+                it.drawImage(upper, 100f, 500f, 200f, 150f)
+                it.line("Figure 1. Between the two pictures", 100f, 484f)
+                it.drawImage(lower, 100f, 320f, 200f, 150f)
+            }
+        }
+
+        val images = imagesOf(file, page()).images
+
+        assertEquals(2, images.size)
+        assertEquals(1, images.count { it.caption == "Figure 1. Between the two pictures" })
+        assertEquals(1, images.count { it.caption == null })
+    }
+
+    @Test
     fun `a caption is found on a page with a crop box that does not start at the origin`() {
         val file = pdf { document, page ->
             page.cropBox = PDRectangle(50f, 100f, 400f, 500f)

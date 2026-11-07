@@ -501,6 +501,27 @@ class ImageStageTest {
     }
 
     @Test
+    fun `a crash between delivery and the commit of another mode cannot bring the stale checkpoint back`() {
+        val parents = pages(1, scanned = true) { listOf(picture(100, 120)) }
+        val finder = FakeFinder(parents)
+        val contexts = contexts(parents) { pageWithPicture() }
+        val target = RecordingTarget()
+        runMode(finder, contexts, target, ImageExtractionMode.EMBEDDED)
+
+        // The ALL run delivers the region unit, then dies while reconciling: its own checkpoint is not committed.
+        target.failRetainOnce = true
+        assertFailsWith<IllegalStateException> { runMode(finder, contexts, target, ImageExtractionMode.ALL) }
+        assertEquals(2, target.held.size)
+
+        // EMBEDDED again must look at the parent again and drop the region unit, not trust its older checkpoint.
+        val again = runMode(finder, contexts, target, ImageExtractionMode.EMBEDDED)
+
+        assertEquals(1, again.images)
+        assertEquals(1, target.held.size)
+        assertEquals(1, imageCheckpointImages(target.target))
+    }
+
+    @Test
     fun `all then embedded then all delivers the region units again`() {
         val parents = pages(1, scanned = true) { listOf(picture(100, 120)) }
         val finder = FakeFinder(parents)
@@ -902,10 +923,17 @@ class ImageStageTest {
     ) : ImageUnitTarget {
         val delivered = mutableListOf<Delivery>()
 
+        /** Makes the next [retainImages] fail, the way a process killed between delivery and commit does. */
+        var failRetainOnce = false
+
         /** What the target holds now: delivered units, less what a later delivery retained away. */
         val held = LinkedHashMap<ContentUnitId, Int>()
 
         override suspend fun retainImages(fromOrdinal: Int, toOrdinal: Int, keep: Set<ContentUnitId>) {
+            if (failRetainOnce) {
+                failRetainOnce = false
+                throw IllegalStateException("interrupted while reconciling")
+            }
             held.entries.removeIf { (id, ordinal) -> ordinal in fromOrdinal..toOrdinal && id !in keep }
         }
 

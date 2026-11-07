@@ -144,6 +144,44 @@ class PageTextContextTest {
     }
 
     @Test
+    fun `an unrelated line that the caption merely contains stays in the context`() {
+        val caption = "Figur 3. Anna Svensson 1923"
+        val lines = listOf(line(caption, top = 0.51), line("1923", top = 0.28), line("Anna", top = 0.24))
+
+        val context = PageTextContext.contextFor(image, lines, exclude = caption)!!
+
+        assertEquals("1923 Anna", context)
+    }
+
+    @Test
+    fun `a caption of two lines is excluded line by line`() {
+        val first = line("Fig. 4 The harbour", top = 0.51)
+        val second = line("seen from the north", top = 0.535)
+        val context = PageTextContext.contextFor(
+            image, listOf(first, second, line("Other text", top = 0.28)),
+            exclude = "Fig. 4 The harbour seen from the north",
+        )
+
+        assertEquals("Other text", context)
+    }
+
+    @Test
+    fun `a caption block names the lines it is made of`() {
+        val first = line("Fig. 4 The harbour", top = 0.51)
+        val second = line("seen from the north", top = 0.535)
+
+        assertEquals(listOf(first, second), PageTextContext.captionBlockFor(image, listOf(second, first)))
+    }
+
+    @Test
+    fun `table labels are labels`() {
+        assertTrue(PageTextContext.isLabel("Table 3. Ferries"))
+        assertTrue(PageTextContext.isLabel("Tabell 2"))
+        assertTrue(PageTextContext.isLabel("Tab. 1"))
+        assertTrue(!PageTextContext.isLabel("Tablet computers"))
+    }
+
+    @Test
     fun `a whole paragraph is body text, not a caption`() {
         val paragraph = (1..80).joinToString(" ") { "sentence$it" }
 

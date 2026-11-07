@@ -250,6 +250,21 @@ class LayoutRegionsTest {
     }
 
     @Test
+    fun `a caption block claimed by one figure is not the page-text caption of the next`() {
+        val first = block(BlockKind.FIGURE, 0, FIGURE_A, FIGURE_A_RANGE)
+        val caption = block(BlockKind.CAPTION, 1, PixelBox(100, 410, 500, 450), CAPTION_ONE_RANGE)
+        val second = block(BlockKind.FIGURE, 2, PixelBox(100, 460, 500, 760), FIGURE_B_RANGE)
+        val engine = FakeSurya { page -> reading(page, PAGE_TEXT, listOf(first, caption, second)) }
+
+        val (one, two) = regions(engine, page(), structure = null).images
+
+        assertEquals("Caption one.", one.caption)
+        assertEquals(CaptionSource.LAYOUT_CAPTION, one.captionSource)
+        assertNull(two.caption)
+        assertNull(two.captionSource)
+    }
+
+    @Test
     fun `a stored structure gives the same page-text caption without calling the engine`() {
         val figure = block(BlockKind.FIGURE, 0, FIGURE_A, FIGURE_A_RANGE)
         val under = block(BlockKind.PARAGRAPH, 1, PixelBox(100, 410, 500, 450), CAPTION_ONE_RANGE)

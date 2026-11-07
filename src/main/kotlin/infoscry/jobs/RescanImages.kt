@@ -64,9 +64,10 @@ internal class RescanImages(
             if (mode == ImageExtractionMode.OFF) {
                 // The candidate holds no image units with images off, whatever an earlier attempt of it staged.
                 stage.run(STAGE_RECORD) {
+                    // Checkpoints first, so a kill between the steps never leaves checkpoints without their units.
+                    images.clearCheckpoints(document.id, candidate)
                     CandidateImageTarget(revisions, candidate, document)
                         .retainImages(ImageIdentity.ORDINAL_BASE, Int.MAX_VALUE, emptySet())
-                    images.clearCheckpoints(document.id, candidate)
                 }
                 return emptyList()
             }
