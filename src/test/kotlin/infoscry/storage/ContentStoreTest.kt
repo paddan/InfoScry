@@ -123,6 +123,25 @@ class ContentStoreTest {
     }
 
     @Test
+    fun `the text a quality score judges leaves out image units`() {
+        val document = newDocument()
+        store.commitExtractedUnit(
+            document, fingerprint, "page-1", 0, draftOf(extracted = "a page of text", search = "a page of text"),
+            artifactRoot(document),
+        )
+        val caption = draftOf(
+            locator = SourceLocation.ImageRegion(SourceLocation.PdfPage(1), 1, null),
+            extracted = "a harbour",
+            search = "a harbour",
+        ).copy(unitId = infoscry.domain.ContentUnitId("00000000-0000-5000-8000-000000000009"))
+        store.commitExtractedUnit(
+            document, fingerprint, "image:1", infoscry.image.ImageIdentity.ordinal(0, 1)!!, caption, artifactRoot(document),
+        )
+
+        assertEquals(listOf("a page of text"), store.extractedTextsOf(listOf(document)).getValue(document))
+    }
+
+    @Test
     fun `committing the same ordinal again keeps the unit's identity and replaces its text`() {
         val document = newDocument()
         val first = store.commitExtractedUnit(
@@ -302,6 +321,25 @@ class ContentStoreTest {
         assertFalse(Files.exists(root.resolve(orphanReference.relativePath)), "an orphaned structure was kept")
         assertEquals(0, sweep.run(), "a second sweep found something more to remove")
         assertTrue(Files.exists(root.resolve(keptReference.relativePath)))
+    }
+
+    @Test
+    fun `the startup sweep removes the temporary image files and page rasters a killed image step left`() {
+        val document = newDocument()
+        val root = artifactRoot(document)
+        val keptImage = writeArtifact(root, "images/${"a".repeat(64)}.png", "image")
+        val keptThumbnail = writeArtifact(root, "images/thumbs/${"a".repeat(64)}.jpg", "thumb")
+        val tempImage = writeArtifact(root, "images/${"b".repeat(64)}.png.1234.tmp", "partial")
+        val tempThumbnail = writeArtifact(root, "images/thumbs/${"b".repeat(64)}.jpg.1234.tmp", "partial")
+        val raster = writeArtifact(root, ".image-pages/page-3/page.png", "raster")
+        val sweep = infoscry.ocr.OrphanedStructureSweep(database, infoscry.config.AppPaths.of(dataDir))
+
+        assertEquals(3, sweep.run())
+
+        assertTrue(Files.exists(keptImage) && Files.exists(keptThumbnail), "a finished image was removed")
+        assertFalse(Files.exists(tempImage) || Files.exists(tempThumbnail), "a temporary image file was kept")
+        assertFalse(Files.exists(raster) || Files.exists(root.resolve(".image-pages")), "the page raster directory was kept")
+        assertEquals(0, sweep.run(), "a second sweep found something more to remove")
     }
 
     @Test

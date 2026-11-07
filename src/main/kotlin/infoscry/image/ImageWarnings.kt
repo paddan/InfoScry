@@ -31,6 +31,9 @@ object ImageWarnings {
     fun mostImportant(codes: Collection<String>): String? =
         codes.minByOrNull { code -> PRIORITY.indexOf(code).let { if (it < 0) PRIORITY.size else it } }
 
+    /** Whether [code] is one of the image warnings. */
+    fun knows(code: String): Boolean = code in PRIORITY
+
     /** The sentence a document records for [code]. */
     fun messageFor(code: String): String = when (code) {
         SuryaLayoutUnavailableException.NEEDS_SURYA_LAYOUT ->

@@ -6,6 +6,7 @@ import infoscry.config.AppPaths
 import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnit
 import infoscry.domain.ContentUnitId
+import infoscry.image.ImageIdentity
 import infoscry.domain.Document
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
@@ -271,6 +272,23 @@ class InvestigationToolsTest {
             ),
         )
         assertEquals(listOf(anchor.value), negative.evidence.map { it.sourceUnitId }) // clamped down to 0
+    }
+
+    @Test
+    fun `adjacent units never include an image unit`() {
+        val docA = document(collectionA)
+        val text = (0 until 3).map { ordinal -> addUnit(docA, ordinal, "unit-$ordinal") }
+        addUnit(
+            docA, ImageIdentity.ordinal(2, 1)!!, "a harbour at dusk",
+            locator = SourceLocation.ImageRegion(SourceLocation.TextLines(5, 6), 1, null),
+        )
+        val tools = tools(collectionA, FakeSearch())
+
+        val success = assertIs<ToolResult.Success>(
+            tools.execute("read_adjacent_units", """{"contentUnitId":"${text[2].value}","before":2,"after":5}"""),
+        )
+
+        assertEquals(text.map { it.value }, success.evidence.map { it.sourceUnitId })
     }
 
     @Test

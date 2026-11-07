@@ -19,6 +19,14 @@ class ImageWarningsTest {
     }
 
     @Test
+    fun `the document detail's message for an image code is the image sentence`() {
+        assertEquals(
+            ImageWarnings.messageFor("IMAGE_LIMIT_REACHED"),
+            infoscry.jobs.ImportJobHandler.messageFor("IMAGE_LIMIT_REACHED"),
+        )
+    }
+
+    @Test
     fun `every code the stage reports has its own sentence and Surya names its remedy`() {
         val codes = listOf(
             "NEEDS_SURYA_LAYOUT", "IMAGE_LIMIT_REACHED", "IMAGE_DECODE_FAILED", "IMAGE_TOO_LARGE", "TOO_MANY_IMAGES",

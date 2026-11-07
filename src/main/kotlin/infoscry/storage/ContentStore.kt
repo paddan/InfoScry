@@ -820,7 +820,7 @@ class ContentStore(private val database: Database) {
     /**
      * The extracted text of every live unit of each of [documentIds], in ordinal order, from one batched read.
      *
-     * A document with no units is absent from the map. This is the text a document-level quality score is
+     * A document with no units is absent from the map; image units are not counted. This is the text a document-level quality score is
      * computed over, so it reads what a reader sees rather than any extraction attempt still in progress.
      */
     fun extractedTextsOf(documentIds: Collection<DocumentId>): Map<DocumentId, List<String>> {
@@ -830,7 +830,9 @@ class ContentStore(private val database: Database) {
             connection.readRows(
                 // Only the sample the quality score judges is read: a long unit's full text is never needed here.
                 "SELECT document_id, SUBSTR(extracted_text, 1, ${OcrQualityScorer.SAMPLE_CHARS}) AS extracted_text " +
-                    "FROM content_units WHERE document_id IN (%s) ORDER BY document_id, ordinal",
+                    "FROM content_units WHERE document_id IN (%s) " +
+                    // An image unit's text is a caption, not a reading, so it is not what the score judges.
+                    "AND ordinal < ${infoscry.image.ImageIdentity.ORDINAL_BASE} ORDER BY document_id, ordinal",
                 ids,
             ) { rows ->
                 val texts = linkedMapOf<DocumentId, MutableList<String>>()
