@@ -214,7 +214,7 @@ class LayoutRegionsTest {
         assertEquals(listOf(ImageRejectedException.IMAGE_TOO_LARGE), stored.failures)
         assertTrue(fresh.images.isEmpty())
         assertEquals(listOf(ImageRejectedException.IMAGE_TOO_LARGE), fresh.failures)
-        assertEquals(1, engine.calls)
+        assertEquals(0, engine.calls)
     }
 
     private fun regions(engine: PageOcrEngine, page: PageImage, structure: PageStructure?): ParentImages =

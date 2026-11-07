@@ -18,6 +18,8 @@ import infoscry.storage.CaptionSource
 import java.awt.image.BufferedImage
 import java.io.IOException
 import javax.imageio.ImageIO
+import javax.imageio.ImageReader
+import javax.imageio.stream.ImageInputStream
 import kotlin.math.max
 import kotlin.math.min
 
@@ -84,7 +86,24 @@ class LayoutRegions(
         settings: OcrSettingsSnapshot,
     ): ParentImages {
         require(structure == null || pageText != null) { "a known page structure needs the text it was derived into" }
-        if (structure != null) return regionsIn(parent, page, structure, requireNotNull(pageText))
+        // The header is read once, before any engine call, so a page that is refused is never read by Surya.
+        return when (val opened = openPage(page)) {
+            is OpenedPage.Refused -> failedWith(opened.code)
+            is OpenedPage.Open -> opened.reader.use { reader ->
+                regionsFrom(parent, page, reader, structure, pageText, settings)
+            }
+        }
+    }
+
+    private suspend fun regionsFrom(
+        parent: ParentUnit,
+        page: PageImage,
+        reader: PageReader,
+        structure: PageStructure?,
+        pageText: String?,
+        settings: OcrSettingsSnapshot,
+    ): ParentImages {
+        if (structure != null) return regionsIn(parent, reader, structure, requireNotNull(pageText))
 
         val surya = engines.engineFor(OcrEngine.SURYA) ?: throw SuryaLayoutUnavailableException(
             "no Surya engine is configured in this build, so picture regions cannot be found on scanned pages. " +
@@ -101,7 +120,7 @@ class LayoutRegions(
             return failedWith(failed.code)
         }
         val found = reading.structure ?: return readingFailure(reading)
-        return regionsIn(parent, page, found, reading.text)
+        return regionsIn(parent, reader, found, reading.text)
     }
 
     /** A reading that has no structure: a failure when it names one, and nothing when the page was empty. */
@@ -110,16 +129,13 @@ class LayoutRegions(
         return if (code == null || code == OcrPageResult.EMPTY_READING_CODE) ParentImages.NONE else failedWith(code)
     }
 
-    private fun regionsIn(parent: ParentUnit, page: PageImage, structure: PageStructure, text: String): ParentImages {
+    private fun regionsIn(parent: ParentUnit, reader: PageReader, structure: PageStructure, text: String): ParentImages {
         val figures = structure.blocks
             .filter { it.kind == BlockKind.FIGURE && it.bbox != null }
             .sortedBy { it.order }
         if (figures.isEmpty()) return ParentImages.NONE
 
-        val raster = when (val read = readRaster(page)) {
-            is PageRaster.Read -> read.image
-            is PageRaster.Refused -> return failedWith(read.code)
-        }
+        val raster = decode(reader) ?: return failedWith(ImageRejectedException.IMAGE_DECODE_FAILED)
         val captions = captionsByFigure(figures, structure.blocks, text, raster.height)
         val images = figures.mapNotNull { figure ->
             regionOf(parent, raster, figure.bbox!!, captions[figure.order])
@@ -219,37 +235,70 @@ class LayoutRegions(
     }
 
     /**
-     * Decodes the page raster after its header is read, so a page over [maxRenderedPixels] is refused without
-     * allocating its pixels. The raster is never subsampled: the structure's boxes are in its own coordinates.
+     * Reads the page's header once and keeps its reader open, so a page over [maxRenderedPixels] is refused
+     * without allocating its pixels, and a page that passes is decoded by the same reader.
+     * The raster is never subsampled: the structure's boxes are in its own coordinates.
      */
-    private fun readRaster(page: PageImage): PageRaster {
-        val decodeFailed = PageRaster.Refused(ImageRejectedException.IMAGE_DECODE_FAILED)
-        return try {
-            ImageIO.createImageInputStream(page.imagePath.toFile())?.use { stream ->
-                val reader = ImageIO.getImageReaders(stream).takeIf { it.hasNext() }?.next()
-                    ?: return decodeFailed
-                try {
-                    reader.input = stream
-                    if (reader.getWidth(0).toLong() * reader.getHeight(0) > maxRenderedPixels) {
-                        return PageRaster.Refused(ImageRejectedException.IMAGE_TOO_LARGE)
-                    }
-                    reader.read(0)?.let { PageRaster.Read(it) } ?: decodeFailed
-                } finally {
-                    reader.dispose()
+    private fun openPage(page: PageImage): OpenedPage {
+        val decodeFailed = OpenedPage.Refused(ImageRejectedException.IMAGE_DECODE_FAILED)
+        val reader: PageReader = try {
+            ImageIO.createImageInputStream(page.imagePath.toFile())?.let { stream ->
+                val imageReader = ImageIO.getImageReaders(stream).takeIf { it.hasNext() }?.next()
+                if (imageReader == null) {
+                    stream.close()
+                    null
+                } else {
+                    PageReader(stream, imageReader)
                 }
-            } ?: decodeFailed
+            }
         } catch (unreadable: IOException) {
-            decodeFailed
+            null
         } catch (unreadable: RuntimeException) {
             // A decoder given untrusted bytes can fail with any runtime exception; none of them may escape.
-            decodeFailed
+            null
+        } ?: return decodeFailed
+
+        val pixels = try {
+            reader.reader.input = reader.stream
+            reader.reader.getWidth(0).toLong() * reader.reader.getHeight(0)
+        } catch (unreadable: IOException) {
+            reader.close()
+            return decodeFailed
+        } catch (unreadable: RuntimeException) {
+            reader.close()
+            return decodeFailed
+        }
+        if (pixels > maxRenderedPixels) {
+            reader.close()
+            return OpenedPage.Refused(ImageRejectedException.IMAGE_TOO_LARGE)
+        }
+        return OpenedPage.Open(reader)
+    }
+
+    /** The page raster, decoded by the reader [openPage] opened, or null when it cannot be decoded. */
+    private fun decode(reader: PageReader): BufferedImage? = try {
+        reader.reader.read(0)
+    } catch (unreadable: IOException) {
+        null
+    } catch (unreadable: RuntimeException) {
+        null
+    }
+
+    /** An open page image: its stream and the reader that has read its header. Close it when done. */
+    private class PageReader(val stream: ImageInputStream, val reader: ImageReader) : AutoCloseable {
+        override fun close() {
+            try {
+                reader.dispose()
+            } finally {
+                stream.close()
+            }
         }
     }
 
-    /** The outcome of reading a page raster: its pixels, or the code that refused it. */
-    private sealed interface PageRaster {
-        class Read(val image: BufferedImage) : PageRaster
-        class Refused(val code: String) : PageRaster
+    /** The outcome of opening a page image: the open reader, or the code that refused it. */
+    private sealed interface OpenedPage {
+        class Open(val reader: PageReader) : OpenedPage
+        class Refused(val code: String) : OpenedPage
     }
 
     private fun failedWith(code: String): ParentImages =
