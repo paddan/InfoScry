@@ -50,11 +50,13 @@ class OfficeImageFinder : ImageFinder {
 
     override fun open(managedPath: Path): OpenedSource = Opened(managedPath)
 
-    private class RawPicture(val bytes: ByteArray?, val box: NormalizedBox?, val alt: String?)
+    /** A picture found but not yet read: [load] fetches its bytes only when its parent is served. */
+    private class RawPicture(val load: () -> ByteArray?, val box: NormalizedBox?, val alt: String?)
 
     private class Opened(private val path: Path) : OpenedSource {
 
         private var word: Map<SourceLocation.WordSection, List<RawPicture>>? = null
+        private var wordDocument: XWPFDocument? = null
         private var show: XMLSlideShow? = null
         private var book: XSSFWorkbook? = null
 
@@ -78,6 +80,7 @@ class OfficeImageFinder : ImageFinder {
 
         @Synchronized
         override fun close() {
+            wordDocument?.close()
             show?.close()
             book?.close()
         }
@@ -90,7 +93,7 @@ class OfficeImageFinder : ImageFinder {
                     failures += ImageFindFailure.TOO_MANY_IMAGES
                     break
                 }
-                val candidate = picture.bytes?.let { ImageProbe.candidateOf(it, picture.box) }
+                val candidate = picture.load()?.let { ImageProbe.candidateOf(it, picture.box) }
                 if (candidate == null) {
                     failures += ImageRejectedException.IMAGE_DECODE_FAILED
                     continue
@@ -109,9 +112,10 @@ class OfficeImageFinder : ImageFinder {
 
         private fun wordPictures(): Map<SourceLocation.WordSection, List<RawPicture>> {
             word?.let { return it }
-            val loaded = Files.newInputStream(path).use { stream ->
-                XWPFDocument(stream).use { document -> wordPicturesOf(document) }
-            }
+            // The document stays open so a picture's bytes are read only when its section is served.
+            val document = Files.newInputStream(path).use { XWPFDocument(it) }
+            wordDocument = document
+            val loaded = wordPicturesOf(document)
             word = loaded
             return loaded
         }
@@ -124,7 +128,7 @@ class OfficeImageFinder : ImageFinder {
             fun add(paragraph: Int, owner: XWPFParagraph) {
                 owner.runs.flatMap { run -> run.embeddedPictures }.forEach { picture ->
                     bySection.getValue(sectionAt(paragraph)) +=
-                        RawPicture(picture.pictureData?.data, box = null, alt = picture.description)
+                        RawPicture({ picture.pictureData?.data }, box = null, alt = picture.description)
                 }
             }
             // The numbering is the extractor's: one per body paragraph, and a table row counts the paragraphs of its cells.
@@ -178,7 +182,7 @@ class OfficeImageFinder : ImageFinder {
                         is XSLFPictureShape -> {
                             val rect = place(shape.anchor)
                             found += RawPicture(
-                                bytes = shape.pictureData?.data,
+                                load = { shape.pictureData?.data },
                                 box = ImageProbe.boxOrNull(
                                     rect.minX / page.width,
                                     rect.minY / page.height,
@@ -211,7 +215,7 @@ class OfficeImageFinder : ImageFinder {
                         is XSSFPicture -> {
                             val row = groupRow ?: rowOfAnchor(shape.clientAnchor) ?: return@forEach
                             if (row in first..last) {
-                                found += RawPicture(shape.pictureData?.data, box = null, alt = shape.ctPicture.nvPicPr.cNvPr.descr)
+                                found += RawPicture({ shape.pictureData?.data }, box = null, alt = shape.ctPicture.nvPicPr.cNvPr.descr)
                             }
                         }
 

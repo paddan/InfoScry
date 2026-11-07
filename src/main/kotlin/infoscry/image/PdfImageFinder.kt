@@ -29,23 +29,23 @@ import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine
  * wholly outside the visible page, or has no area, is not visible and is not returned; one partly outside is
  * clamped to the page.
  */
-class PdfImageFinder : ImageFinder {
+class PdfImageFinder(private val maxParentBytes: Long = ImageProbe.MAX_PARENT_BYTES) : ImageFinder {
 
     override val mediaTypes: Set<String> = setOf(PdfExtractor.PDF_MEDIA_TYPE)
 
     override fun open(managedPath: Path): OpenedSource {
         val document = Loader.loadPDF(managedPath.toFile(), IOUtils.createTempFileOnlyStreamCache())
-        return Opened(document)
+        return Opened(document, maxParentBytes)
     }
 
-    private class Opened(private val document: PDDocument) : OpenedSource {
+    private class Opened(private val document: PDDocument, private val maxParentBytes: Long) : OpenedSource {
 
         @Synchronized
         override fun imagesOf(parent: ParentUnit): ParentImages {
             val locator = parent.locator as? SourceLocation.PdfPage ?: return ParentImages.NONE
             if (locator.page > document.numberOfPages) return ParentImages.NONE
             val page = document.getPage(locator.page - 1)
-            val engine = Collector(page, parent)
+            val engine = Collector(page, parent, maxParentBytes)
             try {
                 engine.processPage(page)
             } catch (unreadable: IOException) {
@@ -63,7 +63,16 @@ class PdfImageFinder : ImageFinder {
         }
     }
 
-    private class Collector(private val page: PDPage, private val parent: ParentUnit) : PDFGraphicsStreamEngine(page) {
+    private class Collector(
+        private val page: PDPage,
+        private val parent: ParentUnit,
+        private val maxParentBytes: Long,
+    ) : PDFGraphicsStreamEngine(page) {
+
+        /** Each XObject decoded once per parent; repeated draws share the candidate's bytes. A null value is a failed decode. */
+        private val decoded = java.util.IdentityHashMap<Any, ImageCandidate?>()
+        private var retained = 0L
+        private var overBudget = false
 
         val images = mutableListOf<FoundImage>()
         val failures = mutableListOf<String>()
@@ -75,11 +84,25 @@ class PdfImageFinder : ImageFinder {
                 scanned = true
                 return
             }
-            if (images.size >= ImageIdentity.MAX_PER_PARENT) {
+            if (overBudget) return
+            if (images.size + failures.size >= ImageIdentity.MAX_PER_PARENT) {
                 if (ImageFindFailure.TOO_MANY_IMAGES !in failures) failures += ImageFindFailure.TOO_MANY_IMAGES
                 return
             }
-            val candidate = candidateOf(pdImage, box)
+            val key: Any = (pdImage as? PDImageXObject)?.cosObject ?: pdImage
+            val candidate = if (decoded.containsKey(key)) {
+                decoded[key]?.copy(box = box)
+            } else {
+                val fresh = candidateOf(pdImage, box)
+                decoded[key] = fresh
+                if (fresh != null) retained += ImageProbe.retainedBytes(fresh)
+                if (retained > maxParentBytes) {
+                    overBudget = true
+                    failures += ImageRejectedException.IMAGE_TOO_LARGE
+                    return
+                }
+                fresh
+            }
             if (candidate == null) {
                 failures += ImageRejectedException.IMAGE_DECODE_FAILED
             } else {

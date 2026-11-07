@@ -238,4 +238,38 @@ class PdfImageFinderTest {
 
         assertEquals(emptyList(), imagesOf(file, page()).images)
     }
+
+    @Test
+    fun `one image drawn twenty times is decoded once and shares its bytes`() {
+        val file = pdf { document, page ->
+            val image = LosslessFactory.createFromImage(document, FinderFixtures.picture(300, 300))
+            PDPageContentStream(document, page).use { stream ->
+                repeat(20) { stream.drawImage(image, 10f + it * 5f, 100f + it * 20f, 100f, 100f) }
+            }
+        }
+
+        val images = imagesOf(file, page()).images
+
+        assertEquals(20, images.size)
+        assertTrue(images.all { it.candidate.bytes === images[0].candidate.bytes })
+        assertEquals(20, images.map { it.candidate.box }.toSet().size)
+    }
+
+    @Test
+    fun `images past the byte budget stop collection with IMAGE_TOO_LARGE once`() {
+        val file = pdf { document, page ->
+            PDPageContentStream(document, page).use { stream ->
+                repeat(4) {
+                    val image = LosslessFactory.createFromImage(document, FinderFixtures.picture(300, 300, it))
+                    stream.drawImage(image, 10f, 100f + it * 100f, 90f, 90f)
+                }
+            }
+        }
+
+        // Each raster holds 300 * 300 * 4 = 360 000 bytes; the budget allows two of them.
+        val result = PdfImageFinder(maxParentBytes = 800_000).open(file).use { it.imagesOf(page()) }
+
+        assertEquals(2, result.images.size)
+        assertEquals(listOf(ImageRejectedException.IMAGE_TOO_LARGE), result.failures)
+    }
 }

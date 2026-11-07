@@ -13,6 +13,15 @@ internal class Probed(val encodedMediaType: String?, val widthPx: Int, val heigh
 /** Reads image headers and turns encoded bytes of any format ImageIO knows into a candidate. */
 internal object ImageProbe {
 
+    /** The most bytes of image data one parent unit may hold at once: encoded length, or width * height * 4 for pixels. */
+    const val MAX_PARENT_BYTES: Long = 512L * 1024 * 1024
+
+    /** The bytes a candidate holds in memory. */
+    fun retainedBytes(candidate: ImageCandidate): Long = when (val bytes = candidate.bytes) {
+        is ImageBytes.Encoded -> bytes.bytes.size.toLong()
+        is ImageBytes.Raster -> bytes.image.width.toLong() * bytes.image.height * 4
+    }
+
     private val ENCODED_BY_FORMAT = mapOf(
         "jpeg" to "image/jpeg",
         "png" to "image/png",
