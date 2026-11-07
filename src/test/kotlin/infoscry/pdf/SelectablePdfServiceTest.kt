@@ -55,6 +55,73 @@ class SelectablePdfServiceTest {
     }
 
     @Test
+    fun `a revision whose export would be the same as its parent's reuses the parent's PDF without a job`() {
+        AppContext.open(dataDir).use { context ->
+            val fixture = publishNativePdf(context, dataDir)
+            runNextSelectablePdfJob(context)
+            val parent = assertNotNull(context.selectablePdfStore.get(fixture.documentId, fixture.revisionId))
+            val jobsBefore = countSelectablePdfJobs(context)
+
+            val child = publishCopyOf(context, fixture.documentId, fixture.revisionId, text = null)
+
+            val status = context.selectablePdfService.status(fixture.collectionId, fixture.documentId, child)
+            assertEquals(PdfArtifactState.READY, status.state)
+            assertEquals(jobsBefore, countSelectablePdfJobs(context), "an unchanged export needs no new job")
+            val reused = assertNotNull(context.selectablePdfStore.get(fixture.documentId, child))
+            assertEquals(parent.pdfSha256, reused.pdfSha256, "the PDF bytes are the parent's")
+            assertTrue(reused.key != parent.key, "the child's artifact is named by its own revision")
+
+            // Asking again changes nothing.
+            context.selectablePdfService.queueForPublishedRevision(fixture.documentId, fixture.collectionId, child)
+            assertEquals(jobsBefore, countSelectablePdfJobs(context))
+        }
+    }
+
+    @Test
+    fun `a revision whose read page changed does not take its parent's PDF`() {
+        AppContext.open(dataDir).use { context ->
+            val fixture = publishMixedNativeAndOcrPdf(context, dataDir)
+            runNextSelectablePdfJob(context)
+            val parent = assertNotNull(context.selectablePdfStore.get(fixture.documentId, fixture.revisionId))
+
+            val child = publishCopyOf(context, fixture.documentId, fixture.revisionId, text = "A different reading of the page")
+
+            val row = assertNotNull(context.selectablePdfStore.get(fixture.documentId, child))
+            assertTrue(row.state != infoscry.storage.SelectablePdfArtifactState.READY || row.pdfSha256 != parent.pdfSha256)
+        }
+    }
+
+    /** Publishes a child of [parentId] holding its pages, with the first page's text replaced when [text] is given. */
+    private fun publishCopyOf(context: AppContext, documentId: DocumentId, parentId: String, text: String?): String {
+        val child = context.revisions.openCandidate(documentId, parentId, "TEST_COPY")
+        context.revisions.pages(parentId).forEach { page ->
+            val newText = text ?: page.extractedText
+            context.revisions.appendPage(
+                child,
+                infoscry.storage.RevisionPageDraft(
+                    ordinal = page.ordinal,
+                    unitId = page.unitId,
+                    locator = page.locator,
+                    extractedText = newText,
+                    searchText = newText.lowercase(),
+                    extractionMethod = page.extractionMethod,
+                    approval = infoscry.storage.PageApproval.APPROVED,
+                    producerRevisionId = if (text == null) page.producerRevisionId else child,
+                    chunks = listOf(
+                        infoscry.storage.RevisionChunkDraft(
+                            ordinal = 0, text = newText, startOffset = 0, endOffset = newText.length,
+                            tokenCount = 5, tokenStart = 0, tokenEnd = 4,
+                            embedding = infoscry.embedding.TestDocumentEmbedder().embedDocuments(listOf(newText)).single(),
+                        ),
+                    ),
+                ),
+            )
+        }
+        kotlinx.coroutines.runBlocking { context.revisionPublication.publish(documentId, parentId, child) }
+        return child
+    }
+
+    @Test
     fun `ensure is idempotent while queued and never enqueues a second job`() {
         AppContext.open(dataDir).use { context ->
             val fixture = publishNativePdf(context, dataDir)

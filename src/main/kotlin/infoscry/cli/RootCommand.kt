@@ -22,7 +22,7 @@ internal fun productionImportEmbedder(context: infoscry.AppContext): () -> Docum
 
 /** The help text for the two options every command accepts, in one place. */
 internal const val JSON_HELP = "Print stable machine-readable JSON instead of text"
-internal const val DATA_DIR_HELP = "Data directory to use (default: ~/.infoscry)"
+internal const val DATA_DIR_HELP = "Data directory to use (default: \$INFOSCRY_DATA_DIR, else ~/.infoscry)"
 
 /**
  * A failure the user can act on.
@@ -100,7 +100,7 @@ class RootCommand(
     }
 
     companion object {
-        fun defaultDataDirectory(): Path = Path.of(System.getProperty("user.home"), ".infoscry")
+        fun defaultDataDirectory(): Path = infoscry.config.AppPaths.defaultDataDir()
     }
 }
 

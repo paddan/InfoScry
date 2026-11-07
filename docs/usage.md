@@ -165,6 +165,20 @@ images on for a document that is already read never repeats OCR. It needs
 produces a version without images; earlier versions keep theirs. A
 selected-page scan extracts images only for the selected pages.
 
+To find the images of a whole collection at once, an editor chooses **Find images in all
+documents…** next to **Add documents**. It runs *Keep current text* on every PDF and
+picture of the collection with the **Extract images** choice made there (the collection
+default pre-fills it): no page is read and every text stays as it is. The dialog shows how
+many documents it covers and which are left out: Office files and e-books (their images
+come with a new import), documents not read yet, and documents being deleted. Each document
+then shows its own rescan; a document someone is already scanning is left to finish, and
+starting again while a run is going shows that run. The collection shows the run the way it
+shows an import: a progress bar of documents done, how many are scanning and waiting, the
+document being scanned, and **Stop finding images**, which stops every scan the run started
+that has not ended. Jobs lists the run as one **Find images** row with the same counts. A
+document whose text the scan kept gets its selectable PDF from the previous version without
+building it again.
+
 To force reading of a particular PDF/image page, open it in page review and choose
 **Scan this page again**. Use **Mark page N** while navigating, then **Scan selected
 pages** to read a sorted selection. The dialog shows exact one-based page numbers,

@@ -103,7 +103,7 @@ function decodeCollection(response: CollectionResponse): Collection {
 /** The lifecycle of a job record; stages inside a running job are reported separately. */
 export type JobState = 'QUEUED' | 'RUNNING' | 'COMPLETE' | 'FAILED' | 'CANCELLED';
 
-export type JobType = 'IMPORT' | 'REINDEX' | 'RETRY' | 'RESCAN' | 'SELECTABLE_PDF';
+export type JobType = 'IMPORT' | 'REINDEX' | 'RETRY' | 'RESCAN' | 'SELECTABLE_PDF' | 'IMAGE_RESCAN';
 
 /**
  * One persistent job. Optional fields may be absent from the wire (nulls are omitted), so callers
@@ -128,6 +128,8 @@ export type JobApiView = {
   total: number;
   errorCode?: string | null;
   cancelRequested: boolean;
+  /** The collection-wide image rescan that started this rescan, when one did. */
+  parentJobId?: string | null;
 };
 
 /** Names used by the reading workflow contract for the existing row and run records. */
@@ -1585,6 +1587,63 @@ export async function previewCorrectionRemoval(collectionId: string, ruleId: str
 /** Starts the collection's correction job again (Retry), or answers with the one already running. */
 export async function applyCorrections(collectionId: string): Promise<JobApiView> {
   return ((await mutate(`${correctionsPath(collectionId)}/apply`, 'POST')) as { job: JobApiView }).job;
+}
+
+// ---- collection image rescan ----
+
+/** Which documents finding images again would cover, why the others are left out, and the job doing it. */
+/** How one collection-wide image rescan is getting on, counted over the per-document rescans it started. */
+export type ImageRescanRun = {
+  jobId: string;
+  documents: number;
+  examined: number;
+  started: number;
+  done: number;
+  failed: number;
+  cancelled: number;
+  scanning: number;
+  waiting: number;
+  currentDocument?: string | null;
+  /** True while documents are still being started or scanned. */
+  active: boolean;
+  cancelRequested: boolean;
+  /** Why the run failed when no document could be started. */
+  errorCode?: string | null;
+};
+
+export type ImageRescanCensus = {
+  eligible: number;
+  /** Left-out documents by reason: UNSUPPORTED_FORMAT, NOT_READ, DELETING. */
+  skipped: Record<string, number>;
+  job: JobApiView | null;
+  run?: ImageRescanRun | null;
+};
+
+const imageRescanPath = (collectionId: string): string =>
+  `/api/collections/${encodeURIComponent(collectionId)}/image-rescan`;
+
+export async function getImageRescanCensus(collectionId: string): Promise<ImageRescanCensus> {
+  const body = (await readJson(await fetch(imageRescanPath(collectionId)))) as Partial<ImageRescanCensus>;
+  return { eligible: body.eligible ?? 0, skipped: body.skipped ?? {}, job: body.job ?? null, run: body.run ?? null };
+}
+
+/** The collection's latest image rescan run, or null when it never had one. */
+export async function getImageRescanRun(collectionId: string): Promise<ImageRescanRun | null> {
+  const body = (await readJson(await fetch(`${imageRescanPath(collectionId)}/run`))) as { run?: ImageRescanRun | null };
+  return body.run ?? null;
+}
+
+/** Stops the collection's image rescan run and every rescan it started that has not ended. */
+export async function cancelImageRescan(collectionId: string): Promise<ImageRescanRun | null> {
+  return ((await mutate(`${imageRescanPath(collectionId)}/cancel`, 'POST')) as { run?: ImageRescanRun | null }).run ?? null;
+}
+
+/** Starts finding the images of every document, keeping their text; answers the collection's running job if any. */
+export async function startImageRescan(
+  collectionId: string,
+  imageExtraction: Exclude<ImageExtraction, 'off'>,
+): Promise<JobApiView> {
+  return ((await mutate(imageRescanPath(collectionId), 'POST', { imageExtraction })) as { job: JobApiView }).job;
 }
 
 // ---- collection glossary ----

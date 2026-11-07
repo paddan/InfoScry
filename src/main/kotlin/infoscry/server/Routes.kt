@@ -122,6 +122,8 @@ data class JobApiView(
     val startedBy: infoscry.domain.UserRef? = null,
     /** Who asked to cancel it. */
     val cancelledBy: infoscry.domain.UserRef? = null,
+    /** The collection-wide image rescan that started this rescan, when one did. */
+    val parentJobId: String? = null,
 )
 
 @Serializable
@@ -327,6 +329,8 @@ fun Application.configureRoutes(
             collectionPromptRoutes(context)
 
             correctionRoutes(context)
+
+            imageRescanRoutes(context)
 
             glossaryRoutes(context)
 
@@ -628,7 +632,16 @@ internal fun Job.toApiView(context: AppContext) = JobApiView(
     cancelRequested = cancelRequested,
     startedBy = context.attribution.userRef(startedBy),
     cancelledBy = context.attribution.userRef(cancelledBy),
+    parentJobId = imageRescanParentOf(context),
 )
+
+/** The image rescan job a rescan job was started by, read from its operation's request id. */
+private fun Job.imageRescanParentOf(context: AppContext): String? {
+    if (type != JobType.RESCAN) return null
+    val operationId = runCatching { infoscry.jobs.RescanJobPayload.decode(payload).operationId }.getOrNull() ?: return null
+    val requestId = runCatching { context.ocrOperations.operation(operationId)?.requestId }.getOrNull() ?: return null
+    return infoscry.jobs.ImageRescanJobHandler.jobIdOfRequest(requestId)
+}
 
 private fun ImportItem.toApiView() = ImportItemApiView(
     id = id,

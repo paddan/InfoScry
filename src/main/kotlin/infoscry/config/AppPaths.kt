@@ -165,11 +165,35 @@ class AppPaths private constructor(val root: Path, library: Path? = null) {
          * Reading logs or running diagnostics must not change the state an operator asked about, so
          * these callers need the layout without the setup [from] performs.
          */
-        fun of(dataDir: Path): AppPaths = AppPaths(dataDir.toAbsolutePath().normalize(), configuredLibrary())
+        fun of(dataDir: Path): AppPaths = layout(dataDir)
 
         /** The data directory of a running InfoScry, created if it does not exist yet. */
-        fun from(dataDir: Path): AppPaths =
-            AppPaths(dataDir.toAbsolutePath().normalize(), configuredLibrary()).ensureDirectories()
+        fun from(dataDir: Path): AppPaths = layout(dataDir).ensureDirectories()
+
+        private fun layout(dataDir: Path): AppPaths {
+            val root = dataDir.toAbsolutePath().normalize()
+            val library = configuredLibrary()
+            // Collections beside logs/ and models/ would mix documents with the server's own files.
+            check(library == null || library != root) {
+                "$LIBRARY_VARIABLE names the data directory itself; leave it unset for <data>/library or point it at another folder"
+            }
+            return AppPaths(root, library)
+        }
+
+        const val DATA_VARIABLE = "INFOSCRY_DATA_DIR"
+
+        /** Where `INFOSCRY_DATA_DIR` puts the data directory; tests replace it. */
+        @Volatile
+        var dataDirFromEnvironment: () -> String? = { System.getenv(DATA_VARIABLE) }
+
+        /** The data directory when no `--data-dir` is given: `INFOSCRY_DATA_DIR`, else `~/.infoscry`. */
+        fun defaultDataDir(): Path {
+            val raw = dataDirFromEnvironment()?.trim()?.takeIf { it.isNotEmpty() }
+                ?: return Path.of(System.getProperty("user.home"), ".infoscry")
+            val path = Path.of(raw)
+            check(path.isAbsolute) { "$DATA_VARIABLE must be an absolute path, was '$raw'" }
+            return path.normalize()
+        }
 
         const val LIBRARY_VARIABLE = "INFOSCRY_LIBRARY_DIR"
 

@@ -78,7 +78,7 @@ class LogsCommand : CliktCommand(name = "logs") {
     companion object {
 
         /** The data directory InfoScry uses when none is given. */
-        fun defaultDataDir(): Path = Path.of(System.getProperty("user.home"), ".infoscry")
+        fun defaultDataDir(): Path = infoscry.config.AppPaths.defaultDataDir()
 
         /**
          * Parses an age window such as `30m`, `12h` or `7d`, or `null` when nothing was given.

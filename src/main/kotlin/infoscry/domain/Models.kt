@@ -245,6 +245,13 @@ enum class JobType {
      * sent anywhere. Its only accelerator work is embedding the passages of the pages it rewrote.
      */
     CORRECTIONS,
+
+    /**
+     * Starts a *Keep current text* rescan for every document of a collection that can be read again from page
+     * images, so their images are found without reading any text again. Each document's rescan is an ordinary
+     * `RESCAN` operation; this job only admits them.
+     */
+    IMAGE_RESCAN,
 }
 
 /**
