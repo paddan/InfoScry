@@ -6,6 +6,7 @@ import SourceReadingHarness from './SourceReadingHarness.test.svelte';
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
   readSourceReading: vi.fn(),
+  listImages: vi.fn(async () => []),
   previewCorrection: vi.fn(),
   putCorrection: vi.fn(),
   putGlossaryGroup: vi.fn(),
@@ -77,5 +78,42 @@ describe('SourceReading', () => {
     await select(screen.getByText(long), long);
 
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Correct across collection' })).toBeNull());
+  });
+
+  describe('images', () => {
+    const image = (over: Partial<api.ImageView> = {}): api.ImageView => ({
+      unitId: 'i1',
+      locator: { type: 'image_region', parent: { type: 'pdf_page', page: 14 }, index: 2, box: null },
+      label: 'image 2 on page 14', parentUnitId: 'u1', kind: 'EMBEDDED', mediaType: 'image/png', widthPx: 400, heightPx: 300,
+      caption: null, captionSource: null, ...over,
+    });
+
+    it('shows a strip under the unit for its own images only', async () => {
+      vi.mocked(api.listImages).mockResolvedValue([image(), image({ unitId: 'i9', parentUnitId: 'other' })]);
+      render(SourceReadingHarness, { hasReading: false, text: 'page text', documentId: 'd1' });
+
+      expect((await screen.findAllByRole('img')).length).toBe(1);
+      expect(api.listImages).toHaveBeenCalledWith('c1', 'd1', null);
+      await fireEvent.click(screen.getByRole('button', { name: 'Image 2 on page 14' }));
+      expect(await screen.findByRole('dialog')).toBeTruthy();
+    });
+
+    it('opens the viewer over its parent for a citation on an image', async () => {
+      vi.mocked(api.listImages).mockResolvedValue([image({ caption: 'A harbour at dusk' })]);
+      render(SourceReadingHarness, { hasReading: false, text: 'page text', documentId: 'd1', openImageUnitId: 'i1' });
+
+      expect(await screen.findByRole('dialog')).toBeTruthy();
+      expect(screen.getByText('page text')).toBeTruthy();
+      expect(screen.getAllByText('A harbour at dusk').length).toBeGreaterThan(0);
+    });
+
+    it('keeps the text readable when the images cannot be listed', async () => {
+      vi.mocked(api.listImages).mockRejectedValue(new Error('offline'));
+      render(SourceReadingHarness, { hasReading: false, text: 'page text', documentId: 'd1' });
+
+      await waitFor(() => expect(api.listImages).toHaveBeenCalled());
+      expect(screen.getByText('page text')).toBeTruthy();
+      expect(screen.queryByRole('list')).toBeNull();
+    });
   });
 });

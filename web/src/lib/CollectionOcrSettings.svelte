@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { isUncheckedImageProfile, methodOptionLabel } from './ocrRescan';
-  import { listReadingMethods, updateCollectionOcrSettings, type Collection, type ReadingMethodOption } from './api';
+  import { listReadingMethods, updateCollectionOcrSettings, type Collection, type ImageExtraction, type ReadingMethodOption } from './api';
 
   export let collection: Collection;
   export let onChanged: () => Promise<void> | void;
@@ -9,6 +9,7 @@
 
   let language = '';
   let defaultMethod = '';
+  let defaultImages: ImageExtraction = 'off';
   let methods: ReadingMethodOption[] = [];
   let loading = true;
   let saving = false;
@@ -29,6 +30,7 @@
     const hasStoredMethod = target.defaultMethod !== undefined;
     language = target.language;
     defaultMethod = target.defaultMethod ?? '';
+    defaultImages = target.defaultImageExtraction ?? 'off';
     loading = true;
     error = null;
     saved = false;
@@ -54,6 +56,7 @@
       await updateCollectionOcrSettings(collection.id, {
         language: language.trim(),
         ...(defaultMethod === '' ? {} : { defaultMethod }),
+        ...(defaultImages === (collection.defaultImageExtraction ?? 'off') ? {} : { defaultImageExtraction: defaultImages }),
       }, collection.version);
       await onChanged();
       if (mine === generation) saved = true;
@@ -83,6 +86,15 @@
     {#each visibleMethods.filter((method) => !method.available) as method (method.method)}
       <p class="hint">{method.label}: {method.unavailableReason ?? 'Unavailable'}</p>
     {/each}
+  </div>
+  <div class="field">
+    <label for="default-image-extraction">Extract images by default</label>
+    <select id="default-image-extraction" data-testid="default-image-extraction" bind:value={defaultImages} disabled={saving}>
+      <option value="off">Off</option>
+      <option value="embedded">Embedded images</option>
+      <option value="all">Embedded + regions from scanned pages</option>
+    </select>
+    <p class="hint">Pre-fills the choice when you import or scan again; you can change it each time.</p>
   </div>
   {#if onOpenLlmProfiles}
     <button type="button" onclick={onOpenLlmProfiles}>Manage LLM profiles</button>

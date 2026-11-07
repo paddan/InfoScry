@@ -11,13 +11,14 @@
     type JobApiView,
     type JobState,
   } from './api';
-  import type { RescanStarted } from './api';
+  import type { ImageExtraction, RescanStarted } from './api';
   import ImportUnitProgress from './ImportUnitProgress.svelte';
   import StartReadingDialog from './StartReadingDialog.svelte';
   import { importItemOutcomeLabel } from './importOutcome';
   import { importProgressText } from './importProgress';
 
   export let collectionId: string;
+  export let defaultImageExtraction: ImageExtraction = 'off';
   export let visible = true;
   /** Refresh collection counts/history after admission and after the job reaches a terminal state. */
   export let onImportChanged: (collectionId: string) => void = () => {};
@@ -473,6 +474,7 @@
   {#if dialogOpen}
     <StartReadingDialog
       {collectionId}
+      {defaultImageExtraction}
       request={{ kind: 'import', uploads: uploadIds, include: [], exclude: [] }}
       onstarted={readingStarted}
       oncancel={() => (dialogOpen = false)}

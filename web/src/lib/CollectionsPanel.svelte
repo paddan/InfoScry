@@ -4,6 +4,7 @@
     ApiError,
     createCollection,
     getCollectionDocument,
+    listImages,
     getCollectionDocumentSummary,
     type CollectionDocumentSummary,
     getDeletion,
@@ -206,6 +207,8 @@
   let selectedDocumentIds = new Set<string>();
 
   let detail: DocumentDetail | null = null;
+  /** How many images the open document's reading has; null until counted or when it cannot be. */
+  let detailImageCount: number | null = null;
   let detailLoading = false;
   let detailError: string | null = null;
   let detailGeneration = 0;
@@ -616,12 +619,20 @@
     const generation = ++detailGeneration;
     detailDocumentId = documentId;
     detail = null;
+    detailImageCount = null;
     detailError = null;
     detailLoading = true;
     try {
       const loaded = await getCollectionDocument(collection.id, documentId);
       if (generation !== detailGeneration) return;
       detail = loaded;
+      // The count is a convenience; a failure to list images leaves it out.
+      void (async () => {
+        try {
+          const images = await listImages(collection.id, documentId);
+          if (generation === detailGeneration) detailImageCount = images.length;
+        } catch { /* no count */ }
+      })();
     } catch (failure) {
       if (generation !== detailGeneration) return;
       detailError = describe(failure);
@@ -652,6 +663,7 @@
     detailDocumentId = null;
     detailOpener = null;
     detail = null;
+    detailImageCount = null;
     detailError = null;
     detailLoading = false;
     retrySubmission = null;
@@ -1382,7 +1394,7 @@
         </div>
         {#if addingDocuments}
           {#key selected.id}
-            <ImportPanel collectionId={selected.id} collectionName={selected.name} onImportChanged={importChanged} {unfinishedImportId} {visible} {isAdmin} />
+            <ImportPanel collectionId={selected.id} defaultImageExtraction={selected.defaultImageExtraction ?? 'off'} collectionName={selected.name} onImportChanged={importChanged} {unfinishedImportId} {visible} {isAdmin} />
           {/key}
         {/if}
 
@@ -1547,6 +1559,10 @@
                               <dd>{formatSize(detail.document.sizeBytes)}</dd>
                               <dt>Imported</dt>
                               <dd>{formatDate(detail.document.createdAt)}{#if detail.importedBy}, by {detail.importedBy.displayName}{/if}</dd>
+                              {#if detailImageCount !== null && detailImageCount > 0}
+                                <dt>Images</dt>
+                                <dd data-testid="document-image-count">{detailImageCount}</dd>
+                              {/if}
                             </dl>
                             {#if detail.progress !== null && detail.progress !== undefined}
                               <dl class="progress">
@@ -1600,6 +1616,7 @@
                                 <DocumentRescan
                                   {visible}
                                   collectionId={selected.id}
+                                  defaultImageExtraction={selected.defaultImageExtraction ?? 'off'}
                                   documentId={detail.document.id}
                                   documentName={detail.document.originalFilename}
                                   document={detail.document}

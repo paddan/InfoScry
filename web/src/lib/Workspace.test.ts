@@ -817,7 +817,7 @@ describe('app shell', () => {
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(await screen.findByRole('button', { name: 'Read page 1 with Surya' })).toBeTruthy();
     const previewCall = calls.find((call) => call.url.endsWith('/documents/document-1/ocr/preview'));
-    expect(JSON.parse(String(previewCall?.init?.body))).toEqual({ method: 'surya', selection: { mode: 'explicit', ordinals: [0] } });
+    expect(JSON.parse(String(previewCall?.init?.body))).toEqual({ method: 'surya', imageExtraction: 'off', selection: { mode: 'explicit', ordinals: [0] } });
     await fireEvent.click(screen.getByRole('button', { name: 'Read page 1 with Surya' }));
     await waitFor(() => expect(calls.some((call) => call.url.endsWith('/documents/document-1/ocr/rescan'))).toBe(true));
     expect(await screen.findByText('Reading revision-2', {}, { timeout: 3000 })).toBeTruthy();

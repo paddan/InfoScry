@@ -36,6 +36,8 @@
     listDocumentRevisions,
     listLlmProfilePrices,
     readSource,
+    isImageRegionLocator,
+    listImages,
     retryDocuments,
     searchCollection,
     SOURCE_PAGE_CHARS,
@@ -523,8 +525,35 @@
     return candidate.page - 1;
   }
 
+  /** The image a hit or citation named, to open over its parent unit once that unit's images are listed. */
+  let openImageUnitId: string | null = null;
+
+  /**
+   * A hit or citation on an image shows its parent unit behind the image. The parent is found from the
+   * revision's image list, because the source view's neighbours are counted over text only.
+   */
+  async function openImageSource(hit: SearchHit, generation: number): Promise<void> {
+    loadingSource = true;
+    try {
+      const images = await listImages(hit.collectionId, hit.documentId, hit.revisionId);
+      const image = images.find((entry) => entry.unitId === hit.unitId);
+      if (image === undefined) throw new Error('This image is not part of the reading any more.');
+      const page = await readSource(hit.collectionId, image.parentUnitId, 0, SOURCE_PAGE_CHARS, hit.revisionId);
+      if (generation !== sourceGeneration || hit.collectionId !== sourceCollectionId) return;
+      source = page;
+      sourceText = page.text;
+      sourceWindows = [page];
+      openImageUnitId = hit.unitId;
+    } catch (failure) {
+      if (generation === sourceGeneration) sourceError = describe(failure);
+    } finally {
+      if (generation === sourceGeneration) loadingSource = false;
+    }
+  }
+
   async function openSource(hit: SearchHit, opener: HTMLElement | null = null, saved: string | null = null): Promise<void> {
     const generation = ++sourceGeneration;
+    openImageUnitId = null;
     pageReviewDocument = null;
     sourceOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     selectedHit = hit;
@@ -534,6 +563,11 @@
     sourceWindows = [];
     savedExcerpt = saved;
     sourceError = null;
+    if (isImageRegionLocator(hit.locator)) {
+      savedExcerpt = null;
+      await openImageSource(hit, generation);
+      return;
+    }
     if (saved !== null) {
       loadingSource = false;
       return;
@@ -1275,6 +1309,7 @@
         <DocumentRescan
           visible={sourcePaneVisible}
           collectionId={pageReviewDocument.collectionId}
+          defaultImageExtraction={collections.find((entry) => entry.id === pageReviewDocument?.collectionId)?.defaultImageExtraction ?? 'off'}
           documentId={pageReviewDocument.documentId}
           documentName="Selected document"
           statusOnly
@@ -1326,7 +1361,7 @@
       {:else if source !== null}
         {@const quality = qualityLabel(source.qualityScore)}
         {#if quality !== null}<p class="ocr-quality {quality.level}">{quality.text}</p>{/if}
-        <SourceReading collectionId={selectedHit.collectionId} sourceId={source.id} revisionId={source.revisionId ?? null} hasReading={source.hasReading === true}>
+        <SourceReading collectionId={selectedHit.collectionId} documentId={selectedHit.documentId} {openImageUnitId} sourceId={source.id} revisionId={source.revisionId ?? null} hasReading={source.hasReading === true}>
           {#if sourceWindows.some((chunk) => chunk.structure !== undefined)}
             {#each sourceWindows as chunk (chunk.offset)}
               <StructuredPage text={chunk.text} structure={chunk.structure ?? null} />
@@ -1349,6 +1384,7 @@
   {#if pageScanDialogOpen && pageScanRequest !== undefined}
     <StartReadingDialog
       collectionId={pageReviewDocument?.collectionId ?? managedCollectionId}
+      defaultImageExtraction={collections.find((entry) => entry.id === (pageReviewDocument?.collectionId ?? managedCollectionId))?.defaultImageExtraction ?? 'off'}
       request={{ kind: 'rescan', documentId: pageScanRequest.documentId, selection: { mode: 'explicit', ordinals: pageScanRequest.ordinals } }}
       onstarted={(run) => pageScanStarted(run as RescanStarted)}
       oncancel={cancelPageScanDialog}

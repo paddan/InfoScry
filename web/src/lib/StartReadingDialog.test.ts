@@ -163,7 +163,7 @@ describe('StartReadingDialog', () => {
     await fireEvent.change(await screen.findByLabelText('Reading method'), { target: { value: 'llm:p1' } });
     expect(await screen.findByRole('button', { name: 'Send pages 1, 7 to api.example.com with Cloud OCR' })).toBeTruthy();
     expect(screen.getByText('Pages to read: 1, 7')).toBeTruthy();
-    expect(api.previewRescan).toHaveBeenLastCalledWith('c', 'doc-1', 'llm:p1', selection);
+    expect(api.previewRescan).toHaveBeenLastCalledWith('c', 'doc-1', 'llm:p1', selection, 'off');
   });
 
   it('retries an uncertain explicit start with the same preview and request id', async () => {
@@ -296,5 +296,42 @@ describe('StartReadingDialog', () => {
     await unmount();
     expect(document.activeElement).toBe(opener);
     opener.remove();
+  });
+
+  const rescanMethods: ReadingMethodList = { ...methods, methods: [
+    ...methods.methods,
+    { method: 'keep', label: 'Keep current text', destination: 'this machine', available: true, unavailableReason: null, external: false },
+  ] };
+
+  it('pre-fills Extract images from the collection default and sends the chosen value with an import', async () => {
+    render(StartReadingDialog, { collectionId: 'c', defaultImageExtraction: 'embedded', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    const images = await screen.findByLabelText('Extract images') as HTMLSelectElement;
+    expect(images.value).toBe('embedded');
+    expect(Array.from(images.options).map((option) => option.text)).toEqual(['Off', 'Embedded images', 'Embedded + regions from scanned pages']);
+    await fireEvent.change(images, { target: { value: 'all' } });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read 48 pages with Surya' }));
+    await waitFor(() => expect(api.startImport).toHaveBeenCalledWith(expect.objectContaining({ imageExtraction: 'all' })));
+  });
+
+  it('offers Keep current text for a rescan, and it needs images on', async () => {
+    vi.mocked(api.listReadingMethods).mockImplementation(async (_id, purpose) => (purpose === 'rescan' ? rescanMethods : methods));
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'rescan', documentId: 'doc-1' }, onstarted: vi.fn(), oncancel: vi.fn() });
+    const select = await screen.findByLabelText('Reading method') as HTMLSelectElement;
+    expect(api.listReadingMethods).toHaveBeenCalledWith('c', 'rescan');
+    await fireEvent.change(select, { target: { value: 'keep' } });
+    expect(await screen.findByText('Choose which images to extract.')).toBeTruthy();
+    const start = screen.getByRole('button', { name: 'Extract images and keep the current text' }) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    await fireEvent.change(screen.getByLabelText('Extract images'), { target: { value: 'embedded' } });
+    await waitFor(() => expect(api.previewRescan).toHaveBeenLastCalledWith('c', 'doc-1', 'keep', undefined, 'embedded'));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Extract images and keep the current text' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByText('Choose which images to extract.')).toBeNull();
+  });
+
+  it('does not list Keep current text for an import', async () => {
+    render(StartReadingDialog, { collectionId: 'c', request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] }, onstarted: vi.fn(), oncancel: vi.fn() });
+    await screen.findByLabelText('Reading method');
+    expect(api.listReadingMethods).toHaveBeenCalledWith('c');
+    expect(screen.queryByRole('option', { name: 'Keep current text' })).toBeNull();
   });
 });

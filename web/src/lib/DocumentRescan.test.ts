@@ -49,7 +49,7 @@ describe('DocumentRescan', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Scan again' }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(await screen.findByRole('button', { name: 'Read 48 pages with Surya' })).toBeTruthy();
-    expect(api.previewRescan).toHaveBeenCalledWith('c', 'doc-1', 'surya');
+    expect(api.previewRescan).toHaveBeenCalledWith('c', 'doc-1', 'surya', undefined, 'off');
   });
 
   it('uses a readable cause when a failed run has only a stable error code', async () => {

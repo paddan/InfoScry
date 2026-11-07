@@ -1,11 +1,17 @@
 <script lang="ts">
-  import { ApiError, readSourceReading } from './api';
+  import { ApiError, listImages, readSourceReading, type ImageView } from './api';
+  import ImageStrip from './ImageStrip.svelte';
+  import ImageViewer from './ImageViewer.svelte';
   import CorrectionDialog from './CorrectionDialog.svelte';
   import GlossaryDialog from './GlossaryDialog.svelte';
 
   export let collectionId: string;
   export let sourceId: string;
   export let revisionId: string | null = null;
+  /** The document this unit belongs to; images are listed for it. Absent shows no images. */
+  export let documentId: string | null = null;
+  /** An image of this unit to open as soon as the images are known (a hit or citation on an image). */
+  export let openImageUnitId: string | null = null;
   /** True when the collection's corrections changed this page; its reading can then be shown. */
   export let hasReading = false;
 
@@ -23,15 +29,49 @@
   let glossaryTerm: string | null = null;
   let glossaryButton: HTMLElement | null = null;
   let boundKey = '';
+  let images: ImageView[] = [];
+  let viewing: ImageView | null = null;
+  let viewerOpen = false;
+  let handledOpenImage: string | null = null;
 
-  $: if (`${collectionId}/${sourceId}/${revisionId ?? ''}` !== boundKey) reset();
+  $: if (`${collectionId}/${documentId ?? ''}/${sourceId}/${revisionId ?? ''}` !== boundKey) reset();
+  $: unitImages = images.filter((image) => image.parentUnitId === sourceId);
+  $: if (openImageUnitId !== null && openImageUnitId !== handledOpenImage) {
+    const wanted = images.find((image) => image.unitId === openImageUnitId);
+    if (wanted !== undefined) {
+      handledOpenImage = openImageUnitId;
+      viewing = wanted;
+      viewerOpen = true;
+    }
+  }
 
   function reset(): void {
-    boundKey = `${collectionId}/${sourceId}/${revisionId ?? ''}`;
+    boundKey = `${collectionId}/${documentId ?? ''}/${sourceId}/${revisionId ?? ''}`;
+    images = [];
+    viewing = null;
+    viewerOpen = false;
+    handledOpenImage = null;
+    void loadImages(boundKey);
     showingReading = false;
     reading = null;
     readingError = null;
     selected = null;
+  }
+
+  /** The strip is a convenience: a failure to list images leaves the text as it is. */
+  async function loadImages(asked: string): Promise<void> {
+    if (documentId === null) return;
+    try {
+      const listed = await listImages(collectionId, documentId, revisionId);
+      if (asked === boundKey) images = listed;
+    } catch {
+      if (asked === boundKey) images = [];
+    }
+  }
+
+  function openImage(image: ImageView): void {
+    viewing = image;
+    viewerOpen = true;
   }
 
   async function toggleReading(): Promise<void> {
@@ -114,7 +154,14 @@
       <slot />
     {/if}
   </div>
+  {#if documentId !== null && unitImages.length > 0}
+    <ImageStrip {collectionId} {documentId} images={unitImages} onOpen={openImage} />
+  {/if}
 </div>
+
+{#if viewing !== null && documentId !== null}
+  <ImageViewer {collectionId} {documentId} {revisionId} image={viewing} open={viewerOpen} onClose={() => (viewerOpen = false)} />
+{/if}
 
 {#if glossaryTerm !== null}
   <GlossaryDialog
