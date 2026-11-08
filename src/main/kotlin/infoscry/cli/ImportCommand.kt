@@ -77,6 +77,14 @@ class ImportCommand : CliktCommand(name = "import") {
         "--images",
         help = "Image extraction: off, embedded or all; without it the collection default applies",
     )
+    private val describeImagesOption by option(
+        "--describe-images",
+        help = "Describe and tag images with this OCR profile, or 'none'; without it the collection default applies",
+    )
+    private val identifyAppearanceFlag by option(
+        "--identify-appearance",
+        help = "Also name people, objects, animals and places recognised from appearance, as uncertain suggestions",
+    ).flag()
     private val yesFlag by option("--yes", help = "Confirm sending the previewed pages to an external endpoint").flag()
 
     private val waitFlag by option(
@@ -150,6 +158,7 @@ class ImportCommand : CliktCommand(name = "import") {
                         all.firstOrNull { it.id.value == collection } ?: all.firstOrNull { it.name.equals(collection, ignoreCase = true) }
                     } ?: throw CliFailure("no usable collection named or identified by '$collection'")
                     val method = methodOption?.let(infoscry.ocr.ReadingMethod::parse) ?: selected.ocrSettings().defaultMethod
+                    val imageAnalysis = imageAnalysisOf(api, selected)
                     // Keep current text carries a document's published text forward, so only a rescan has meaning for it.
                     if (method == infoscry.ocr.ReadingMethod.KeepText) {
                         throw CliFailure("--method keep is for rescans; an import has no published text to keep")
@@ -167,7 +176,8 @@ class ImportCommand : CliktCommand(name = "import") {
                     if (uploads.isEmpty()) return@runBlocking null
                     val request = infoscry.server.ImportPreviewRouteRequest(collection = selected.id.value,
                         uploads = uploads.map { it.first },
-                        include = extensions.include, exclude = extensions.exclude, method = method.id)
+                        include = extensions.include, exclude = extensions.exclude, method = method.id,
+                        imageExtraction = images?.id, imageAnalysis = imageAnalysis)
                     val preview = api.previewImport(request)
                     confirmPreview(preview, method.id)
                     val identity = uploads.map { it.second }
@@ -176,7 +186,7 @@ class ImportCommand : CliktCommand(name = "import") {
                         include = extensions.include, exclude = extensions.exclude,
                         method = method.id, previewHash = preview.previewHash,
                         requestId = commandRequestId(identity, request, preview.previewHash, images), restartStopped = true,
-                        imageExtraction = images?.id))
+                        imageExtraction = images?.id, imageAnalysis = imageAnalysis))
                 }
             } catch (failure: RemoteApiFailure) {
                 throw CliFailure("${failure.code}: ${failure.message}", failure)
@@ -200,6 +210,38 @@ class ImportCommand : CliktCommand(name = "import") {
         }
     }
 
+    /**
+     * The image analysis this command asks for: the flag when given, the collection's default when not.
+     *
+     * A profile the server does not offer, or one that has not passed the image check, is refused here — before
+     * any file is uploaded — because a run that would fail at its first picture should not move the files.
+     */
+    private suspend fun imageAnalysisOf(
+        api: infoscry.cli.ApiClient,
+        collection: infoscry.domain.Collection,
+    ): infoscry.ocr.ImageAnalysisRequest? {
+        val named = describeImagesOption
+        val profileId = when {
+            named == null -> collection.defaultImageProfileId
+            named == infoscry.ocr.ImageAnalysisAdmission.NONE -> null
+            else -> named
+        } ?: return null
+        if (identifyAppearanceFlag && named == infoscry.ocr.ImageAnalysisAdmission.NONE) {
+            throw CliFailure("--identify-appearance needs --describe-images to name a profile")
+        }
+        val profile = api.ocrProfiles().firstOrNull { it.id == profileId }
+            ?: throw CliFailure("--describe-images names '$profileId', which this server does not offer")
+        if (!profile.enabled || profile.imageCapabilityMeasured != true) {
+            throw CliFailure(
+                "--describe-images needs a profile that passed the image check; '$profileId' has not",
+            )
+        }
+        return infoscry.ocr.ImageAnalysisRequest(
+            profileId = profileId,
+            identifyAppearance = identifyAppearanceFlag || (named == null && collection.defaultIdentifyAppearance),
+        )
+    }
+
     private fun confirmPreview(preview: infoscry.jobs.ImportPreview, method: String) {
         if (method == infoscry.ocr.ReadingMethod.None.id) {
             echo("No OCR: no page is read; each page keeps the document's own text.", err = true)
@@ -208,6 +250,17 @@ class ImportCommand : CliktCommand(name = "import") {
         val count = (if (preview.atLeast) "at least " else "") + preview.totalPages
         val action = if (preview.external) "Send" else "Read"
         echo("$action $count pages ${if (preview.external) "to" else "on"} ${preview.destination} with $method.", err = true)
+        preview.imageCount?.let { count ->
+            val action = if (preview.imageExternal) "Send" else "Describe"
+            echo("$action $count pictures; the image cost is ${preview.imageEstimatedCostUsd?.let { "USD $it" } ?: "unavailable"}.", err = true)
+            preview.imageCostBasis?.let { echo(it, err = true) }
+        }
+        if (preview.imageExternal && !yesFlag) {
+            echo("Send these pictures to the image profile? [y/N]", err = true)
+            if (readlnOrNull()?.trim()?.lowercase() !in setOf("y", "yes")) {
+                throw CliFailure("Import cancelled before any job was queued.")
+            }
+        }
         if (preview.external) {
             if (preview.atLeast) {
                 echo("All pages in these files will be sent; the total cost is unavailable because their page count is unknown:", err = true)
@@ -231,6 +284,9 @@ class ImportCommand : CliktCommand(name = "import") {
         images: infoscry.image.ImageExtractionMode?): String {
         val canonical = listOf(request.collection, request.method, recursiveFlag.toString()) +
             listOfNotNull(images?.let { "images=${it.id}" }) +
+            listOfNotNull(request.imageAnalysis?.let { "describe=${it.profileId}" }).let { describe ->
+                describe + listOfNotNull(request.imageAnalysis?.let { "appearance=${it.identifyAppearance}" })
+            } +
             identity.distinct().sorted() + request.include.sorted() + listOf("|") + request.exclude.sorted()
         val bytes = (canonical.joinToString("\n") + "\n" + previewHash).toByteArray(Charsets.UTF_8)
         return "cli-import-" + java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))

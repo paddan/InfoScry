@@ -6,9 +6,19 @@ import infoscry.domain.NormalizedBox
 import infoscry.domain.SourceImageProvenance
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
+import infoscry.chunk.Chunker
+import infoscry.chunk.WhitespaceTokenCounter
+import infoscry.embedding.TestDocumentEmbedder
 import infoscry.image.ImageExtractionMode
 import infoscry.image.ImageIdentity
 import infoscry.image.ImageSourceKind
+import infoscry.image.analysis.AnalysisOutcome
+import infoscry.image.analysis.ImageAnalysis
+import infoscry.image.analysis.ImageAnalysisKey
+import infoscry.image.analysis.ImageTag
+import infoscry.image.analysis.TagCategory
+import infoscry.image.analysis.TagEditAction
+import infoscry.image.analysis.TagSource
 import infoscry.jobs.ImportJobPayload
 import infoscry.storage.CaptionSource
 import infoscry.storage.PageApproval
@@ -160,7 +170,8 @@ class ImageRoutesTest {
         val older = server.context.revisions.activeRevisionId(document.id)!!
         // A later reading publishes the text only.
         fixture.publish(document, listOf(fixture.page(0, "one again"), fixture.page(1, "two again")))
-        assertEquals(0, Json.parseToJsonElement(server.get(base()).bodyAsText()).jsonArray.size)
+        val emptyBody = server.get(base()).bodyAsText()
+        assertEquals(0, Json.parseToJsonElement(emptyBody).jsonArray.size, emptyBody)
         val pinned = Json.parseToJsonElement(server.get("${base()}?revision=$older").bodyAsText()).jsonArray
         assertEquals(2, pinned.size)
 
@@ -298,6 +309,82 @@ class ImageRoutesTest {
         assertEquals(HttpStatusCode.NotFound, server.get(path).status)
     }
 
+    // ---- tags ----
+
+    private fun analysisFor(bytes: ByteArray) = ImageAnalysis(
+        key = ImageAnalysisKey(
+            documentId = document.id,
+            unitId = imageUnitId(document, first),
+            imageSha256 = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) },
+            profileRevisionId = "revision-1",
+            promptVersion = 1,
+            language = "swe",
+            identifyAppearance = true,
+        ),
+        outcome = AnalysisOutcome.DONE,
+        description = "En man vid en bil.",
+        tags = listOf(ImageTag(TagCategory.PERSON, "man", "Jeffrey Epstein", TagSource.APPEARANCE)),
+        errorCode = null,
+        caption = "first picture",
+        pageContext = "Sidan 1.",
+    )
+
+    private suspend fun editTags(editId: String, action: String, version: Long?): HttpResponse {
+        val body = ApiJson.encodeToString(
+            EditImageTagRequest(
+                editId = editId,
+                action = TagEditAction.valueOf(action),
+                tag = ImageTag(TagCategory.PERSON, "man", "Jeffrey Epstein", TagSource.MANUAL),
+            ),
+        )
+        return server.client.request(server.url + "${base()}/${imageUnitId(document, first).value}/tags") {
+            method = HttpMethod.Post
+            header(HttpHeaders.Authorization, "Bearer ${server.bearer}")
+            version?.let { header(HttpHeaders.IfMatch, it.toString()) }
+            contentType(ContentType.Application.Json)
+            setBody(body)
+        }
+    }
+
+    @Test fun `a reader sees the tags the viewer shows and only an editor confirms one`() = runBlocking {
+        val bytes = seedTwo()
+        server.context.imageAnalyses.record(analysisFor(bytes))
+        server.context.attachDocumentEmbedder { TestDocumentEmbedder() }
+        server.context.attachChunker(Chunker(WhitespaceTokenCounter(prefixTokens = 2, specialTokens = 1)))
+        val tagsPath = "${base()}/${imageUnitId(document, first).value}/tags"
+
+        val shown = json(tagsPath)
+        assertEquals("En man vid en bil.", shown!!.getValue("description").jsonPrimitive.content)
+        assertEquals("Jeffrey Epstein", shown.getValue("tags").jsonArray.single().jsonObject.getValue("name").jsonPrimitive.content)
+
+        val reader = TestAccounts.ensureUser(server.context, "reader")
+        server.context.memberships.put(
+            document.collectionId, reader.id, infoscry.account.CollectionRole.READER, server.admin.id,
+        )
+        val readerToken = server.context.accounts.createToken(reader.id, "tests", null).value
+        val readerPost = server.client.request(server.url + tagsPath) {
+            method = HttpMethod.Post
+            header(HttpHeaders.Authorization, "Bearer $readerToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"editId":"r1","action":"CONFIRM","tag":{"category":"PERSON","label":"man","source":"MANUAL"}}""")
+        }
+        assertEquals(HttpStatusCode.Forbidden, readerPost.status, readerPost.bodyAsText())
+        assertEquals(HttpStatusCode.NotFound, asOutsider(tagsPath).status)
+
+        val confirmed = editTags("e1", "CONFIRM", 0)
+        assertEquals(HttpStatusCode.OK, confirmed.status, confirmed.bodyAsText())
+        val confirmedBody = Json.parseToJsonElement(confirmed.bodyAsText()).jsonObject
+        assertEquals("MANUAL", confirmedBody.getValue("tags").jsonArray.single().jsonObject.getValue("source").jsonPrimitive.content)
+        val active = server.context.revisions.activeRevisionId(document.id)
+        val repeated = editTags("e1", "CONFIRM", 0)
+        assertEquals(HttpStatusCode.OK, repeated.status, repeated.bodyAsText())
+        assertEquals(active, server.context.revisions.activeRevisionId(document.id), "a repeated edit publishes nothing")
+
+        val stale = editTags("e2", "REMOVE", 0)
+        assertEquals(HttpStatusCode.Conflict, stale.status, stale.bodyAsText())
+        assert(stale.bodyAsText().contains("EDIT_CONFLICT")) { stale.bodyAsText() }
+    }
+
     // ---- import start and collection settings ----
 
     private suspend fun startImport(requestId: String, images: String?, upload: String, previewHash: String): HttpResponse {
@@ -317,7 +404,12 @@ class ImageRoutesTest {
         val preview = ApiJson.decodeFromString<infoscry.jobs.ImportPreview>(
             server.request(
                 HttpMethod.Post, "/api/imports/preview",
-                ApiJson.encodeToString(ImportPreviewRouteRequest(collection = collection, uploads = listOf(upload), method = "none")),
+                ApiJson.encodeToString(
+                    ImportPreviewRouteRequest(
+                        collection = collection, uploads = listOf(upload), method = "none",
+                        imageExtraction = "all",
+                    ),
+                ),
                 Credential.BEARER,
             ).bodyAsText(),
         )

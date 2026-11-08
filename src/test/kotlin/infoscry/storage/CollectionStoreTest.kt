@@ -133,6 +133,34 @@ class CollectionStoreTest {
     }
 
     @Test
+    fun `a collection starts without image analysis and the defaults change with its version`() {
+        val created = store.create("Pictures")
+        assertNull(created.defaultImageProfileId)
+        assertFalse(created.defaultIdentifyAppearance)
+
+        val updated = store.updateImageAnalysisDefaults(created.id, "  profile-1  ", true, created.version)
+
+        assertEquals("profile-1", updated.defaultImageProfileId)
+        assertTrue(updated.defaultIdentifyAppearance)
+        assertEquals(created.version + 1, updated.version)
+        assertEquals(updated, store.get(created.id))
+    }
+
+    @Test
+    fun `stale image analysis defaults conflict but repeating the current ones is a no-op`() {
+        val created = store.create("Pictures")
+        val changed = store.updateImageAnalysisDefaults(created.id, "profile-1", true, created.version)
+
+        assertFailsWith<EditConflictException> {
+            store.updateImageAnalysisDefaults(created.id, null, false, created.version)
+        }
+        assertEquals(changed, store.get(created.id), "a refused edit changes nothing")
+
+        val repeated = store.updateImageAnalysisDefaults(created.id, "profile-1", true, created.version)
+        assertEquals(changed, repeated, "the same defaults with a stale version change nothing")
+    }
+
+    @Test
     fun `create rejects a name that differs only in case`() {
         store.create("Nightfall")
 

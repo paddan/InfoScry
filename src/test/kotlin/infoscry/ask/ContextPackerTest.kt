@@ -17,6 +17,11 @@ class ContextPackerTest {
         SourceLocation.TextLines(1, 2), "lines 1-2", emptySet(),
     )
 
+    private fun pictureHit(document: String, text: String) = SearchHit(
+        CollectionId("c"), DocumentId(document), ContentUnitId("u$document"), 0, text, null,
+        SourceLocation.ImageRegion(SourceLocation.PdfPage(14), 2, null), "image 2 on page 14", emptySet(),
+    )
+
     private fun glossaryGroup(id: String, vararg texts: String) = infoscry.glossary.GlossaryGroup(
         id, CollectionId("c"), infoscry.glossary.GlossaryRules.normalize(texts.map { infoscry.glossary.GlossaryTermInput(it) }), "t", "t",
     )
@@ -127,6 +132,34 @@ class ContextPackerTest {
 
         assertEquals(listOf(markdown), packed.evidences.map { it.text })
         assertTrue(packed.request.messages[1].content.contains(markdown))
+    }
+
+    @Test
+    fun `a picture hit is labelled as a picture and carries its description and tags`() {
+        val text = "Fig. 3\n\nTwo men by a car.\n\nperson: possibly Jeffrey Epstein\nobject: Volvo PV444"
+        val packed = ContextPacker().pack(
+            "question", "core",
+            listOf(pictureHit("d1", text)),
+            RequestBudget(10_000), 10,
+        )
+
+        val evidence = packed.evidences.single()
+        assertEquals("Picture: image 2 on page 14", evidence.locatorLabel)
+        assertTrue(evidence.text.contains("possibly"))
+        assertTrue(packed.request.messages[1].content.contains("locator=\"Picture: image 2 on page 14\""))
+    }
+
+    @Test
+    fun `a picture hit still fits a request budget measured with its label`() {
+        val text = "A harbour at dusk.\n\nperson: possibly Astrid Lindgren"
+        val loose = ContextPacker().pack("question", "core", listOf(pictureHit("d1", text)), RequestBudget(100_000), 10)
+        val bytes = RequestBudget(100_000).measure(loose.request).serializedBytes
+        val tight = RequestBudget(bytes + 1_024, safetyMargin = 0)
+
+        val packed = ContextPacker().pack("question", "core", listOf(pictureHit("d1", text)), tight, 10)
+
+        assertEquals(1, packed.evidences.size)
+        assertTrue(tight.measure(packed.request).fits)
     }
 
     @Test

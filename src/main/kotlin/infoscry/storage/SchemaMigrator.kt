@@ -67,6 +67,8 @@ class SchemaMigrator(private val database: Database) {
             "db/migration/004_images.sql",
             "db/migration/005_caption_source_page_text.sql",
             "db/migration/006_image_rescan_job.sql",
+            "db/migration/007_image_tagging.sql",
+            "db/migration/008_image_analysis_source_text.sql",
         )
 
         /** The schema version this build writes and understands. */

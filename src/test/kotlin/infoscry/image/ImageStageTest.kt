@@ -9,8 +9,18 @@ import infoscry.domain.NormalizedBox
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.extract.UnitBoundary
+import infoscry.image.analysis.AnalysisRules
+import infoscry.image.analysis.ImageAnalysisStep
+import infoscry.image.analysis.ImageAnalyzer
+import infoscry.llm.FakeOpenAiResponse
+import infoscry.llm.FakeOpenAiServer
+import infoscry.llm.LlmProvider
+import infoscry.llm.RetryPolicy
 import infoscry.ocr.BlockKind
+import infoscry.ocr.ImageAnalysisChoice
+import infoscry.ocr.ImageLlmClient
 import infoscry.ocr.OcrEngine
+import infoscry.ocr.OcrProfileRevision
 import infoscry.ocr.OcrImportMode
 import infoscry.ocr.OcrPageResult
 import infoscry.ocr.OcrSettingsSnapshot
@@ -28,6 +38,7 @@ import infoscry.storage.Database
 import infoscry.storage.DocumentBeingDeletedException
 import infoscry.storage.DocumentStore
 import infoscry.storage.ImageCheckpointOutcome
+import infoscry.storage.ImageAnalysisStore
 import infoscry.storage.ImageStore
 import infoscry.storage.SchemaMigrator
 import java.awt.image.BufferedImage
@@ -40,7 +51,13 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 
 class ImageStageTest {
 
@@ -810,6 +827,104 @@ class ImageStageTest {
         if (!Files.isDirectory(images)) return 0
         return Files.list(images).use { entries -> entries.filter { Files.isRegularFile(it) }.count().toInt() }
     }
+
+    @Test
+    fun `a refused picture is delivered with its caption and the other picture is analysed`() {
+        val server = FakeOpenAiServer(
+            listOf(
+                FakeOpenAiResponse(statusCode = 400, body = """{"error":"no"}"""),
+                FakeOpenAiResponse(body = openAiAnswer("""{"description":"En bil.","tags":[]}""")),
+            ),
+        )
+        try {
+            val parents = pages(1) { listOf(picture(100, 120), picture(130, 140)) }
+            val target = RecordingTarget()
+            val profile = analysisRevision(server.url)
+
+            val result = runBlocking {
+                stage(finder = FakeFinder(parents), regions = LayoutRegions(PageOcrEngines(emptyList())), analysis = profile)
+                    .run(
+                        document,
+                        managedPath,
+                        artifactRoot,
+                        contexts(parents) { null },
+                        ImageExtractionMode.EMBEDDED,
+                        target,
+                        Direct,
+                        settings.copy(
+                            imageExtraction = ImageExtractionMode.EMBEDDED,
+                            imageAnalysis = ImageAnalysisChoice("revision-1", false),
+                            language = "swe",
+                        ),
+                    )
+            }
+
+            assertEquals(2, target.delivered.size)
+            assertEquals(2, server.handledRequests, "each picture is asked about once")
+            assertTrue(AnalysisRules.REFUSED in result.warnings, "a refused picture is a warning, was ${result.warnings}")
+            assertEquals("", target.delivered[0].caption, "a refused picture keeps its caption and page text, which are absent")
+            assertEquals("En bil.", target.delivered[1].caption, "the document's other picture is analysed")
+            assertEquals(
+                infoscry.image.analysis.AnalysisOutcome.DONE,
+                ImageAnalysisStore(database)
+                    .latestDone(document.id, target.delivered[1].unitId, target.delivered[1].image.sha256)
+                    ?.outcome,
+            )
+        } finally {
+            server.close()
+        }
+    }
+
+    private fun analysisRevision(endpoint: String) = OcrProfileRevision(
+        revisionId = "revision-1",
+        profileId = "profile-1",
+        sequence = 1,
+        provider = LlmProvider.OPENAI_COMPATIBLE,
+        model = "vision-model",
+        contextWindow = 32_000,
+        maxOutputTokens = 2_048,
+        inputPricePerMillion = 0.0,
+        outputPricePerMillion = 0.0,
+        createdAt = "2026-11-07T00:00:00.000Z",
+        endpoint = endpoint,
+        imageCapabilityMeasured = true,
+    )
+
+    private fun openAiAnswer(content: String): String = buildJsonObject {
+        put("model", "vision-model")
+        putJsonArray("choices") {
+            addJsonObject {
+                put("finish_reason", "stop")
+                putJsonObject("message") {
+                    put("role", "assistant")
+                    put("content", content)
+                }
+            }
+        }
+    }.toString()
+
+    private fun stage(
+        finder: FakeFinder,
+        regions: LayoutRegions,
+        analysis: OcrProfileRevision,
+    ) = ImageStage(
+        ImageFinders(listOf(finder)),
+        regions,
+        ImageArtifacts(),
+        store,
+        documentStore,
+        analysis = ImageAnalysisStep(
+            analyzer = ImageAnalyzer { _, _ ->
+                ImageLlmClient(
+                    profile = analysis,
+                    timeout = 10.seconds,
+                    retryPolicy = RetryPolicy(maxRetries = 1, retryDelay = { }),
+                )
+            },
+            store = ImageAnalysisStore(database),
+            profileRevisionOf = { revisionId -> analysis.takeIf { it.revisionId == revisionId } },
+        ),
+    )
 
     private fun run(
         finder: FakeFinder,

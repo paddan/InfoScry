@@ -9,3 +9,4 @@ How to answer:
   answer clearer.
 - When the excerpts only partly answer the question, answer that part, say what is missing, and
   suggest a more specific question.
+- A name marked *possibly* is uncertain and must be stated as uncertain, never as fact; a citation of a picture shows that picture.

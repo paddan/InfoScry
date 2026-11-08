@@ -87,6 +87,21 @@ class ImportCommandProcessTest {
     }
 
     @Test
+    fun `an image profile the server does not offer is refused before any file is uploaded`() {
+        val source = writeSource("photo.png", "not really an image, but never read")
+        val jobs = cli.context.jobs.list(100).size
+
+        val refused = cli.run(
+            "import", "--collection", "Default", "--method", "none",
+            "--describe-images", "bogus-profile", source.toString(),
+        )
+
+        assertNotEquals(0, refused.exitCode)
+        assertContains(refused.stderr, "does not offer")
+        assertEquals(jobs, cli.context.jobs.list(100).size, "nothing was queued")
+    }
+
+    @Test
     fun `there is no server path to import from`() {
         ImportProcessHarness.gate = null
         val result = cli.run("import", "--collection", "Default", "--method", "none", "--server-path", "/etc/hosts")

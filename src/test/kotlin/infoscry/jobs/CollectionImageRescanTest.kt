@@ -129,7 +129,7 @@ class CollectionImageRescanTest {
                 val service = harness.rescanServiceOf(context, FakePageEngine())
                 val calls = mutableListOf<Pair<DocumentId, String>>()
                 val outcomes = mutableListOf<ImageRescanOutcome>()
-                val handler = ImageRescanJobHandler(context.documents) { collectionId, documentId, mode, requestId ->
+                val handler = ImageRescanJobHandler(context.documents) { collectionId, documentId, mode, requestId, _ ->
                     calls += documentId to requestId
                     service.startImageRescan(collectionId, documentId, mode, requestId).also { outcomes += it.outcome }
                 }
@@ -181,7 +181,7 @@ class CollectionImageRescanTest {
             harness.importTextDocument()
             AppContext.open(harness.archiveDir).use { context ->
                 val refusal = RescanRefusalException(RescanRefusalException.MANAGED_COPY_MISSING, "the managed copy is gone")
-                val refusing = ImageRescanJobHandler(context.documents) { _, _, _, _ ->
+                val refusing = ImageRescanJobHandler(context.documents) { _, _, _, _, _ ->
                     ImageRescanStep(ImageRescanOutcome.REFUSED, refusal)
                 }
                 runBlocking { context.collectionImageRescanService.start(collection, ImageExtractionMode.EMBEDDED) }
@@ -193,7 +193,7 @@ class CollectionImageRescanTest {
                 assertEquals("No document could be scanned for images. 2 documents refused: the managed copy is gone", failure.message)
 
                 var first = true
-                val mixed = ImageRescanJobHandler(context.documents) { _, _, _, _ ->
+                val mixed = ImageRescanJobHandler(context.documents) { _, _, _, _, _ ->
                     if (first) { first = false; ImageRescanStep(ImageRescanOutcome.STARTED) }
                     else ImageRescanStep(ImageRescanOutcome.UNSUPPORTED_FORMAT)
                 }
@@ -212,7 +212,7 @@ class CollectionImageRescanTest {
                 val job = runBlocking { context.collectionImageRescanService.start(collection, ImageExtractionMode.EMBEDDED) }
                 val claimed = assertNotNull(context.jobs.claimNextQueued(setOf(JobType.IMAGE_RESCAN)))
                 val service = harness.rescanServiceOf(context, FakePageEngine())
-                val handler = ImageRescanJobHandler(context.documents) { collectionId, documentId, mode, requestId ->
+                val handler = ImageRescanJobHandler(context.documents) { collectionId, documentId, mode, requestId, _ ->
                     service.startImageRescan(collectionId, documentId, mode, requestId)
                 }
                 runBlocking { handler.handle(claimed, JobStage(claimed.id, context.jobs, context.collections, context.mutations)) }

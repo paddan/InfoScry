@@ -255,6 +255,13 @@ class AppContext private constructor(
     /** The metadata of the images documents yield, and the checkpoints of the extraction that finds them. */
     val imageStore: infoscry.storage.ImageStore = infoscry.storage.ImageStore(database)
 
+    /** What each picture was described as, and the tag edits people made on top of it. */
+    val imageAnalyses: infoscry.storage.ImageAnalysisStore = infoscry.storage.ImageAnalysisStore(database)
+
+    /** The picture categories one image unit's search rows carry, from its analysis and edits. */
+    val imageCategories: infoscry.image.analysis.ImageCategories =
+        infoscry.image.analysis.ImageCategories(imageAnalyses, imageStore)
+
     /** The reviews a comparison writes and a person decides about. */
     val ocrReviews: OcrReviewStore = OcrReviewStore(database)
 
@@ -285,6 +292,7 @@ class AppContext private constructor(
         collections = collections,
         mutations = mutations,
         index = { index() },
+        imageCategories = imageCategories,
         onPublished = RevisionPublishedHook { documentId, collectionId, revisionId ->
             selectablePdfService.queueForPublishedRevision(documentId, collectionId, revisionId)
             followCorrections(collectionId, revisionId)
@@ -296,6 +304,21 @@ class AppContext private constructor(
      * or restore corrected before a rule changed, an import that straddled a change). It never throws: a publication
      * is never failed by its follow-up, and a collection being deleted needs no corrections.
      */
+    /**
+     * Reading and editing the tags of one picture, publishing an edited unit through the ordinary revision
+     * protocol.
+     */
+    val imageTagService: infoscry.image.analysis.ImageTagService = infoscry.image.analysis.ImageTagService(
+        analyses = imageAnalyses,
+        revisions = revisions,
+        documents = documents,
+        images = imageStore,
+        publication = revisionPublication,
+        chunker = { attachedChunker ?: productionChunker },
+        documentEmbedder = { currentDocumentEmbedder() },
+        paths = paths,
+    )
+
     internal fun followCorrectionsFor(collectionId: CollectionId) = followCorrections(collectionId) { true }
 
     internal fun followCorrections(collectionId: CollectionId, revisionId: String) =

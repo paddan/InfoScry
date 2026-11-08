@@ -44,6 +44,22 @@ describe('ImageStrip', () => {
     expect(onOpen).toHaveBeenCalledTimes(2);
   });
 
+  it('counts the described pictures and marks one whose last analysis failed', () => {
+    render(ImageStrip, {
+      collectionId: 'c',
+      documentId: 'd1',
+      images: [
+        image({ description: 'En bil.', tags: [] }),
+        image({ unitId: 'i2', tags: [{ category: 'PERSON', label: 'man', name: null, source: 'TEXT' }] }),
+        image({ unitId: 'i3', analysisErrorCode: 'IMAGE_ANALYSIS_REFUSED' }),
+      ],
+      onOpen: vi.fn(),
+    });
+
+    expect(screen.getByTestId('image-analysed-count').textContent).toContain('2 of 3 images described');
+    expect(screen.getAllByTestId('image-failure-mark')).toHaveLength(1);
+  });
+
   it('renders nothing for a unit without images', () => {
     render(ImageStrip, { collectionId: 'c', documentId: 'd1', images: [], onOpen: vi.fn() });
     expect(screen.queryByRole('list')).toBeNull();

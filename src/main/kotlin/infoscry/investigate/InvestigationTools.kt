@@ -135,7 +135,7 @@ class InvestigationTools(
                 EvidenceItem(
                     hit.unitId.value,
                     hit.locator,
-                    hit.locatorLabel,
+                    ContextPacker.labelOf(hit.locator, hit.locatorLabel),
                     escape(session?.textOf(hit) ?: hit.text),
                     revisionId = hit.revisionId,
                     documentId = hit.documentId.value,
@@ -233,7 +233,7 @@ class InvestigationTools(
         EvidenceItem(
             unit.id.value,
             unit.locator,
-            unit.locator.describe(),
+            ContextPacker.labelOf(unit.locator, unit.locator.describe()),
             escape(session?.unitText(unit) ?: unit.extractedText),
             revisionId = revisionId,
             documentId = unit.documentId.value,

@@ -32,6 +32,8 @@ data class RescanPreviewRequest(
     val selection: RescanSelection? = null,
     /** `off`, `embedded` or `all`; absent takes the collection's default. */
     val imageExtraction: String? = null,
+    /** How the run describes its pictures; absent describes none. */
+    val imageAnalysis: infoscry.ocr.ImageAnalysisRequest? = null,
 )
 
 /** Admitting a previewed rescan. The request id is what makes a repeated POST one operation. */
@@ -202,6 +204,7 @@ fun Routing.configureOcrRescanRoutes(context: AppContext) {
                     method = method,
                     selection = request.selection ?: RescanSelection.Automatic,
                     imageExtraction = images,
+                    imageAnalysis = request.imageAnalysis,
                 )
                 call.respondJson(HttpStatusCode.OK, preview)
             }

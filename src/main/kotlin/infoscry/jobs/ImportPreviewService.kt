@@ -3,9 +3,16 @@ package infoscry.jobs
 import infoscry.document.costEstimateOf
 import infoscry.domain.CollectionId
 import infoscry.extract.EXTRACTOR_SCHEMA_VERSION
+import infoscry.extract.MediaTypeDetector
 import infoscry.extract.PageCounter
+import infoscry.image.ImageCount
+import infoscry.image.ImageCounter
+import infoscry.image.ImageExtractionMode
 import infoscry.ocr.CollectionOcrSettings
+import infoscry.ocr.ImageAnalysisAdmission
+import infoscry.ocr.ImageAnalysisRequest
 import infoscry.ocr.OcrProfileService
+import infoscry.ocr.ReadingMethodUnavailableException
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.ReadingMethod
 import infoscry.ocr.ReadingMethodCatalog
@@ -24,6 +31,10 @@ data class ImportPreviewRequest(
     val include: List<String> = emptyList(),
     val exclude: List<String> = emptyList(),
     val method: ReadingMethod,
+    /** How much imagery the run extracts; null takes the collection's default. */
+    val imageExtraction: ImageExtractionMode? = null,
+    /** How the run describes its pictures; null describes none. */
+    val imageAnalysis: ImageAnalysisRequest? = null,
 )
 
 @Serializable
@@ -46,6 +57,16 @@ data class ImportPreview(
     val estimatedCostUsd: Double?,
     val costBasis: String?,
     val previewHash: String,
+    /** How many pictures the analysis would send, when the selected files make that countable; null otherwise. */
+    val imageCount: Int? = null,
+    /** Whether the chosen image profile sends pictures off this machine. */
+    val imageExternal: Boolean = false,
+    /** True when [imageCount] is a lower bound because scanned pages can add regions no preview can count. */
+    val imageAtLeast: Boolean = false,
+    val imageEstimatedCostUsd: Double? = null,
+    val imageCostBasis: String? = null,
+    /** The confirmed picture allowance an external profile would run under; zero for a local one. */
+    val imageAllowance: Int = 0,
 )
 
 internal data class ConfirmedImportSourceSet(val previewHash: String, val sources: List<ConfirmedImportSource>)
@@ -61,6 +82,10 @@ class ImportPreviewService internal constructor(
     private val ignorePatterns: (CollectionId) -> IgnorePatterns,
     /** Refuses paths outside the import roots and the collection's upload area; the default allows every path. */
     private val allowPaths: (CollectionId, List<String>) -> Unit = { _, _ -> },
+    /** How a selected file's media type is read, so its pictures can be counted before extraction. */
+    private val detector: MediaTypeDetector = MediaTypeDetector(),
+    /** How many pictures a file holds, as far as that is knowable before extraction. */
+    private val imageCounter: ImageCounter = ImageCounter(),
 ) {
     fun preview(request: ImportPreviewRequest): ImportPreview {
         val collection = requireCollection(request.collection)
@@ -83,6 +108,18 @@ class ImportPreviewService internal constructor(
         }
         val totalPages = filePreviews.sumOf { it.pages ?: 0 }
         val pageTotalForCost = totalPages.takeIf { filePreviews.all { file -> file.pages != null } }
+        val images = request.imageExtraction ?: collection.defaultImageExtraction
+        val imageCount = imageCountOf(selected, filePreviews, images)
+        val admittedImage = ImageAnalysisAdmission.admit(
+            request.imageAnalysis, profiles::get, imageCount?.upperBound,
+        )
+        if (admittedImage != null && images == ImageExtractionMode.OFF) {
+            throw ReadingMethodUnavailableException(
+                "describing images needs images on; choose how much imagery to extract, or describe none",
+            )
+        }
+        val imageRevision = admittedImage?.choice?.profileRevisionId?.let(profiles::findRevision)
+        val imageEstimate = ImageAnalysisAdmission.costEstimateOf(imageCount?.upperBound, imageRevision)
         val snapshot = snapshotFor(collection.ocrLanguages, request.method)
         val estimate = if (method.external) {
             // A known-page subtotal cannot price an approval that also includes files whose counts are
@@ -100,7 +137,18 @@ class ImportPreviewService internal constructor(
             external = method.external,
             estimatedCostUsd = estimate.first?.amountUsd,
             costBasis = estimate.first?.basis ?: estimate.second,
-            previewHash = hashOfSelected(collection.ocrLanguages, request.method, selected),
+            previewHash = hashOfSelected(collection.ocrLanguages, request.method, selected, images, admittedImage?.choice?.profileRevisionId),
+            imageCount = imageCount?.known,
+            imageExternal = imageRevision?.scope == infoscry.ocr.OcrEndpointScope.EXTERNAL,
+            imageAtLeast = imageCount?.atLeast ?: false,
+            imageEstimatedCostUsd = imageEstimate?.amountUsd,
+            imageCostBasis = imageEstimate?.basis
+                ?: if (admittedImage != null && imageRevision?.scope == infoscry.ocr.OcrEndpointScope.EXTERNAL) {
+                    "the number of pictures is unknown, so the cost of sending them is unavailable"
+                } else {
+                    null
+                },
+            imageAllowance = admittedImage?.externalAllowance ?: 0,
         )
     }
 
@@ -109,7 +157,11 @@ class ImportPreviewService internal constructor(
         val collection = requireCollection(request.collection)
         catalog.require(request.collection, request.method)
         val selected = selectedFiles(request, ignorePatterns(request.collection))
-        return hashOfSelected(collection.ocrLanguages, request.method, selected)
+        val images = request.imageExtraction ?: collection.defaultImageExtraction
+        val revisionId = request.imageAnalysis
+            ?.takeIf { it.profileId.isNotBlank() && it.profileId != ImageAnalysisAdmission.NONE }
+            ?.let { profiles.get(it.profileId)?.revision?.revisionId }
+        return hashOfSelected(collection.ocrLanguages, request.method, selected, images, revisionId)
     }
 
     /** Captures the exact file identities used by a start request, with a hash matching the preview contract. */
@@ -119,8 +171,12 @@ class ImportPreviewService internal constructor(
         val sources = selectedFiles(request, ignorePatterns(request.collection)).map { file ->
             confirmedSourceOf(file.path)
         }
+        val images = request.imageExtraction ?: collection.defaultImageExtraction
+        val revisionId = request.imageAnalysis
+            ?.takeIf { it.profileId.isNotBlank() && it.profileId != ImageAnalysisAdmission.NONE }
+            ?.let { profiles.get(it.profileId)?.revision?.revisionId }
         return ConfirmedImportSourceSet(
-            previewHash = hashOfConfirmed(collection.ocrLanguages, request.method, sources),
+            previewHash = hashOfConfirmed(collection.ocrLanguages, request.method, sources, images, revisionId),
             sources = sources,
         )
     }
@@ -139,12 +195,24 @@ class ImportPreviewService internal constructor(
             }
     }
 
-    private fun hashOfSelected(language: String, method: ReadingMethod, files: List<ImportSource>): String {
+    private fun hashOfSelected(
+        language: String,
+        method: ReadingMethod,
+        files: List<ImportSource>,
+        images: ImageExtractionMode,
+        imageProfileRevisionId: String?,
+    ): String {
         val sources = files.map { file -> confirmedSourceOf(file.path) }
-        return hashOfConfirmed(language, method, sources)
+        return hashOfConfirmed(language, method, sources, images, imageProfileRevisionId)
     }
 
-    private fun hashOfConfirmed(language: String, method: ReadingMethod, sources: List<ConfirmedImportSource>): String {
+    private fun hashOfConfirmed(
+        language: String,
+        method: ReadingMethod,
+        sources: List<ConfirmedImportSource>,
+        images: ImageExtractionMode,
+        imageProfileRevisionId: String?,
+    ): String {
         val profileRevision = when (method) {
             ReadingMethod.Tesseract, ReadingMethod.Surya, ReadingMethod.None, ReadingMethod.KeepText -> "-"
             is ReadingMethod.Llm -> profiles.get(method.profileId)?.revision?.revisionId
@@ -154,12 +222,51 @@ class ImportPreviewService internal constructor(
             append("method=").append(method.id).append('\n')
             append("profileRevision=").append(profileRevision).append('\n')
             append("language=").append(language).append('\n')
+            append("images=").append(images.id).append('\n')
+            append("imageProfileRevision=").append(imageProfileRevisionId ?: "-").append('\n')
             sources.forEach { file ->
                 append("file\t").append(file.path).append('\t').append(file.sizeBytes).append('\t')
                     .append(file.sha256).append('\n')
             }
         }
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8)))
+    }
+
+    /**
+     * How many pictures the selected files hold, when that is knowable before extraction.
+     *
+     * A standalone picture is one picture; a PDF's embedded pictures are counted from its page resources, and a
+     * region pass on a scanned page adds pictures no preview can count, so the count is then a lower bound and
+     * the confirmed allowance is one figure per scanned page above it. A format whose pictures are attached to
+     * units only the extractor names is not counted, and the admission then refuses an external profile rather
+     * than guessing what it would send.
+     */
+    private fun imageCountOf(
+        files: List<ImportSource>,
+        previews: List<ImportPreviewFile>,
+        mode: infoscry.image.ImageExtractionMode,
+    ): ImageCount? {
+        if (files.isEmpty()) return null
+        var known = 0
+        var upperBound = 0
+        var atLeast = false
+        for ((source, preview) in files.zip(previews)) {
+            val mediaType = try {
+                detector.detect(source.path).value
+            } catch (_: RuntimeException) {
+                return null
+            }
+            val count = imageCounter.count(
+                path = source.path,
+                mediaType = mediaType,
+                pages = preview.documentPages ?: preview.pages,
+                withRegions = mode == infoscry.image.ImageExtractionMode.ALL,
+            ) ?: return null
+            known += count.known
+            upperBound += count.upperBound
+            atLeast = atLeast || count.atLeast
+        }
+        return ImageCount(known, upperBound, atLeast)
     }
 
     private fun confirmedSourceOf(path: Path): ConfirmedImportSource = ConfirmedImportSource(

@@ -277,17 +277,21 @@ class CollectionService(
         update: OcrSettingsUpdate,
         expectedVersion: Long? = null,
         imageDefault: ImageExtractionMode? = null,
+        imageAnalysisDefault: infoscry.storage.ImageAnalysisDefaults? = null,
     ): Collection =
         coordinator.withMutation {
             requireMutationsAllowed()
             val existing = requireActive(id)
+            imageAnalysisDefault?.profileId?.let { profileId ->
+                infoscry.ocr.ImageAnalysisAdmission.requireCapable(profileId, ocrProfiles::get)
+            }
             val settings = update.appliedTo(existing.ocrSettings())
             if (settings.defaultMethod != existing.ocrSettings().defaultMethod) {
                 (settings.defaultMethod as? ReadingMethod.Llm)?.let { method ->
                     ocrProfiles.requireSelectable(method.profileId, OcrProfileRole.TRANSCRIPTION)
                 }
             }
-            collections.updateOcrSettings(id, settings, expectedVersion, imageDefault)
+            collections.updateOcrSettings(id, settings, expectedVersion, imageDefault, imageAnalysisDefault)
         }
 
     /**
@@ -300,6 +304,22 @@ class CollectionService(
             requireActive(id)
             collections.updateImageDefault(id, mode, expectedVersion)
         }
+
+    /**
+     * Saves the collection's image-analysis defaults: the profile a future run describes pictures with, and
+     * whether it also names what it recognises from appearance. It changes future runs only; each run carries
+     * the choice it was admitted with. Whether the profile can still be used is decided at admission.
+     */
+    suspend fun updateImageAnalysisDefaults(
+        id: CollectionId,
+        profileId: String?,
+        identifyAppearance: Boolean,
+        expectedVersion: Long? = null,
+    ): Collection = coordinator.withMutation {
+        requireMutationsAllowed()
+        requireActive(id)
+        collections.updateImageAnalysisDefaults(id, profileId, identifyAppearance, expectedVersion)
+    }
 
     /**
      * The collection's saved ignore patterns. A read like the others here: it takes no permit, and it answers

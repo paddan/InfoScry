@@ -5,6 +5,7 @@ import infoscry.domain.CollectionId
 import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
+import infoscry.image.analysis.TagCategory
 import infoscry.glossary.Glossary
 import infoscry.storage.Database
 import infoscry.storage.Instants
@@ -95,6 +96,8 @@ data class DocumentRow(
     val chunk: Chunk,
     val vector: FloatArray,
     val revisionId: String? = null,
+    /** The picture categories this row's unit was tagged with; empty for a text unit. */
+    val imageCategories: Set<String> = emptySet(),
 )
 
 /** One search result row. */
@@ -187,6 +190,7 @@ class SearchIndex(
                     statement.setString(8, row.locatorLabel)
                     statement.setString(9, vectorLiteral(row.vector))
                     statement.setInt(10, row.vector.size)
+                    statement.setArray(11, connection.createArrayOf("text", row.imageCategories.toTypedArray()))
                     statement.addBatch()
                 }
                 statement.executeBatch()
@@ -329,13 +333,14 @@ class SearchIndex(
         documentIds: Set<String>? = null,
         limit: Int,
         expansion: KeywordExpansion? = null,
+        pictureCategory: TagCategory? = null,
     ): List<IndexHit> {
         val parsed = expansion?.query ?: run {
             requireQueryWithinClauseCeiling(queryText)
             parseSafely(queryText)
         }
         val translated = PgSearchQuery.translate(parsed)
-        val (scope, scopeParameters) = scopeClause(collectionId, documentIds)
+        val (scope, scopeParameters) = scopeClause(collectionId, documentIds, pictureCategory)
         val sql = "SELECT $HIT_COLUMNS, pdb.score(row_id) AS score FROM search_chunks " +
             "WHERE row_id @@@ ${translated.sql}$scope ORDER BY score DESC, row_id LIMIT ?"
         return database.read { connection ->
@@ -360,10 +365,11 @@ class SearchIndex(
         collectionId: CollectionId?,
         documentIds: Set<String>? = null,
         extraTokens: List<String> = emptyList(),
+        pictureCategory: TagCategory? = null,
     ): Boolean {
         val tokens = (analyzeTokens(queryText) + extraTokens).distinct().filter { it.length >= MIN_ANCHOR_PREFIX }
         if (tokens.isEmpty()) return false
-        val (scope, scopeParameters) = scopeClause(collectionId, documentIds)
+        val (scope, scopeParameters) = scopeClause(collectionId, documentIds, pictureCategory)
         return database.read { connection ->
             tokens.any { token ->
                 connection.prepareStatement(
@@ -389,14 +395,16 @@ class SearchIndex(
         vector: FloatArray,
         documentIds: Set<String>? = null,
         limit: Int,
+        pictureCategory: TagCategory? = null,
     ): List<IndexHit> {
         require(vector.size == identity.dimension) {
             "a query vector must match the index's dimension (${identity.dimension}), was ${vector.size}"
         }
         val dimension = identity.dimension
-        val (scope, scopeParameters) = scopeClause(collectionId, documentIds)
+        val (scope, scopeParameters) = scopeClause(collectionId, documentIds, pictureCategory)
         // A scope that is small, or not much larger than what was asked for, costs no more to scan exactly.
-        val exact = vectorCandidateCount(collectionId, documentIds) <= maxOf(EXACT_SEARCH_LIMIT, limit * 4)
+        val exact = vectorCandidateCount(collectionId, documentIds, pictureCategory) <=
+            maxOf(EXACT_SEARCH_LIMIT, limit * 4)
         // The approximate path orders by the indexed expression so the HNSW index serves it; the exact path
         // orders by a different expression on purpose, so the planner scans the scope and orders it exactly.
         val distance = if (exact) "(embedding <#> ?::halfvec)" else "(embedding::halfvec($dimension) <#> ?::halfvec($dimension))"
@@ -428,8 +436,12 @@ class SearchIndex(
     }
 
     /** Number of rows in the scope [searchVector] searches. */
-    fun vectorCandidateCount(collectionId: CollectionId?, documentIds: Set<String>? = null): Int {
-        val (scope, scopeParameters) = scopeClause(collectionId, documentIds)
+    fun vectorCandidateCount(
+        collectionId: CollectionId?,
+        documentIds: Set<String>? = null,
+        pictureCategory: TagCategory? = null,
+    ): Int {
+        val (scope, scopeParameters) = scopeClause(collectionId, documentIds, pictureCategory)
         return database.read { connection ->
             connection.prepareStatement(
                 "SELECT count(*) FROM search_chunks WHERE embedding_dimension = ${identity.dimension}$scope",
@@ -495,7 +507,11 @@ class SearchIndex(
     }
 
     /** The `AND …` filter of a collection and document scope, and its parameters. */
-    private fun scopeClause(collectionId: CollectionId?, documentIds: Set<String>?): Pair<String, List<Any>> {
+    private fun scopeClause(
+        collectionId: CollectionId?,
+        documentIds: Set<String>?,
+        pictureCategory: TagCategory? = null,
+    ): Pair<String, List<Any>> {
         val clause = StringBuilder()
         val parameters = mutableListOf<Any>()
         if (collectionId != null) {
@@ -505,6 +521,11 @@ class SearchIndex(
         if (!documentIds.isNullOrEmpty()) {
             clause.append(" AND document_id = ANY(?)")
             parameters.add(documentIds.toTypedArray())
+        }
+        if (pictureCategory != null) {
+            // A text unit's category list is empty, so this filter can never match one.
+            clause.append(" AND ? = ANY(image_categories)")
+            parameters += pictureCategory.name
         }
         return clause.toString() to parameters
     }
@@ -606,7 +627,8 @@ class SearchIndex(
 
         private const val INSERT_ROW =
             "INSERT INTO search_chunks (collection_id, document_id, revision_id, content_unit_id, chunk_ordinal, " +
-                "text, locator, locator_label, embedding, embedding_dimension) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::halfvec, ?)"
+                "text, locator, locator_label, embedding, embedding_dimension, image_categories) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::halfvec, ?, ?)"
 
         /**
          * The analyzer whose tokens are the index's: standard tokenizer, ICU folding, lower case. The BM25

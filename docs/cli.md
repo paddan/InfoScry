@@ -221,6 +221,16 @@ the method, files or preview inputs creates a different request. When an externa
 page total is unknown, confirmation covers all pages in the listed unchanged
 files and no exact total cost is shown.
 
+`--describe-images <profileId|none>` chooses the image-capable OCR profile that
+describes and tags the extracted pictures (`none` describes none). Without it the
+collection default applies. The profile is checked before any file is uploaded: one
+the server does not offer, or one that has not passed the image check, is refused
+without moving anything. `--identify-appearance` also lets the model name people,
+objects, animals and places it recognises from appearance; those names are shown and
+indexed as uncertain ("possibly …") and only read from appearance when this flag (or
+the collection default) asks for it. An external image profile asks for confirmation
+of the pictures it would send, and `--yes` confirms that too.
+
 `--include` imports only files with the listed extensions, and `--exclude`
 imports every file except those with the listed extensions. Both take a
 comma-separated list (`--include=pdf,docx`); extensions match without regard to
@@ -237,9 +247,12 @@ infoscry import --collection Notes --method tesseract --wait --json /path/to/doc
 infoscry import --collection Notes --method llm:profile-id --yes /path/to/document.pdf
 infoscry import --collection Notes --recursive --include=pdf,docx /path/to/dir
 infoscry import --collection Notes --recursive --exclude=tmp,log /path/to/dir
+infoscry import --collection Notes --images embedded --describe-images profile-id /path/to/dir
 ```
 
-Options: `--collection`, `--recursive`, `--include`, `--exclude`, `--wait`, `--json`.
+Options: `--collection`, `--recursive`, `--include`, `--exclude`, `--method`,
+`--images`, `--describe-images`, `--identify-appearance`, `--yes`, `--wait`,
+`--json`.
 
 ## search
 

@@ -46,7 +46,57 @@ export type Collection = {
   callerRole?: 'OWNER' | 'EDITOR' | 'READER' | null;
   /** How much imagery an import or rescan extracts unless told otherwise; absent means `off`. */
   defaultImageExtraction?: ImageExtraction;
+  /** The OCR profile future runs describe and tag pictures with unless told otherwise. */
+  defaultImageProfileId?: string | null;
+  /** Whether future runs also name what they recognise from a picture's appearance, unless told otherwise. */
+  defaultIdentifyAppearance?: boolean;
 };
+
+/** How one run describes and tags its extracted pictures. */
+export type ImageAnalysisChoice = {
+  profileId: string;
+  identifyAppearance: boolean;
+};
+
+/** What an image tag describes: a person, an object, an animal, a place, or text visible in the picture. */
+export type TagCategory = 'PERSON' | 'OBJECT' | 'ANIMAL' | 'PLACE' | 'TEXT';
+
+/** Where a tag's specific name came from: the text around the picture, the model's appearance recognition, or a person. */
+export type TagSource = 'TEXT' | 'APPEARANCE' | 'MANUAL';
+
+/** One thing an image shows: the generic label, and the specific name when one is known. */
+export type ImageTag = {
+  category: TagCategory;
+  label: string;
+  name?: string | null;
+  source: TagSource;
+};
+
+export type TagEditAction = 'ADD' | 'REMOVE' | 'CONFIRM';
+
+export type ImageTagEditAuthor = { id: string; name?: string | null; displayName?: string | null };
+
+export type ImageTagEditView = {
+  editId: string;
+  action: TagEditAction;
+  tag: ImageTag;
+  createdBy?: ImageTagEditAuthor | null;
+  createdAt: string;
+};
+
+export type ImageTagsView = {
+  documentId: string;
+  unitId: string;
+  description?: string | null;
+  tags: ImageTag[];
+  edits: ImageTagEditView[];
+  tagsVersion: number;
+  /** The code of the latest failed analysis, when the last attempt to describe the picture failed. */
+  analysisErrorCode?: string | null;
+};
+
+/** Which picture category a search is restricted to; empty or absent searches everything. */
+export type PictureFilter = '' | 'people' | 'objects' | 'animals' | 'places';
 
 /** How much of a document's imagery an import or rescan extracts. */
 export type ImageExtraction = 'off' | 'embedded' | 'all';
@@ -169,6 +219,7 @@ export type SearchFilters = {
   until?: string;
   status?: string;
   ocrOnly?: boolean;
+  picture?: string;
 };
 
 export type SearchHit = {
@@ -625,6 +676,7 @@ export async function searchCollection(collection: string, query: string, mode: 
   if (filters.until) parameters.set('until', `${filters.until}T23:59:59.999Z`);
   if (filters.status) parameters.append('status', filters.status);
   if (filters.ocrOnly) parameters.set('ocrOnly', 'true');
+  if (filters.picture?.trim()) parameters.set('picture', filters.picture.trim());
   const response = await fetch(`/api/search?${parameters.toString()}`);
   const body = (await readJson(response)) as Partial<SearchResponse> & { hits: SearchHit[]; staleFiltered: number };
   return { ...body, expandedWith: body.expandedWith ?? [], expansionTruncated: body.expansionTruncated ?? false };
@@ -1105,6 +1157,10 @@ export type ImageView = {
   heightPx: number;
   caption: string | null;
   captionSource: string | null;
+  description?: string | null;
+  tags?: ImageTag[];
+  tagsVersion?: number;
+  analysisErrorCode?: string | null;
 };
 
 function imagesPath(collectionId: string, documentId: string): string {
@@ -1114,7 +1170,50 @@ function imagesPath(collectionId: string, documentId: string): string {
 /** The images of a document's published (or the given) revision, in reading order. */
 export async function listImages(collectionId: string, documentId: string, revisionId?: string | null): Promise<ImageView[]> {
   const query = revisionId ? `?revision=${encodeURIComponent(revisionId)}` : '';
-  return (await readJson(await fetch(`${imagesPath(collectionId, documentId)}${query}`))) as ImageView[];
+  const list = (await readJson(await fetch(`${imagesPath(collectionId, documentId)}${query}`))) as ImageView[];
+  return list.map((entry) => ({
+    ...entry,
+    description: entry.description ?? null,
+    tags: entry.tags ?? [],
+    tagsVersion: entry.tagsVersion ?? 0,
+    analysisErrorCode: entry.analysisErrorCode ?? null,
+  }));
+}
+
+/** One picture's description, effective tags, raw edits and edit version. */
+export async function getImageTags(collectionId: string, documentId: string, unitId: string): Promise<ImageTagsView> {
+  const path = `${imagesPath(collectionId, documentId)}/${encodeURIComponent(unitId)}/tags`;
+  const view = (await readJson(await fetch(path))) as Partial<ImageTagsView> & { documentId: string; unitId: string };
+  return {
+    documentId: view.documentId,
+    unitId: view.unitId,
+    description: view.description ?? null,
+    tags: view.tags ?? [],
+    edits: view.edits ?? [],
+    tagsVersion: view.tagsVersion ?? 0,
+    analysisErrorCode: view.analysisErrorCode ?? null,
+  };
+}
+
+/** Confirms, removes or adds a tag on one picture, sending `If-Match` with the version it was edited from. */
+export async function editImageTag(
+  collectionId: string,
+  documentId: string,
+  unitId: string,
+  request: { editId: string; action: TagEditAction; tag: ImageTag },
+  tagsVersion?: number,
+): Promise<ImageTagsView> {
+  const path = `${imagesPath(collectionId, documentId)}/${encodeURIComponent(unitId)}/tags`;
+  const view = (await mutate(path, 'POST', request, tagsVersion)) as Partial<ImageTagsView> & { documentId: string; unitId: string };
+  return {
+    documentId: view.documentId,
+    unitId: view.unitId,
+    description: view.description ?? null,
+    tags: view.tags ?? [],
+    edits: view.edits ?? [],
+    tagsVersion: view.tagsVersion ?? 0,
+    analysisErrorCode: view.analysisErrorCode ?? null,
+  };
 }
 
 /** The query that names a revision, so an older reading shows its own pictures and not the current reading's. */
@@ -1292,6 +1391,8 @@ export type ImportPreviewRequest = {
   include: string[];
   exclude: string[];
   method: string;
+  imageExtraction?: ImageExtraction;
+  imageAnalysis?: ImageAnalysisChoice;
 };
 export type ImportPreview = {
   /** `pages` is what will be read; `documentPages` is every page the file has, when it could be counted. */
@@ -1303,6 +1404,13 @@ export type ImportPreview = {
   estimatedCostUsd: number | null;
   costBasis: string | null;
   previewHash: string;
+  imageCount?: number | null;
+  imageExternal?: boolean;
+  /** True when `imageCount` is a lower bound because scanned pages can add regions. */
+  imageAtLeast?: boolean;
+  imageEstimatedCostUsd?: number | null;
+  imageCostBasis?: string | null;
+  imageAllowance?: number;
 };
 export type ImportStarted = { accepted?: boolean; job: JobApiView };
 
@@ -1335,7 +1443,12 @@ export async function previewImport(request: ImportPreviewRequest): Promise<Impo
 }
 
 export async function startImport(
-  request: ImportPreviewRequest & { previewHash: string; requestId: string; imageExtraction?: ImageExtraction },
+  request: ImportPreviewRequest & {
+    previewHash: string;
+    requestId: string;
+    imageExtraction?: ImageExtraction;
+    imageAnalysis?: ImageAnalysisChoice;
+  },
 ): Promise<ImportStarted> {
   return (await mutate('/api/imports', 'POST', request)) as ImportStarted;
 }
@@ -1642,8 +1755,10 @@ export async function cancelImageRescan(collectionId: string): Promise<ImageResc
 export async function startImageRescan(
   collectionId: string,
   imageExtraction: Exclude<ImageExtraction, 'off'>,
+  imageAnalysis?: ImageAnalysisChoice,
 ): Promise<JobApiView> {
-  return ((await mutate(imageRescanPath(collectionId), 'POST', { imageExtraction })) as { job: JobApiView }).job;
+  const body = imageAnalysis === undefined ? { imageExtraction } : { imageExtraction, imageAnalysis };
+  return ((await mutate(imageRescanPath(collectionId), 'POST', body)) as { job: JobApiView }).job;
 }
 
 // ---- collection glossary ----
@@ -1707,6 +1822,8 @@ export type CollectionOcrSettingsPatch = {
   language?: string;
   defaultMethod?: string;
   defaultImageExtraction?: ImageExtraction;
+  defaultImageProfileId?: string | null;
+  defaultIdentifyAppearance?: boolean;
 };
 
 /** Saves any of a collection's OCR settings. Nothing is reprocessed; the next import or rescan snapshots them. */
@@ -2097,6 +2214,13 @@ export type RescanPreview = {
   costBasis?: string | null;
   previewHash?: string;
   expiresAt?: string;
+  imageCount?: number | null;
+  imageExternal?: boolean;
+  /** True when `imageCount` is a lower bound because scanned pages can add regions. */
+  imageAtLeast?: boolean;
+  imageEstimatedCostUsd?: number | null;
+  imageCostBasis?: string | null;
+  imageAllowance?: number;
 };
 
 /** A rescan reads the automatic default or exactly the canonical zero-based page ordinals. */
@@ -2158,8 +2282,14 @@ export async function previewRescan(
   method: string,
   selection?: RescanSelection,
   imageExtraction?: ImageExtraction,
+  imageAnalysis?: ImageAnalysisChoice,
 ): Promise<RescanPreview> {
-  const body = imageExtraction === undefined ? { method, selection } : { method, selection, imageExtraction };
+  const body = {
+    method,
+    selection,
+    ...(imageExtraction === undefined ? {} : { imageExtraction }),
+    ...(imageAnalysis === undefined ? {} : { imageAnalysis }),
+  };
   return (await mutate(`${ocrPath(collectionId, documentId)}/preview`, 'POST', body)) as RescanPreview;
 }
 

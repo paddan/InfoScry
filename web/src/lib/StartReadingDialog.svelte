@@ -1,7 +1,25 @@
 <script lang="ts">
   import { isUncheckedImageProfile, methodOptionLabel } from './ocrRescan';
   import { onDestroy, onMount, tick } from 'svelte';
-  import { ApiError, listReadingMethods, previewImport, previewRescan, startImport, startRescan, type ImageExtraction, type ImportPreview, type ImportStarted, type ReadingMethodOption, type RescanPreview, type RescanSelection, type RescanStarted } from './api';
+  import {
+    ApiError,
+    listOcrProfiles,
+    listReadingMethods,
+    previewImport,
+    previewRescan,
+    startImport,
+    startRescan,
+    type ImageAnalysisChoice,
+    type ImageExtraction,
+    type ImportPreview,
+    type ImportPreviewRequest,
+    type ImportStarted,
+    type OcrProfile,
+    type ReadingMethodOption,
+    type RescanPreview,
+    type RescanSelection,
+    type RescanStarted,
+  } from './api';
 
   export let collectionId: string;
   export let request:
@@ -11,6 +29,10 @@
   export let oncancel: () => void;
   /** The collection's default for *Extract images*; it only pre-fills the choice. */
   export let defaultImageExtraction: ImageExtraction = 'off';
+  /** The collection's default for *Describe images with*; it only pre-fills the choice. */
+  export let defaultImageProfileId: string | null = null;
+  /** The collection's default for identifying from appearance; it only pre-fills the choice. */
+  export let defaultIdentifyAppearance = false;
 
   type Preview = ImportPreview | RescanPreview;
   type PendingStart =
@@ -25,6 +47,9 @@
     { value: 'all', label: 'Embedded + regions from scanned pages' },
   ];
   let imageExtraction: ImageExtraction = defaultImageExtraction;
+  let imageProfiles: OcrProfile[] = [];
+  let imageProfileId = defaultImageExtraction === 'off' ? '' : (defaultImageProfileId ?? '');
+  let identifyAppearance = defaultIdentifyAppearance;
   let methods: ReadingMethodOption[] = [];
   let selectedMethod = '';
   let preview: Preview | null = null;
@@ -39,6 +64,16 @@
   let submitLock = false;
   let started = false;
   let pendingStart: PendingStart | null = null;
+
+  $: imagesOff = imageExtraction === 'off';
+  $: effectiveImageProfileId = imagesOff ? '' : imageProfileId;
+  $: imageAnalysis = effectiveImageProfileId === '' || effectiveImageProfileId === 'none'
+    ? undefined
+    : ({ profileId: effectiveImageProfileId, identifyAppearance } satisfies ImageAnalysisChoice);
+  $: selectedImageProfile = imageProfiles.find((entry) => entry.id === effectiveImageProfileId);
+  $: imageCount = preview === null ? null : preview.imageCount ?? null;
+  $: imageSendsExternally = Boolean(preview?.imageExternal || selectedImageProfile?.scope === 'EXTERNAL');
+  $: displayedImageCost = imageCostTextFor(preview);
 
   $: pageCount = preview === null ? null : 'totalPages' in preview ? preview.totalPages : preview.pageTotal ?? preview.externalPageUpperBound ?? null;
   $: shownAtLeast = preview !== null && 'atLeast' in preview && preview.atLeast;
@@ -81,6 +116,14 @@
     if ('costUnavailableReason' in current && current.costUnavailableReason) return current.costUnavailableReason;
     return null;
   }
+  function imageCostTextFor(current: Preview | null): string | null {
+    if (current === null) return null;
+    if (current.imageEstimatedCostUsd !== undefined && current.imageEstimatedCostUsd !== null) {
+      return `$${current.imageEstimatedCostUsd.toFixed(4)}${current.imageCostBasis ? ` (${current.imageCostBasis})` : ''}`;
+    }
+    if (current.imageCostBasis) return current.imageCostBasis;
+    return null;
+  }
   function methodName(entry: ReadingMethodOption | undefined): string {
     if (!entry) return '';
     return entry.method.startsWith('llm:') ? entry.label.replace(/^LLM:\s*/i, '') : entry.label;
@@ -96,8 +139,39 @@
   function describe(failure: unknown): string {
     return failure instanceof Error ? failure.message : 'Something went wrong.';
   }
+  function analysisFor(profileId: string, identify: boolean): ImageAnalysisChoice | undefined {
+    const effective = imageExtraction === 'off' ? '' : profileId;
+    return effective === '' || effective === 'none'
+      ? undefined
+      : { profileId: effective, identifyAppearance: identify };
+  }
+  function importPreviewBody(
+    currentRequest: Extract<typeof request, { kind: 'import' }>,
+    analysis: ImageAnalysisChoice | undefined,
+  ): ImportPreviewRequest {
+    const base: ImportPreviewRequest = {
+      collection: collectionId,
+      uploads: [...currentRequest.uploads],
+      include: currentRequest.include,
+      exclude: currentRequest.exclude,
+      method: selectedMethod,
+    };
+    if (analysis !== undefined) {
+      return { ...base, imageExtraction, imageAnalysis: analysis };
+    }
+    if (imageExtraction !== defaultImageExtraction) {
+      return { ...base, imageExtraction };
+    }
+    return base;
+  }
 
-  async function updatePreview(): Promise<void> {
+  async function updatePreview(
+    profileId = effectiveImageProfileId,
+    identify = identifyAppearance,
+  ): Promise<void> {
+    // The caller has just changed one of these; the reactive values update on the next flush, so they are
+    // passed explicitly. A preview that lagged one choice behind would show a count and cost nobody chose.
+    const analysis = analysisFor(profileId, identify);
     if (selectedMethod === '' || pendingStart !== null) return;
     const mine = ++generation;
     const currentRequest = request;
@@ -110,10 +184,24 @@
     previewing = true;
     try {
       const next = currentRequest.kind === 'import'
-        ? await previewImport({ collection: collectionId, uploads: [...currentRequest.uploads], include: currentRequest.include, exclude: currentRequest.exclude, method: selectedMethod })
+        ? await previewImport(importPreviewBody(currentRequest, analysis))
         : currentRequest.selection === undefined
-          ? await previewRescan(collectionId, currentRequest.documentId, selectedMethod, undefined, imageExtraction)
-          : await previewRescan(collectionId, currentRequest.documentId, selectedMethod, currentRequest.selection, imageExtraction);
+          ? await previewRescan(
+              collectionId,
+              currentRequest.documentId,
+              selectedMethod,
+              undefined,
+              imageExtraction,
+              ...(analysis === undefined ? [] : [analysis]),
+            )
+          : await previewRescan(
+              collectionId,
+              currentRequest.documentId,
+              selectedMethod,
+              currentRequest.selection,
+              imageExtraction,
+              ...(analysis === undefined ? [] : [analysis]),
+            );
       if (mine === generation) preview = next;
     } catch (failure) {
       if (mine === generation) error = describe(failure);
@@ -125,7 +213,14 @@
   async function load(): Promise<void> {
     loadingMethods = true;
     try {
-      const list = await (request.kind === 'rescan' ? listReadingMethods(collectionId, 'rescan') : listReadingMethods(collectionId));
+      const [list, profiles] = await Promise.all([
+        request.kind === 'rescan' ? listReadingMethods(collectionId, 'rescan') : listReadingMethods(collectionId),
+        listOcrProfiles().catch(() => [] as OcrProfile[]),
+      ]);
+      imageProfiles = (profiles ?? []).filter((entry) => entry.enabled && entry.imageCapabilityMeasured === true);
+      if (imageProfileId !== '' && !imageProfiles.some((entry) => entry.id === imageProfileId)) {
+        imageProfileId = '';
+      }
       methods = list.methods.filter((entry) => !isUncheckedImageProfile(entry));
       const preferred = methods.find((entry) => entry.method === list.default && entry.available);
       selectedMethod = preferred?.method ?? methods.find((entry) => entry.available)?.method ?? '';
@@ -149,9 +244,29 @@
   async function chooseImages(event: Event): Promise<void> {
     const value = (event.currentTarget as HTMLSelectElement).value as ImageExtraction;
     if (value === imageExtraction) return;
+    const hadImageAnalysis = imageProfileId !== '';
     imageExtraction = value;
-    // An import's summary does not depend on images; a rescan's does.
-    if (request.kind === 'rescan') await updatePreview();
+    if (value === 'off') {
+      imageProfileId = '';
+      identifyAppearance = false;
+    }
+    // An import's summary does not depend on images unless an image analysis profile was chosen; a rescan's does.
+    if (request.kind === 'rescan' || hadImageAnalysis) await updatePreview(imageProfileId, identifyAppearance);
+  }
+
+  async function chooseImageProfile(event: Event): Promise<void> {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    if (value === imageProfileId) return;
+    imageProfileId = value;
+    if (value === '') identifyAppearance = false;
+    await updatePreview(value, identifyAppearance);
+  }
+
+  async function toggleIdentifyAppearance(event: Event): Promise<void> {
+    const checked = (event.currentTarget as HTMLInputElement).checked;
+    if (checked === identifyAppearance) return;
+    identifyAppearance = checked;
+    if (effectiveImageProfileId !== '') await updatePreview(effectiveImageProfileId, checked);
   }
 
   async function confirm(): Promise<void> {
@@ -164,7 +279,23 @@
       if (pendingStart === null) {
         const currentRequest = request;
         pendingStart = currentRequest.kind === 'import'
-          ? { kind: 'import', body: { collection: collectionId, uploads: [...currentRequest.uploads], include: [...currentRequest.include], exclude: [...currentRequest.exclude], method: selectedMethod, previewHash: (preview as ImportPreview).previewHash, requestId, imageExtraction } }
+          ? {
+              kind: 'import',
+              body: {
+                collection: collectionId,
+                uploads: [...currentRequest.uploads],
+                include: [...currentRequest.include],
+                exclude: [...currentRequest.exclude],
+                method: selectedMethod,
+                previewHash: (preview as ImportPreview).previewHash,
+                requestId,
+                imageExtraction,
+                ...((() => {
+                  const analysis = analysisFor(imageProfileId, identifyAppearance);
+                  return analysis === undefined ? {} : { imageAnalysis: analysis };
+                })()),
+              },
+            }
           : { kind: 'rescan', collectionId, documentId: currentRequest.documentId, body: { previewId: (preview as RescanPreview).previewId, requestId } };
       }
       const run = pendingStart.kind === 'import'
@@ -254,6 +385,33 @@
         {#each imageOptions as option (option.value)}<option value={option.value}>{option.label}</option>{/each}
       </select>
       {#if keepNeedsImages}<p class="unavailable" role="alert">Choose which images to extract.</p>{/if}
+      <label for="describe-images">Describe images with</label>
+      <select
+        id="describe-images"
+        data-testid="describe-images"
+        value={effectiveImageProfileId}
+        onchange={chooseImageProfile}
+        disabled={imagesOff || submitting || pendingStart !== null}
+      >
+        <option value="">None</option>
+        {#each imageProfiles as profile (profile.id)}
+          <option value={profile.id}>{profile.name}</option>
+        {/each}
+      </select>
+      {#if imagesOff}
+        <p class="unavailable">Turn on Extract images to describe pictures.</p>
+      {:else if effectiveImageProfileId !== ''}
+        <label class="check-label">
+          <input
+            type="checkbox"
+            data-testid="identify-appearance"
+            checked={identifyAppearance}
+            onchange={toggleIdentifyAppearance}
+            disabled={submitting || pendingStart !== null}
+          />
+          Identify specific people, objects, animals and places from their appearance
+        </label>
+      {/if}
     {/if}
     {#if previewing}<p role="status">Preparing page summary…</p>{/if}
     {#if preview !== null}
@@ -276,6 +434,16 @@
         {#if unknownExternalTotal}<p>All pages in the listed files will be sent; total cost is unavailable because the page count is unknown.</p>{/if}
         <p>Destination: {destinationLabel}</p>
         {#if displayedCost}<p>{displayedCost}</p>{/if}
+        {#if effectiveImageProfileId !== ''}
+          {#if imageCount !== null}
+            <p>{'atLeast' in preview && preview.imageAtLeast ? 'At least ' : ''}{imageCount} {imageCount === 1 ? 'image' : 'images'} will be described{#if selectedImageProfile} with {selectedImageProfile.name}{/if}.</p>
+          {/if}
+          {#if imageSendsExternally && displayedImageCost}
+            <p>{displayedImageCost}</p>
+          {:else if displayedImageCost}
+            <p>{displayedImageCost}</p>
+          {/if}
+        {/if}
       </section>
     {/if}
     {#if error}<p role="alert">{error}</p>{/if}
@@ -298,6 +466,8 @@
   .actions { flex: none; display: flex; flex-wrap: wrap; justify-content: end; gap: 0.5rem; padding: 0.8rem 1.2rem; border-top: 1px solid #454a4a; }
   button, select { font: inherit; padding: 0.4rem 0.6rem; }
   select { width: 100%; max-width: 100%; text-overflow: ellipsis; }
+  .check-label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
+  .check-label input { accent-color: #c4a77d; }
   .unavailable { color: #b9bdbc; font-size: 0.82rem; }
   .primary { font-weight: 600; }
 </style>

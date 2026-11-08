@@ -5,6 +5,7 @@ import infoscry.domain.ContentUnitId
 import infoscry.domain.DocumentId
 import infoscry.domain.DocumentStatus
 import infoscry.domain.SourceLocation
+import infoscry.image.analysis.TagCategory
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
@@ -51,6 +52,13 @@ data class SearchFilters(
     val importedUntil: String? = null,
     val statuses: Set<DocumentStatus> = emptySet(),
     val ocrOnly: Boolean = false,
+    /**
+     * Whether only pictures tagged with this category match.
+     *
+     * It is an index-row criterion rather than a document one: one document holds both text and picture units,
+     * and only the picture's rows carry its categories. A text unit's list is empty, so it never matches.
+     */
+    val pictureCategory: TagCategory? = null,
 ) {
 
     /** Whether any document-level criterion (beyond the collection) is set. */

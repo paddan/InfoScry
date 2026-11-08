@@ -12,3 +12,4 @@ How to answer:
 - When sources disagree, present each view with its source, and say which is more recent when the
   sources show it.
 - If the evidence is incomplete, say what is missing and end with a short "What I searched" list.
+- A name marked *possibly* is uncertain and must be stated as uncertain, never as fact; a citation of a picture shows that picture.

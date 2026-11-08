@@ -165,6 +165,19 @@ images on for a document that is already read never repeats OCR. It needs
 produces a version without images; earlier versions keep theirs. A
 selected-page scan extracts images only for the selected pages.
 
+**Describe images with** chooses an image-capable OCR profile that describes and tags
+every extracted picture, or **None**. It is available only while **Extract images** is
+not Off. **Identify specific people, objects, animals and places from their appearance**
+is off by default: without it the model names only what the caption or page text says.
+The collection's settings pre-fill both choices. A description and its tags become part of
+the picture's searchable text, so a picture is found by what it shows. An external profile
+shows how many pictures it would send and an estimated cost before you confirm; a run may
+never send more pictures than that. A standalone picture counts as one, a PDF's embedded
+pictures are counted from its pages, and scanned-page regions make the shown number a lower
+bound (the confirmed allowance adds one figure per scanned page). Office files and e-books
+are not counted, so an external profile cannot be used for them. A picture the model refuses or times out on is a
+warning on a completed document, not a failed import or scan.
+
 To find the images of a whole collection at once, an editor chooses **Find images in all
 documents…** next to **Add documents**. It runs *Keep current text* on every PDF and
 picture of the collection with the **Extract images** choice made there (the collection
@@ -308,7 +321,14 @@ retrieval require the local embedding model and supported GPU runtime.
 
 Images appear as a strip of thumbnails under the page, slide or section they
 belong to. Select one to see it full size with its caption and *from page N*; for
-a picture cut out of a scanned page, its position is outlined on the page.
+a picture cut out of a scanned page, its position is outlined on the page. An analysed
+picture also shows its description and its tags grouped by category. A name the model
+recognised from the picture reads **possibly …**; an editor can **Confirm** it (it becomes
+stated fact), **Remove** it, or **Add tag** with a category, a generic kind and an optional
+name. Each edit names who made it, and the picture's text and search categories change with
+it. Readers see the tags but cannot change them. A tag a person removed stays out when a
+later analysis proposes it again. The search filter **Pictures: All | People | Objects |
+Animals | Places** restricts results to pictures tagged with that category.
 Escape closes the viewer. A picture is found by its caption (alt text, a
 figcaption, a caption on a scanned page, or for a PDF image or a picture on a scanned page the text next to
 it, such as "Figur 3. Anna Svensson 1923" under it) and by a short excerpt of the page text around it, so

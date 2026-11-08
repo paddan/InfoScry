@@ -19,6 +19,8 @@
 
   export let collectionId: string;
   export let defaultImageExtraction: ImageExtraction = 'off';
+  export let defaultImageProfileId: string | null = null;
+  export let defaultIdentifyAppearance = false;
   export let visible = true;
   /** Refresh collection counts/history after admission and after the job reaches a terminal state. */
   export let onImportChanged: (collectionId: string) => void = () => {};
@@ -475,6 +477,8 @@
     <StartReadingDialog
       {collectionId}
       {defaultImageExtraction}
+      {defaultImageProfileId}
+      {defaultIdentifyAppearance}
       request={{ kind: 'import', uploads: uploadIds, include: [], exclude: [] }}
       onstarted={readingStarted}
       oncancel={() => (dialogOpen = false)}

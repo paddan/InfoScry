@@ -112,6 +112,24 @@ class ImageStore(private val database: Database) {
         }
 
     /**
+     * The SHA-256 of the image file recorded for [unitId], or null when the unit is not an image or has none.
+     *
+     * It is what a search row builder, which knows only the unit it indexes, asks to find the unit's picture
+     * categories. A unit is one picture: its identity includes the content hash, so a changed image is a
+     * different unit rather than another row under the same one.
+     */
+    fun imageSha256Of(documentId: DocumentId, unitId: ContentUnitId): String? = database.read { connection ->
+        connection.prepareStatement(
+            "SELECT artifact_sha256 FROM document_images WHERE document_id = ? AND unit_id = ? " +
+                "ORDER BY created_at DESC LIMIT 1",
+        ).use { statement ->
+            statement.setString(1, documentId.value)
+            statement.setString(2, unitId.value)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
+        }
+    }
+
+    /**
      * The images of one revision, in reading order: the revision's `image_region` page rows joined to their
      * metadata on (document, unit, source image). A unit with no page row in the revision is not its image, and
      * a page row whose metadata is not recorded yields nothing.

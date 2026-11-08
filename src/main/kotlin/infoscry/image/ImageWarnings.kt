@@ -22,6 +22,9 @@ object ImageWarnings {
         ImageFindFailure.PARENT_UNREADABLE,
         ImageStage.LIMIT_REACHED,
         ImageFindFailure.TOO_MANY_IMAGES,
+        infoscry.image.analysis.AnalysisRules.INVALID,
+        infoscry.image.analysis.AnalysisRules.REFUSED,
+        infoscry.image.analysis.AnalysisRules.TIMEOUT,
         ImageRejectedException.IMAGE_TOO_LARGE,
         ImageRejectedException.IMAGE_DECODE_FAILED,
         ImageStage.PARENT_TOO_LATE,
@@ -47,6 +50,12 @@ object ImageWarnings {
             "a page or section holds more images than ${ImageIdentity.MAX_PER_PARENT}; the rest were not read"
         ImageRejectedException.IMAGE_TOO_LARGE -> "an image was too large to keep"
         ImageRejectedException.IMAGE_DECODE_FAILED -> "an image could not be decoded"
+        infoscry.image.analysis.AnalysisRules.INVALID ->
+            "a picture could not be described because the image model's answer was not usable"
+        infoscry.image.analysis.AnalysisRules.REFUSED ->
+            "a picture could not be described because the image model refused it"
+        infoscry.image.analysis.AnalysisRules.TIMEOUT ->
+            "a picture could not be described before the image model timed out"
         ImageStage.PARENT_TOO_LATE -> "a page lies too late in the document for its images to be kept"
         else -> "the document's images were extracted with a warning"
     }

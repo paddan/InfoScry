@@ -1448,13 +1448,25 @@
             collectionId={selected.id}
             collectionName={selected.name}
             defaultImageExtraction={selected.defaultImageExtraction ?? 'off'}
+            defaultImageProfileId={selected.defaultImageProfileId ?? null}
+            defaultIdentifyAppearance={selected.defaultIdentifyAppearance ?? false}
             onClose={closeFindImages}
             onStarted={imageRescanStarted}
           />
         {/if}
         {#if addingDocuments}
           {#key selected.id}
-            <ImportPanel collectionId={selected.id} defaultImageExtraction={selected.defaultImageExtraction ?? 'off'} collectionName={selected.name} onImportChanged={importChanged} {unfinishedImportId} {visible} {isAdmin} />
+            <ImportPanel
+              collectionId={selected.id}
+              defaultImageExtraction={selected.defaultImageExtraction ?? 'off'}
+              defaultImageProfileId={selected.defaultImageProfileId ?? null}
+              defaultIdentifyAppearance={selected.defaultIdentifyAppearance ?? false}
+              collectionName={selected.name}
+              onImportChanged={importChanged}
+              {unfinishedImportId}
+              {visible}
+              {isAdmin}
+            />
           {/key}
         {/if}
 
@@ -1677,6 +1689,8 @@
                                   {visible}
                                   collectionId={selected.id}
                                   defaultImageExtraction={selected.defaultImageExtraction ?? 'off'}
+                                  defaultImageProfileId={selected.defaultImageProfileId ?? null}
+                                  defaultIdentifyAppearance={selected.defaultIdentifyAppearance ?? false}
                                   documentId={detail.document.id}
                                   documentName={detail.document.originalFilename}
                                   document={detail.document}

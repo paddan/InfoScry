@@ -69,6 +69,12 @@ Images are implemented: *Extract images* in the import and rescan dialogs finds 
 Office files and EPUBs and, with Surya layout, pictures on scanned pages; they are shown, searchable by
 caption and citable. Browser coverage is `ImagesBrowserAcceptanceTest`; region extraction is not yet verified
 against real Surya ([status](docs/implementation-status.md#image-foundation-2026-11-07)).
+Image tagging is implemented: *Describe images with* an image-capable OCR profile describes every extracted
+picture and tags its people, objects, animals, places and visible text, so pictures are found by what they
+show, filtered by category, cited by Ask and corrected by editors (Confirm/Remove/Add, with attribution).
+The collection pre-fills the profile and the *Identify from appearance* choice; an external profile is
+approved with a picture count and may never send more. Analyses are reused with no model call and edits
+survive later analyses. Browser coverage is `ImageTaggingBrowserAcceptanceTest` ([status](docs/implementation-status.md#image-tagging-2026-11-07)).
 The [OCR workflow](docs/ocr-workflow.md) adds a
 confirmed reading method for every import and rescan (including No OCR, which uses the
 document's own text), reads selected pages and publishes
@@ -100,7 +106,7 @@ historical PDF page and image citations. Live review can mark pages and confirm 
 page set and reading method for rescanning. Stopped selected-page runs can resume
 from committed pages. Integrated browser verification passed 42 scenarios; an
 earlier accumulated check (historical; current counts are in
-[implementation status](docs/implementation-status.md#image-foundation-2026-11-07)) passed 1,838 JVM and 474 frontend tests.
+[implementation status](docs/implementation-status.md#image-tagging-2026-11-07)) passed 1,838 JVM and 474 frontend tests.
 The latest Investigate browser run passed all nine scenarios against local fake
 providers. [Effort contracts](docs/investigate-effort.md) describe profile overrides
 and the fresh-database prerequisite; no existing archive was reset or migrated.

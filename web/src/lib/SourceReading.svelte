@@ -14,6 +14,8 @@
   export let openImageUnitId: string | null = null;
   /** True when the collection's corrections changed this page; its reading can then be shown. */
   export let hasReading = false;
+  /** Whether the signed-in user may edit image tags in this collection; readers see tags only. */
+  export let canEdit = true;
 
   /** The longest selection a correction can be made from, the same bound a rule's text has. */
   const MAX_SELECTION = 200;
@@ -72,6 +74,13 @@
   function openImage(image: ImageView): void {
     viewing = image;
     viewerOpen = true;
+  }
+
+  function updateViewingTags(updated: { description: string | null; tags: ImageView['tags']; tagsVersion: number }): void {
+    if (viewing === null) return;
+    const next: ImageView = { ...viewing, description: updated.description, tags: updated.tags, tagsVersion: updated.tagsVersion };
+    viewing = next;
+    images = images.map((entry) => (entry.unitId === next.unitId ? next : entry));
   }
 
   async function toggleReading(): Promise<void> {
@@ -160,7 +169,7 @@
 </div>
 
 {#if viewing !== null && documentId !== null}
-  <ImageViewer {collectionId} {documentId} {revisionId} image={viewing} open={viewerOpen} onClose={() => (viewerOpen = false)} />
+  <ImageViewer {collectionId} {documentId} {revisionId} {canEdit} image={viewing} open={viewerOpen} onClose={() => (viewerOpen = false)} onTagsChanged={updateViewingTags} />
 {/if}
 
 {#if glossaryTerm !== null}

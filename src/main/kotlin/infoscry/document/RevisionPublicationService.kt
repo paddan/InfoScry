@@ -61,6 +61,8 @@ fun interface RevisionPublishedHook {
  * hook may not have run is finished by [recoverUnfinished] at the next start.
  */
 class RevisionPublicationService(
+    /** The picture categories each image unit's rows carry, or null when this build tags no pictures. */
+    private val imageCategories: infoscry.image.analysis.ImageCategories? = null,
     private val database: Database,
     private val revisions: DocumentRevisionStore,
     private val documents: DocumentStore,
@@ -301,6 +303,9 @@ class RevisionPublicationService(
         val rows = ArrayList<DocumentRow>(chunks.size)
         for (page in pages) {
             for (chunk in byOrdinal[page.ordinal].orEmpty()) {
+                val categories = page.sourceImage
+                    ?.let { image -> imageCategories?.of(intent.documentId, page.unitId, image.sha256) }
+                    ?: emptySet()
                 rows += DocumentRow(
                     collectionId = intent.collectionId,
                     documentId = intent.documentId,
@@ -322,6 +327,7 @@ class RevisionPublicationService(
                         "a staged passage of revision ${intent.targetRevisionId} has no vector"
                     },
                     revisionId = intent.targetRevisionId,
+                    imageCategories = categories,
                 )
             }
         }

@@ -80,6 +80,9 @@ data class OcrExternalOwner(val kind: OcrExternalOwnerKind, val id: String) {
 enum class OcrDispatchStage {
     TRANSCRIPTION,
     REVIEW,
+
+    /** The picture-analysis stage of an image run, counted against the same confirmed allowance. */
+    IMAGE_ANALYSIS,
 }
 
 /** The frozen scope of a rescan; explicit ordinals are zero-based physical page positions. */
@@ -281,6 +284,13 @@ data class RescanPreview(
     val expiresAt: String,
     /** The pages the document has in total; [pageTotal] is only the pages a rescan reads. */
     val documentPages: Int? = null,
+    /** The pictures the analysis would describe, when known; null otherwise. */
+    val imageCount: Int? = null,
+    val imageExternal: Boolean = false,
+    val imageEstimatedCostUsd: Double? = null,
+    val imageCostBasis: String? = null,
+    /** The confirmed allowance an external image profile may send under; zero for a local one. */
+    val imageAllowance: Int = 0,
 ) {
 
     init {

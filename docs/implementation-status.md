@@ -21,6 +21,7 @@ application suites.
 | Ask | Streaming answers with validated citations and saved answer history |
 | Investigate | Four effort levels with server-resolved profile overrides and opt-in research-only native reasoning; bounded research, retained-evidence follow-ups, one adopted answer per turn and saved conversations; an unmeasured profile is marked and refused with the remedy |
 | Images | *Extract images* at import and rescan (embedded images; scanned-page regions need Surya layout, unverified against real Surya), Keep current text, thumbnails and viewer in the source reader, captions searchable and citable, `--images` in the CLI |
+| Image tagging | *Describe images with* an image-capable profile and *Identify from appearance*, descriptions and tags in the picture's searchable text, *Pictures* search filter, Confirm/Remove/Add in the viewer with attribution, `--describe-images` in the CLI |
 | Sources | Bounded extracted-source viewer, managed-original link and selectable-text PDF copies (durable generation, repeat/retry, rescan/Restore identity; automated fake-provider coverage plus owner-confirmed OCR/PDF checks on 2026-10-11) |
 
 ## OCR engines and document rescanning
@@ -394,6 +395,53 @@ is; that is fixed (a word-less `FIGURE` block with a box is kept with an empty r
 unit tests and the acceptance test's fake now exercise this path). Whether real Surya marks a real photograph as a
 `Picture` is still unknown, so region extraction remains unverified against real Surya and needs a run on a real
 photograph by the owner. Pages already read by Surya before the fix keep structures without figures until read again.
+
+## Image tagging (2026-11-07)
+
+The [image tagging](specs/2026-11-07-image-tagging-design.md) sub-project is implemented: *Describe images
+with* an image-capable OCR profile (or None) is chosen at import, rescan and collection image rescan, with
+*Identify specific people, objects, animals and places from their appearance* off by default; the collection
+settings pre-fill both. Each extracted picture gets a description of at most 400 characters and at most 30
+tags in five categories (`PERSON`, `OBJECT`, `ANIMAL`, `PLACE`, `TEXT`) and three sources (`TEXT`,
+`APPEARANCE`, `MANUAL`); an appearance-derived name is shown and indexed as `possibly <name>`. The analysis
+is part of the picture's unit text, reused with zero model calls for the same image, profile revision,
+prompt version, language and appearance choice, and recorded as `FAILED` (and retried) when invalid, refused
+or timed out. An image-only rescan keeps the latest completed analysis. Editors confirm, remove and add tags
+in the viewer with attribution; an edit republishes the document through the ordinary revision protocol,
+and a removed tag stays out when a later analysis proposes it again. Search's *Pictures: All | People |
+Objects | Animals | Places* filter matches `search_chunks.image_categories`, so a text unit never appears.
+Ask and Investigate receive a picture as `Picture: <locator label>` evidence, and their prompts state that a
+name marked *possibly* is uncertain. Contracts: [technical reference](technical-reference.md#image-tagging),
+[usage](usage.md#create-a-collection-and-import-files) and [CLI](cli.md#import).
+
+**Verified (2026-11-07):**
+
+- Focused JVM suites per task, all green: schema/store and migration, analysis rules and unit text, the model
+  call and the image stage (including interruption and zero-call reuse), the picture search filter, admission
+  (unchecked/disabled/external profiles and the confirmed allowance), tag edits and their republication, and
+  the Ask/Investigate evidence labels.
+- `web && npm test -- --run`: 637 Vitest tests passed; `npm run check` reports 0 errors and 0 warnings.
+- `./gradlew check`: 2,546 JVM tests and 638 Vitest tests, no failures (`npm run check` clean).
+- `ImageTaggingBrowserAcceptanceTest` (`externalTest`, Chromium, signed in, test embedder, one local fake
+  provider serving the analysis and the Ask): adding one picture with *Describe images with* a checked fake
+  profile and *Identify from appearance* shows its description and `man: possibly Jeffrey Epstein`; an editor
+  confirms the tag (it becomes stated fact and names the editor); the *People* filter finds the picture; an
+  Ask citation opens it.
+- **Real check:** one generated 800×600 picture (a red vehicle marked VOLVO by a quay) was described through
+  the local Ollama vision model `gemma4:e4b-mlx` (OpenAI-compatible endpoint `http://127.0.0.1:11434/v1`) on
+  2026-11-07. Outcome: a valid analysis, a Swedish description ("Bilden visar en röd lastbil som är placerad
+  nära en kaj. Lastbilen verkar vara i solsken.") and tags for the vehicle and the quay. With *Identify from
+  appearance* off, the model's VOLVO name was correctly demoted and dropped (the caption did not state it).
+  The model wrapped its first answer in a Markdown code fence; one surrounding fence is now read as the
+  object it carries, and the shipped prompt asks for the object alone.
+
+**Not verified:** analysis quality across real photographs and providers, and the cost estimate's assumed
+token count per picture (1,200). External picture sending is limited to a confirmed picture count: a standalone
+picture is one, a PDF's embedded pictures are counted from its page resources, and a region pass on a scanned
+page adds pictures no preview can count, so the dialog shows the embedded count as a lower bound and the
+confirmed allowance adds one figure per scanned page. Office files and e-books are not counted, because their
+pictures are attached to units only the extractor names; an external profile is refused for them
+(`IMAGE_PROFILE_UNAVAILABLE`) rather than given a guessed allowance.
 
 ## Recorded verification
 

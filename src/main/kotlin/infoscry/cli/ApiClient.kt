@@ -289,6 +289,12 @@ class ApiClient(
         return ApiJson.decodeFromString(expect(response))
     }
 
+    /** The OCR profiles this server offers, with whether each revision passed the image check. */
+    suspend fun ocrProfiles(): List<infoscry.server.OcrProfileApiView> =
+        ApiJson.decodeFromString<infoscry.server.OcrProfilesResponse>(
+            expect(client.get("$base/api/ocr/profiles")),
+        ).profiles
+
     suspend fun previewImport(request: infoscry.server.ImportPreviewRouteRequest): infoscry.jobs.ImportPreview {
         val response = client.post("$base/api/imports/preview") {
             contentType(ContentType.Application.Json)

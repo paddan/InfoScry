@@ -165,6 +165,14 @@ class RetryJobHandler internal constructor(
                 perDocumentScope = true,
                 confirmedManifestScope = confirmedManagedCopy,
             ),
+            imageDispatch = attemptDispatch.authorityFor(
+                job = job,
+                document = document,
+                snapshot = snapshot,
+                dispatchStage = OcrDispatchStage.IMAGE_ANALYSIS,
+                perDocumentScope = true,
+                confirmedManifestScope = confirmedManagedCopy,
+            ),
             // The selection this retry was admitted with, which the revision it publishes records as its reading.
             reading = snapshot,
         )

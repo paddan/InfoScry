@@ -6,6 +6,7 @@ import infoscry.domain.Job
 import infoscry.document.ImageRescanOutcome
 import infoscry.document.ImageRescanStep
 import infoscry.image.ImageExtractionMode
+import infoscry.ocr.ImageAnalysisRequest
 import infoscry.storage.DocumentStore
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -15,14 +16,19 @@ class ImageRescanFailedException(val code: String, message: String) : IllegalSta
 
 /** What a collection-wide image rescan was started with. */
 @Serializable
-data class ImageRescanJobPayload(val imageExtraction: String) {
+data class ImageRescanJobPayload(
+    val imageExtraction: String,
+    /** How the run describes its pictures; absent describes none. */
+    val imageAnalysis: ImageAnalysisRequest? = null,
+) {
 
     val mode: ImageExtractionMode get() = ImageExtractionMode.parse(imageExtraction)
 
     fun encode(): String = json.encodeToString(serializer(), this)
 
     companion object {
-        fun of(mode: ImageExtractionMode): ImageRescanJobPayload = ImageRescanJobPayload(mode.id)
+        fun of(mode: ImageExtractionMode, imageAnalysis: ImageAnalysisRequest? = null): ImageRescanJobPayload =
+            ImageRescanJobPayload(mode.id, imageAnalysis)
 
         fun decode(payload: String?): ImageRescanJobPayload {
             require(!payload.isNullOrBlank()) { "an image rescan job has no payload to read" }
@@ -46,18 +52,19 @@ data class ImageRescanJobPayload(val imageExtraction: String) {
  */
 class ImageRescanJobHandler(
     private val documents: DocumentStore,
-    private val start: suspend (CollectionId, DocumentId, ImageExtractionMode, String) -> ImageRescanStep,
+    private val start: suspend (CollectionId, DocumentId, ImageExtractionMode, String, ImageAnalysisRequest?) -> ImageRescanStep,
 ) : JobHandler {
 
     override suspend fun handle(job: Job, stage: JobStage) {
         val collectionId = requireNotNull(job.collectionId) { "an image rescan job names its collection" }
-        val mode = ImageRescanJobPayload.decode(job.payload).mode
+        val payload = ImageRescanJobPayload.decode(job.payload)
+        val mode = payload.mode
         val ids = documentIds(collectionId)
         stage.reportProgress(completed = 0, total = ids.size)
         val outcomes = mutableMapOf<ImageRescanOutcome, Int>()
         val refusals = linkedMapOf<String, Pair<String, Int>>()
         ids.forEachIndexed { index, documentId ->
-            val step = start(collectionId, documentId, mode, requestIdOf(job, documentId))
+            val step = start(collectionId, documentId, mode, requestIdOf(job, documentId), payload.imageAnalysis)
             outcomes.merge(step.outcome, 1, Int::plus)
             step.refusal?.let { refusal ->
                 val (message, count) = refusals[refusal.code] ?: ((refusal.message ?: refusal.code) to 0)

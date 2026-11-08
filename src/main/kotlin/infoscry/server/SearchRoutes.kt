@@ -4,6 +4,7 @@ import infoscry.AppContext
 import infoscry.domain.DocumentStatus
 import infoscry.domain.JobType
 import infoscry.domain.SourceLocation
+import infoscry.image.analysis.TagCategory
 import infoscry.jobs.ReindexJobPayload
 import infoscry.search.SearchFilters
 import infoscry.search.SearchMode
@@ -74,6 +75,8 @@ data class SearchRequestFilters(
     val importedUntil: String? = null,
     val statuses: List<String>? = null,
     val ocrOnly: Boolean = false,
+    /** `people`, `objects`, `animals` or `places` restricts the hits to pictures so tagged. */
+    val picture: String? = null,
 )
 
 /** What a POST /api/search body carries: the query and the same filters the GET parameters name. */
@@ -155,6 +158,7 @@ private suspend fun ApplicationCall.runSearch(
             importedUntil = request.importedUntil,
             statuses = request.statuses?.map { DocumentStatus.valueOf(it) }?.toSet() ?: emptySet(),
             ocrOnly = request.ocrOnly,
+            pictureCategory = parsePictureCategory(request.picture),
         ),
         // The web Search box is the surface where "no results" has to mean no results; the semantic-only
         // half is admitted only for a query the archive has words for.
@@ -203,8 +207,19 @@ private fun ApplicationCall.searchRequest(): SearchRequest {
             importedUntil = parameters["until"],
             statuses = parameters.getAll("status"),
             ocrOnly = parameters["ocrOnly"]?.toBooleanStrictOrNull() ?: false,
+            picture = parameters["picture"],
         ),
     )
+}
+
+/** The category one `picture=` filter names, or a refusal naming the four it accepts. */
+private fun parsePictureCategory(picture: String?): TagCategory? = when (picture?.trim()?.lowercase()) {
+    null, "" -> null
+    "people" -> TagCategory.PERSON
+    "objects" -> TagCategory.OBJECT
+    "animals" -> TagCategory.ANIMAL
+    "places" -> TagCategory.PLACE
+    else -> throw BadRequestException("picture must be one of people, objects, animals or places")
 }
 
 internal fun parseSearchMode(mode: String?): SearchMode = mode?.let { value ->

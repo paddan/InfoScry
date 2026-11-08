@@ -1011,6 +1011,30 @@ class ImageLlmClientTest {
         assertFalse(refused.dispatched)
     }
 
+    // ---- describe: the analysis request carries its own bytes and instructions ----
+
+    @Test
+    fun `describe sends the given image bytes and instructions and accepts an answer that names no page`() = runBlocking {
+        val image = pngBytes(120, 80)
+        val content = """{"description":"En bil.","tags":[]}"""
+        withServer(script = listOf(FakeOpenAiResponse(body = openAiAnswer(content)))) { server, client ->
+            val answer = client.describe(
+                identity = PageDispatchIdentity(unitId = "image-unit", ordinal = 2, documentId = "doc-1"),
+                image = image,
+                mediaType = "image/png",
+                instructions = "Describe this picture in swe",
+            )
+
+            assertEquals(content, answer.value, "an analysis answer has no page identity to echo")
+            val request = Json.parseToJsonElement(server.requestBody!!).jsonObject
+            val contentBlocks = request.getValue("messages").jsonArray.single().jsonObject.getValue("content").jsonArray
+            assertEquals("Describe this picture in swe", contentBlocks[0].jsonObject.getValue("text").jsonPrimitive.content)
+            val url = contentBlocks[1].jsonObject.getValue("image_url").jsonObject.getValue("url").jsonPrimitive.content
+            assertTrue(url.startsWith("data:image/png;base64,"))
+            assertTrue(Base64.getDecoder().decode(url.substringAfter("base64,")).contentEquals(image))
+        }
+    }
+
     // ---- helpers ----
 
     /** Runs [block] against a scripted loopback endpoint, closing the client and the server afterwards. */
@@ -1072,6 +1096,22 @@ class ImageLlmClientTest {
         endpoint = endpoint,
         apiKeyEnvironmentVariable = keyVariable,
     )
+
+    /** A small PNG in memory, for a call that takes encoded bytes rather than a page artifact. */
+    private fun pngBytes(width: Int, height: Int): ByteArray {
+        val raster = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB).also { image ->
+            val graphics = image.createGraphics()
+            try {
+                graphics.color = Color.WHITE
+                graphics.fillRect(0, 0, image.width, image.height)
+            } finally {
+                graphics.dispose()
+            }
+        }
+        val output = java.io.ByteArrayOutputStream()
+        check(ImageIO.write(raster, "png", output)) { "no PNG writer is available" }
+        return output.toByteArray()
+    }
 
     /** One page image over a written PNG, measured the way a producer measures it. */
     private fun page(
@@ -1184,8 +1224,7 @@ class ImageLlmClientTest {
         }
     }
 
-    private fun writeImage(path: Path, width: Int, height: Int, text: String?) {
-        val raster = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB).also { image ->
+    private fun writeImage(path: Path, width: Int, height: Int, text: String?) {        val raster = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB).also { image ->
             val graphics = image.createGraphics()
             try {
                 graphics.color = Color.WHITE

@@ -7,6 +7,10 @@ import infoscry.domain.DocumentId
 import infoscry.domain.SourceLocation
 import infoscry.image.ImageArtifacts
 import infoscry.image.ImageSourceKind
+import infoscry.image.analysis.ImageTag
+import infoscry.image.analysis.ImageTagEditView
+import infoscry.image.analysis.ImageTagsView
+import infoscry.image.analysis.TagEditAction
 import infoscry.storage.ImageStore
 import infoscry.storage.RevisionState
 import infoscry.storage.StoredImage
@@ -18,6 +22,7 @@ import io.ktor.server.application.call
 import io.ktor.server.response.respondOutputStream
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
+import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
@@ -58,6 +63,22 @@ data class ImageView(
     val heightPx: Int,
     val caption: String?,
     val captionSource: String?,
+    /** The description the last completed analysis made, when the picture has been analysed. */
+    val description: String? = null,
+    /** The effective tags: the analysis with every person's edit applied. */
+    val tags: List<ImageTag> = emptyList(),
+    /** What an edit of this picture's tags is made from. */
+    val tagsVersion: Long = 0,
+    /** The code of the latest failed analysis, when the last attempt to describe the picture failed. */
+    val analysisErrorCode: String? = null,
+)
+
+/** One edit of a picture's tags; the request id makes a retried POST change nothing. */
+@Serializable
+data class EditImageTagRequest(
+    val editId: String,
+    val action: TagEditAction,
+    val tag: ImageTag,
 )
 
 /**
@@ -69,8 +90,8 @@ fun Routing.configureImageRoutes(context: AppContext) {
     route("/api/collections/{id}/documents/{documentId}/images") {
         get {
             call.handle {
-                val (_, revisionId) = call.imageScope(context)
-                val views = revisionId?.let { revision -> imageViews(context, revision) }.orEmpty()
+                val (document, revisionId) = call.imageScope(context)
+                val views = revisionId?.let { revision -> imageViews(context, document, revision) }.orEmpty()
                 call.respondJson(HttpStatusCode.OK, views.map { it.first })
             }
         }
@@ -104,6 +125,43 @@ fun Routing.configureImageRoutes(context: AppContext) {
                 call.serveImage(thumbnailFile(context, document, image), THUMBNAIL_MEDIA_TYPE)
             }
         }
+        get("/{unitId}/tags") {
+            call.handle {
+                val (document, _) = call.imageScope(context)
+                val unitId = call.imageUnitId()
+                call.respondJson(
+                    HttpStatusCode.OK,
+                    context.imageTagService.tags(document.collectionId, document.id, unitId),
+                )
+            }
+        }
+        post("/{unitId}/tags") {
+            call.handle {
+                val (document, _) = call.imageScope(context)
+                val unitId = call.imageUnitId()
+                // Changing a picture's tags changes what its document publishes, so it is an editor's act.
+                call.requireCollectionRole(document.collectionId.value, infoscry.account.CollectionRole.EDITOR)
+                val request = call.receiveJson<EditImageTagRequest>()
+                if (request.editId.isBlank()) {
+                    throw BadRequestException("a tag edit needs an id, so a retry cannot apply it twice")
+                }
+                // A tag edit is a shared mutation like any other: it waits for maintenance, refuses while
+                // mutations are paused, and publishes through the revision protocol inside this permit.
+                val view = context.mutations.withMutation {
+                    context.collectionService.requireMutationsAllowed()
+                    context.imageTagService.edit(
+                        collectionId = document.collectionId,
+                        documentId = document.id,
+                        unitId = unitId,
+                        editId = request.editId,
+                        action = request.action,
+                        tag = request.tag,
+                        expectedVersion = call.ifMatchVersion(),
+                    )
+                }
+                call.respondJson(HttpStatusCode.OK, view)
+            }
+        }
     }
 }
 
@@ -135,10 +193,16 @@ private fun ApplicationCall.imageScope(context: AppContext): Pair<Document, Stri
 }
 
 /** The revision's images with their metadata, in reading order: one query, however many images it holds. */
-private fun imageViews(context: AppContext, revisionId: String): List<Pair<ImageView, StoredImage>> =
-    context.imageStore.locatedImagesOf(revisionId).map { it.toView() }
+private fun imageViews(
+    context: AppContext,
+    document: Document,
+    revisionId: String,
+): List<Pair<ImageView, StoredImage>> =
+    context.imageStore.locatedImagesOf(revisionId).map { it.toView(context, document) }
 
-private fun ImageStore.LocatedImage.toView(): Pair<ImageView, StoredImage> = ImageView(
+private fun ImageStore.LocatedImage.toView(context: AppContext, document: Document): Pair<ImageView, StoredImage> {
+    val tags = context.imageTagService.tags(document.collectionId, document.id, image.unitId)
+    return ImageView(
     unitId = image.unitId.value,
     locator = locator,
     label = locator.describe(),
@@ -149,15 +213,26 @@ private fun ImageStore.LocatedImage.toView(): Pair<ImageView, StoredImage> = Ima
     heightPx = image.heightPx,
     caption = image.caption,
     captionSource = image.captionSource?.name,
+    description = tags.description,
+    tags = tags.tags,
+    tagsVersion = tags.tagsVersion,
+    analysisErrorCode = tags.analysisErrorCode,
 ) to image
+}
 
 /** The one image a request names, looked up directly rather than by walking the revision's images. */
 private fun ApplicationCall.findImage(context: AppContext, revisionId: String?): Pair<ImageView, StoredImage> {
     val unitId = parameters["unitId"]?.takeIf(String::isNotBlank) ?: throw BadRequestException("an image needs an id")
     return revisionId?.let { revision ->
-        context.imageStore.locatedImagesOf(revision, ContentUnitId(unitId)).firstOrNull()?.toView()
+        context.imageStore.locatedImagesOf(revision, ContentUnitId(unitId)).firstOrNull()
+            ?.let { located -> located.toView(context, context.documents.get(located.image.documentId) ?: return@let null) }
     } ?: throw missingImage()
 }
+
+/** The image id in the path, refused when absent. */
+private fun ApplicationCall.imageUnitId(): ContentUnitId =
+    parameters["unitId"]?.takeIf(String::isNotBlank)?.let(::ContentUnitId)
+        ?: throw BadRequestException("an image needs an id")
 
 /** The media type to send for stored [raw], or null when it is not a raster image that is safe to show inline. */
 private fun servableMediaType(raw: String): ContentType? {

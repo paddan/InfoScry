@@ -6,7 +6,7 @@ import * as api from './api';
 
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
-  listReadingMethods: vi.fn(), updateCollectionOcrSettings: vi.fn(),
+  listReadingMethods: vi.fn(), listOcrProfiles: vi.fn(), updateCollectionOcrSettings: vi.fn(),
 }));
 
 const collection = (defaultMethod: string | null = 'tesseract'): Collection => ({
@@ -23,6 +23,7 @@ describe('CollectionOcrSettings', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.listReadingMethods).mockResolvedValue(methods);
+    vi.mocked(api.listOcrProfiles).mockResolvedValue([]);
     vi.mocked(api.updateCollectionOcrSettings).mockResolvedValue(collection());
   });
   afterEach(cleanup);
@@ -86,6 +87,44 @@ describe('CollectionOcrSettings', () => {
     await fireEvent.change(select, { target: { value: 'all' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
     await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith('c1', { language: 'eng', defaultMethod: 'tesseract', defaultImageExtraction: 'all' }, 7));
+  });
+
+  it('shows and saves the image analysis defaults with the version they were edited from', async () => {
+    vi.mocked(api.listOcrProfiles).mockResolvedValue([
+      { id: 'p1', name: 'Vision', enabled: true, imageCapabilityMeasured: true } as api.OcrProfile,
+      { id: 'p2', name: 'Unchecked', enabled: true, imageCapabilityMeasured: null } as api.OcrProfile,
+    ]);
+    render(CollectionOcrSettings, {
+      collection: { ...collection(), version: 7, defaultImageExtraction: 'embedded', defaultImageProfileId: 'p1' },
+      onChanged: vi.fn(),
+    });
+    const select = await screen.findByTestId('default-describe-images') as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('p1'));
+    expect(screen.queryByRole('option', { name: 'Unchecked' })).toBeNull();
+    await fireEvent.click(screen.getByTestId('default-identify-appearance'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
+
+    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith(
+      'c1',
+      { language: 'eng', defaultMethod: 'tesseract', defaultImageProfileId: 'p1', defaultIdentifyAppearance: true },
+      7,
+    ));
+  });
+
+  it('clears the analysis profile when images are turned off', async () => {
+    render(CollectionOcrSettings, {
+      collection: { ...collection(), defaultImageExtraction: 'embedded', defaultImageProfileId: 'p1', defaultIdentifyAppearance: true },
+      onChanged: vi.fn(),
+    });
+    const images = await screen.findByLabelText('Extract images by default');
+    await fireEvent.change(images, { target: { value: 'off' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save OCR settings' }));
+
+    await waitFor(() => expect(api.updateCollectionOcrSettings).toHaveBeenCalledWith(
+      'c1',
+      { language: 'eng', defaultMethod: 'tesseract', defaultImageExtraction: 'off', defaultImageProfileId: 'none', defaultIdentifyAppearance: false },
+      undefined,
+    ));
   });
 
   it('shows the conflict message when someone else changed the settings', async () => {

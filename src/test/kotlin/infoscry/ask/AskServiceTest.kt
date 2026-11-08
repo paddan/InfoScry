@@ -14,8 +14,10 @@ import infoscry.llm.LlmProvider
 import infoscry.llm.LlmRequest
 import infoscry.llm.LlmStreamingClient
 import infoscry.llm.PromptService
+import infoscry.llm.ShippedPrompts
 import infoscry.llm.TokenUsage
 import infoscry.llm.LlmError
+import infoscry.llm.LlmPromptRole
 import infoscry.search.SearchFilters
 import infoscry.search.SearchHit
 import infoscry.search.SearchMode
@@ -134,6 +136,38 @@ class AskServiceTest {
     }
 
     @Test
+    fun `the shipped ask and investigate prompts state the uncertainty and picture rules`() {
+        listOf(LlmPromptRole.ASK, LlmPromptRole.INVESTIGATE).forEach { role ->
+            val composed = PromptService().compose(ShippedPrompts.body(role))
+            assertTrue(composed.contains("marked *possibly* is uncertain"), "$role must mark possibly names as uncertain")
+            assertTrue(composed.contains("citation of a picture shows"), "$role must say a picture citation shows the picture")
+        }
+    }
+
+    @Test
+    fun `a citation of a picture validates against the labelled evidence sent`() = runBlocking {
+        val provider = ScriptedProvider(
+            streamed = listOf(LlmEvent.TextDelta("The picture shows a man [S1]"), LlmEvent.Usage(TokenUsage(1, 1))),
+            completion = LlmCompletion("unused"),
+        )
+        var saved: SavedAsk? = null
+        val service = service(CapturedSearch(listOf(pictureHit())), provider) { request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction ->
+            saved = SavedAsk(request, answer, evidence, initialUsage, initialCitations, retrievalSnapshot, correction)
+            "conversation-id"
+        }
+
+        val events = service.ask(request()).toList()
+
+        val sent = provider.streamRequests.single().messages.last().content
+        assertTrue(sent.contains("locator=\"Picture: image 2 on page 14\""), sent)
+        assertTrue(sent.contains("possibly Jeffrey Epstein"), "the picture's description and tags are the evidence text")
+        assertEquals(listOf(AskEvent.Citation("S1", true)), events.filterIsInstance<AskEvent.Citation>())
+        val done = assertIs<AskEvent.Done>(events.last())
+        assertEquals("Picture: image 2 on page 14", done.evidence.single().locatorLabel)
+        assertEquals(listOf("S1"), requireNotNull(saved).initialCitations.valid)
+    }
+
+    @Test
     fun `a provider failure maps to a typed error and is not persisted`() = runBlocking {
         val service = service(CapturedSearch(listOf(hit())), FailingProvider) { _, _, _, _, _, _, _ -> error("must not persist") }
 
@@ -244,6 +278,16 @@ class AskServiceTest {
         collectionId = CollectionId("collection"), documentId = DocumentId("document"), unitId = ContentUnitId("unit"),
         chunkOrdinal = 0, text = "evidence", highlighted = null, locator = SourceLocation.TextLines(1, 1),
         locatorLabel = "lines 1", matchedBy = setOf(SearchMode.HYBRID),
+    )
+
+    private fun pictureHit() = SearchHit(
+        collectionId = CollectionId("collection"), documentId = DocumentId("document"), unitId = ContentUnitId("picture"),
+        chunkOrdinal = 0,
+        text = "Fig. 3\n\nTwo men by a car.\n\nperson: possibly Jeffrey Epstein\nobject: Volvo PV444",
+        highlighted = null,
+        locator = SourceLocation.ImageRegion(SourceLocation.PdfPage(14), 2, null),
+        locatorLabel = "image 2 on page 14",
+        matchedBy = setOf(SearchMode.HYBRID),
     )
 
     private data class SavedAsk(

@@ -65,6 +65,8 @@ class ReindexService(
     private val documentEmbedder: () -> DocumentEmbedder?,
     private val index: () -> SearchIndex,
     private val maxChunksPerDocument: Int = MAX_CHUNKS_PER_DOCUMENT,
+    /** The picture categories each image unit's rows carry, or null when this build tags no pictures. */
+    private val imageCategories: infoscry.image.analysis.ImageCategories? = null,
 ) {
 
     suspend fun reindex(
@@ -157,6 +159,7 @@ class ReindexService(
             if (batch.isEmpty()) break
             batch.forEach { unit ->
                 val unitChunks = content.chunksOf(unit.id)
+                val categories = imageCategories?.ofUnit(documentId, unit.id) ?: emptySet()
                 unitChunks.chunked(EMBED_BATCH).forEach { group ->
                     val vectors = embed(group.map { it.text }, documentId)
                     group.forEachIndexed { position, chunk ->
@@ -169,6 +172,7 @@ class ReindexService(
                             chunk = chunk,
                             vector = vectors[position],
                             revisionId = revisionId,
+                            imageCategories = categories,
                         )
                     }
                 }

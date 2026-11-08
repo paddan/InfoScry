@@ -442,6 +442,12 @@ class RescanJobHandler internal constructor(
                 selection = operation.selection,
                 snapshot = snapshot,
                 stage = stage,
+                dispatch = dispatchAuthority(
+                    operation = operation,
+                    document = document,
+                    revisionId = snapshot.imageAnalysis?.profileRevisionId,
+                    dispatchStage = OcrDispatchStage.IMAGE_ANALYSIS,
+                ),
             )
         } else {
             emptyList()
@@ -677,7 +683,11 @@ class RescanJobHandler internal constructor(
             documentId = document.id,
             stage = dispatchStage,
             profileRevisionId = revisionId,
-            configuredAllowance = operation.snapshot.externalPageLimit,
+            configuredAllowance = if (dispatchStage == OcrDispatchStage.IMAGE_ANALYSIS) {
+                operation.snapshot.imageAnalysisExternalLimit
+            } else {
+                operation.snapshot.externalPageLimit
+            },
         )
     }
 

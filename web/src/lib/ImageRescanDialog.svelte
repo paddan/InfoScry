@@ -3,10 +3,13 @@
   import {
     ApiError,
     getImageRescanCensus,
+    listOcrProfiles,
     startImageRescan,
+    type ImageAnalysisChoice,
     type ImageExtraction,
     type ImageRescanCensus,
     type JobApiView,
+    type OcrProfile,
   } from './api';
   import { containDialogFocus, holdDialogFocus } from './dialogFocus';
 
@@ -14,6 +17,10 @@
   export let collectionName: string;
   /** The collection's default, pre-filling the choice; Off falls back to embedded images. */
   export let defaultImageExtraction: ImageExtraction = 'off';
+  /** The collection's default for *Describe images with*; it only pre-fills the choice. */
+  export let defaultImageProfileId: string | null = null;
+  /** The collection's default for identifying from appearance; it only pre-fills the choice. */
+  export let defaultIdentifyAppearance = false;
   export let onClose: () => void;
   export let onStarted: (job: JobApiView) => void;
 
@@ -24,6 +31,9 @@
   };
 
   let mode: Exclude<ImageExtraction, 'off'> = defaultImageExtraction === 'all' ? 'all' : 'embedded';
+  let imageProfiles: OcrProfile[] = [];
+  let imageProfileId = defaultImageProfileId ?? '';
+  let identifyAppearance = defaultIdentifyAppearance;
   let census: ImageRescanCensus | null = null;
   let loadError: string | null = null;
   let error: string | null = null;
@@ -33,6 +43,9 @@
 
   $: running = census?.job != null && (census.job.state === 'QUEUED' || census.job.state === 'RUNNING');
   $: canStart = census !== null && census.eligible > 0 && !starting;
+  $: imageAnalysis = imageProfileId === '' || imageProfileId === 'none'
+    ? undefined
+    : ({ profileId: imageProfileId, identifyAppearance } satisfies ImageAnalysisChoice);
 
   onMount(() => {
     void tick().then(() => select?.focus());
@@ -42,7 +55,15 @@
   async function load(): Promise<void> {
     loadError = null;
     try {
-      census = await getImageRescanCensus(collectionId);
+      const [loadedCensus, profiles] = await Promise.all([
+        getImageRescanCensus(collectionId),
+        listOcrProfiles().catch(() => [] as OcrProfile[]),
+      ]);
+      imageProfiles = (profiles ?? []).filter((entry) => entry.enabled && entry.imageCapabilityMeasured === true);
+      if (imageProfileId !== '' && !imageProfiles.some((entry) => entry.id === imageProfileId)) {
+        imageProfileId = '';
+      }
+      census = loadedCensus;
     } catch (failure) {
       loadError = describe(failure);
     }
@@ -59,7 +80,10 @@
     error = null;
     holdDialogFocus(dialog);
     try {
-      onStarted(await startImageRescan(collectionId, mode));
+      const job = imageAnalysis === undefined
+        ? await startImageRescan(collectionId, mode)
+        : await startImageRescan(collectionId, mode, imageAnalysis);
+      onStarted(job);
     } catch (failure) {
       error = describe(failure);
       starting = false;
@@ -104,6 +128,32 @@
         <option value="all">Embedded + regions from scanned pages</option>
       </select>
     </div>
+    <div class="field">
+      <label for="image-rescan-profile">Describe images with</label>
+      <select
+        id="image-rescan-profile"
+        data-testid="describe-images"
+        bind:value={imageProfileId}
+        onchange={() => { if (imageProfileId === '') identifyAppearance = false; }}
+        disabled={starting}
+      >
+        <option value="">None</option>
+        {#each imageProfiles as profile (profile.id)}
+          <option value={profile.id}>{profile.name}</option>
+        {/each}
+      </select>
+    </div>
+    {#if imageProfileId !== ''}
+      <label class="check-label">
+        <input
+          type="checkbox"
+          data-testid="identify-appearance"
+          bind:checked={identifyAppearance}
+          disabled={starting}
+        />
+        Identify specific people, objects, animals and places from their appearance
+      </label>
+    {/if}
     {#if loadError !== null}
       <p role="alert">{loadError}</p>
     {:else if census === null}
@@ -140,6 +190,8 @@
   ul { display: grid; gap: 0.3rem; margin: 0.4rem 0 0; padding-left: 1.1rem; font-size: 0.85rem; }
   .field { display: grid; gap: 0.35rem; }
   label { color: #b8bcbb; font-size: 0.82rem; }
+  .check-label { display: flex; align-items: center; gap: 0.5rem; color: #e8e9e7; font-size: 0.85rem; }
+  .check-label input { accent-color: #c4a77d; }
   select { border: 1px solid #383d3e; border-radius: 0.48rem; background: #202324; padding: 0.55rem 0.65rem; color: #e8e9e7; font: inherit; }
   .hint { color: #929997; font-size: 0.82rem; }
   .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem; }

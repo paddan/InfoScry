@@ -1,6 +1,6 @@
 # Image tagging
 
-Status: design approved 2026-11-07; not implemented.
+Status: implemented 2026-11-07.
 
 Sub-project 2 of the image work. Sub-project 1, the [image foundation](2026-11-07-image-foundation-design.md),
 finds, stores, shows and cites images; this spec makes what an image *shows* searchable and citable. Sub-project 3

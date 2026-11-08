@@ -341,6 +341,23 @@ data class OcrAttemptIdentity(
 }
 
 /**
+ * The choice to describe and tag pictures in one run, frozen in the attempt's snapshot.
+ *
+ * [profileRevisionId] is the immutable OCR profile revision resolved at admission, so editing the profile later
+ * changes future runs and cannot move this one. [identifyAppearance] is the run's answer to *Identify from
+ * appearance*; the analysis key records it, so the same image with the other answer is another analysis.
+ */
+@Serializable
+data class ImageAnalysisChoice(
+    val profileRevisionId: String,
+    val identifyAppearance: Boolean,
+) {
+    init {
+        require(profileRevisionId.isNotBlank()) { "an image analysis choice names its profile revision" }
+    }
+}
+
+/**
  * Everything one OCR attempt was admitted with, as one immutable value.
  *
  * It is what a rescan job carries and what a resumed attempt is compared against: the collection's
@@ -388,6 +405,17 @@ data class OcrSettingsSnapshot(
      * *Keep current text*). It reads nothing, so its engine is [OcrEngine.NONE].
      */
     val keepsText: Boolean = false,
+    /**
+     * How this run describes and tags its pictures, when it was asked to. It is deliberately not part of the
+     * reading's identity ([attemptIdentity]): switching it never invalidates committed page text, and each
+     * analysis keeps its own key.
+     */
+    val imageAnalysis: ImageAnalysisChoice? = null,
+    /**
+     * How many pictures an external analysis profile may send: the number shown and confirmed in the start
+     * dialog. Zero for a local profile (nothing leaves the machine) and when no analysis runs.
+     */
+    val imageAnalysisExternalLimit: Int = 0,
 ) {
     init {
         require(!keepsText || engine == OcrEngine.NONE) { "keeping the current text reads with no engine" }
@@ -403,8 +431,14 @@ data class OcrSettingsSnapshot(
         require(externalPageLimit >= 0) {
             "the external page allowance must not be negative, was $externalPageLimit"
         }
+        require(imageAnalysisExternalLimit >= 0) {
+            "the external picture allowance must not be negative, was $imageAnalysisExternalLimit"
+        }
         require((engine == OcrEngine.LLM) == (transcriptionProfileRevisionId != null)) {
             "engine LLM reads through a profile revision, and a local engine must not name one"
+        }
+        require(imageAnalysis == null || imageExtraction != infoscry.image.ImageExtractionMode.OFF) {
+            "describing pictures needs images on: a run with images off has no picture to describe"
         }
     }
 

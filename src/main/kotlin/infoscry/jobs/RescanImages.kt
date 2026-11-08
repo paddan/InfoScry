@@ -7,6 +7,7 @@ import infoscry.image.ImageExtractionMode
 import infoscry.image.ImageIdentity
 import infoscry.image.ImageStage
 import infoscry.image.ParentUnitContext
+import infoscry.ocr.OcrDispatchAuthority
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PageStructureStore
 import infoscry.ocr.RescanSelection
@@ -57,6 +58,8 @@ internal class RescanImages(
         selection: RescanSelection,
         snapshot: OcrSettingsSnapshot,
         stage: JobStage,
+        /** The operation's permit authority for describing pictures, or null when the profile is local. */
+        dispatch: OcrDispatchAuthority? = null,
     ): List<String> {
         val mode = snapshot.imageExtraction
         val workDirectory = artifactRoot.resolve(ImageParents.PAGES_DIRECTORY)
@@ -86,6 +89,7 @@ internal class RescanImages(
                     override suspend fun <T> unit(block: suspend () -> T): T = stage.run(STAGE_IMAGES) { block() }
                 },
                 settings = snapshot,
+                dispatch = dispatch,
             ).warnings
         } catch (cancelled: CancellationException) {
             throw cancelled

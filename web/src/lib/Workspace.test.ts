@@ -442,6 +442,24 @@ describe('app shell', () => {
     expect(call?.init?.method).toBeUndefined();
   });
 
+  it('restricts a search to the chosen picture category', async () => {
+    const { calls } = stubFetch({
+      list: () => jsonResponse({ collections: [collection('Default')] }),
+      search: () => jsonResponse({ hits: [], staleFiltered: 0 }),
+    });
+
+    renderWorkspace();
+    await screen.findByText('Default');
+    await fireEvent.change(screen.getByLabelText('Pictures'), { target: { value: 'people' } });
+    await fireEvent.input(screen.getByLabelText('Search query'), { target: { value: 'Jeffrey' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    await waitFor(() => {
+      const call = calls.find((entry) => entry.url.startsWith('/api/search'));
+      expect(call?.url).toContain('picture=people');
+    });
+  });
+
   it('says which other names a search also searched', async () => {
     stubFetch({
       list: () => jsonResponse({ collections: [collection('Default')] }),

@@ -121,6 +121,8 @@ internal class DocumentIngest(
     private val corrector: CandidateCorrector? = null,
     /** Starts the collection's correction job, for a published import that does not follow today's list. */
     private val requestCorrections: (CollectionId) -> Unit = {},
+    /** The picture categories each image unit's search rows carry, or null when this build tags no pictures. */
+    private val imageCategories: infoscry.image.analysis.ImageCategories? = null,
 ) {
 
     /** What a staged reading becomes: its passages, their vectors, and the publication of its pages. */
@@ -155,6 +157,12 @@ internal class DocumentIngest(
          * job's twenty files share one, an operation's one document has its own.
          */
         dispatch: infoscry.ocr.OcrDispatchAuthority? = null,
+        /**
+         * The attempt's authority for sending pictures off this machine to be described, or null when the
+         * analysis profile is local or this run does not describe pictures. It counts against the same
+         * confirmed allowance as the pages.
+         */
+        imageDispatch: infoscry.ocr.OcrDispatchAuthority? = null,
         /**
          * The OCR selection this attempt was admitted with, recorded on the revision the reading becomes so
          * the history can say how it was read. Null for an attempt that recorded none.
@@ -317,7 +325,7 @@ internal class DocumentIngest(
         // The text is complete, so the images found beside it can be delivered into the same sink, before the
         // passages that make their captions searchable are cut. A warning here is a warning on the document,
         // never a failure of its text.
-        val imageWarnings = extractImages(document, mediaType.value, managedPath, fingerprint, sink, stage, reading)
+        val imageWarnings = extractImages(document, mediaType.value, managedPath, fingerprint, sink, stage, reading, imageDispatch)
         if (imageWarnings.isNotEmpty()) warned = true
         val imageWarning = ImageWarnings.mostImportant(imageWarnings)
 
@@ -350,6 +358,7 @@ internal class DocumentIngest(
         sink: ExtractionSink,
         stage: JobStage,
         reading: OcrSettingsSnapshot?,
+        imageDispatch: infoscry.ocr.OcrDispatchAuthority? = null,
     ): List<String> {
         val images = pipeline.images ?: return emptyList()
         val snapshot = reading ?: return emptyList()
@@ -382,6 +391,7 @@ internal class DocumentIngest(
                 target = SinkImageTarget(sink, document.id, fingerprint),
                 boundary = StageBoundary(stage),
                 settings = snapshot,
+                dispatch = imageDispatch,
             ).warnings
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -594,6 +604,7 @@ internal class DocumentIngest(
                 if (units.isEmpty()) break
                 units.forEach { unit ->
                     val chunks = content.chunksOf(unit.id)
+                    val categories = imageCategories?.ofUnit(document.id, unit.id) ?: emptySet()
                     chunks.chunked(EMBED_BATCH).forEach { batch ->
                         val vectors = stage.run(STAGE_EMBED) {
                             embedder.embedDocuments(batch.map { it.text })
@@ -610,6 +621,7 @@ internal class DocumentIngest(
                                 locatorLabel = unit.locator.describe(),
                                 chunk = chunk,
                                 vector = vectors[index],
+                                imageCategories = categories,
                             )
                         }
                     }

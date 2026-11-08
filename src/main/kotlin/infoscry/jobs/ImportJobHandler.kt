@@ -308,6 +308,13 @@ class ImportJobHandler internal constructor(
                 dispatchStage = OcrDispatchStage.TRANSCRIPTION,
                 confirmedManifestScope = payload.confirmedSources != null,
             ),
+            imageDispatch = attemptDispatch.authorityFor(
+                job = job,
+                document = document,
+                snapshot = payload.ocr,
+                dispatchStage = OcrDispatchStage.IMAGE_ANALYSIS,
+                confirmedManifestScope = payload.confirmedSources != null,
+            ),
             // The selection this import was admitted with, which the revision it publishes records as its reading.
             reading = payload.ocr,
         )
@@ -786,6 +793,7 @@ class ImportJobHandler internal constructor(
                 publication = context.revisionPublication,
                 corrector = context.candidateCorrector,
                 requestCorrections = { collectionId -> context.followCorrectionsFor(collectionId) },
+                imageCategories = context.imageCategories,
             )
             val attemptDispatch = AttemptDispatch(
                 operations = context.ocrOperations,
@@ -856,8 +864,8 @@ class ImportJobHandler internal constructor(
                         JobType.REINDEX to ReindexJobHandler(reindexService(context)),
                         JobType.RESCAN to rescanHandler,
                         JobType.SELECTABLE_PDF to selectablePdfHandler,
-                        JobType.IMAGE_RESCAN to ImageRescanJobHandler(context.documents) { collectionId, documentId, mode, requestId ->
-                            context.rescanService.startImageRescan(collectionId, documentId, mode, requestId)
+                        JobType.IMAGE_RESCAN to ImageRescanJobHandler(context.documents) { collectionId, documentId, mode, requestId, imageAnalysis ->
+                            context.rescanService.startImageRescan(collectionId, documentId, mode, requestId, imageAnalysis)
                         },
                         JobType.CORRECTIONS to CorrectionJobHandler(
                             revisions = context.revisions,
@@ -945,6 +953,7 @@ class ImportJobHandler internal constructor(
             documentEmbedder = context.pinnedEmbedder,
             index = { context.index() },
             revisions = context.revisions,
+            imageCategories = context.imageCategories,
         )
     }
 }

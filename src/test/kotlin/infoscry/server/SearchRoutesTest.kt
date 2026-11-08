@@ -98,6 +98,14 @@ class SearchRoutesTest {
     }
 
     @Test
+    fun `an unknown picture filter is refused as a bad request`() = runBlocking {
+        val response = harness.get("/api/search?collection=Default&q=nightfall&picture=bogus")
+
+        assertEquals(HttpStatusCode.BadRequest, response.status, response.bodyAsText())
+        assertContains(response.bodyAsText(), "picture must be one of people, objects, animals or places")
+    }
+
+    @Test
     fun `a search against an unknown collection is refused as not found`() = runBlocking {
         val response = harness.get("/api/search?collection=nobody&q=nightfall")
 

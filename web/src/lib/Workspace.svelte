@@ -103,6 +103,14 @@
   let importedUntil = '';
   let statusFilter = '';
   let ocrOnly = false;
+  let pictureFilter: '' | 'people' | 'objects' | 'animals' | 'places' = '';
+  const PICTURE_OPTIONS: { value: '' | 'people' | 'objects' | 'animals' | 'places'; label: string }[] = [
+    { value: '', label: 'All' },
+    { value: 'people', label: 'People' },
+    { value: 'objects', label: 'Objects' },
+    { value: 'animals', label: 'Animals' },
+    { value: 'places', label: 'Places' },
+  ];
   let askProfile = '';
   let investigateProfile = '';
   /** The prompt each mode's Prompt select holds; undefined until that collection's prompts load. */
@@ -433,6 +441,7 @@
       const filters: SearchFilters = {
         mediaType, path: pathContains, text: textContains,
         from: importedFrom, until: importedUntil, status: statusFilter, ocrOnly,
+        ...(pictureFilter === '' ? {} : { picture: pictureFilter }),
       };
       const response = await searchCollection(selectedCollectionId, text, mode, filters);
       if (generation === searchGeneration) {
@@ -1030,6 +1039,12 @@
             <option value="SEMANTIC">Semantic</option>
             <option value="HYBRID">Hybrid</option>
           </select>
+          <label for="picture-filter">Pictures</label>
+          <select id="picture-filter" bind:value={pictureFilter} onchange={() => handleFilterChange(false)}>
+            {#each PICTURE_OPTIONS as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </select>
           <details>
             <summary>Advanced search filters</summary>
             <div class="filter-fields">
@@ -1310,6 +1325,8 @@
           visible={sourcePaneVisible}
           collectionId={pageReviewDocument.collectionId}
           defaultImageExtraction={collections.find((entry) => entry.id === pageReviewDocument?.collectionId)?.defaultImageExtraction ?? 'off'}
+          defaultImageProfileId={collections.find((entry) => entry.id === pageReviewDocument?.collectionId)?.defaultImageProfileId ?? null}
+          defaultIdentifyAppearance={collections.find((entry) => entry.id === pageReviewDocument?.collectionId)?.defaultIdentifyAppearance ?? false}
           documentId={pageReviewDocument.documentId}
           documentName="Selected document"
           statusOnly
@@ -1361,7 +1378,18 @@
       {:else if source !== null}
         {@const quality = qualityLabel(source.qualityScore)}
         {#if quality !== null}<p class="ocr-quality {quality.level}">{quality.text}</p>{/if}
-        <SourceReading collectionId={selectedHit.collectionId} documentId={selectedHit.documentId} {openImageUnitId} sourceId={source.id} revisionId={source.revisionId ?? null} hasReading={source.hasReading === true}>
+        <SourceReading
+          collectionId={selectedHit.collectionId}
+          documentId={selectedHit.documentId}
+          {openImageUnitId}
+          sourceId={source.id}
+          revisionId={source.revisionId ?? null}
+          hasReading={source.hasReading === true}
+          canEdit={(() => {
+            const role = collections.find((entry) => entry.id === selectedHit?.collectionId)?.callerRole;
+            return role === 'OWNER' || role === 'EDITOR';
+          })()}
+        >
           {#if sourceWindows.some((chunk) => chunk.structure !== undefined)}
             {#each sourceWindows as chunk (chunk.offset)}
               <StructuredPage text={chunk.text} structure={chunk.structure ?? null} />
@@ -1385,6 +1413,8 @@
     <StartReadingDialog
       collectionId={pageReviewDocument?.collectionId ?? managedCollectionId}
       defaultImageExtraction={collections.find((entry) => entry.id === (pageReviewDocument?.collectionId ?? managedCollectionId))?.defaultImageExtraction ?? 'off'}
+      defaultImageProfileId={collections.find((entry) => entry.id === (pageReviewDocument?.collectionId ?? managedCollectionId))?.defaultImageProfileId ?? null}
+      defaultIdentifyAppearance={collections.find((entry) => entry.id === (pageReviewDocument?.collectionId ?? managedCollectionId))?.defaultImageProfileId ? (collections.find((entry) => entry.id === (pageReviewDocument?.collectionId ?? managedCollectionId))?.defaultIdentifyAppearance ?? false) : false}
       request={{ kind: 'rescan', documentId: pageScanRequest.documentId, selection: { mode: 'explicit', ordinals: pageScanRequest.ordinals } }}
       onstarted={(run) => pageScanStarted(run as RescanStarted)}
       oncancel={cancelPageScanDialog}

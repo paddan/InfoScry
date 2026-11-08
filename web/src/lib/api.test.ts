@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listGlossary, putGlossaryGroup, deleteGlossaryGroup, searchCollection, applyCorrections, deleteCorrection, getCorrections, previewCorrection, previewCorrectionRemoval, putCorrection, readSourceReading, createCollectionPrompt, deleteCollectionPrompt, getCollectionPrompts, setCollectionPromptDefault, updateCollectionPrompt, fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
+import { listGlossary, putGlossaryGroup, deleteGlossaryGroup, searchCollection, getImageTags, editImageTag, startImageRescan, applyCorrections, deleteCorrection, getCorrections, previewCorrection, previewCorrectionRemoval, putCorrection, readSourceReading, createCollectionPrompt, deleteCollectionPrompt, getCollectionPrompts, setCollectionPromptDefault, updateCollectionPrompt, fetchLlmCatalog, createLlmProfile, updateLlmProfile, listLlmProfiles, ApiError, continueInvestigation, createCollection, createSelectablePdf, getCollectionDocumentSummary, getSelectablePdfStatus, listCollections, listOcrProfiles, listReadingMethods, previewImport, previewRescan, readInvestigationEvents, readSource, renameCollection, resumeRescan, selectablePdfFileHref, startAsk, startImport, startInvestigation, startRescan, updateCollectionOcrSettings } from './api';
 
 const sse = (...frames: string[]) => new Response(frames.map((frame) => `data:${frame}\n\n`).join(''));
 
@@ -620,5 +620,52 @@ describe('collection glossary', () => {
 
     expect(response.expandedWith).toEqual([]);
     expect(response.expansionTruncated).toBe(false);
+  });
+
+  it('sends picture filter in search, image analysis in runs, and edits image tags with If-Match', async () => {
+    const calls: { url: string; method: string; headers?: Record<string, string>; body?: unknown }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/session') return new Response(JSON.stringify({ csrfToken: 'csrf-test' }), { status: 200 });
+      calls.push({
+        url,
+        method: init?.method ?? 'GET',
+        headers: init?.headers as Record<string, string> | undefined,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      if (url.startsWith('/api/search')) return new Response(JSON.stringify({ hits: [], staleFiltered: 0 }), { status: 200 });
+      if (url.endsWith('/image-rescan')) return new Response(JSON.stringify({ job: { id: 'j1' } }), { status: 200 });
+      return new Response(JSON.stringify({ documentId: 'd1', unitId: 'u1', tags: [], edits: [], tagsVersion: 2 }), { status: 200 });
+    }));
+
+    await searchCollection('c1', 'Jeffrey', 'HYBRID', { picture: 'people' });
+    await startImageRescan('c1', 'embedded', { profileId: 'p1', identifyAppearance: true });
+    await getImageTags('c 1', 'd/1', 'u/1');
+    await editImageTag('c 1', 'd/1', 'u/1', {
+      editId: 'e1',
+      action: 'CONFIRM',
+      tag: { category: 'PERSON', label: 'man', name: 'Jeffrey Epstein', source: 'MANUAL' },
+    }, 1);
+
+    expect(calls[0].url).toBe('/api/search?collection=c1&mode=HYBRID&q=Jeffrey&picture=people');
+    expect(calls[1]).toMatchObject({
+      url: '/api/collections/c1/image-rescan',
+      method: 'POST',
+      body: { imageExtraction: 'embedded', imageAnalysis: { profileId: 'p1', identifyAppearance: true } },
+    });
+    expect(calls[2]).toMatchObject({
+      url: '/api/collections/c%201/documents/d%2F1/images/u%2F1/tags',
+      method: 'GET',
+    });
+    expect(calls[3]).toMatchObject({
+      url: '/api/collections/c%201/documents/d%2F1/images/u%2F1/tags',
+      method: 'POST',
+      headers: expect.objectContaining({ 'If-Match': '"1"' }),
+      body: {
+        editId: 'e1',
+        action: 'CONFIRM',
+        tag: { category: 'PERSON', label: 'man', name: 'Jeffrey Epstein', source: 'MANUAL' },
+      },
+    });
   });
 });

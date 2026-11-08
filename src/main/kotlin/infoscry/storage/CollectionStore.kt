@@ -14,6 +14,9 @@ import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.SQLException
 
+/** The collection's image-analysis defaults, written with the rest of its OCR settings in one edit. */
+data class ImageAnalysisDefaults(val profileId: String?, val identifyAppearance: Boolean)
+
 /** A collection name is already used, compared case-insensitively. */
 class DuplicateCollectionNameException(val name: String) : ApiFaultException(
     ApiStatus.CONFLICT,
@@ -158,6 +161,7 @@ class CollectionStore(private val database: Database) {
         settings: CollectionOcrSettings,
         expectedVersion: Long? = null,
         imageDefault: ImageExtractionMode? = null,
+        imageAnalysisDefault: ImageAnalysisDefaults? = null,
     ): Collection =
         database.transaction { connection ->
             val existing = selectById(connection, id, forUpdate = true)
@@ -171,8 +175,16 @@ class CollectionStore(private val database: Database) {
                 is infoscry.ocr.ReadingMethod.Llm -> OcrEngine.LLM to method.profileId
             }
             val images = imageDefault ?: existing.defaultImageExtraction
+            val imageProfile = if (imageAnalysisDefault != null) {
+                imageAnalysisDefault.profileId?.trim()?.takeIf { it.isNotEmpty() }
+            } else {
+                existing.defaultImageProfileId
+            }
+            val identifyAppearance = imageAnalysisDefault?.identifyAppearance ?: existing.defaultIdentifyAppearance
             if (existing.ocrLanguages == language && existing.ocrEngine == engine &&
-                existing.ocrTranscriptionProfileId == profileId && existing.defaultImageExtraction == images
+                existing.ocrTranscriptionProfileId == profileId && existing.defaultImageExtraction == images &&
+                existing.defaultImageProfileId == imageProfile &&
+                existing.defaultIdentifyAppearance == identifyAppearance
             ) {
                 return@transaction existing
             }
@@ -180,14 +192,17 @@ class CollectionStore(private val database: Database) {
             val updatedAt = Instants.now()
             connection.prepareStatement(
                 "UPDATE collections SET ocr_languages = ?, ocr_engine = ?, " +
-                    "ocr_transcription_profile_id = ?, default_image_extraction = ?, updated_at = ? WHERE id = ?",
+                    "ocr_transcription_profile_id = ?, default_image_extraction = ?, " +
+                    "default_image_profile_id = ?, default_identify_appearance = ?, updated_at = ? WHERE id = ?",
             ).use { statement ->
                 statement.setString(1, language)
                 statement.setString(2, engine.name)
                 statement.setString(3, profileId)
                 statement.setString(4, images.name)
-                statement.setString(5, updatedAt)
-                statement.setString(6, id.value)
+                statement.setString(5, imageProfile)
+                statement.setInt(6, if (identifyAppearance) 1 else 0)
+                statement.setString(7, updatedAt)
+                statement.setString(8, id.value)
                 statement.executeUpdate()
             }
             checkNotNull(selectById(connection, id))
@@ -213,6 +228,37 @@ class CollectionStore(private val database: Database) {
             }
             checkNotNull(selectById(connection, id))
         }
+
+    /**
+     * Sets the OCR profile and appearance choice future runs describe pictures with. Setting the values the
+     * collection already has changes nothing, whatever version the caller holds; a different value needs the
+     * current one.
+     */
+    fun updateImageAnalysisDefaults(
+        id: CollectionId,
+        profileId: String?,
+        identifyAppearance: Boolean,
+        expectedVersion: Long? = null,
+    ): Collection = database.transaction { connection ->
+        val existing = selectById(connection, id, forUpdate = true)
+            ?: throw NoSuchElementException("no collection with id ${id.value}")
+        val profile = profileId?.trim()?.takeIf { it.isNotEmpty() }
+        if (existing.defaultImageProfileId == profile && existing.defaultIdentifyAppearance == identifyAppearance) {
+            return@transaction existing
+        }
+        infoscry.domain.requireVersion(expectedVersion, existing.version, existing.updatedBy)
+        connection.prepareStatement(
+            "UPDATE collections SET default_image_profile_id = ?, default_identify_appearance = ?, " +
+                "updated_at = ? WHERE id = ?",
+        ).use { statement ->
+            statement.setString(1, profile)
+            statement.setInt(2, if (identifyAppearance) 1 else 0)
+            statement.setString(3, Instants.now())
+            statement.setString(4, id.value)
+            statement.executeUpdate()
+        }
+        checkNotNull(selectById(connection, id))
+    }
 
     /**
      * Deletes a collection row and cascades to its documents and jobs. Returns whether the
@@ -327,6 +373,8 @@ class CollectionStore(private val database: Database) {
         version = getLong("version"),
         updatedBy = getString("updated_by")?.let { infoscry.domain.UserRef(it, getString("updated_by_name") ?: it) },
         defaultImageExtraction = ImageExtractionMode.valueOf(getString("default_image_extraction")),
+        defaultImageProfileId = getString("default_image_profile_id"),
+        defaultIdentifyAppearance = getInt("default_identify_appearance") != 0,
     )
 
     companion object {
@@ -338,6 +386,7 @@ class CollectionStore(private val database: Database) {
         private const val SELECT_COLLECTIONS =
             "SELECT id, name, description, ocr_languages, lifecycle, created_at, updated_at, " +
                 "ocr_engine, ocr_transcription_profile_id, version, updated_by, default_image_extraction, " +
+                "default_image_profile_id, default_identify_appearance, " +
                 "(SELECT display_name FROM users WHERE id = collections.updated_by) AS updated_by_name FROM collections"
 
         /**
@@ -348,6 +397,7 @@ class CollectionStore(private val database: Database) {
         private const val SELECT_COLLECTIONS_WITH_DOCUMENT_COUNT =
             "SELECT c.id, c.name, c.description, c.ocr_languages, c.lifecycle, c.created_at, " +
                 "c.updated_at, c.ocr_engine, c.ocr_transcription_profile_id, c.version, c.updated_by, c.default_image_extraction, " +
+                "c.default_image_profile_id, c.default_identify_appearance, " +
                 "(SELECT display_name FROM users WHERE id = c.updated_by) AS updated_by_name, COUNT(d.id) AS document_count " +
                 "FROM collections c LEFT JOIN documents d ON d.collection_id = c.id GROUP BY c.id"
     }

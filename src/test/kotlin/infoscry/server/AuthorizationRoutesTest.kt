@@ -11,6 +11,7 @@ import infoscry.llm.LlmProfile
 import infoscry.llm.LlmProvider
 import infoscry.llm.TokenUsage
 import infoscry.llm.defaultTestPrompt
+import infoscry.ocr.OcrProfileRevisionDraft
 import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
@@ -105,6 +106,48 @@ class AuthorizationRoutesTest {
         assertEquals(HttpStatusCode.Forbidden, status("reader", HttpMethod.Post, "$path/cancel"))
         assertEquals(HttpStatusCode.NotFound, status("outsider", HttpMethod.Get, "$path/run"))
         assertEquals(HttpStatusCode.OK, status("editor", HttpMethod.Post, "$path/cancel"))
+    }
+
+    @Test
+    fun `only an owner saves the collection's image analysis defaults and a stale version conflicts`() = runBlocking {
+        val vision = OcrProfileRevisionDraft(
+            provider = LlmProvider.OPENAI_COMPATIBLE,
+            model = "vision-model",
+            contextWindow = 32_000,
+            maxOutputTokens = 2_048,
+            endpoint = "http://127.0.0.1:11434/v1",
+        )
+        val profile = harness.context.ocrProfiles.create("Vision", vision, enabled = true)
+        harness.context.ocrProfiles.recordImageCapability(profile.revision.revisionId, true, "2026-11-07T10:00:00Z")
+        val path = "/api/collections/$collectionId/ocr-languages"
+        val body = """{"defaultImageProfileId":"${profile.id}","defaultIdentifyAppearance":true}"""
+
+        assertEquals(HttpStatusCode.Forbidden, status("reader", HttpMethod.Patch, path, body))
+        assertEquals(HttpStatusCode.Forbidden, status("editor", HttpMethod.Patch, path, body))
+        assertEquals(HttpStatusCode.NotFound, status("outsider", HttpMethod.Patch, path, body))
+        val version = harness.context.collections.get(CollectionId(collectionId))!!.version
+        val saved = harness.client.request(harness.url + path) {
+            this.method = HttpMethod.Patch
+            header(HttpHeaders.Authorization, "Bearer ${tokens.getValue("owner")}")
+            header(HttpHeaders.IfMatch, version.toString())
+            contentType(ContentType.Application.Json)
+            setBody(body)
+        }
+        assertEquals(HttpStatusCode.OK, saved.status, saved.bodyAsText())
+        assertContains(saved.bodyAsText(), profile.id)
+        val stored = harness.context.collections.get(CollectionId(collectionId))!!
+        assertEquals(profile.id, stored.defaultImageProfileId)
+        assertEquals(true, stored.defaultIdentifyAppearance)
+
+        val stale = harness.client.request(harness.url + path) {
+            this.method = HttpMethod.Patch
+            header(HttpHeaders.Authorization, "Bearer ${tokens.getValue("owner")}")
+            header(HttpHeaders.IfMatch, version.toString())
+            contentType(ContentType.Application.Json)
+            setBody("""{"defaultImageProfileId":"none","defaultIdentifyAppearance":false}""")
+        }
+        assertEquals(HttpStatusCode.Conflict, stale.status, stale.bodyAsText())
+        assertEquals(profile.id, harness.context.collections.get(CollectionId(collectionId))!!.defaultImageProfileId)
     }
 
     @Test

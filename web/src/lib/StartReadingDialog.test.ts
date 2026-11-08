@@ -6,7 +6,7 @@ import * as api from './api';
 
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
-  listReadingMethods: vi.fn(), previewImport: vi.fn(), startImport: vi.fn(),
+  listReadingMethods: vi.fn(), listOcrProfiles: vi.fn(), previewImport: vi.fn(), startImport: vi.fn(),
   previewRescan: vi.fn(), startRescan: vi.fn(),
 }));
 
@@ -34,6 +34,7 @@ describe('StartReadingDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.listReadingMethods).mockResolvedValue(methods);
+    vi.mocked(api.listOcrProfiles).mockResolvedValue([]);
     vi.mocked(api.previewImport).mockResolvedValue(importPreview);
     vi.mocked(api.previewRescan).mockResolvedValue(rescanPreview());
     vi.mocked(api.startImport).mockResolvedValue({ job: { id: 'job-1' } as api.JobApiView });
@@ -94,6 +95,57 @@ describe('StartReadingDialog', () => {
     await screen.findByRole('button', { name: 'Send at least 48 pages to api.example.com with Cloud OCR' });
     expect(screen.getByText('All pages in the listed files will be sent; total cost is unavailable because the page count is unknown.')).toBeTruthy();
     expect(screen.queryByText(/\$3\.2500/)).toBeNull();
+  });
+
+  it('sends the chosen image analysis, the appearance choice and the picture count', async () => {
+    vi.mocked(api.listOcrProfiles).mockResolvedValue([
+      { id: 'v1', name: 'Vision', enabled: true, imageCapabilityMeasured: true, scope: 'LOCAL' } as api.OcrProfile,
+      { id: 'unchecked', name: 'Unchecked', enabled: true, imageCapabilityMeasured: null } as api.OcrProfile,
+    ]);
+    vi.mocked(api.previewImport).mockResolvedValue({ ...importPreview, imageCount: 12, imageExternal: false, imageAllowance: 0 });
+    render(StartReadingDialog, {
+      collectionId: 'c',
+      request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] },
+      defaultImageExtraction: 'embedded',
+      onstarted: vi.fn(),
+      oncancel: vi.fn(),
+    });
+    const profile = await screen.findByTestId('describe-images') as HTMLSelectElement;
+    await waitFor(() => expect(screen.queryByRole('option', { name: 'Unchecked' })).toBeNull());
+
+    await fireEvent.change(profile, { target: { value: 'v1' } });
+    await waitFor(() => expect(api.previewImport).toHaveBeenLastCalledWith(expect.objectContaining({
+      imageExtraction: 'embedded',
+      imageAnalysis: { profileId: 'v1', identifyAppearance: false },
+    })));
+    expect((await screen.findByText(/12 images will be described/)).textContent).toContain('with Vision');
+
+    await fireEvent.click(screen.getByTestId('identify-appearance'));
+    await waitFor(() => expect(api.previewImport).toHaveBeenLastCalledWith(expect.objectContaining({
+      imageAnalysis: { profileId: 'v1', identifyAppearance: true },
+    })));
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Read 48 pages with Surya' }));
+    await waitFor(() => expect(api.startImport).toHaveBeenCalledWith(expect.objectContaining({
+      imageExtraction: 'embedded',
+      imageAnalysis: { profileId: 'v1', identifyAppearance: true },
+    })));
+  });
+
+  it('presents a scanned PDF picture count as a lower bound', async () => {
+    vi.mocked(api.listOcrProfiles).mockResolvedValue([
+      { id: 'v1', name: 'Vision', enabled: true, imageCapabilityMeasured: true, scope: 'LOCAL' } as api.OcrProfile,
+    ]);
+    vi.mocked(api.previewImport).mockResolvedValue({ ...importPreview, imageCount: 3, imageAtLeast: true, imageAllowance: 5 });
+    render(StartReadingDialog, {
+      collectionId: 'c',
+      request: { kind: 'import', uploads: ['u1'], include: [], exclude: [] },
+      defaultImageExtraction: 'all',
+      onstarted: vi.fn(),
+      oncancel: vi.fn(),
+    });
+    await fireEvent.change(await screen.findByTestId('describe-images'), { target: { value: 'v1' } });
+    expect((await screen.findByText(/images will be described/)).textContent).toContain('At least 3 images');
   });
 
   it('re-previews a stale preview and explains why', async () => {

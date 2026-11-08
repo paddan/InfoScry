@@ -403,6 +403,31 @@ class ImageLlmClient(
     }
 
     /**
+     * Describes and tags one picture through the shipped analysis instructions.
+     *
+     * The bytes are the caller's own prepared copy — already reduced to the analysis bound and encoded as PNG or
+     * JPEG — and the instructions are the analysis prompt for this picture, which carries its caption and page
+     * text inside an untrusted-data block. Unlike a page reading, the answer names no page: it is a description
+     * of the image this call sent, and the caller attributes it to that image. Nothing else about the exchange
+     * differs: the permit, the credential, the budget and the one bounded call are the same rules.
+     */
+    suspend fun describe(
+        identity: PageDispatchIdentity,
+        image: ByteArray,
+        mediaType: String,
+        instructions: String,
+    ): ImageAnswer<String> {
+        val measured = imageFormOf(image)
+        return exchange(
+            identity = identity,
+            image = image,
+            form = ImageForm(mediaType, measured.pixels),
+            instructions = instructions,
+            requiresIdentity = false,
+        ) { it }
+    }
+
+    /**
      * Checks that this profile can carry an image at all, using the explicit synthetic image.
      *
      * The image is this build's own constant — a page of this project's words, drawn and encoded here — so
@@ -446,6 +471,14 @@ class ImageLlmClient(
         form: ImageForm,
         instructions: String,
         probe: Boolean = false,
+        /**
+         * Whether the answer has to name this page.
+         *
+         * A page reading does, because a model that answered about another page has not read this one. An image
+         * analysis's schema names no page at all: the description belongs to the image this call carried, and
+         * the caller attributes it to that image, so there is nothing for the answer to echo.
+         */
+        requiresIdentity: Boolean = true,
         decode: (String) -> T,
     ): ImageAnswer<T> {
         // Nothing is sent before the permit: a page image that leaves this machine without one is the
@@ -480,7 +513,7 @@ class ImageLlmClient(
             )
         }
         requireFits(instructions, form.pixels)
-        return dispatch(identity, form.mediaType, image, instructions, credential, decode)
+        return dispatch(identity, form.mediaType, image, instructions, credential, requiresIdentity, decode)
     }
 
     /**
@@ -526,6 +559,7 @@ class ImageLlmClient(
         image: ByteArray,
         instructions: String,
         credential: String?,
+        requiresIdentity: Boolean,
         decode: (String) -> T,
     ): ImageAnswer<T> {
         var attempt = 1
@@ -537,7 +571,7 @@ class ImageLlmClient(
             }
             val answer = try {
                 withTimeout(timeout) {
-                    oneAttempt(identity, mediaType, image, instructions, credential, decode)
+                    oneAttempt(identity, mediaType, image, instructions, credential, requiresIdentity, decode)
                 }
             } catch (retryable: RetryableStatus) {
                 if (attempt > retryPolicy.maxRetries) throw failureFor(retryable.status)
@@ -594,10 +628,11 @@ class ImageLlmClient(
         image: ByteArray,
         instructions: String,
         credential: String?,
+        requiresIdentity: Boolean,
         decode: (String) -> T,
     ): ImageAnswer<T> {
         val response = post(mediaType, image, instructions, credential)
-        if (response.status.isSuccess()) return readAnswer(response, identity, decode)
+        if (response.status.isSuccess()) return readAnswer(response, identity, requiresIdentity, decode)
         if (response.status.value in REDIRECT_STATUSES) {
             throw ImageLlmException(
                 ImageLlmException.REDIRECT_REFUSED,
@@ -699,6 +734,7 @@ class ImageLlmClient(
     private suspend fun <T> readAnswer(
         response: HttpResponse,
         identity: PageDispatchIdentity,
+        requiresIdentity: Boolean,
         decode: (String) -> T,
     ): ImageAnswer<T> {
         val body = boundedBody(response)
@@ -736,7 +772,7 @@ class ImageLlmClient(
             }
         }
         val document = parseAnswer(content)
-        requireAnsweredFor(document, identity)
+        if (requiresIdentity) requireAnsweredFor(document, identity)
         val value = try {
             decode(content)
         } catch (refused: ImageLlmException) {

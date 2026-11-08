@@ -10,7 +10,10 @@ import infoscry.domain.JobId
 import infoscry.domain.JobType
 import infoscry.extract.ExtractionSettings
 import infoscry.ocr.CollectionOcrSettings
+import infoscry.ocr.ImageAnalysisAdmission
+import infoscry.ocr.ImageAnalysisRequest
 import infoscry.ocr.OcrProfileService
+import infoscry.ocr.ReadingMethodUnavailableException
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.ReadingMethod
 import infoscry.ocr.ReadingMethodCatalog
@@ -33,6 +36,8 @@ data class ImportStartRequest(
     val restartStopped: Boolean = false,
     /** How much imagery to extract; null follows the collection's default when the import is admitted. */
     val imageExtraction: infoscry.image.ImageExtractionMode? = null,
+    /** How the run describes its pictures; null describes none. */
+    val imageAnalysis: ImageAnalysisRequest? = null,
 )
 
 class StaleImportPreviewException : ApiFaultException(
@@ -71,6 +76,8 @@ class ImportStartService internal constructor(
                     include = request.include,
                     exclude = request.exclude,
                     method = request.method,
+                    imageExtraction = request.imageExtraction,
+                    imageAnalysis = request.imageAnalysis,
                 )
                 val availability = catalog.require(collection.id, request.method)
                 val preview = previews.preview(previewRequest)
@@ -84,11 +91,20 @@ class ImportStartService internal constructor(
                 )
                 val manifestScopeConfirmed = availability.external && preview.atLeast
                 val allowance = if (availability.external && !manifestScopeConfirmed) preview.totalPages else 0
+                val images = request.imageExtraction ?: collection.defaultImageExtraction
+                val admittedImage = ImageAnalysisAdmission.admit(request.imageAnalysis, ocr::get, preview.imageCount)
+                if (admittedImage != null && images == infoscry.image.ImageExtractionMode.OFF) {
+                    throw ReadingMethodUnavailableException(
+                        "describing images needs images on; choose how much imagery to extract, or describe none",
+                    )
+                }
                 val snapshot = ocr.withProbedRuntime(
                     baseSnapshot.copy(
                         externalPageLimit = allowance,
                         externalConfirmedSourceScope = manifestScopeConfirmed,
-                        imageExtraction = request.imageExtraction ?: collection.defaultImageExtraction,
+                        imageExtraction = images,
+                        imageAnalysis = admittedImage?.choice,
+                        imageAnalysisExternalLimit = admittedImage?.externalAllowance ?: 0,
                     ),
                 )
                 val settings = extractionSettings(collection.ocrLanguages).forOcrSettings(snapshot)
@@ -153,6 +169,10 @@ class ImportStartService internal constructor(
             // Absent follows the collection's default and adds nothing, so a request recorded before the field
             // existed still replays; a stated mode is part of what was asked.
             request.imageExtraction?.let { add("images" to it.id) }
+            request.imageAnalysis?.let { choice ->
+                add("describeImages" to choice.profileId)
+                add("identifyAppearance" to choice.identifyAppearance.toString())
+            }
             add("recursive" to request.recursive.toString())
             extensions.include.forEach { add("include" to it) }
             extensions.exclude.forEach { add("exclude" to it) }

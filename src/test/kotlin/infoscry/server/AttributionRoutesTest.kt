@@ -191,15 +191,26 @@ class AttributionRoutesTest {
         val accepted = send("anna", HttpMethod.Post, "/api/reindex", """{"collection":"$collectionId"}""")
         assertEquals(HttpStatusCode.Accepted, accepted.status, accepted.bodyAsText())
         val queued = harness.context.jobs.enqueue(JobType.REINDEX, collectionId = CollectionId(collectionId))
-        // Claimed here, so the worker this class runs cannot take it and finish it before the cancellation.
-        harness.context.jobs.claim(queued.id)
-        // Enqueued outside a request: nobody in person.
+        // Enqueued outside a request: nobody in person, whether or not the worker has claimed it yet.
         assertEquals(null, harness.context.jobs.get(queued.id)?.startedBy)
 
         val jobId = json(accepted.bodyAsText())["jobId"]!!.jsonPrimitive.content
         assertEquals(users.getValue("anna").id, harness.context.jobs.get(JobId(jobId))?.startedBy)
-        send("erik", HttpMethod.Post, "/api/jobs/${queued.id.value}/cancel")
-        val job = json(send("anna", HttpMethod.Get, "/api/jobs/${queued.id.value}").bodyAsText())["job"]!!.jsonObject
+        // A job inserted already running cannot be claimed and finished by the worker before the
+        // cancellation, so the attribution under test is decided without racing it.
+        val runningId = JobId("attribution-running")
+        harness.context.database.transaction { connection ->
+            connection.prepareStatement(
+                "INSERT INTO jobs (id, collection_id, type, state, created_at, updated_at) " +
+                    "VALUES (?, ?, 'REINDEX', 'RUNNING', '2026-11-07T00:00:00Z', '2026-11-07T00:00:00Z')",
+            ).use { statement ->
+                statement.setString(1, runningId.value)
+                statement.setString(2, collectionId)
+                statement.executeUpdate()
+            }
+        }
+        send("erik", HttpMethod.Post, "/api/jobs/${runningId.value}/cancel")
+        val job = json(send("anna", HttpMethod.Get, "/api/jobs/${runningId.value}").bodyAsText())["job"]!!.jsonObject
         assertEquals("Erik Lund", job["cancelledBy"]!!.jsonObject["displayName"]!!.jsonPrimitive.content)
         assertTrue(json(send("anna", HttpMethod.Get, "/api/jobs/$jobId").bodyAsText())["job"]!!.jsonObject["startedBy"].toString().contains("Anna Berg"))
     }

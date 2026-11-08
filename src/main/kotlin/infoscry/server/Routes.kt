@@ -77,6 +77,10 @@ data class UpdateOcrLanguagesRequest(
     val defaultMethod: ReadingMethod? = null,
     /** `off`, `embedded` or `all`; absent keeps the collection's current default. */
     val defaultImageExtraction: String? = null,
+    /** The profile future runs describe pictures with; absent keeps it, blank or `none` clears it. */
+    val defaultImageProfileId: String? = null,
+    /** Whether future runs name what they recognise from appearance; absent keeps it. */
+    val defaultIdentifyAppearance: Boolean? = null,
 ) {
 
     fun toUpdate(): OcrSettingsUpdate = OcrSettingsUpdate(
@@ -174,6 +178,8 @@ data class ImportRequest(
     val restartStopped: Boolean = false,
     /** `off`, `embedded` or `all`; absent takes the collection's default. A stated value is part of the request. */
     val imageExtraction: String? = null,
+    /** How the run describes its pictures; absent describes none. */
+    val imageAnalysis: infoscry.ocr.ImageAnalysisRequest? = null,
 )
 
 @Serializable
@@ -184,6 +190,10 @@ data class ImportPreviewRouteRequest(
     val include: List<String> = emptyList(),
     val exclude: List<String> = emptyList(),
     val method: String,
+    /** `off`, `embedded` or `all`; absent takes the collection's default. */
+    val imageExtraction: String? = null,
+    /** How the run describes its pictures; absent describes none. */
+    val imageAnalysis: infoscry.ocr.ImageAnalysisRequest? = null,
 )
 
 /**
@@ -340,11 +350,24 @@ fun Application.configureRoutes(
                     val request = call.receiveJson<UpdateOcrLanguagesRequest>()
                     val images = parseImageMode(request.defaultImageExtraction)
                     val expected = call.ifMatchVersion()
-                    val saved = if (images != null && request.language == null && request.defaultMethod == null) {
+                    val imageAnalysis = if (request.defaultImageProfileId != null || request.defaultIdentifyAppearance != null) {
+                        infoscry.storage.ImageAnalysisDefaults(
+                            profileId = request.defaultImageProfileId?.takeUnless { it.isBlank() || it == "none" },
+                            identifyAppearance = request.defaultIdentifyAppearance ?: false,
+                        )
+                    } else {
+                        null
+                    }
+                    val saved = if (images != null && request.language == null && request.defaultMethod == null &&
+                        imageAnalysis == null
+                    ) {
                         context.collectionService.updateImageDefault(id, images, expected)
                     } else {
-                        // One edit, one version check: the image default travels with the OCR settings.
-                        context.collectionService.updateOcrSettings(id, request.toUpdate(), expected, images)
+                        // One edit, one version check: the image default and the analysis defaults travel with the
+                        // OCR settings, so a stale edit of any of them conflicts as one edit.
+                        context.collectionService.updateOcrSettings(
+                            id, request.toUpdate(), expected, images, imageAnalysis,
+                        )
                     }
                     call.respondJson(HttpStatusCode.OK, CollectionResponse(saved))
                 }
@@ -372,6 +395,8 @@ fun Application.configureRoutes(
                             include = request.include,
                             exclude = request.exclude,
                             method = method,
+                            imageExtraction = parseImageMode(request.imageExtraction),
+                            imageAnalysis = request.imageAnalysis,
                         ),
                     )
                     // An uploaded file is named as the person knows it, not by where the server keeps it.
@@ -406,6 +431,7 @@ fun Application.configureRoutes(
                             requestId = request.requestId,
                             restartStopped = request.restartStopped,
                             imageExtraction = parseImageMode(request.imageExtraction),
+                            imageAnalysis = request.imageAnalysis,
                         ),
                     )
                     call.respondJson(

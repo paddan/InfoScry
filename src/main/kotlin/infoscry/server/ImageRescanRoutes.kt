@@ -36,7 +36,11 @@ private fun infoscry.document.ImageRescanRun.toWire() = ImageRescanRunWire(
 )
 
 @Serializable
-data class StartImageRescanRequest(val imageExtraction: String)
+data class StartImageRescanRequest(
+    val imageExtraction: String,
+    /** How the run describes its pictures; absent describes none. */
+    val imageAnalysis: infoscry.ocr.ImageAnalysisRequest? = null,
+)
 
 /** Finding the images of every document of a collection; mounted under `/api/collections/{id}`. */
 fun Route.imageRescanRoutes(context: AppContext) {
@@ -58,7 +62,7 @@ fun Route.imageRescanRoutes(context: AppContext) {
             } catch (_: IllegalArgumentException) {
                 throw BadRequestException("unknown image extraction mode")
             }
-            val job = context.collectionImageRescanService.start(call.collectionId(), mode)
+            val job = context.collectionImageRescanService.start(call.collectionId(), mode, request.imageAnalysis)
             call.respondJson(HttpStatusCode.OK, JobResponse(job.toApiView(context)))
         }
     }

@@ -311,6 +311,40 @@ class InvestigationToolsTest {
     }
 
     @Test
+    fun `search and direct reads label a picture as a picture`() {
+        val docA = document(collectionA)
+        val locator = SourceLocation.ImageRegion(SourceLocation.PdfPage(14), 2, null)
+        val text = "Fig. 3\n\nA man by a car.\n\nperson: possibly Jeffrey Epstein"
+        val unit = addUnit(docA, ImageIdentity.ordinal(14, 2)!!, text, locator = locator)
+        val search = FakeSearch()
+        search.hits = listOf(
+            SearchHit(
+                collectionId = collectionA,
+                documentId = docA,
+                unitId = unit,
+                chunkOrdinal = 0,
+                text = text,
+                highlighted = null,
+                locator = locator,
+                locatorLabel = locator.describe(),
+                matchedBy = setOf(SearchMode.HYBRID),
+            ),
+        )
+        val tools = tools(collectionA, search)
+
+        val searched = assertIs<ToolResult.Success>(tools.execute("search_collection", """{"query":"man"}"""))
+        assertEquals("Picture: image 2 on page 14", searched.evidence.single().locatorLabel)
+        assertTrue(searched.evidence.single().text.contains("possibly"))
+        assertEquals(
+            "Picture: image 2 on page 14",
+            Json.parseToJsonElement(searched.payloadJson).jsonArray.single().jsonObject["locatorLabel"]!!.jsonPrimitive.content,
+        )
+
+        val read = assertIs<ToolResult.Success>(tools.execute("read_content_unit", """{"contentUnitId":"${unit.value}"}"""))
+        assertEquals("Picture: image 2 on page 14", read.evidence.single().locatorLabel)
+    }
+
+    @Test
     fun `a large unit is truncated to the result cap with truncated true`() {
         val docA = document(collectionA)
         val big = "x".repeat(5_000)

@@ -10,6 +10,9 @@ import infoscry.image.ImageArtifacts
 import infoscry.image.ImageFinders
 import infoscry.image.ImageStage
 import infoscry.image.LayoutRegions
+import infoscry.image.analysis.ImageAnalysisStep
+import infoscry.image.analysis.ImageAnalyzer
+import infoscry.ocr.ImageLlmClient
 import infoscry.ocr.PageOcrEngines
 import infoscry.ocr.SuryaOcr
 import infoscry.ocr.CandidateRevisionSink
@@ -96,6 +99,19 @@ class ImportPipeline(
                     artifacts = ImageArtifacts(),
                     store = context.imageStore,
                     documents = context.documents,
+                    // A picture is described through the analysis profile its run was admitted with; every
+                    // external call is asked for a permit against the allowance that run owns.
+                    analysis = ImageAnalysisStep(
+                        analyzer = ImageAnalyzer { profile, dispatch ->
+                            ImageLlmClient(
+                                profile = profile,
+                                permits = dispatch,
+                                calls = dispatch?.let { authority -> authority::attemptAboutToBeSent },
+                            )
+                        },
+                        store = infoscry.storage.ImageAnalysisStore(context.database),
+                        profileRevisionOf = { revisionId -> context.ocrProfiles.findRevision(revisionId) },
+                    ),
                 ),
                 registry = ExtractorRegistry.production(
                     surya = surya,

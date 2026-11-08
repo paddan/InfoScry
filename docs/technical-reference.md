@@ -63,7 +63,11 @@ and the `source_image_*` columns of `content_units` (written only for image unit
 (version 5) lets `document_images.caption_source` be `PAGE_TEXT`. `006_image_rescan_job.sql` (version 6) adds the
 `IMAGE_RESCAN` job type: a collection-wide image rescan that admits one *Keep current text* rescan per PDF and
 picture (request id `image-rescan:<job>:<document>`, so a repeated or resumed job starts nothing twice) and leaves a
-document with a running reading alone. [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
+document with a running reading alone. `007_image_tagging.sql` (version 7) adds `image_analyses`,
+`image_tag_edits`, `collections.default_image_profile_id`, `collections.default_identify_appearance`,
+`search_chunks.image_categories` and the `IMAGE_ANALYSIS` external dispatch stage; existing text chunks get an
+empty category list. `008_image_analysis_source_text.sql` (version 8) adds the caption and page text an analysis
+was made with, so an edit can rebuild the picture's unit text; earlier analyses keep none. [SchemaMigrator](../src/main/kotlin/infoscry/storage/SchemaMigrator.kt)
 applies every script above the database's version in one transaction, recording
 each version in `schema_version`, so a crash leaves the version it started from
 and starting again resumes. Values keep their
@@ -139,6 +143,55 @@ Design: [image foundation](specs/2026-11-07-image-foundation-design.md), with it
   `TOO_MANY_IMAGES`, `IMAGE_PARENT_UNREADABLE`, `IMAGE_EXTRACTION_FAILED`, `IMAGE_PARENT_ORDINAL_TOO_LATE`,
   `IMAGE_SOURCE_UNREADABLE`; a warning completes the document with warnings and keeps its text, and the most
   important code is recorded as the document's error code and message and named by the reader.
+
+## Image tagging
+
+Design: [image tagging](specs/2026-11-07-image-tagging-design.md).
+
+- **Analysis.** An image-capable OCR profile chosen per run describes each extracted picture: a
+  description of at most 400 characters and at most 30 tags
+  `{category, label, name?, source}`. Categories are `PERSON`, `OBJECT`, `ANIMAL`, `PLACE` and `TEXT`;
+  sources are `TEXT`, `APPEARANCE` and `MANUAL`. A name is `TEXT` only when the caption or page text
+  states it (compared case- and accent-insensitively); a name the model recognised from the pixels is
+  `APPEARANCE` and is shown and indexed as `possibly <name>`. Without *Identify from appearance* the
+  prompt names only what the text states and every appearance-derived name is dropped, keeping the
+  generic label; a model that labels a tag `MANUAL` is demoted to `APPEARANCE`.
+- **Reuse.** `image_analyses` has one row per `(document_id, unit_id, image_sha256,
+  profile_revision_id, prompt_version, language, identify_appearance)`, with `outcome` `DONE` or
+  `FAILED`, the description, the tags (JSONB), the caption and page context the analysis was made with,
+  and an error code. A `DONE` row is reused with no model call; a `FAILED` row is replaced by the next
+  attempt's result. An image-only rescan with no choice keeps the latest `DONE` analysis of its pictures.
+- **Unit text.** Caption, blank line, description, blank line, one `label: name` line per tag
+  (`possibly name` for `APPEARANCE`), blank line, page context; absent parts and their blank lines are
+  omitted and nothing is truncated. The chunker splits it, so a long description remains searchable.
+- **Edits.** `image_tag_edits` has one row per `(document_id, unit_id, edit_id)`: `ADD`, `REMOVE` or
+  `CONFIRM`, the tag, the person and the time. Edits apply to every analysis in creation order — a removed
+  tag stays out when a later analysis proposes it again, a confirmed one becomes `MANUAL` — and
+  `tagsVersion` is the unit's highest edit sequence. An edit stores the row and republishes the document:
+  a candidate descended from the published reading, the one picture's text rebuilt and re-chunked,
+  embedded in the request, then published with its search rows' `image_categories` updated. A stale
+  `If-Match` answers 409 `EDIT_CONFLICT`; the same `editId` twice changes nothing.
+- **Search.** `search_chunks.image_categories TEXT[]` holds the categories of a picture's effective
+  tags (empty for a text unit) and is written in the publication transaction. `picture=people|objects|
+  animals|places` (GET) or `picture` in the POST filters restricts keyword, semantic and hybrid search to
+  rows carrying that category; it applies inside the index query and in the semantic candidate count.
+- **Runs.** Import start, rescan preview and collection image-rescan start accept
+  `imageAnalysis: {profileId, identifyAppearance} | null`; the profile is resolved to its current
+  revision at admission and must have passed the image check, else 409 `IMAGE_PROFILE_UNAVAILABLE`. The
+  choice and an external picture allowance travel in the attempt snapshot; `OcrDispatchStage.IMAGE_ANALYSIS`
+  counts each dispatched picture against that allowance, never the page allowance. The allowance is
+  counted in the preview where that is possible — one for a standalone picture, a PDF's embedded images
+  from its page resources — and a region pass on a scanned page makes the shown count a lower bound and
+  adds one figure per scanned page to the allowance. A format whose pictures are attached to
+  extractor-named units (Office, EPUB) is not counted, and an external profile is refused for it rather
+  than given a guessed allowance. A picture analysis that fails is a warning on a complete document,
+  never a failed document.
+- **Routes.** `GET …/images/{unitId}/tags` is a reader route; `POST …/images/{unitId}/tags` is an
+  editor route with `{editId, action, tag}` and `If-Match: <tagsVersion>`. The image views and list carry
+  `description`, `tags` and `tagsVersion`.
+- **Codes.** `IMAGE_ANALYSIS_INVALID`, `IMAGE_ANALYSIS_REFUSED`, `IMAGE_ANALYSIS_TIMEOUT` (per picture,
+  reported as warnings) and `IMAGE_PROFILE_UNAVAILABLE` (the chosen profile is gone, disabled, unchecked,
+  or its external send was not confirmed).
 
 ## Mutation, deletion and recovery
 

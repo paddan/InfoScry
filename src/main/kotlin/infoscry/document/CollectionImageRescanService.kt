@@ -160,7 +160,11 @@ class CollectionImageRescanService(
     }
 
     /** The collection's running image rescan job, or a new one for [mode]. */
-    suspend fun start(collectionId: CollectionId, mode: ImageExtractionMode): Job {
+    suspend fun start(
+        collectionId: CollectionId,
+        mode: ImageExtractionMode,
+        imageAnalysis: infoscry.ocr.ImageAnalysisRequest? = null,
+    ): Job {
         if (mode == ImageExtractionMode.OFF) throw ImageRescanModeRequiredException()
         return mutations.withMutation {
             collections.requireMutationsAllowed()
@@ -170,7 +174,7 @@ class CollectionImageRescanService(
                     ?: jobs.enqueue(
                         JobType.IMAGE_RESCAN,
                         collectionId,
-                        payload = ImageRescanJobPayload.of(mode).encode(),
+                        payload = ImageRescanJobPayload.of(mode, imageAnalysis).encode(),
                         total = documents.countByCollection(collectionId),
                     )
             }

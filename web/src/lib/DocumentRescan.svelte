@@ -8,6 +8,8 @@
   export let visible = true;
   export let collectionId: string;
   export let defaultImageExtraction: ImageExtraction = 'off';
+  export let defaultImageProfileId: string | null = null;
+  export let defaultIdentifyAppearance = false;
   export let documentId: string;
   export let documentName: string;
   export let document: DocumentApiRow | undefined = undefined;
@@ -356,6 +358,8 @@
     <StartReadingDialog
       {collectionId}
       {defaultImageExtraction}
+      {defaultImageProfileId}
+      {defaultIdentifyAppearance}
       request={{ kind: 'rescan', documentId, selection: dialogSelection }}
       onstarted={(run) => readingStarted(run as RescanStarted)}
       oncancel={() => (dialogOpen = false)}

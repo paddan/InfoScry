@@ -305,6 +305,10 @@ data class Collection(
     val updatedBy: UserRef? = null,
     /** How much imagery an import or rescan of this collection extracts unless it is told otherwise. */
     val defaultImageExtraction: ImageExtractionMode = ImageExtractionMode.OFF,
+    /** The OCR profile future runs describe and tag pictures with unless they choose another one. */
+    val defaultImageProfileId: String? = null,
+    /** Whether future runs also name what they recognise from a picture's appearance, unless told otherwise. */
+    val defaultIdentifyAppearance: Boolean = false,
     /** The caller's role here (`OWNER`, `EDITOR`, `READER`), filled in for a listing; never persisted. */
     val callerRole: String? = null,
 ) {

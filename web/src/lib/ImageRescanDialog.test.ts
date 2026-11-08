@@ -7,6 +7,7 @@ import ImageRescanDialog from './ImageRescanDialog.svelte';
 vi.mock('./api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api')>()),
   getImageRescanCensus: vi.fn(),
+  listOcrProfiles: vi.fn(),
   startImageRescan: vi.fn(),
 }));
 
@@ -16,6 +17,7 @@ describe('ImageRescanDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getImageRescanCensus).mockResolvedValue({ eligible: 3, skipped: { UNSUPPORTED_FORMAT: 2 }, job: null });
+    vi.mocked(api.listOcrProfiles).mockResolvedValue([]);
     vi.mocked(api.startImageRescan).mockResolvedValue(job);
   });
   afterEach(cleanup);
@@ -45,6 +47,23 @@ describe('ImageRescanDialog', () => {
     const select = screen.getByLabelText('Extract images') as HTMLSelectElement;
     expect(select.value).toBe('all');
     expect(Array.from(select.options).map((option) => option.value)).toEqual(['embedded', 'all']);
+  });
+
+  it('offers only checked image profiles and starts with the chosen analysis', async () => {
+    vi.mocked(api.listOcrProfiles).mockResolvedValue([
+      { id: 'v1', name: 'Vision', enabled: true, imageCapabilityMeasured: true } as api.OcrProfile,
+      { id: 'unchecked', name: 'Unchecked', enabled: true, imageCapabilityMeasured: null } as api.OcrProfile,
+    ]);
+    open();
+    await screen.findByText('3 documents will be scanned for images.');
+    expect(screen.queryByRole('option', { name: 'Unchecked' })).toBeNull();
+    await fireEvent.change(screen.getByTestId('describe-images'), { target: { value: 'v1' } });
+    await fireEvent.click(screen.getByTestId('identify-appearance'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+
+    await waitFor(() => expect(api.startImageRescan).toHaveBeenCalledWith(
+      'c1', 'embedded', { profileId: 'v1', identifyAppearance: true },
+    ));
   });
 
   it('cannot start when no document qualifies', async () => {

@@ -22,6 +22,9 @@ import infoscry.extract.TextNormalizer
 import infoscry.jobs.RescanJobPayload
 import infoscry.ocr.CollectionOcrSettings
 import infoscry.ocr.OcrCostEstimate
+import infoscry.ocr.ImageAnalysisAdmission
+import infoscry.ocr.ImageAnalysisRequest
+import infoscry.ocr.ImageProfileUnavailableException
 import infoscry.ocr.OcrDispatchAuthority
 import infoscry.ocr.OcrEndpointScope
 import infoscry.ocr.OcrNamedDestination
@@ -614,6 +617,8 @@ class RescanService(
         selection: RescanSelection = RescanSelection.Automatic,
         /** The image mode confirmed in the dialog; null takes the collection's default. */
         imageExtraction: ImageExtractionMode? = null,
+        /** How the run describes its pictures; null describes none. */
+        imageAnalysis: ImageAnalysisRequest? = null,
     ): RescanPreview {
         val collection = requireActiveCollection(collectionId)
         val document = requireDocument(collectionId, documentId)
@@ -621,6 +626,10 @@ class RescanService(
         val images = imageExtraction ?: collection.defaultImageExtraction
         // Keeping the text leaves only the image step to do, so with images off there is nothing for it to do.
         if (method == ReadingMethod.KeepText && images == ImageExtractionMode.OFF) {
+            throw ReadingMethodUnavailableException(KEEP_TEXT_NEEDS_IMAGES)
+        }
+        // A picture with images off is not delivered, so there is nothing for an image profile to describe.
+        if (imageAnalysis != null && images == ImageExtractionMode.OFF) {
             throw ReadingMethodUnavailableException(KEEP_TEXT_NEEDS_IMAGES)
         }
         pageImagesRefusal(document)?.let { throw it }
@@ -644,11 +653,23 @@ class RescanService(
         )
         val frozenSelection = selection.canonicalized(census.documentPages)
         val pageTotal = census.pagesToRead
+        // The pictures the document publishes now: what an image-only rescan would describe again. A rescan that
+        // also reads pages can find new pictures, and those are counted when they are found; the dialog's
+        // allowance is this count.
+        val publishedImages = baselineRevisionId
+            ?.let { revisions.pages(it) }
+            ?.count { page -> infoscry.image.ImageIdentity.isImageOrdinal(page.ordinal) }
+        val imageCount = publishedImages.takeIf { images != ImageExtractionMode.OFF }
+        val admittedImage = ImageAnalysisAdmission.admit(imageAnalysis, profileOf, imageCount)
+        val imageRevision = admittedImage?.choice?.profileRevisionId?.let(profileRevisionOf)
+        val imageEstimate = ImageAnalysisAdmission.costEstimateOf(imageCount, imageRevision)
         val snapshot = snapshotFor(settings, externalPageLimit = if (method is ReadingMethod.Llm &&
             profileOf(method.profileId)?.revision?.scope == OcrEndpointScope.EXTERNAL
         ) pageTotal else 0).copy(
             imageExtraction = images,
             keepsText = method == ReadingMethod.KeepText,
+            imageAnalysis = admittedImage?.choice,
+            imageAnalysisExternalLimit = admittedImage?.externalAllowance ?: 0,
         )
         requireRescanable(document, snapshot)
         val destinations = destinationsOf(snapshot)
@@ -673,6 +694,16 @@ class RescanService(
             externalAllowance = snapshot.externalPageLimit,
             expiresAt = clock().plus(PREVIEW_LIFETIME).toString(),
             documentPages = census.documentPages,
+            imageCount = imageCount,
+            imageExternal = imageRevision?.scope == OcrEndpointScope.EXTERNAL,
+            imageEstimatedCostUsd = imageEstimate?.amountUsd,
+            imageCostBasis = imageEstimate?.basis
+                ?: if (admittedImage != null && imageRevision?.scope == OcrEndpointScope.EXTERNAL) {
+                    "the number of pictures is unknown, so the cost of sending them is unavailable"
+                } else {
+                    null
+                },
+            imageAllowance = snapshot.imageAnalysisExternalLimit,
         ).also { preview ->
             operations.recordPreview(
                 collectionId.value,
@@ -986,6 +1017,7 @@ class RescanService(
         documentId: DocumentId,
         mode: ImageExtractionMode,
         requestId: String,
+        imageAnalysis: ImageAnalysisRequest? = null,
     ): ImageRescanStep {
         require(mode != ImageExtractionMode.OFF) { "an image rescan needs images on" }
         val document = documents.get(documentId)?.takeIf { it.collectionId == collectionId }
@@ -996,7 +1028,9 @@ class RescanService(
         imageRescanEligibility(document)?.let { return ImageRescanStep(it) }
         if (operations.activeOperation(documentId) != null) return ImageRescanStep(ImageRescanOutcome.BUSY)
         return try {
-            val preview = preview(collectionId, documentId, ReadingMethod.KeepText, RescanSelection.Automatic, mode)
+            val preview = preview(
+                collectionId, documentId, ReadingMethod.KeepText, RescanSelection.Automatic, mode, imageAnalysis,
+            )
             val operation = admitRescan(collectionId, documentId, preview.previewId, requestId)
             ImageRescanStep(if (operation.requestId == requestId) ImageRescanOutcome.STARTED else ImageRescanOutcome.BUSY)
         } catch (refused: RescanRefusalException) {
@@ -1154,6 +1188,23 @@ class RescanService(
      * for a preview is decided by [requirePreviewStillCurrent].
      */
     private fun requireSnapshotStillResolvable(snapshot: OcrSettingsSnapshot) {
+        snapshot.imageAnalysis?.let { choice ->
+            val revision = profileRevisionOf(choice.profileRevisionId)
+                ?: throw ImageProfileUnavailableException(
+                    "the image profile this run was admitted with no longer exists; preview again",
+                )
+            if (!revision.imageCapabilitySupported) {
+                throw ImageProfileUnavailableException(
+                    "the image profile no longer passes the image check; check it again or choose another profile",
+                )
+            }
+            val activeRevisionId = profileOf(revision.profileId)?.revision?.revisionId
+            if (activeRevisionId != revision.revisionId) {
+                throw ImageProfileUnavailableException(
+                    "the image profile points at another revision now than the one previewed; preview again",
+                )
+            }
+        }
         listOfNotNull(snapshot.transcriptionProfileRevisionId).forEach { id ->
             val revision = profileRevisionOf(id)
                 ?: throw StaleRescanPreviewException(

@@ -6,6 +6,9 @@ import infoscry.domain.DocumentId
 import infoscry.domain.SourceImageRoot
 import infoscry.domain.SourceLocation
 import infoscry.extract.UnitBoundary
+import infoscry.image.analysis.AnalysisRules
+import infoscry.image.analysis.ImageAnalysisStep
+import infoscry.ocr.OcrDispatchAuthority
 import infoscry.ocr.OcrSettingsSnapshot
 import infoscry.ocr.PageImage
 import infoscry.ocr.PageStructure
@@ -81,6 +84,8 @@ class ImageStage(
     private val artifacts: ImageArtifacts,
     private val store: ImageStore,
     private val documents: DocumentStore,
+    /** How each picture is described and tagged, or null when this build analyses no pictures. */
+    private val analysis: ImageAnalysisStep? = null,
 ) {
 
     /**
@@ -99,6 +104,8 @@ class ImageStage(
         target: ImageUnitTarget,
         boundary: UnitBoundary,
         settings: OcrSettingsSnapshot,
+        /** The run's permit authority for picture analysis, when the snapshot asked for an external one. */
+        dispatch: OcrDispatchAuthority? = null,
     ): ImageStageResult {
         if (mode == ImageExtractionMode.OFF || parents.isEmpty()) return ImageStageResult.NONE
         val committed = store.checkpoints(document.id, target.target, mode, IMAGE_EXTRACTOR_VERSION)
@@ -126,7 +133,7 @@ class ImageStage(
             for (context in parents) {
                 if (context.parent.unitId in committed) continue
                 if (documents.isDeletionTarget(document.id)) throw DocumentBeingDeletedException(document.id)
-                val run = ParentRun(document, managedPath, artifactRoot, context, mode, target, boundary, settings)
+                val run = ParentRun(document, managedPath, artifactRoot, context, mode, target, boundary, settings, dispatch)
                 val outcome = extractParent(run, source, repeated, total, regionsAvailable, summary)
                 total += outcome.delivered
                 if (outcome.regionsUnavailable) regionsAvailable = false
@@ -178,6 +185,7 @@ class ImageStage(
         val target: ImageUnitTarget,
         val boundary: UnitBoundary,
         val settings: OcrSettingsSnapshot,
+        val dispatch: OcrDispatchAuthority?,
     )
 
     private class ParentOutcome(val delivered: Int, val regionsUnavailable: Boolean)
@@ -269,12 +277,64 @@ class ImageStage(
     ): Int {
         checkNotDeleting(run)
         val parent = run.context.parent
-        // Invalidate first: a checkpoint of another mode that outlives a kill between the changes below would make a
-        // later run of that mode skip a parent whose units this run changed. A missing checkpoint only costs a repeat.
-        store.clearOtherModeCheckpoints(run.document.id, run.target.target, parent.unitId, run.mode)
+        // Analysing a picture is a model call: it must not hold the unit boundary, which is this process's
+        // mutation permit, for as long as a provider takes to answer. Artifacts are content-addressed and
+        // written idempotently, so what is prepared here is safe to prepare again after an interruption.
+        val prepared = prepare(run, images, repeated, totalBefore, counts)
+        return run.boundary.unit {
+            checkNotDeleting(run)
+            // Invalidate first: a checkpoint of another mode that outlives a kill between the changes below would
+            // make a later run of that mode skip a parent whose units this run changed. A missing checkpoint only
+            // costs a repeat.
+            store.clearOtherModeCheckpoints(run.document.id, run.target.target, parent.unitId, run.mode)
+            val produced = HashSet<ContentUnitId>()
+            for (image in prepared) {
+                store.record(image.record)
+                run.target.deliver(image.ordinal, image.unitId, image.locator, image.text, image.written, image.root)
+                produced += image.unitId
+            }
+            // What an earlier run (another mode, or more images) left in this parent's band and this one did not
+            // produce is stale. A parent that could not be read at all says nothing about what it holds, so it keeps
+            // its units.
+            if (!unreadable && parent.ordinal <= ImageIdentity.MAX_PARENT_ORDINAL) {
+                val first = checkNotNull(ImageIdentity.ordinal(parent.ordinal, 1))
+                val last = checkNotNull(ImageIdentity.ordinal(parent.ordinal, ImageIdentity.MAX_PER_PARENT))
+                run.target.retainImages(first, last, produced)
+            }
+            commit(run, counts, outcome, prepared.size)
+            prepared.size
+        }
+    }
+
+    /** One deliverable picture, decided and written but not yet recorded or delivered. */
+    private class PreparedImage(
+        val ordinal: Int,
+        val unitId: ContentUnitId,
+        val locator: SourceLocation.ImageRegion,
+        val text: String,
+        val written: WrittenImage,
+        val root: SourceImageRoot,
+        val record: StoredImage,
+    )
+
+    /**
+     * Filters a parent's found images, writes the kept ones' artifacts and analyses them, outside the unit
+     * boundary.
+     *
+     * The filtering and counting are the stage's own rules, unchanged: the document-wide cap, the per-parent cap,
+     * size, repetition and uniformity. What is new is that each kept picture's text is the analysis of it — or,
+     * when no analysis could be made, its caption and page text — computed here because it may be a model call.
+     */
+    private suspend fun prepare(
+        run: ParentRun,
+        images: List<FoundImage>,
+        repeated: Set<String>,
+        totalBefore: Int,
+        counts: Counts,
+    ): List<PreparedImage> {
+        val parent = run.context.parent
         val occurrences = HashMap<String, Int>()
-        var delivered = 0
-        val produced = HashSet<ContentUnitId>()
+        val prepared = ArrayList<PreparedImage>()
         for (found in images) {
             // Equal images in one parent are told apart in finder order, whether or not each is kept.
             val key = identityKey(found)
@@ -291,12 +351,12 @@ class ImageStage(
                 counts.skip(early)
                 continue
             }
-            if (totalBefore + delivered >= ImageFilter.MAX_PER_DOCUMENT) {
+            if (totalBefore + prepared.size >= ImageFilter.MAX_PER_DOCUMENT) {
                 counts.skip(SkipReason.LIMIT)
                 counts.warn(LIMIT_REACHED)
                 continue
             }
-            if (delivered >= ImageIdentity.MAX_PER_PARENT) {
+            if (prepared.size >= ImageIdentity.MAX_PER_PARENT) {
                 counts.warn(ImageFindFailure.TOO_MANY_IMAGES)
                 continue
             }
@@ -312,7 +372,7 @@ class ImageStage(
                 }
             }
 
-            val index = delivered + 1
+            val index = prepared.size + 1
             val ordinal = checkNotNull(ImageIdentity.ordinal(parent.ordinal, index)) {
                 "a parent ordinal beyond the bound was admitted"
             }
@@ -351,8 +411,15 @@ class ImageStage(
                 counts.warn(rejected.code)
                 continue
             }
-            store.record(
-                StoredImage(
+            val locator = SourceLocation.ImageRegion(parent.locator, index, candidate.box)
+            prepared += PreparedImage(
+                ordinal = ordinal,
+                unitId = unitId,
+                locator = locator,
+                text = textOf(run, unitId, written, root, found, counts),
+                written = written,
+                root = root,
+                record = StoredImage(
                     documentId = run.document.id,
                     unitId = unitId,
                     sha256 = written.sha256,
@@ -368,26 +435,55 @@ class ImageStage(
                     captionSource = found.captionSource,
                 ),
             )
-            run.target.deliver(
-                ordinal,
-                unitId,
-                SourceLocation.ImageRegion(parent.locator, index, candidate.box),
-                unitTextOf(found.caption, found.context),
-                written,
-                root,
+        }
+        return prepared
+    }
+
+    /**
+     * The text one picture is delivered with: its analysis when this build can make one, else its caption and
+     * page context.
+     *
+     * A picture that cannot be analysed is not a failed document: its caption and context are still its text,
+     * and the stage reports the code as a warning. A run that ran past its confirmed external allowance is the one
+     * exception — that is the run's own bound, and it ends the run rather than being recorded per picture.
+     */
+    private suspend fun textOf(
+        run: ParentRun,
+        unitId: ContentUnitId,
+        written: WrittenImage,
+        root: SourceImageRoot,
+        found: FoundImage,
+        counts: Counts,
+    ): String {
+        val step = analysis ?: return unitTextOf(found.caption, found.context)
+        val path = when (root) {
+            SourceImageRoot.MANAGED_COPY -> run.managedPath
+            SourceImageRoot.ARTIFACTS -> run.artifactRoot.resolve(written.relativePath)
+        }
+        return try {
+            val result = step.textFor(
+                document = run.document,
+                unitId = unitId,
+                image = written,
+                imagePath = path,
+                caption = found.caption,
+                context = found.context,
+                choice = run.settings.imageAnalysis,
+                language = run.settings.language,
+                dispatch = run.dispatch,
             )
-            produced += unitId
-            delivered++
+            result.warning?.let(counts::warn)
+            result.text
+        } catch (exceeded: infoscry.ocr.ExternalPageAllowanceExceededException) {
+            throw exceeded
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (deleted: DocumentBeingDeletedException) {
+            throw deleted
+        } catch (_: Exception) {
+            counts.warn(AnalysisRules.INVALID)
+            unitTextOf(found.caption, found.context)
         }
-        // What an earlier run (another mode, or more images) left in this parent's band and this one did not produce
-        // is stale. A parent that could not be read at all says nothing about what it holds, so it keeps its units.
-        if (!unreadable && parent.ordinal <= ImageIdentity.MAX_PARENT_ORDINAL) {
-            val first = checkNotNull(ImageIdentity.ordinal(parent.ordinal, 1))
-            val last = checkNotNull(ImageIdentity.ordinal(parent.ordinal, ImageIdentity.MAX_PER_PARENT))
-            run.target.retainImages(first, last, produced)
-        }
-        commit(run, counts, outcome, delivered)
-        return delivered
     }
 
     /** The unit's indexed text: the caption, a blank line, then the page-text context; either part may be absent. */

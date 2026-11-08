@@ -50,7 +50,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
 
             assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
-            assertEquals(6, SchemaMigrator.SUPPORTED_VERSION)
+            assertEquals(8, SchemaMigrator.SUPPORTED_VERSION)
             assertEquals(SchemaMigrator.SUPPORTED_VERSION, count(database, "schema_version"), "one row per applied step")
         }
     }
@@ -116,7 +116,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(6, database.schemaVersion())
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
             assertEquals(1, count(database, "collections"))
             assertEquals(1, count(database, "documents"))
             assertTrue(tableNames(database).containsAll(listOf("document_images", "image_extraction_checkpoints")))
@@ -129,7 +129,7 @@ class SchemaMigratorTest {
                 }
             }
             assertEquals("OFF", mode)
-            assertEquals(6, count(database, "schema_version"), "no step may be applied twice")
+            assertEquals(8, count(database, "schema_version"), "no step may be applied twice")
         }
     }
 
@@ -549,7 +549,7 @@ class SchemaMigratorTest {
             SchemaMigrator(database).migrate()
             SchemaMigrator(database).migrate()
 
-            assertEquals(6, database.schemaVersion())
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
             database.transaction { connection ->
                 connection.createStatement().use {
                     it.executeUpdate(
@@ -559,6 +559,61 @@ class SchemaMigratorTest {
                 }
             }
             assertEquals(2, count(database, "jobs"))
+        }
+    }
+
+    @Test
+    fun `versions seven and eight keep rows and give text chunks no picture categories`() {
+        newDatabase().use { database ->
+            val now = "2026-11-07T00:00:00Z"
+            SchemaMigrator(database).migrate(upTo = 6)
+            database.transaction { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeUpdate(
+                        "INSERT INTO collections (id, name, created_at, updated_at) VALUES ('c', 'C', '$now', '$now')",
+                    )
+                    statement.executeUpdate(
+                        "INSERT INTO documents (id, collection_id, sha256, media_type, original_filename, original_path, " +
+                            "size_bytes, status, created_at, updated_at) VALUES ('d', 'c', 'h', 'application/pdf', " +
+                            "'d.pdf', '/d.pdf', 1, 'COMPLETE', '$now', '$now')",
+                    )
+                    statement.executeUpdate(
+                        "INSERT INTO document_revisions (id, document_id, state, provenance, created_at) " +
+                            "VALUES ('r', 'd', 'PUBLISHED', 'IMPORT', '$now')",
+                    )
+                    statement.executeUpdate(
+                        "INSERT INTO search_chunks (collection_id, document_id, revision_id, content_unit_id, " +
+                            "chunk_ordinal, text, locator, locator_label, embedding, embedding_dimension) VALUES " +
+                            "('c', 'd', 'r', 'u', 0, 'kept text', '{\"type\":\"pdf_page\",\"page\":1}', 'Page 1', " +
+                            "'[0.1]'::halfvec, 1)",
+                    )
+                }
+            }
+
+            SchemaMigrator(database).migrate()
+            SchemaMigrator(database).migrate()
+
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, database.schemaVersion())
+            assertEquals(SchemaMigrator.SUPPORTED_VERSION, count(database, "schema_version"), "a repeated migration applies no step")
+            assertEquals(1, count(database, "documents"))
+            assertEquals(1, count(database, "search_chunks"))
+            val categories = database.read { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery("SELECT image_categories FROM search_chunks").use { rows ->
+                        rows.next()
+                        rows.getArray(1).array as Array<*>
+                    }
+                }
+            }
+            assertEquals(0, categories.size, "an older text chunk has no picture category")
+            assertTrue(
+                tableNames(database).containsAll(listOf("image_analyses", "image_tag_edits")),
+                "version seven creates the analysis and edit tables",
+            )
+            assertTrue(
+                columnNames(database, "image_analyses").containsAll(listOf("caption", "page_context")),
+                "version eight keeps the source text an analysis was made with",
+            )
         }
     }
 

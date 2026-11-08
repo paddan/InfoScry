@@ -143,6 +143,8 @@ val ACCESS_RULES: Map<Pair<HttpMethod, String>, AccessRule> = buildMap {
     rule(get, "$images/{unitId}", AccessRule.InCollection(READER))
     rule(get, "$images/{unitId}/file", AccessRule.InCollection(READER))
     rule(get, "$images/{unitId}/thumbnail", AccessRule.InCollection(READER))
+    rule(get, "$images/{unitId}/tags", AccessRule.InCollection(READER))
+    rule(post, "$images/{unitId}/tags", AccessRule.InCollection(EDITOR))
     rule(get, "/api/collections/{id}/sources/{sourceId}", AccessRule.InCollection(READER))
     rule(get, "/api/collections/{id}/sources/{sourceId}/reading", AccessRule.InCollection(READER))
     rule(get, "/api/collections/{id}/documents/{documentId}/page-review", AccessRule.InCollection(READER))

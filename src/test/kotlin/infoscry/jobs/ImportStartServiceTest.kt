@@ -178,11 +178,13 @@ class ImportStartServiceTest {
             context.collectionService.updateImageDefault(collection.id, infoscry.image.ImageExtractionMode.EMBEDDED)
             val (previews, service) = services(context)
             val request = ImportPreviewRequest(collection.id, listOf(source.toString()), method = ReadingMethod.Tesseract)
-            val preview = previews.preview(request)
+            // The image mode is part of the preview a start is confirmed from, as it is for the dialog.
+            fun previewHashOf(mode: infoscry.image.ImageExtractionMode?) =
+                previews.preview(request.copy(imageExtraction = mode)).previewHash
             suspend fun start(id: String, mode: infoscry.image.ImageExtractionMode?) = service.start(
                 ImportStartRequest(
                     collectionId = collection.id, paths = request.paths, method = ReadingMethod.Tesseract,
-                    previewHash = preview.previewHash, requestId = id, imageExtraction = mode,
+                    previewHash = previewHashOf(mode), requestId = id, imageExtraction = mode,
                 ),
             )
             fun modeOf(job: infoscry.domain.Job) =

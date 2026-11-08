@@ -1,7 +1,14 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { isUncheckedImageProfile, methodOptionLabel } from './ocrRescan';
-  import { listReadingMethods, updateCollectionOcrSettings, type Collection, type ImageExtraction, type ReadingMethodOption } from './api';
+  import {
+    listOcrProfiles,
+    listReadingMethods,
+    updateCollectionOcrSettings,
+    type Collection,
+    type ImageExtraction,
+    type OcrProfile,
+    type ReadingMethodOption,
+  } from './api';
 
   export let collection: Collection;
   export let onChanged: () => Promise<void> | void;
@@ -10,6 +17,9 @@
   let language = '';
   let defaultMethod = '';
   let defaultImages: ImageExtraction = 'off';
+  let defaultImageProfileId = '';
+  let defaultIdentifyAppearance = false;
+  let imageProfiles: OcrProfile[] = [];
   let methods: ReadingMethodOption[] = [];
   let loading = true;
   let saving = false;
@@ -23,6 +33,9 @@
   // A stored default stays listed even if its profile is no longer checked, so the form shows what is saved.
   $: visibleMethods = methods.filter((method) => !isUncheckedImageProfile(method) || method.method === defaultMethod);
   $: hasAvailableMethod = methods.some((method) => method.available);
+  $: imagesOff = defaultImages === 'off';
+  $: effectiveImageProfileId = imagesOff ? '' : defaultImageProfileId;
+  $: effectiveIdentifyAppearance = effectiveImageProfileId === '' ? false : defaultIdentifyAppearance;
 
   async function load(target: Collection): Promise<void> {
     boundId = target.id;
@@ -31,12 +44,22 @@
     language = target.language;
     defaultMethod = target.defaultMethod ?? '';
     defaultImages = target.defaultImageExtraction ?? 'off';
+    defaultImageProfileId = (target.defaultImageExtraction ?? 'off') === 'off' ? '' : (target.defaultImageProfileId ?? '');
+    defaultIdentifyAppearance = target.defaultIdentifyAppearance ?? false;
     loading = true;
     error = null;
     saved = false;
     try {
-      const result = await listReadingMethods(target.id);
+      const [result, profiles] = await Promise.all([
+        listReadingMethods(target.id),
+        listOcrProfiles().catch(() => [] as OcrProfile[]),
+      ]);
       if (mine !== generation) return;
+      imageProfiles = (profiles ?? []).filter((entry) => entry.enabled && entry.imageCapabilityMeasured === true);
+      if (defaultImageProfileId !== '' && !imageProfiles.some((entry) => entry.id === defaultImageProfileId)) {
+        defaultImageProfileId = '';
+        defaultIdentifyAppearance = false;
+      }
       methods = result.methods;
       if (!hasStoredMethod && defaultMethod === '' && result.default !== null) defaultMethod = result.default;
     } catch (failure) {
@@ -45,6 +68,22 @@
       if (mine === generation) loading = false;
     }
   }
+
+  function changeDefaultImages(event: Event): void {
+    const value = (event.currentTarget as HTMLSelectElement).value as ImageExtraction;
+    defaultImages = value;
+    if (value === 'off') {
+      defaultImageProfileId = '';
+      defaultIdentifyAppearance = false;
+    }
+  }
+
+  function changeDefaultImageProfile(event: Event): void {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    defaultImageProfileId = value;
+    if (value === '') defaultIdentifyAppearance = false;
+  }
+
   async function save(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (saving) return;
@@ -53,10 +92,19 @@
     error = null;
     saved = false;
     try {
+      const initialProfileId = collection.defaultImageProfileId ?? '';
+      const initialIdentify = collection.defaultIdentifyAppearance ?? false;
+      const analysisChanged = effectiveImageProfileId !== initialProfileId || effectiveIdentifyAppearance !== initialIdentify;
       await updateCollectionOcrSettings(collection.id, {
         language: language.trim(),
         ...(defaultMethod === '' ? {} : { defaultMethod }),
         ...(defaultImages === (collection.defaultImageExtraction ?? 'off') ? {} : { defaultImageExtraction: defaultImages }),
+        ...(analysisChanged
+          ? {
+              defaultImageProfileId: effectiveImageProfileId === '' ? 'none' : effectiveImageProfileId,
+              defaultIdentifyAppearance: effectiveIdentifyAppearance,
+            }
+          : {}),
       }, collection.version);
       await onChanged();
       if (mine === generation) saved = true;
@@ -89,13 +137,42 @@
   </div>
   <div class="field">
     <label for="default-image-extraction">Extract images by default</label>
-    <select id="default-image-extraction" data-testid="default-image-extraction" bind:value={defaultImages} disabled={saving}>
+    <select id="default-image-extraction" data-testid="default-image-extraction" value={defaultImages} onchange={changeDefaultImages} disabled={saving}>
       <option value="off">Off</option>
       <option value="embedded">Embedded images</option>
       <option value="all">Embedded + regions from scanned pages</option>
     </select>
     <p class="hint">Pre-fills the choice when you import or scan again; you can change it each time.</p>
   </div>
+  <div class="field">
+    <label for="default-describe-images">Describe images with</label>
+    <select
+      id="default-describe-images"
+      data-testid="default-describe-images"
+      value={effectiveImageProfileId}
+      onchange={changeDefaultImageProfile}
+      disabled={imagesOff || loading || saving}
+    >
+      <option value="">None</option>
+      {#each imageProfiles as profile (profile.id)}
+        <option value={profile.id}>{profile.name}</option>
+      {/each}
+    </select>
+    {#if imagesOff}
+      <p class="hint">Turn on Extract images by default to choose an image description profile.</p>
+    {/if}
+  </div>
+  {#if !imagesOff && effectiveImageProfileId !== ''}
+    <label class="check-label">
+      <input
+        type="checkbox"
+        data-testid="default-identify-appearance"
+        bind:checked={defaultIdentifyAppearance}
+        disabled={saving}
+      />
+      Identify specific people, objects, animals and places from their appearance
+    </label>
+  {/if}
   {#if onOpenLlmProfiles}
     <button type="button" onclick={onOpenLlmProfiles}>Manage LLM profiles</button>
   {/if}
@@ -109,7 +186,9 @@
   .settings-form { display: grid; gap: 0.7rem; }
   .field { display: grid; gap: 0.3rem; }
   label { color: #b8bcbb; font-size: 0.82rem; }
-  input, select { min-width: 0; border: 1px solid #383d3e; border-radius: 0.48rem; background: #202324; padding: 0.62rem 0.72rem; color: #e8e9e7; font: inherit; }
+  .check-label { display: flex; align-items: center; gap: 0.5rem; color: #e8e9e7; font-size: 0.85rem; }
+  .check-label input { accent-color: #c4a77d; }
+  input:not([type='checkbox']), select { min-width: 0; border: 1px solid #383d3e; border-radius: 0.48rem; background: #202324; padding: 0.62rem 0.72rem; color: #e8e9e7; font: inherit; }
   .actions { display: flex; gap: 0.55rem; }
   button.primary { border-color: #c4a77d; background: #c4a77d; color: #1c1b18; font-weight: 650; }
   .hint { color: #929997; font-size: 0.82rem; }

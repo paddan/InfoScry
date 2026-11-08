@@ -34,6 +34,7 @@ internal class AttemptDispatch(
         val revisionId = when (dispatchStage) {
             OcrDispatchStage.TRANSCRIPTION -> scope.transcriptionProfileRevisionId
             OcrDispatchStage.REVIEW -> scope.reviewProfileRevisionId
+            OcrDispatchStage.IMAGE_ANALYSIS -> scope.imageAnalysis?.profileRevisionId
         } ?: return null
         val revision = profileRevisionOf(revisionId) ?: return null
         if (revision.scope != OcrEndpointScope.EXTERNAL) return null
@@ -45,10 +46,14 @@ internal class AttemptDispatch(
             documentId = document.id,
             stage = dispatchStage,
             profileRevisionId = revisionId,
-            configuredAllowance = if (confirmedManifestScope && scope.externalConfirmedSourceScope) {
-                Int.MAX_VALUE
-            } else {
-                scope.externalPageLimit
+            configuredAllowance = when (dispatchStage) {
+                OcrDispatchStage.IMAGE_ANALYSIS -> scope.imageAnalysisExternalLimit
+                OcrDispatchStage.TRANSCRIPTION, OcrDispatchStage.REVIEW ->
+                    if (confirmedManifestScope && scope.externalConfirmedSourceScope) {
+                        Int.MAX_VALUE
+                    } else {
+                        scope.externalPageLimit
+                    }
             },
         )
     }

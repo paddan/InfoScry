@@ -100,7 +100,10 @@ class SearchService(
             SearchMode.KEYWORD, SearchMode.HYBRID ->
                 validatedCandidates(SearchMode.KEYWORD, queryText, alternatives = alternatives) { limit ->
                     searchRefusingOverbroad {
-                        index().searchKeyword(normalizedFilters.collectionId, queryText, documentIds, limit, expansion)
+                        index().searchKeyword(
+                            normalizedFilters.collectionId, queryText, documentIds, limit, expansion,
+                            pictureCategory = normalizedFilters.pictureCategory,
+                        )
                     }
                 }
             SearchMode.SEMANTIC -> ValidatedCandidates.empty()
@@ -196,10 +199,10 @@ class SearchService(
         } catch (failure: EmbeddingException) {
             throw SearchUnavailableException(failure.code, failure.message ?: "the query could not be embedded")
         }
-        val candidateCount = index().vectorCandidateCount(filters.collectionId, documentIds)
+        val candidateCount = index().vectorCandidateCount(filters.collectionId, documentIds, filters.pictureCategory)
         return validatedCandidates(SearchMode.SEMANTIC, queryText, candidateCount) { limit ->
             searchRefusingOverbroad {
-                index().searchVector(filters.collectionId, vector, documentIds, limit)
+                index().searchVector(filters.collectionId, vector, documentIds, limit, filters.pictureCategory)
             }
         }
     }
@@ -220,7 +223,9 @@ class SearchService(
         alternativeTokens: List<String>,
     ): Boolean {
         if (!requireLexicalAnchor || keywordHits.isNotEmpty()) return true
-        return index().hasLexicalAnchor(queryText, filters.collectionId, documentIds, alternativeTokens)
+        return index().hasLexicalAnchor(
+            queryText, filters.collectionId, documentIds, alternativeTokens, filters.pictureCategory,
+        )
     }
 
     /**
